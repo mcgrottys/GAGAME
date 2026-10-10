@@ -92,25 +92,53 @@ climb. It is step 4 below, not the first PR.
 
 ## 6. On the sparse structure
 
-The level-`k` cells are the cube lattice's tiles (`face, rung, x, y`), the lattice every tenant
-shares (HIERARCHY §0, the GPU-resident law), not a second grid of degrees. A tile at a coarser
-rung holds the buildings of the coarser size class and the folded `M` of all beneath it, so the
-tree is one more tenant. Its parent/child fold is `Σ T M T̃`, its name is a path (HIERARCHY 4.20
-law 1), and it has no depth bound but the largest thing on Earth. The 0.05° harvest stays the
-level-0 source of full rings near the eye.
+**What was planned:** level-`k` cells as the cube lattice's tiles (`face, rung, x, y`), the
+lattice every tenant shares (HIERARCHY §0), with each tile's folded `M` beside its boxes.
+
+**What was built (steps 2–3), and why it differs:** the tiles are the building harvest's own
+0.05° grid, doubled per level (`lod::TileDeg`: 0.05° for level 2, up to 3.2° for level 8). Every
+record is filed by its *detail cell*, the 0.05° cell the streaming draws its full prisms in. A far box
+and its prisms therefore always agree on which cell owns the building, and the layer can skip
+exactly the boxes whose cell is drawn. On the cube lattice a tile would cut across those cells and
+that agreement would need a second index. Moving both to the cube lattice is one change, made
+together; it is not done here. The folded `M` per tile waits for step 4, its only reader.
 
 ## 7. Order of work
 
 1. **The moment algebra** (`compose/BuildingMoments`): prism moments, fold, frame change, CGA
    vector, moment box, level law. Gate: `--selftest [lod]` pins §2's three facts and §3's limits.
-   *(this PR, first commit)*
-2. **The pyramid tool**: one pass over the planet harvest writes the size-stratified box records
-   (≈28 B each) by cube tile, with each tile's folded `M`. Offline, cached, rebuilt when the
-   harvest's identity changes.
-3. **The far layer**: the globe walk's leaves ask for the levels their `d_k` admits; boxes drawn
-   instanced, one draw per tile; a box whose 0.05° detail cell is resident is skipped (no double
-   draw). Gate: Tokyo from 9, 27, 100 and 400 km (vertices, ms, stills).
+   **Done.**
+2. **The pyramid tool** (`--tool building-lod[:lon0,lat0,lon1,lat1]`, `compose/BuildingLod`): every
+   cell of the scene's stack composed by the streaming's own `Compose` (the stack laws hold),
+   boxed, filed by level and tile, 36 B a box. Latitude band by band (3.2°), so memory holds one
+   band. **Done.** Levels 0 and 1 reach no farther than 8 km, inside the detail radius, so they are
+   not kept: in Massachusetts level 1 alone was 58% of 4.75 M solids, and the kept levels 2–8 are
+   232,677 boxes (8.4 MB). The state takes 7.3 s on 16 threads.
+3. **The far layer** (`BuildingLayer`, `VsBox`): level `k`'s tiles are wanted within its reach
+   `ρ₀2^k/(τ·pixAng)` and dropped past 1.25× it. `pixAng` is the camera's vertical field over the
+   viewport's height. Each box is 36 vertices from `SV_VertexID`, stood on the composed ground at
+   its centroid on the prisms' own east/north/up. A tile within reach of a resident detail cell
+   draws only the runs of cells that are *not* resident, so by construction no building is drawn twice
+   (no instrument counts it yet). **Done.**
+   It uses the layer's own distance measure, not the globe walk's leaves: the same span-over-
+   distance law, not yet the same caller.
+   *Also:* buildings, prisms and boxes alike, are now seen through `AerialPerspective`, the
+   ground's own air. Without it far boxes stood at full contrast in haze that faded the land under
+   them.
 4. **The residual**: the hidden mass as a ground tenant (coverage, height, roughness).
+
+### Measured (Massachusetts pyramid, 1600×900, frozen clock)
+
+| view | eye | far tiles | boxes loaded | buildings GPU |
+|---|---|---|---|---|
+| downtown Newburyport | 141 m | 100 | 7,275 | 1.15 ms (0.39 ms without the air) |
+| Boston, range 30 km | 9.3 km up | 109 | 14,803 | 0.18 ms (0.05 ms without the air) |
+| Boston, range 100 km | 51 km up | 16 | 310 | < 0.01 ms |
+| Boston, range 300 km | 216 km up | 0 | 0 | 0 |
+
+At 300 km nothing in Massachusetts covers a pixel: its largest structures are under 512 m, so
+level 7 is empty. The air costs 0.77 ms downtown, the overdrawn prisms each marching it. Taken per
+vertex instead it cost 1.87 ms, so it stays per pixel.
 
 ## 8. Open for the owner
 

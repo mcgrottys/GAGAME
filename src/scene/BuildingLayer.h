@@ -28,9 +28,21 @@
 //
 //  Drawn with no culling: a footprint's winding is the file's, and a solid's inside is occluded by
 //  its own walls anyway. Procedural fetch by SV_VertexID, as every layer here (no input assembler).
+//
+//  FAR BOXES (docs/BUILDING_LOD.md, step 3): past the detail cells, the size-stratified pyramid
+//  (compose/BuildingLod.h) streams the same way. Level k's tiles are wanted within its REACH,
+//  rho0 2^k / (lodPixels * pixAng) -- the span-over-distance measure of the globe's LeafWants, so a
+//  thing is drawn while it covers lodPixels -- with pixAng the camera's vertical field over the
+//  viewport's height, and dropped past kKeep x reach. Each tile's boxes are built on the pool (the
+//  ground asked under each centroid, its east/north/up taken from the same Place as the prisms)
+//  and drawn as 36 vertices a box. A box is SKIPPED where its detail cell is resident: the records
+//  are sorted by detail cell, so a tile near the eye draws the runs whose cell is not, and a tile
+//  beyond every resident cell draws whole. No building is drawn twice; one still building shows as
+//  its box until its cell lands.
 // ================================================================================================
 #pragma once
 
+#include "compose/BuildingLod.h"
 #include "compose/BuildingSolids.h"
 #include "scene/Layer.h"
 
@@ -41,6 +53,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace ga {
@@ -58,6 +71,8 @@ public:
     ~BuildingLayer() override;
     void Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack, double radiusM,
                    Place place, Locate locate, Ground ground);
+    // The far boxes' pyramid (null = none) and the law's pixel count.
+    void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels);
 
     const char* Name() const override { return "buildings"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields, hal::RootSignature rootSig) override;
@@ -79,6 +94,15 @@ public:
     static constexpr int kInFlight = 6, kUploadsPerFrame = 4;
     static constexpr uint64_t kWarmBytes = 512ull << 20;   // dropped cells' buffers kept for a return
     static constexpr uint64_t kRetireFrames = 4;
+    static constexpr int kFarInFlight = 4;
+
+    // Mirrors `struct BuildingBox` in shaders/Buildings.hlsl: a moment box about its tile's origin.
+    struct Box {
+        float c[3], pad0;   // centre, metres from the tile's origin, flat frame
+        float u[3], pad1;   // the long half-axis (direction x half-extent)
+        float v[3], pad2;   // the short half-axis
+        float w[3], pad3;   // the up half-axis
+    };
 
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -92,10 +116,24 @@ private:
         std::vector<size_t> drawn;      // per source of the stack
         double ms = 0.0;
     };
+    using FarKey = std::tuple<int, int, int>;   // (level, tx, ty)
+    struct Run {                        // boxes [first, first + count) of one detail cell
+        Key cell;
+        uint32_t first = 0, count = 0;
+    };
+    struct FarBuilt {
+        FarKey key;
+        double origin[3];
+        uint32_t count = 0;             // boxes
+        std::vector<Run> runs;
+        GpuBuffer staging, vb;
+        double ms = 0.0;
+    };
     struct Shared {                     // what a pool job and the layer both hold
         std::mutex mx;
         std::vector<Built> done;
-        std::atomic<int> inflight{0};
+        std::vector<FarBuilt> farDone;
+        std::atomic<int> inflight{0}, farInflight{0};
         std::atomic<bool> cancel{false};
     };
     struct Cell {
@@ -110,6 +148,10 @@ private:
     // Distance (m) from a point to the cell's box over the sphere's surface, the eye's height
     // folded in: the one measure that both wants and drops.
     double Reach(const Key& k, double latDeg, double lonDeg, double h) const;
+    // ...of any box of `deg` with its south-west corner at (lon0, lat0).
+    static double ReachBox(double lon0, double lat0, double deg, double latDeg, double lonDeg, double h);
+    void WantFar(Gpu* gpu, double latDeg, double lonDeg, double h, double pixAng);
+    void UploadFar(const FrameContext& ctx);
     void Want(Gpu* gpu, double latDeg, double lonDeg, double h);
     void Upload(const FrameContext& ctx);
 
@@ -120,7 +162,7 @@ private:
     Locate m_locate;
     Ground m_ground;
     hal::RootSignature m_rootSig = nullptr;
-    hal::Pso m_pso;
+    hal::Pso m_pso, m_psoBox;
     std::shared_ptr<Shared> m_shared = std::make_shared<Shared>();
     std::map<Key, Cell> m_cells;
     struct Warm {
@@ -134,6 +176,21 @@ private:
     uint64_t m_frame = 0;
     uint64_t m_rewarmed = 0, m_built = 0;
     Key m_eyeCell{INT32_MIN, INT32_MIN};   // the instrument: cells taken back warm vs built
+
+    struct Far {
+        double origin[3];
+        GpuBuffer vb;
+        uint32_t count = 0;
+        std::vector<Run> runs;
+        bool nearDetail = true;   // within reach of a resident detail cell: drawn run by run
+    };
+    std::shared_ptr<const BuildingLodFile> m_lod;
+    double m_lodPixels = 1.0;
+    std::map<FarKey, Far> m_far;
+    std::set<FarKey> m_farPending;
+    uint64_t m_farBuilt = 0;
+    uint64_t m_farBoxesDrawn = 0, m_farTilesDrawn = 0;   // the last frame's, for the instrument
+    int m_farLevelsLogged = -1;
 };
 
 }  // namespace ga

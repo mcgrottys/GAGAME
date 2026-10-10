@@ -390,6 +390,8 @@ struct TideLayerProps {
 // untagged building stand for, and how far about the eye its cells are streamed.
 struct BuildingsLayerProps {
     double levelHeight = 3.0, defaultHeight = 6.0, radius = 3000.0;
+    std::string lod;                 // the size-stratified pyramid's folder ("" = no far boxes)
+    double lodRho0 = 4.0, lodPixels = 1.0;
 };
 struct NodeProps {
     std::string name;

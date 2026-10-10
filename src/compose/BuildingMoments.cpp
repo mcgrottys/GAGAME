@@ -61,7 +61,8 @@ cga::Mv Moments::Conformal(double L) const {
     return cga::N0() * m + cga::Dir(s[0] / L, s[1] / L, s[2] / L) + cga::Ni() * (0.5 * tr / (L * L));
 }
 
-Moments PrismMoments(const std::vector<std::vector<double>>& rings, double bottom, double top) {
+Moments PrismMoments(const std::vector<std::vector<double>>& rings, double bottom, double top,
+                     const std::vector<uint8_t>* outer) {
     Moments r;
     if (rings.empty() || !(top > bottom)) return r;
     double a[6] = {0, 0, 0, 0, 0, 0};
@@ -69,7 +70,8 @@ Moments PrismMoments(const std::vector<std::vector<double>>& rings, double botto
         double q[6];
         RingMoments(rings[k], q);
         // The outer adds and every hole subtracts, whatever the file's winding.
-        const double sign = ((q[0] >= 0.0) == (k == 0)) ? 1.0 : -1.0;
+        const bool adds = k == 0 || (outer && k < outer->size() && (*outer)[k]);
+        const double sign = ((q[0] >= 0.0) == adds) ? 1.0 : -1.0;
         for (int i = 0; i < 6; ++i) a[i] += sign * q[i];
     }
     if (!(a[0] > 0.0)) return r;

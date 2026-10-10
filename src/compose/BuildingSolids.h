@@ -81,6 +81,10 @@ public:
     std::vector<BuildingSolid> Compose(double lon0, double lat0, double lon1, double lat1, double margin,
                                        uint64_t* identity = nullptr) const;
     size_t Sources() const { return m_src.size(); }
+    // Every cell of `cellDeg` (as ix, iy: [ix, ix+1) x [iy, iy+1)) that any source holds a solid in,
+    // sorted by (iy, ix): a harvest's own index where its grain is cellDeg, a GeoJSON's solids by
+    // their first point. What a pass over the whole stack walks (the LOD pyramid's tool).
+    std::vector<std::pair<int, int>> Cells(double cellDeg) const;
     const std::string& Name(size_t k) const { return m_src[k].name; }
 
 private:

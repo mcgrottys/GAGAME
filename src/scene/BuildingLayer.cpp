@@ -1,5 +1,7 @@
 #include "scene/BuildingLayer.h"
 
+#include "compose/BuildingMoments.h"
+
 #include "core/Common.h"
 #include "core/ThreadManager.h"
 #include "hal/GpuProfiler.h"
@@ -22,7 +24,9 @@ BuildingLayer::~BuildingLayer() {
     // A job holds the stack and the ground's sources: none may outlive the layer's owner. Ask them
     // to stop and wait for the ones already running (a cell is tens of milliseconds).
     m_shared->cancel = true;
-    for (int i = 0; i < 2000 && m_shared->inflight.load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    for (int i = 0; i < 2000 && (m_shared->inflight.load() > 0 || m_shared->farInflight.load() > 0); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack,
@@ -33,6 +37,11 @@ void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<con
     m_place = std::move(place);
     m_locate = std::move(locate);
     m_ground = std::move(ground);
+}
+
+void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels) {
+    m_lod = std::move(lod);
+    m_lodPixels = pixels > 0.0 ? pixels : 1.0;
 }
 
 void BuildingLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
@@ -50,7 +59,9 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     d.depthClip = TRUE;
     d.depthTest = true;
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
-    return hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "buildings"); }, "buildings");
+    const bool ok = hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "buildings"); }, "buildings");
+    d.vs = sc.Compile(path, L"VsBox", L"vs_6_0");   // the far boxes: the same light, the same depth
+    return hal::Reload(m_psoBox, [&] { return hal::BuildGraphics(gpu, d, "buildings.boxes"); }, "buildings.boxes") && ok;
 }
 
 void BuildingLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
@@ -245,9 +256,12 @@ static void Prisms(const BuildingSolid& s, const double org[3], const BuildingLa
 }
 
 double BuildingLayer::Reach(const Key& k, double latDeg, double lonDeg, double h) const {
+    return ReachBox(k.first * kCellDeg, k.second * kCellDeg, kCellDeg, latDeg, lonDeg, h);
+}
+
+double BuildingLayer::ReachBox(double x0, double y0, double deg, double latDeg, double lonDeg, double h) {
     constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
-    const double x0 = k.first * kCellDeg, y0 = k.second * kCellDeg;
-    const double nx = (std::clamp)(lonDeg, x0, x0 + kCellDeg), ny = (std::clamp)(latDeg, y0, y0 + kCellDeg);
+    const double nx = (std::clamp)(lonDeg, x0, x0 + deg), ny = (std::clamp)(latDeg, y0, y0 + deg);
     const double sa = std::sin(0.5 * (ny - latDeg) * kDeg), so = std::sin(0.5 * (nx - lonDeg) * kDeg);
     const double q = sa * sa + std::cos(latDeg * kDeg) * std::cos(ny * kDeg) * so * so;
     const double ground = 2.0 * kR * std::asin(std::sqrt((std::min)(1.0, q)));
@@ -369,6 +383,143 @@ void BuildingLayer::Upload(const FrameContext& ctx) {
     }
 }
 
+namespace {
+// The ground's frame at a point, flat frame: p, unit east, north and up (away from the centre) --
+// the prisms' own construction, so a box and its building stand on the same axes.
+void PointFrame(const BuildingLayer::Place& place, double lat, double lon, double z, double p0[3], double e3[3],
+                double n3[3], double u3[3]) {
+    double pe[3], pn[3];
+    place(lat, lon, z, p0);
+    place(lat, lon + 1e-4, z, pe);
+    place(lat + 1e-4, lon, z, pn);
+    double le = 0.0, ln = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        e3[i] = pe[i] - p0[i];
+        n3[i] = pn[i] - p0[i];
+        le += e3[i] * e3[i];
+        ln += n3[i] * n3[i];
+    }
+    for (int i = 0; i < 3; ++i) {
+        e3[i] /= std::sqrt(le);
+        n3[i] /= std::sqrt(ln);
+    }
+    u3[0] = e3[1] * n3[2] - e3[2] * n3[1];
+    u3[1] = e3[2] * n3[0] - e3[0] * n3[2];
+    u3[2] = e3[0] * n3[1] - e3[1] * n3[0];
+}
+}  // namespace
+
+void BuildingLayer::WantFar(Gpu* gpu, double latDeg, double lonDeg, double h, double pixAng) {
+    constexpr double kDeg = 3.14159265358979323846 / 180.0;
+    std::vector<std::pair<double, FarKey>> want;
+    for (int k = lod::kMinLevel; k <= lod::kMaxLevel; ++k) {
+        if (!m_lod->Tiles(k)) continue;
+        const double reach = LodReach(k, m_lod->Rho0(), m_lodPixels, pixAng);
+        if (h > reach) continue;   // the eye's altitude alone puts the whole level under its pixels
+        const double T = lod::TileDeg(k);
+        const int ex = static_cast<int>(std::floor(lonDeg / T)), ey = static_cast<int>(std::floor(latDeg / T));
+        const double tileM = T * 111195.0 * (std::max)(0.2, std::cos(latDeg * kDeg));
+        const int spanX = (std::min)(static_cast<int>(std::ceil(reach / tileM)) + 1, 400);
+        const int spanY = (std::min)(static_cast<int>(std::ceil(reach / (T * 111195.0))) + 1, 400);
+        for (int dy = -spanY; dy <= spanY; ++dy) {
+            for (int dx = -spanX; dx <= spanX; ++dx) {
+                const int tx = ex + dx, ty = ey + dy;
+                const FarKey key{k, tx, ty};
+                if (m_far.count(key) || m_farPending.count(key) || !m_lod->Find(k, tx, ty)) continue;
+                const double r = ReachBox(tx * T, ty * T, T, latDeg, lonDeg, h);
+                if (r <= reach) want.push_back({r / reach, key});   // nearest within its own reach first
+            }
+        }
+    }
+    std::sort(want.begin(), want.end());
+    for (const auto& [r, key] : want) {
+        if (m_shared->farInflight.load() >= kFarInFlight) break;
+        const LodTile* tile = m_lod->Find(std::get<0>(key), std::get<1>(key), std::get<2>(key));
+        if (!tile) continue;
+        m_farPending.insert(key);
+        m_shared->farInflight.fetch_add(1);
+        Threads().Submit(Lane::Io, "buildings.far",
+                         [shared = m_shared, lodf = m_lod, place = m_place, ground = m_ground, gpu, key, t = *tile] {
+            if (!shared->cancel.load()) {
+                const auto t0 = std::chrono::steady_clock::now();
+                const int k = std::get<0>(key);
+                const double T = lod::TileDeg(k);
+                FarBuilt b;
+                b.key = key;
+                place((std::get<2>(key) + 0.5) * T, (std::get<1>(key) + 0.5) * T, 0.0, b.origin);
+                const std::vector<LodRecord> recs = lodf->Read(k, t);
+                std::vector<Box> boxes;
+                boxes.reserve(recs.size());
+                for (const LodRecord& r : recs) {
+                    if (shared->cancel.load()) break;
+                    const double lat = r.lat7 * 1e-7, lon = r.lon7 * 1e-7;
+                    double p[3], e[3], n[3], u[3];
+                    PointFrame(place, lat, lon, ground(lat, lon) + r.zc, p, e, n, u);
+                    const double ch = std::cos(r.heading), sh = std::sin(r.heading);
+                    Box x{};
+                    for (int i = 0; i < 3; ++i) {
+                        x.c[i] = static_cast<float>(p[i] - b.origin[i]);
+                        x.u[i] = static_cast<float>((ch * e[i] + sh * n[i]) * r.a1);
+                        x.v[i] = static_cast<float>((-sh * e[i] + ch * n[i]) * r.a2);
+                        x.w[i] = static_cast<float>(u[i] * r.hz);
+                    }
+                    const Key cell{r.cx, r.cy};
+                    if (b.runs.empty() || b.runs.back().cell != cell) b.runs.push_back({cell, static_cast<uint32_t>(boxes.size()), 0});
+                    ++b.runs.back().count;
+                    boxes.push_back(x);
+                }
+                b.count = static_cast<uint32_t>(boxes.size());
+                if (b.count && !shared->cancel.load()) {
+                    const uint64_t bytes = boxes.size() * sizeof(Box);
+                    b.staging = gpu->CreateUploadBuffer(bytes, L"buildings.far.staging");
+                    std::memcpy(b.staging.cpu, boxes.data(), bytes);
+                    b.vb = gpu->CreateDefaultBuffer(nullptr, bytes, L"buildings.far");
+                }
+                b.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                std::lock_guard<std::mutex> lk(shared->mx);
+                shared->farDone.push_back(std::move(b));
+            }
+            shared->farInflight.fetch_sub(1);
+        });
+    }
+}
+
+void BuildingLayer::UploadFar(const FrameContext& ctx) {
+    std::vector<FarBuilt> done;
+    {
+        std::lock_guard<std::mutex> lk(m_shared->mx);
+        const size_t n = (std::min)(m_shared->farDone.size(), static_cast<size_t>(kUploadsPerFrame));
+        done.assign(std::make_move_iterator(m_shared->farDone.begin()),
+                    std::make_move_iterator(m_shared->farDone.begin() + static_cast<std::ptrdiff_t>(n)));
+        m_shared->farDone.erase(m_shared->farDone.begin(), m_shared->farDone.begin() + static_cast<std::ptrdiff_t>(n));
+    }
+    for (FarBuilt& b : done) {
+        m_farPending.erase(b.key);
+        Far f{};
+        for (int i = 0; i < 3; ++i) f.origin[i] = b.origin[i];
+        f.count = b.vb.Valid() ? b.count : 0;
+        f.runs = std::move(b.runs);
+        if (f.count) {   // the cells' own copy and barrier (Upload)
+            f.vb = std::move(b.vb);
+            ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
+            cl->CopyBufferRegion(f.vb.res.Get(), 0, b.staging.res.Get(), 0, b.staging.size);
+            D3D12_RESOURCE_BARRIER br{};
+            br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            br.Transition.pResource = f.vb.res.Get();
+            br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            cl->ResourceBarrier(1, &br);
+            m_retired.push_back({std::move(b.staging), m_frame});
+        }
+        ++m_farBuilt;
+        Log("[buildings] frame %llu far level %d tile %d,%d: %u boxes in %zu detail cells, built %.0f ms (%zu far tiles)",
+            static_cast<unsigned long long>(m_frame), std::get<0>(b.key), std::get<1>(b.key), std::get<2>(b.key), f.count,
+            f.runs.size(), b.ms, m_far.size() + 1);
+        m_far[b.key] = std::move(f);
+    }
+}
+
 void BuildingLayer::Simulate(const FrameContext& ctx) {
     ++m_frame;
     // Buffers no frame in flight can still read.
@@ -407,10 +558,30 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
     }
     Upload(ctx);
     Want(ctx.gpu, lat, lon, h);
+    if (m_lod && m_lod->Valid() && ctx.height > 0) {
+        // The far boxes: each level's reach at this camera; tiles past kKeep x it dropped (small: no
+        // warm pool); each kept tile told whether a detail cell can stand in it, so the draw splits
+        // it into runs only where it must.
+        const double pixAng = double(ctx.camera->fovY) / double(ctx.height);
+        for (auto it = m_far.begin(); it != m_far.end();) {
+            const int k = std::get<0>(it->first);
+            const double T = lod::TileDeg(k);
+            const double r = ReachBox(std::get<1>(it->first) * T, std::get<2>(it->first) * T, T, lat, lon, h);
+            if (r > kKeep * LodReach(k, m_lod->Rho0(), m_lodPixels, pixAng)) {
+                if (it->second.vb.Valid()) m_retired.push_back({std::move(it->second.vb), m_frame});
+                it = m_far.erase(it);
+                continue;
+            }
+            it->second.nearDetail = r <= kKeep * m_radius + 1.0;
+            ++it;
+        }
+        UploadFar(ctx);
+        WantFar(ctx.gpu, lat, lon, h, pixAng);
+    }
 }
 
 void BuildingLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || m_cells.empty() || !ctx.camera) return;
+    if (!m_pso || (m_cells.empty() && m_far.empty()) || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
     ctx.cmd->Pipeline(m_pso.Get());
@@ -430,6 +601,41 @@ void BuildingLayer::Render(const FrameContext& ctx) {
         ctx.cmd->GraphicsSrvAt(2, c.vb.gpu);
         ctx.cmd->Draw(c.count, 1, 0, 0);
     }
+    if (!m_psoBox || m_far.empty()) return;
+    // THE FAR BOXES: 36 vertices a box; where a tile can hold a resident detail cell, only the runs
+    // of the cells that are not resident (the cells' prisms draw the rest).
+    ctx.cmd->Pipeline(m_psoBox.Get());
+    uint64_t boxes = 0, tiles = 0;
+    for (const auto& [key, f] : m_far) {
+        if (!f.count) continue;
+        cb.origin[0] = static_cast<float>(f.origin[0] - ctx.camera->px);
+        cb.origin[1] = static_cast<float>(f.origin[1] - ctx.camera->py);
+        cb.origin[2] = static_cast<float>(f.origin[2] - ctx.camera->pz);
+        cb.origin[3] = 1.0f;
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(2, f.vb.gpu);
+        ++tiles;
+        if (!f.nearDetail) {
+            ctx.cmd->Draw(f.count * 36u, 1, 0, 0);
+            boxes += f.count;
+            continue;
+        }
+        uint32_t first = 0, n = 0;   // consecutive drawable runs, merged into one draw
+        for (const Run& r : f.runs) {
+            if (m_cells.count(r.cell)) {
+                if (n) ctx.cmd->Draw(n * 36u, 1, first * 36u, 0);
+                boxes += n;
+                n = 0;
+                continue;
+            }
+            if (!n) first = r.first;
+            n += r.count;
+        }
+        if (n) ctx.cmd->Draw(n * 36u, 1, first * 36u, 0);
+        boxes += n;
+    }
+    m_farBoxesDrawn = boxes;
+    m_farTilesDrawn = tiles;
 }
 
 }  // namespace ga

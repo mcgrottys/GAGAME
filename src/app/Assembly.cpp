@@ -1472,7 +1472,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             extra.push_back({"loader", "a field file type (core/FieldLoader.h LoaderRegistry)",
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
-                             {"bathy-map", "dump-water-state", "export", "fidelity-map",
+                             {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
                               "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
@@ -1558,6 +1558,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     constexpr double kRad = 3.14159265358979323846 / 180.0;
                     return ch >= 0 ? comp->SampleHeightStack(ch, lat * kRad, lon * kRad, 1.0) : 0.0;
                 });
+            if (!bl->lod.empty()) {   // the far boxes (docs/BUILDING_LOD.md): a missing pyramid is named, not fatal
+                auto lodf = std::make_shared<BuildingLodFile>();
+                std::string why;
+                if (lodf->Open(bl->lod, &why)) {
+                    std::string per;
+                    for (int k = lod::kMinLevel; k <= lod::kMaxLevel; ++k) {
+                        per += (per.empty() ? "" : ", ") + std::to_string(k) + ":" + std::to_string(lodf->Tiles(k));
+                    }
+                    Log("[buildings] far boxes from %s: rho0 %.2f m, drawn while %.1f px; tiles by level %s", bl->lod.c_str(),
+                        lodf->Rho0(), bl->lodPixels, per.c_str());
+                    blOwned->ConfigureFar(std::move(lodf), bl->lodPixels);
+                } else {
+                    Log("[buildings] no far boxes: %s", why.c_str());
+                }
+            }
             blOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             buildingLayer = blOwned.get();
             renderer.AddLayer(std::move(blOwned));

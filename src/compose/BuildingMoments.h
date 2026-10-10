@@ -48,8 +48,10 @@ struct Moments {
 };
 
 // A prism: rings in local metres (x0, y0, x1, y1, ...; any winding), rings[0] the outer and the
-// rest holes, from z = bottom to z = top. Holes subtract whatever their winding.
-Moments PrismMoments(const std::vector<std::vector<double>>& ringsXY, double bottom, double top);
+// rest holes, from z = bottom to z = top. Holes subtract whatever their winding. `outer`, when
+// given (BuildingSolid's own flags), marks the further rings that ADD (a multipolygon's pieces).
+Moments PrismMoments(const std::vector<std::vector<double>>& ringsXY, double bottom, double top,
+                     const std::vector<uint8_t>* outer = nullptr);
 
 struct MomentBox {
     double c[3] = {0, 0, 0};   // centroid

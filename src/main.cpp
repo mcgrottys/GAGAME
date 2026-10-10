@@ -111,6 +111,8 @@ int main(int argc, char** argv) {
         // The prune tool: the tile trees' folders by last use, before any device and before any
         // tree exists -- it builds none, so it stamps none. Its keys are the scene's prune.*.
         if (S.Tool("tree-prune")) return tools::RunTreePrune(S.prune);
+        // The building pyramid: the stack's every cell, boxed, on the CPU (docs/BUILDING_LOD.md).
+        if (const SceneTool* t = S.Tool("building-lod")) return tools::RunBuildingLod(S, t->args);
         // One block of --selftest that needs no device: a raster by file and its own level; with
         // `:real`, the real height files against the harvester's grids (slice 3, part C).
         if (const SceneTool* t = S.Tool("rastertest")) {

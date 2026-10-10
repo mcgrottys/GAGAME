@@ -376,7 +376,10 @@
     { "type": "layer.buildings", "keys": [
       { "key": "levelHeight", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3, "reload": "restart", "doc": "what one tagged floor (building:levels) stands for, where no height is tagged" },
       { "key": "defaultHeight", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6, "reload": "restart", "doc": "a building with neither height nor floors tagged: the scene's assumption" },
-      { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3000, "reload": "restart", "doc": "cells of solids are streamed in within this distance of the eye (its altitude counted) and dropped beyond 1.25 times it" }
+      { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3000, "reload": "restart", "doc": "cells of solids are streamed in within this distance of the eye (its altitude counted) and dropped beyond 1.25 times it" },
+      { "key": "lod", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the far boxes' pyramid (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none" },
+      { "key": "lodRho0", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 4, "reload": "restart", "doc": "the smallest size class: a thing of circumscribed radius rho lives at level floor(log2(rho/rho0))" },
+      { "key": "lodPixels", "type": "number", "field": "f64", "quantity": "1", "unit": "px", "default": 1, "reload": "restart", "doc": "a far box is drawn while its size covers at least this many pixels" }
     ] },
     { "type": "layer.plain", "keys": [
     ] },

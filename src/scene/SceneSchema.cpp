@@ -666,7 +666,13 @@ const Schema& BuildingsLayerSchema() {
                   "a building with neither height nor floors tagged: the scene's assumption", R)
             .Bind("radius", kBuildings.radius, Q::Length, "m",
                   "cells of solids are streamed in within this distance of the eye (its altitude counted) and "
-                  "dropped beyond 1.25 times it", R);
+                  "dropped beyond 1.25 times it", R)
+            .BindPath("lod", kBuildings.lod,
+                      "the far boxes' pyramid (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
+            .Bind("lodRho0", kBuildings.lodRho0, Q::Length, "m",
+                  "the smallest size class: a thing of circumscribed radius rho lives at level floor(log2(rho/rho0))", R)
+            .Bind("lodPixels", kBuildings.lodPixels, Q::Dimensionless, "px",
+                  "a far box is drawn while its size covers at least this many pixels", R);
         return sc;
     }();
     return *s;

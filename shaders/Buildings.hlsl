@@ -48,6 +48,36 @@ VsOut VsMain(uint vid : SV_VertexID) {
     return o;
 }
 
+// THE FAR BOXES (docs/BUILDING_LOD.md): a building past the detail cells as its moment box, three
+// half-axes about a centre (metres from its TILE's origin), 36 vertices a box from SV_VertexID. The
+// buffer is bound at the same slot as the prisms' (one draw reads one of them).
+struct BuildingBox {
+    float3 c; float pad0;
+    float3 u; float pad1;   // long half-axis
+    float3 v; float pad2;   // short half-axis
+    float3 w; float pad3;   // up half-axis
+};
+StructuredBuffer<BuildingBox> gBoxes : register(t0, space0);
+
+VsOut VsBox(uint vid : SV_VertexID) {
+    const BuildingBox b = gBoxes[vid / 36u];
+    const uint f = (vid % 36u) / 6u, t = vid % 6u;   // face, then its two triangles
+    const float s = (f & 1u) ? -1.0f : 1.0f;         // faces in pairs along u, v, w
+    const uint ax = f >> 1;
+    const float3 A = ax == 0u ? b.u : (ax == 1u ? b.v : b.w);
+    const float3 B = ax == 0u ? b.v : (ax == 1u ? b.w : b.u);
+    const float3 C = ax == 0u ? b.w : (ax == 1u ? b.u : b.v);
+    static const float2 kQuad[6] = {float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1)};
+    const float2 q = kQuad[t];
+    VsOut o;
+    o.rel = gBdOrigin.xyz + b.c + s * A + q.x * B + q.y * C;
+    o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+    o.n = s * A / max(length(A), 1e-6f);   // a box with no width keeps a finite normal
+    const bool roof = ax == 2u && s > 0.0f;
+    o.col = kPalette[roof ? 1u : 0u] * gBdOrigin.w;
+    return o;
+}
+
 float4 PsMain(VsOut i) : SV_Target {
     // The solids stand in the eye's own world: cut away wherever a window shows another place.
     if (WindowChainDepth(i.rel, 1u) != 0u) discard;
@@ -62,5 +92,9 @@ float4 PsMain(VsOut i) : SV_Target {
     const float h = r - Rb;
     const float3 n = normalize(i.n);
     const float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
-    return float4(i.col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f), 1.0f);
+    const float3 lit = i.col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f);
+    // ...and seen through THE AIR IN FRONT OF IT, the ground's own law: a box 60 km off fades into
+    // the same haze as the land under it, where it stood out at full contrast.
+    const float range = length(i.rel);
+    return float4(AerialPerspective(lit, i.rel / max(range, 1e-3f), range), 1.0f);
 }

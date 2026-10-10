@@ -296,6 +296,33 @@ void BuildingStack::Open(std::vector<BuildingSourceSpec> specs, const BuildingDe
     }
 }
 
+std::vector<std::pair<int, int>> BuildingStack::Cells(double cellDeg) const {
+    std::vector<std::pair<int, int>> out;   // (iy, ix) while gathering, for the sort
+    for (const Source& s : m_src) {
+        if (s.harvest) {
+            const double f = s.cellDeg / cellDeg;
+            const int n = static_cast<int>(std::lround(f));
+            for (const auto& c : s.cells) {   // a coarser harvest cell covers n x n of ours
+                for (int dy = 0; dy < (std::max)(n, 1); ++dy) {
+                    for (int dx = 0; dx < (std::max)(n, 1); ++dx) {
+                        out.push_back({static_cast<int>(std::floor(c[0] * f)) + dy, static_cast<int>(std::floor(c[1] * f)) + dx});
+                    }
+                }
+            }
+        } else {
+            for (const BuildingSolid& b : s.whole) {
+                if (b.rings.empty() || b.rings[0].size() < 2) continue;
+                out.push_back({static_cast<int>(std::floor(b.rings[0][1] / cellDeg)),
+                               static_cast<int>(std::floor(b.rings[0][0] / cellDeg))});
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    for (auto& c : out) std::swap(c.first, c.second);
+    return out;
+}
+
 void BuildingStack::Read(const Source& s, double lon0, double lat0, double lon1, double lat1,
                          std::vector<BuildingSolid>& out) const {
     if (!s.harvest) {
