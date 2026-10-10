@@ -130,8 +130,13 @@ down) shows the multi-lane road as a wide grey band, the streets narrower, the p
 street still shows the grid between the blocks where the imagery has it. First render had the
 ribbons translucent: the width-on-screen law read the view-projection's diagonal as the
 projection's scale, which it is not once the view is folded in; the pixel's angle now travels in
-the constant buffer (the walk's own number). The planet tree with roads is one run of the same
-tool over the planet harvest (`D:\DataCache\OSMoads\planet-261005-roads-loc.roads.json`:
+the constant buffer (the walk's own number). The planet tree with roads
+(`D:/DataCache/OSM/buildings/planet-261010-roads.tree`, named by `scenes/demos/earth.json`) was
+built the same evening by the same tool over the planet harvest
+(`D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json`: 268,036,135 ways in 2,437,980 cells,
+63.6 GB, harvested in 15 min): 2,530,247 cells, 712,436,745 solids and 277,476,474 ribbon pieces
+(1,118,583 tunnels left out) in 59 min, 120 GB; the market still from it is pixel for pixel the
+test tree's.
 268,036,135 ways in 2,437,980 cells, 63.6 GB, harvested in 15 min).
 
 ## 6. What is derived, and not yet built
