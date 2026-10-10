@@ -1027,7 +1027,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // it already has -- the global cube is not repainted for this.
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
-                    gisMask.Load("data/gis/")) {
+                    gisMask.Load("data/gis/", S.streaming.gisLand)) {
                     srcGisMask.Refresh();   // the rings are loaded: declare the real box
                     srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);

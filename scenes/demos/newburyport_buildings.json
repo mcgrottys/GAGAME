@@ -19,6 +19,7 @@
   ],
   "base": "scenes/merrimack.json",
   "scene": {"name": "newburyport-buildings", "mode": "world", "view": "downtown"},
+  "streaming": {"gisLand": "D:/DataCache/OSM/coastline/land.galand"},
   "time": {"start": "2026-08-28T19:30:00Z"},
   "layers": [
     {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,

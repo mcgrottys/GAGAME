@@ -336,6 +336,9 @@ const Schema& StreamingSchema() {
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
+            .BindPath("gisLand", p.gisLand,
+                      "the global coast: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py); "
+                      "\"\" = the New England survey alone", R)
             .Bind("gisGrainM", p.gisGrainM, Q::Length, "m",
                   "the survey's grain: the finest level the land/sea mask has anything of its own "
                   "for; a mask tile finer than it is its parent, magnified -- never painted, stored "

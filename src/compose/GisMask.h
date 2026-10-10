@@ -60,6 +60,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -73,8 +76,19 @@ public:
     // Loads the rings themselves -- coast, NHD open water, and the hand edits. Returns false if
     // there is no coast ring set to be authoritative about, in which case the gate simply never
     // exists and nothing downstream changes.
-    bool Load(const std::string& dir);
-    bool Ready() const { return !m_coast.empty(); }
+    // `landPath` (scene: streaming.gisLand), when given, is THE GLOBAL COAST: OSM's land polygons
+    // (GALAND01, harvester/harvest_land_polygons.py, from osmdata.openstreetmap.de's split set,
+    // which osmcoastline builds from natural=coastline). It replaces the New England GSHHG coast
+    // (the finer survey wins: OSM's coastline is metres, GSHHG's ~100 m) and makes the mask's
+    // opinion global; the NHD carve and the hand edits stay on top where they are.
+    //
+    // READ ONLY FOR WHAT IS PAINTED: only the 1-degree cells index is held. A cell's rings are read
+    // inside the paint of a mask tile -- and a tile is painted only when the residency manager
+    // wants it (the globe walk's culled, sized leaves), once, then served from the tile tree on
+    // disk -- into an LRU of kLandCacheBytes. A tile decimates each ring to a quarter of its own
+    // texel, so a tile of the whole globe walks a few points a ring, not 79 M.
+    bool Load(const std::string& dir, const std::string& landPath = std::string());
+    bool Ready() const { return !m_coast.empty() || !m_landIdx.empty(); }
 
     // The union of the loaded rings' own bounding boxes, in degrees -- the source's declared
     // footprint, which is what keeps the gate OUT of the cache identity of every tile it cannot
@@ -165,6 +179,39 @@ private:
     // Parity-fill a column from the sorted crossing latitudes.
     static void FillParity(std::vector<double>& xs, double latMin, double latMax, uint32_t dim,
                            std::vector<uint8_t>& col, uint8_t inside);
+
+    // ---- the global coast (GALAND01), paged by cell ----
+    struct LandIndex {
+        int16_t cx, cy;
+        uint32_t rings;
+        uint64_t off;
+    };
+    struct LandRing {
+        float lon0, lat0, lon1, lat1;
+        uint32_t first, count;   // into the cell's lon/lat pairs
+    };
+    struct LandCell {
+        std::vector<float> ll;   // lon, lat pairs (degrees)
+        std::vector<LandRing> rings;
+        uint64_t bytes = 0;
+    };
+    static constexpr uint64_t kLandCacheBytes = 768ull << 20;
+    std::shared_ptr<const LandCell> LandCellAt(int cx, int cy) const;
+    // The land of one tile: every ring whose box meets it, decimated to `eps` degrees, as unit
+    // vectors; whether any of their edges meets the box (else one column decides the tile).
+    struct TileLand {
+        std::vector<Vec3> pts;
+        std::vector<Ring> rings;
+        std::vector<uint8_t> south;   // the ring holds the south pole: its parity starts inside
+        bool touches = false;
+    };
+    void GatherLand(double latMin, double latMax, double lonMin, double lonMax, double eps, TileLand& t) const;
+    std::string m_landPath;
+    std::vector<LandIndex> m_landIdx;   // sorted by (cy, cx)
+    mutable std::mutex m_landMx;
+    mutable std::map<int32_t, std::shared_ptr<const LandCell>> m_landCache;
+    mutable std::map<int32_t, uint64_t> m_landUse;
+    mutable uint64_t m_landTick = 0, m_landBytes = 0, m_landReads = 0;
 
     std::vector<Vec3> m_pts;
     std::vector<Ring> m_coast, m_water, m_edits;
