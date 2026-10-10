@@ -1580,7 +1580,15 @@ float4 PsMain(VsOut i) : SV_Target {
             const float3 nM = normalize(upT - east * grF.x - north * grF.y);
             const float water = gWavesB.w;
             float3 matAlb = alb;
-            if (hp - water < 0.35f) matAlb = float3(0.38f, 0.34f, 0.27f);   // wet sand band
+            // The wet band is the SEA's: weighted by the mask's water coverage, so ground the survey
+            // calls land is never wet however low it lies -- Tokyo's polders sit below the one
+            // live waterline and came out sand (Mark, 2026-10-10). Flats inside the survey's water
+            // still wet as the tide uncovers them; no opinion leaves the height band alone.
+            if (hp - water < 0.35f) {
+                const float lmW = ComposedLandMask(up, pA CS_WC);
+                const float sea = (lmW >= 0.0f) ? 1.0f - lmW : 1.0f;
+                matAlb = lerp(alb, float3(0.38f, 0.34f, 0.27f), sea);   // wet sand band
+            }
             const float ndlM = saturate(dot(nM, GA_SUN_DIR)) * sunVis;
             // M10 (a pre-existing bug the Droste night found): the sky's ambient here ignored
             // the hour. Every other term in this shader dims its skylight by `day`; this one did
