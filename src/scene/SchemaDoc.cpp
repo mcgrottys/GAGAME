@@ -191,8 +191,10 @@ struct Spelling {
 const Spelling kSpellings[] = {
     {"compass", "\"x\", \"alt\", \"z\", \"az\", \"pitch\"",
      "the flat world frame in metres and compass degrees: Camera::SetFromCompass, then FromCamera"},
-    {"orbit", "\"lat\", \"lon\", \"alt\", \"lookAt\"",
-     "the orbit key: degrees and metres above the planet; lookAt aims at a second lat/lon"},
+    {"orbit", "\"lat\", \"lon\", \"alt\", \"lookAt\" | \"heading\", \"tilt\", \"roll\", \"range\"",
+     "a place on the planet in degrees and metres: lookAt aims at a second lat/lon, or the site's own "
+     "frame turns the camera (scene::LatLonPose: all zero looks at the planet's centre, north up; heading "
+     "clockwise from north, tilt 90 = the horizon, range stands the eye back from the place)"},
     {"motor", "\"motor.re\", \"motor.du\"",
      "the PGA motor outright (core/Pga.h), for a pose no sugar spells"},
     {"similarity", "\"similarity.p\", \"similarity.s\", \"similarity.axis\", "

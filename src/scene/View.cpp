@@ -97,7 +97,7 @@ void View::FromCamera(const Camera& c) {
 }
 
 void View::ToCamera(Camera& c) const {
-    // motorPose, verbatim. Position and aim; upHint and speed are the session's, untouched.
+    // motorPose, verbatim. Position and aim; the up (upRef) and speed are the session's, untouched.
     scene::ToCamera(m_pose, c);
     c.fovY = m_fovYRad;
     c.nearZ = m_props.nearZ;

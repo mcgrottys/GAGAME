@@ -46,3 +46,6 @@ tools/Scriptorium/obj/
 data/overlay/*.rgba
 cache/overlay/
 out/
+
+# the harvester's C++ tool (harvester/cpp/build.bat)
+harvester/cpp/bin/

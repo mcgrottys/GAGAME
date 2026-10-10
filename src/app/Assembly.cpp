@@ -1512,43 +1512,27 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // never into earth.height, so the water solver's bed does not see them (2026-10-09).
         if (!marsMode && S.LayerOn("buildings")) {
             const SceneLayer* bl = S.Layer("buildings");
-            std::vector<const scene::SourceProps*> order;
+            // The stack is OPENED here (each harvest's cell index, each GeoJSON read whole) and
+            // composed cell by cell about the eye as it moves (scene/BuildingLayer: the streaming).
+            std::vector<BuildingSourceSpec> specs;
             for (const scene::SourceProps& s : S.sources) {
-                if (s.kind == "buildings") order.push_back(&s);
+                if (s.kind == "buildings") specs.push_back({s.name, s.manifest.empty() ? s.file : s.manifest, s.over});
             }
-            std::stable_sort(order.begin(), order.end(),
-                             [](const scene::SourceProps* a, const scene::SourceProps* b) { return a->over < b->over; });
-            std::vector<std::vector<BuildingSolid>> stack;
-            std::vector<const scene::SourceProps*> loaded;
-            for (const scene::SourceProps* s : order) {
-                const std::string path = s->manifest.empty() ? s->file : s->manifest;
-                std::vector<BuildingSolid> solids;
-                std::string why;
-                if (!LoadBuildingSource(path, surface.flat.latDeg, surface.flat.lonDeg, bl->radius, solids, &why)) {
-                    Log("[buildings] source '%s' refused: %s", s->name.c_str(), why.c_str());
-                    continue;
-                }
-                Log("[buildings] source '%s' (over %g): %zu solids within %.0f m of the anchor",
-                    s->name.c_str(), s->over, solids.size(), bl->radius);
-                stack.push_back(std::move(solids));
-                loaded.push_back(s);
+            auto stack = std::make_shared<BuildingStack>();
+            std::string log;
+            stack->Open(std::move(specs), {bl->levelHeight, bl->defaultHeight}, &log);
+            for (size_t p0 = 0, p1; (p1 = log.find('\n', p0)) != std::string::npos; p0 = p1 + 1) {
+                Log("[buildings] %s", log.substr(p0, p1 - p0).c_str());
             }
-            uint64_t identity = 0;
-            std::vector<size_t> drawn;
-            std::vector<BuildingSolid> solids =
-                ComposeBuildings(std::move(stack), {bl->levelHeight, bl->defaultHeight}, &identity, &drawn);
-            for (size_t k = 0; k < loaded.size(); ++k) {
-                Log("[buildings]   '%s' draws %zu", loaded[k]->name.c_str(), drawn[k]);
-            }
-            Log("[buildings] composed: %zu solids (floor %.2f m, untagged %.2f m) identity %016llx",
-                solids.size(), bl->levelHeight, bl->defaultHeight, static_cast<unsigned long long>(identity));
+            Log("[buildings] streamed by %.2f deg cell within %.0f m of the eye (floor %.2f m, untagged %.2f m)",
+                BuildingLayer::kCellDeg, bl->radius, bl->levelHeight, bl->defaultHeight);
             const SurfaceFrame* sf = &surface;
             const Compositor* comp = &compositor;
             const int ch = hgtCh;
             const double R = planetR;
             auto blOwned = std::make_unique<BuildingLayer>();
             blOwned->Configure(
-                shaderDir, std::move(solids),
+                shaderDir, std::move(stack), bl->radius,
                 // The marker pylons' placement (FrameLoop): the planet point on the sphere of the
                 // globe, rotated into the flat frame whose origin is the anchor on the surface.
                 [sf, R](double lat, double lon, double h, double out[3]) {
@@ -1558,6 +1542,17 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     out[0] = (sf->east[0] * d[0] + sf->east[1] * d[1] + sf->east[2] * d[2]) * r;
                     out[1] = (sf->up[0] * d[0] + sf->up[1] * d[1] + sf->up[2] * d[2]) * r - R;
                     out[2] = (sf->north[0] * d[0] + sf->north[1] * d[1] + sf->north[2] * d[2]) * r;
+                },
+                // ...and its inverse: the planet point is east x + up (y + R) + north z; LatLonDir's
+                // own convention (y at the pole, z at 90 E) reads latitude and longitude off it.
+                [sf, R](const double f[3], double& lat, double& lon, double& h) {
+                    constexpr double kDegPerRad = 180.0 / 3.14159265358979323846;
+                    double P[3];
+                    for (int i = 0; i < 3; ++i) P[i] = sf->east[i] * f[0] + sf->up[i] * (f[1] + R) + sf->north[i] * f[2];
+                    const double r = std::sqrt(P[0] * P[0] + P[1] * P[1] + P[2] * P[2]);
+                    lat = std::asin(P[1] / r) * kDegPerRad;
+                    lon = std::atan2(P[2], P[0]) * kDegPerRad;
+                    h = r - R;
                 },
                 [comp, ch](double lat, double lon) -> double {
                     constexpr double kRad = 3.14159265358979323846 / 180.0;

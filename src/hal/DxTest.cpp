@@ -471,11 +471,8 @@ bool RunDxSelfTest() {
             // centre at (0, -R, 0), which is world up to the last bit at the estuary and a real
             // direction at 200 km.
             const double R = 6371000.0;
-            const double gy = cam.py + R;
-            const double gl = std::sqrt(cam.px * cam.px + gy * gy + cam.pz * cam.pz);
-            cam.upHint[0] = static_cast<float>(cam.px / gl);
-            cam.upHint[1] = static_cast<float>(gy / gl);
-            cam.upHint[2] = static_cast<float>(cam.pz / gl);
+            const double radial[3] = {cam.px, cam.py + R, cam.pz};
+            cam.Transport(radial);   // as the frame loop does: a compass pose is levelled to it
 
             SceneFill f;
             f.cam = &cam;

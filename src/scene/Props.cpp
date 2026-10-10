@@ -323,6 +323,7 @@ struct SugarValues {
     double x = 0, alt = 0, z = 0, az = 90.0, pitch = 0.0;   // compass (az/pitch default: yaw 0, level)
     double lat = 0, lon = 0, tLat = 0, tLon = 0;            // orbit
     bool lookAt = false;
+    double heading = 0, tilt = 0, roll = 0, range = 0;      // orbit, the site's own frame
     double re[4] = {1, 0, 0, 0}, du[4] = {0, 0, 0, 0};     // motor
     double p[3] = {0, 0, 0}, s = 1.0, axis[3] = {0, 0, 1}, twistDeg = 0.0;   // similarity
 };
@@ -338,13 +339,23 @@ bool ReadSugar(const JsonValue& v, const std::string& path, SugarValues& o, std:
                    NumField(v, "az", kDegrees(), path, o.az, why, false) &&
                    NumField(v, "pitch", kDegrees(), path, o.pitch, why, false);
         case Sugar::Orbit: {
-            if (!OnlyKeys(v, {"lat", "lon", "alt", "lookAt"}, path, why)) return false;
+            if (!OnlyKeys(v, {"lat", "lon", "alt", "lookAt", "heading", "tilt", "roll", "range"}, path, why)) {
+                return false;
+            }
             if (!NumField(v, "lat", kDegrees(), path, o.lat, why) ||
                 !NumField(v, "lon", kDegrees(), path, o.lon, why) ||
-                !NumField(v, "alt", kMetres(), path, o.alt, why)) {
+                !NumField(v, "alt", kMetres(), path, o.alt, why) ||
+                !NumField(v, "heading", kDegrees(), path, o.heading, why, false) ||
+                !NumField(v, "tilt", kDegrees(), path, o.tilt, why, false) ||
+                !NumField(v, "roll", kDegrees(), path, o.roll, why, false) ||
+                !NumField(v, "range", kMetres(), path, o.range, why, false)) {
                 return false;
             }
             if (const JsonValue* t = v.Get("lookAt")) {
+                if (v.Get("heading") || v.Get("tilt") || v.Get("roll") || v.Get("range")) {
+                    return Refuse(why, path + ": lookAt aims at a second place; heading/tilt/roll/range turn "
+                                       "the site's own frame -- one or the other");
+                }
                 if (t->type != JsonValue::Type::Object) {
                     return Refuse(why, path + ".lookAt: expected {lat, lon}");
                 }
@@ -407,8 +418,8 @@ static bool ResolveMotor(const SugarValues& o, const PoseFrame& frame, const std
         }
         case Sugar::Orbit: {
             if (!frame.valid) return Refuse(why, path + ": the lat/lon spelling needs the tangent frame");
-            const Camera g = o.lookAt ? OrbitPose(o.lat, o.lon, o.alt, o.tLat, o.tLon, frame.planetR)
-                                      : GlobeCamera(o.lat, o.lon, o.alt, frame.planetR);
+            const Camera g = LatLonPose(o.lat, o.lon, o.alt, o.lookAt, o.tLat, o.tLon, o.heading, o.tilt,
+                                        o.roll, o.range, frame.planetR);
             out = FromCamera(PlanetToFlatPose(g, frame.east, frame.up, frame.north, frame.planetR));
             return true;
         }
@@ -451,6 +462,10 @@ bool ReadPoseSugar(const JsonValue& sugar, const std::string& path, PoseSugar& o
     out.tLat = o.tLat;
     out.tLon = o.tLon;
     out.lookAt = o.lookAt;
+    out.heading = o.heading;
+    out.tilt = o.tilt;
+    out.roll = o.roll;
+    out.range = o.range;
     return true;
 }
 

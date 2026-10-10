@@ -220,9 +220,8 @@ void Minimap::BuildCamera() {
     m_cam.px = p[0];
     m_cam.py = p[1];
     m_cam.pz = p[2];
-    m_cam.yaw = static_cast<float>(std::atan2(f[2], f[0]));
-    m_cam.pitch = static_cast<float>(std::atan2(f[1], std::sqrt(f[0] * f[0] + f[2] * f[2])));
-    for (int i = 0; i < 3; ++i) m_cam.upHint[i] = static_cast<float>(up[i]);
+    m_cam.Orient(f, up);   // its motor's own attitude, exactly (straight down is an ordinary view)
+    m_cam.SetUp(up);
 }
 
 double Minimap::Altitude() const {

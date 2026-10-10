@@ -29,6 +29,7 @@
 // ================================================================================================
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -46,7 +47,7 @@ struct BuildingSolid {
     std::vector<std::vector<double>> rings;   // each: lon0, lat0, lon1, lat1, ...
     std::vector<uint8_t> outer;
     double bottom = 0.0, top = 0.0;   // metres above the ground: resolved by Compose
-
+    int source = -1;                  // the stack's index of the source that drew it: by Compose
 };
 
 struct BuildingSourceSpec {
@@ -59,17 +60,42 @@ struct BuildingDefaults {
     double defaultHeight = 6.0;   // metres for a building with neither height nor floors
 };
 
-// Every solid of one source whose outer ring's first point lies within radiusM of (latDeg, lonDeg)
-// (radiusM <= 0: the whole file). False, and why, when the file is refused.
-bool LoadBuildingSource(const std::string& path, double latDeg, double lonDeg, double radiusM,
-                        std::vector<BuildingSolid>& out, std::string* why);
-
 // The stack, bottom to top, composed by the laws above into the solids to draw, bottom and top
-// resolved. `identity` is FNV-1a over the inputs that decided them, for a cache key; `drawn[k]`,
-// how many of source k's solids were drawn (the instrument that sees which claim won where).
+// resolved, each naming its source. `identity` is FNV-1a over the inputs that decided them.
 std::vector<BuildingSolid> ComposeBuildings(std::vector<std::vector<BuildingSolid>> stack,
-                                            const BuildingDefaults& d, uint64_t* identity = nullptr,
-                                            std::vector<size_t>* drawn = nullptr);
+                                            const BuildingDefaults& d, uint64_t* identity = nullptr);
+
+// THE STACK, OPEN AND READ BY BOX: what streams. A harvest keeps only its cell index in memory (the
+// manifest's "cells", or at planet scale the binary sidecar its "cellIndex" names: int32 ix, int32
+// iy, int64 offset, int64 count) and finds a box's cells by binary search on (iy, ix), then reads
+// their records by seek; a GeoJSON (an owner's file, small) is read whole once. A
+// box is composed from every source's solids in the box grown by `margin` degrees, so a footprint
+// just over the edge still covers, and the box keeps the solids whose outer ring's first point lies
+// inside it: each solid is drawn by exactly one box. Compose is const and opens its own file
+// handles, so boxes may be composed on several threads at once.
+class BuildingStack {
+public:
+    // Every source of `specs` (any order: sorted here by `over`, file order breaking a tie); a
+    // refused one is named in `log` and the stack goes on without it.
+    void Open(std::vector<BuildingSourceSpec> specs, const BuildingDefaults& d, std::string* log);
+    std::vector<BuildingSolid> Compose(double lon0, double lat0, double lon1, double lat1, double margin,
+                                       uint64_t* identity = nullptr) const;
+    size_t Sources() const { return m_src.size(); }
+    const std::string& Name(size_t k) const { return m_src[k].name; }
+
+private:
+    struct Source {
+        std::string name, bin;
+        double cellDeg = 0.0;
+        std::vector<std::array<int64_t, 4>> cells;   // iy, ix, offset, count, sorted by (iy, ix)
+        std::vector<BuildingSolid> whole;            // a GeoJSON, read once
+        bool harvest = false;
+    };
+    void Read(const Source& s, double lon0, double lat0, double lon1, double lat1,
+              std::vector<BuildingSolid>& out) const;
+    std::vector<Source> m_src;
+    BuildingDefaults m_d;
+};
 
 // The [buildings] block of --selftest (compose/BuildingSolidsTest.cpp): the stack's laws, planted.
 bool RunBuildingSelfTest();

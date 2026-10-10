@@ -24,7 +24,7 @@
 //  lambda captures by reference, is a std::function member with the lambda's own signature,
 //  ASSIGNED at the line that used to declare it: applyMode, altOf, poseMotor, motorPose,
 //  railPose, diveFrom, diveAt, legU, diveU, keyedPose, gravityUp, drosteRailPose, oceanAt,
-//  southAt, westAt, westQAt, sceneToWaveCfg, groundAt, pixelRay, pickGround, pickGlobe,
+//  southAt, westAt, westQAt, sceneToWaveCfg, groundClear, pixelRay, pickGround, pickGlobe,
 //  pickAny, stepBoat. A `[&]` inside Session() captures the aliases, which are the members
 //  (CWG 2011), and every other block-level local it captures is itself a member, so nothing
 //  dangles. Four lambdas only Session() calls stay its locals: planetToFlatPose,
@@ -468,7 +468,7 @@ private:
     bool m_lmbWas = false;
     double m_dragPivot[3] = {};
     double m_lastWaterNavd = 0;  // last frame's level; the pivot ray tests against it
-    std::function<double(double, double)> m_groundAt;
+    std::function<double(double, double, double)> m_groundClear;   // metres clear of the ground, radially
     std::function<void(float, float, double[3])> m_pixelRay;
     std::function<bool(float, float, double[3])> m_pickGround;
     std::function<bool(float, float, double[3])> m_pickGlobe;
@@ -518,7 +518,7 @@ private:
     static constexpr const char* kProfName[kProfN] = {
         "weather.Update", "scene hot-reload stat", "waveField.Update",
         "waterBank.SetFrame", "tide.SetTime", "sea.SetTime",
-        "groundAt (cam clamp)", "globe.SetView", "globe.PredictWants", "swe (solver step)",
+        "groundClear (cam clamp)", "globe.SetView", "globe.PredictWants", "swe (solver step)",
         "wave-plane Wants (17)", "exposure + the entities' steps"};
     std::chrono::steady_clock::time_point m_profT0;
     bool m_profHelm = false;

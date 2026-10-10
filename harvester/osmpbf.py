@@ -168,13 +168,15 @@ class Block:
                         lo = (w >> 1) ^ -(w & 1)
                 yield nid, self._e7(la, self.lat_off), self._e7(lo, self.lon_off)
 
-    def ways(self):
-        """Every way, lazily: (id, key ids, val ids, refs slice). Decode refs with packed_delta."""
+    def ways(self, locations=False):
+        """Every way, lazily: (id, key ids, val ids, refs slice), and with `locations` the way's own
+        lat and lon slices too (LocationsOnWays, fields 9 and 10: osmium add-locations-to-ways).
+        Decode refs with packed_delta, locations with way_e7."""
         for g in self.groups:
             for f, v in fields(g):
                 if f != 3:
                     continue
-                wid, keys, vals, refs = 0, (), (), b""
+                wid, keys, vals, refs, lats, lons = 0, (), (), b"", b"", b""
                 for h, w in fields(v):
                     if h == 1:
                         wid = w
@@ -184,7 +186,18 @@ class Block:
                         vals = _small_u(w)
                     elif h == 8:
                         refs = w
-                yield wid, keys, vals, refs
+                    elif h == 9:
+                        lats = w
+                    elif h == 10:
+                        lons = w
+                if locations:
+                    yield wid, keys, vals, refs, lats, lons
+                else:
+                    yield wid, keys, vals, refs
+
+    def way_e7(self, lats, lons):
+        """A way's own coordinates (LocationsOnWays) in the file's 1e-7 degree, as (lon, lat) int64."""
+        return (self._e7(packed_delta(lons), self.lon_off), self._e7(packed_delta(lats), self.lat_off))
 
     def relations(self):
         """Every relation: (id, key ids, val ids, member ids, member types, role string ids)."""

@@ -1,6 +1,8 @@
 #include "scene/BuildingLayer.h"
 
 #include "core/Common.h"
+#include "core/ThreadManager.h"
+#include "hal/GpuProfiler.h"
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
 #include "hal/Shader.h"
@@ -9,9 +11,29 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
+#include <cstring>
 #include <map>
+#include <thread>
 
 namespace ga {
+
+BuildingLayer::~BuildingLayer() {
+    // A job holds the stack and the ground's sources: none may outlive the layer's owner. Ask them
+    // to stop and wait for the ones already running (a cell is tens of milliseconds).
+    m_shared->cancel = true;
+    for (int i = 0; i < 2000 && m_shared->inflight.load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+}
+
+void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack,
+                              double radiusM, Place place, Locate locate, Ground ground) {
+    m_shaderDir = shaderDir;
+    m_stack = std::move(stack);
+    m_radius = radiusM;
+    m_place = std::move(place);
+    m_locate = std::move(locate);
+    m_ground = std::move(ground);
+}
 
 void BuildingLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
     m_rootSig = rootSig;
@@ -87,36 +109,27 @@ void EarClip(const std::vector<P2>& pts, std::vector<uint32_t> idx, std::vector<
 
 }  // namespace
 
-void BuildingLayer::Build(Gpu& gpu) {
+// One solid's prisms into `out`, about its cell's origin `org` (flat frame, doubles).
+static void Prisms(const BuildingSolid& s, const double org[3], const BuildingLayer::Place& place,
+            const BuildingLayer::Ground& ground, std::vector<BuildingLayer::Vertex>& out) {
+    using Vertex = BuildingLayer::Vertex;
     constexpr double kDeg = 3.14159265358979323846 / 180.0;
-    std::map<std::pair<int, int>, std::vector<Vertex>> byCell;
-    std::map<std::pair<int, int>, std::array<double, 3>> origins;
-    for (const BuildingSolid& s : m_solids) {
+    {
         const std::vector<double>& o = s.rings[0];
         const double lon0 = o[0], lat0 = o[1];
-        const std::pair<int, int> key{static_cast<int>(std::floor(lat0 / kCellDeg)),
-                                      static_cast<int>(std::floor(lon0 / kCellDeg))};
-        auto oit = origins.find(key);
-        if (oit == origins.end()) {
-            std::array<double, 3> org{};
-            m_place((key.first + 0.5) * kCellDeg, (key.second + 0.5) * kCellDeg, 0.0, org.data());
-            oit = origins.emplace(key, org).first;
-        }
-        const double* org = oit->second.data();
-        std::vector<Vertex>& out = byCell[key];
 
         // The ground: the lowest composed height under the footprint's outer ring.
         double base = 1e30;
-        for (size_t k = 0; k + 1 < o.size(); k += 2) base = (std::min)(base, m_ground(o[k + 1], o[k]));
+        for (size_t k = 0; k + 1 < o.size(); k += 2) base = (std::min)(base, ground(o[k + 1], o[k]));
         const double zb = base + s.bottom, zt = base + s.top;
 
         // The footprint in metres on its own tangent plane (east, north), and that plane's
         // directions in the flat frame for the walls' normals.
         const double mx = std::cos(lat0 * kDeg) * 6371008.8 * kDeg, my = 6371008.8 * kDeg;
         double e3[3], n3[3], p0[3], pe[3], pn[3];
-        m_place(lat0, lon0, zb, p0);
-        m_place(lat0, lon0 + 1e-4, zb, pe);
-        m_place(lat0 + 1e-4, lon0, zb, pn);
+        place(lat0, lon0, zb, p0);
+        place(lat0, lon0 + 1e-4, zb, pe);
+        place(lat0 + 1e-4, lon0, zb, pn);
         double le = 0.0, ln = 0.0;
         for (int i = 0; i < 3; ++i) {
             e3[i] = pe[i] - p0[i];
@@ -136,7 +149,7 @@ void BuildingLayer::Build(Gpu& gpu) {
         const uint8_t part = s.kind == 1 ? 2 : 0;
         auto emit = [&](double lat, double lon, double z, const double nrm[3], float kind) {
             double p[3];
-            m_place(lat, lon, z, p);
+            place(lat, lon, z, p);
             Vertex v{};
             for (int i = 0; i < 3; ++i) {
                 v.pos[i] = static_cast<float>(p[i] - org[i]);
@@ -229,43 +242,192 @@ void BuildingLayer::Build(Gpu& gpu) {
         }
     }
 
-    std::vector<Vertex> all;
-    m_cells.clear();
-    for (auto& [key, verts] : byCell) {
+}
+
+double BuildingLayer::Reach(const Key& k, double latDeg, double lonDeg, double h) const {
+    constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+    const double x0 = k.first * kCellDeg, y0 = k.second * kCellDeg;
+    const double nx = (std::clamp)(lonDeg, x0, x0 + kCellDeg), ny = (std::clamp)(latDeg, y0, y0 + kCellDeg);
+    const double sa = std::sin(0.5 * (ny - latDeg) * kDeg), so = std::sin(0.5 * (nx - lonDeg) * kDeg);
+    const double q = sa * sa + std::cos(latDeg * kDeg) * std::cos(ny * kDeg) * so * so;
+    const double ground = 2.0 * kR * std::asin(std::sqrt((std::min)(1.0, q)));
+    return std::hypot(ground, (std::max)(h, 0.0));
+}
+
+void BuildingLayer::Want(Gpu* gpu, double latDeg, double lonDeg, double h) {
+    // The cells about the eye, nearest first; those not resident and not building are asked for
+    // until kInFlight are building.
+    constexpr double kDeg = 3.14159265358979323846 / 180.0;
+    const int ex = static_cast<int>(std::floor(lonDeg / kCellDeg)), ey = static_cast<int>(std::floor(latDeg / kCellDeg));
+    const double cellM = kCellDeg * 111195.0 * (std::max)(0.2, std::cos(latDeg * kDeg));
+    const int span = static_cast<int>(std::ceil(m_radius / cellM)) + 1;
+    std::vector<std::pair<double, Key>> want;
+    const uint64_t rewarmed0 = m_rewarmed;
+    for (int dy = -span; dy <= span; ++dy) {
+        for (int dx = -span; dx <= span; ++dx) {
+            const Key k{ex + dx, ey + dy};
+            const double r = Reach(k, latDeg, lonDeg, h);
+            if (r > m_radius || m_cells.count(k) || m_pending.count(k)) continue;
+            auto w = m_warm.find(k);
+            if (w != m_warm.end()) {   // back from the warm pool: drawn this frame, nothing built
+                m_warmBytes -= uint64_t(w->second.cell.count) * sizeof(Vertex);
+                m_cells[k] = std::move(w->second.cell);
+                m_warm.erase(w);
+                ++m_rewarmed;
+                continue;
+            }
+            want.push_back({r, k});
+        }
+    }
+    if (m_rewarmed != rewarmed0) {
+        Log("[buildings] frame %llu: %llu cells back warm, drawn this frame (%zu resident, %zu warm, %.0f MB warm)",
+            static_cast<unsigned long long>(m_frame), static_cast<unsigned long long>(m_rewarmed - rewarmed0),
+            m_cells.size(), m_warm.size(), m_warmBytes / 1048576.0);
+    }
+    std::sort(want.begin(), want.end());
+    for (const auto& [r, k] : want) {
+        if (m_shared->inflight.load() >= kInFlight) break;
+        m_pending.insert(k);
+        m_shared->inflight.fetch_add(1);
+        Threads().Submit(Lane::Io, "buildings.cell",
+                         [shared = m_shared, stack = m_stack, place = m_place, ground = m_ground, gpu, k] {
+            if (!shared->cancel.load()) {
+                const auto t0 = std::chrono::steady_clock::now();
+                Built b;
+                b.key = k;
+                const double x0 = k.first * kCellDeg, y0 = k.second * kCellDeg;
+                place(y0 + 0.5 * kCellDeg, x0 + 0.5 * kCellDeg, 0.0, b.origin);
+                // The margin: a footprint whose first point is a little over the edge still covers.
+                const std::vector<BuildingSolid> solids =
+                    stack->Compose(x0, y0, x0 + kCellDeg, y0 + kCellDeg, 0.002);
+                b.drawn.assign(stack->Sources(), 0);
+                std::vector<Vertex> verts;
+                for (const BuildingSolid& s : solids) {
+                    if (shared->cancel.load()) break;
+                    Prisms(s, b.origin, place, ground, verts);
+                    if (s.source >= 0) ++b.drawn[static_cast<size_t>(s.source)];
+                }
+                b.count = static_cast<uint32_t>(verts.size());
+                if (b.count && !shared->cancel.load()) {
+                    const uint64_t bytes = verts.size() * sizeof(Vertex);
+                    b.staging = gpu->CreateUploadBuffer(bytes, L"buildings.staging");
+                    std::memcpy(b.staging.cpu, verts.data(), bytes);
+                    b.vb = gpu->CreateDefaultBuffer(nullptr, bytes, L"buildings.cell");
+                }
+                b.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                std::lock_guard<std::mutex> lk(shared->mx);
+                shared->done.push_back(std::move(b));
+            }
+            shared->inflight.fetch_sub(1);
+        });
+    }
+}
+
+void BuildingLayer::Upload(const FrameContext& ctx) {
+    std::vector<Built> done;
+    {
+        std::lock_guard<std::mutex> lk(m_shared->mx);
+        const size_t n = (std::min)(m_shared->done.size(), static_cast<size_t>(kUploadsPerFrame));
+        done.assign(std::make_move_iterator(m_shared->done.begin()),
+                    std::make_move_iterator(m_shared->done.begin() + static_cast<std::ptrdiff_t>(n)));
+        m_shared->done.erase(m_shared->done.begin(), m_shared->done.begin() + static_cast<std::ptrdiff_t>(n));
+    }
+    for (Built& b : done) {
+        const auto t0 = std::chrono::steady_clock::now();
+        m_pending.erase(b.key);
         Cell c{};
-        const auto& org = origins[key];
-        for (int i = 0; i < 3; ++i) c.origin[i] = org[i];
-        c.first = static_cast<uint32_t>(all.size());
-        c.count = static_cast<uint32_t>(verts.size());
-        all.insert(all.end(), verts.begin(), verts.end());
-        m_cells.push_back(c);
+        for (int i = 0; i < 3; ++i) c.origin[i] = b.origin[i];
+        c.count = b.vb.Valid() ? b.count : 0;
+        if (c.count) {
+            // Copied on THIS frame's list: the cell's buffer is born COMMON, the copy promotes it to
+            // COPY_DEST, and one barrier hands it to the vertex shader's reads.
+            c.vb = std::move(b.vb);
+            ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
+            cl->CopyBufferRegion(c.vb.res.Get(), 0, b.staging.res.Get(), 0, b.staging.size);
+            D3D12_RESOURCE_BARRIER br{};
+            br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            br.Transition.pResource = c.vb.res.Get();
+            br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            cl->ResourceBarrier(1, &br);
+            m_retired.push_back({std::move(b.staging), m_frame});   // freed once this frame has retired
+        }
+        std::string tally;
+        for (size_t k = 0; k < b.drawn.size(); ++k) {
+            if (!b.drawn[k]) continue;
+            tally += (tally.empty() ? "" : ", ") + m_stack->Name(k) + " " + std::to_string(b.drawn[k]);
+        }
+        m_cells[b.key] = std::move(c);
+        ++m_built;
+        const double up = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        Log("[buildings] frame %llu cell %d,%d (%.2f, %.2f): %u vertices (%.1f MB), built %.0f ms, frame's upload %.2f ms, %zu "
+            "resident (%llu built, %llu back warm) -- %s", static_cast<unsigned long long>(m_frame), b.key.first, b.key.second, b.key.second * kCellDeg, b.key.first * kCellDeg,
+            m_cells[b.key].count, m_cells[b.key].count * sizeof(Vertex) / 1048576.0, b.ms, up, m_cells.size(),
+            static_cast<unsigned long long>(m_built), static_cast<unsigned long long>(m_rewarmed),
+            tally.empty() ? "no solids" : tally.c_str());
     }
-    m_vertexCount = all.size();
-    if (!all.empty()) {
-        m_vb = gpu.CreateDefaultBuffer(all.data(), all.size() * sizeof(Vertex), L"buildings.vertices");
+}
+
+void BuildingLayer::Simulate(const FrameContext& ctx) {
+    ++m_frame;
+    // Buffers no frame in flight can still read.
+    m_retired.erase(std::remove_if(m_retired.begin(), m_retired.end(),
+                                   [this](const Retired& r) { return m_frame - r.frame > kRetireFrames; }),
+                    m_retired.end());
+    if (!m_pso || !m_stack || !ctx.camera || !ctx.gpu || !ctx.cmd) return;
+    const double eye[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
+    double lat = 0.0, lon = 0.0, h = 0.0;
+    m_locate(eye, lat, lon, h);
+    {   // The instrument: where the layer believes the eye is, each time it enters another cell.
+        const Key here{static_cast<int>(std::floor(lon / kCellDeg)), static_cast<int>(std::floor(lat / kCellDeg))};
+        if (here != m_eyeCell) {
+            m_eyeCell = here;
+            Log("[buildings] frame %llu: eye at %.5f, %.5f, %.0f m (flat %.0f, %.0f, %.0f)",
+                static_cast<unsigned long long>(m_frame), lat, lon, h, eye[0], eye[1], eye[2]);
+        }
     }
-    Log("[buildings] %zu solids -> %llu vertices in %zu cells of %.2f deg (%.1f MB)", m_solids.size(),
-        static_cast<unsigned long long>(m_vertexCount), m_cells.size(), kCellDeg,
-        all.size() * sizeof(Vertex) / 1048576.0);
+    // Drop what has fallen behind kKeep x radius into the warm pool, and the pool's oldest out past
+    // its budget: a freed buffer waits out the frames in flight.
+    for (auto it = m_cells.begin(); it != m_cells.end();) {
+        if (Reach(it->first, lat, lon, h) > kKeep * m_radius) {
+            m_warmBytes += uint64_t(it->second.count) * sizeof(Vertex);
+            m_warm[it->first] = {std::move(it->second), m_frame};
+            it = m_cells.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    while (m_warmBytes > kWarmBytes && !m_warm.empty()) {
+        auto old = std::min_element(m_warm.begin(), m_warm.end(),
+                                    [](const auto& a, const auto& b) { return a.second.frame < b.second.frame; });
+        m_warmBytes -= uint64_t(old->second.cell.count) * sizeof(Vertex);
+        if (old->second.cell.vb.Valid()) m_retired.push_back({std::move(old->second.cell.vb), m_frame});
+        m_warm.erase(old);
+    }
+    Upload(ctx);
+    Want(ctx.gpu, lat, lon, h);
 }
 
 void BuildingLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || !m_vb.Valid() || !ctx.camera) return;
+    if (!m_pso || m_cells.empty() || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
+    GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     // Mirrors Buildings.hlsl's cbuffer (priors 22).
     struct {
         float origin[4];   // xyz the cell's origin relative to the eye, w = brightness
     } cb{};
-    for (const Cell& c : m_cells) {
+    for (const auto& [key, c] : m_cells) {
+        if (!c.count) continue;
         // THE BOUNDARY: the difference taken in doubles, then cast.
         cb.origin[0] = static_cast<float>(c.origin[0] - ctx.camera->px);
         cb.origin[1] = static_cast<float>(c.origin[1] - ctx.camera->py);
         cb.origin[2] = static_cast<float>(c.origin[2] - ctx.camera->pz);
         cb.origin[3] = 1.0f;
         ctx.cmd->GraphicsConstants(1, cb);
-        ctx.cmd->GraphicsSrvAt(2, m_vb.gpu + uint64_t(c.first) * sizeof(Vertex));
+        ctx.cmd->GraphicsSrvAt(2, c.vb.gpu);
         ctx.cmd->Draw(c.count, 1, 0, 0);
     }
 }
