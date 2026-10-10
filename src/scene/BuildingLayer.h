@@ -261,6 +261,7 @@ private:
     std::vector<Retired> m_retired;
     uint64_t m_frame = 0;
     uint64_t m_rewarmed = 0, m_built = 0, m_staleBuilds = 0;
+    bool m_cellsSaid = false;   // the near cells' state, said once
     Key m_eyeCell{INT32_MIN, INT32_MIN};   // the instrument: cells taken back warm vs built
 
     std::shared_ptr<const BuildingLodFile> m_lod;

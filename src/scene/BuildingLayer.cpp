@@ -1191,8 +1191,17 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
         if (old->second.cell.vb.Valid()) m_retired.push_back({std::move(old->second.cell.vb), m_frame});
         m_warm.erase(old);
     }
+    // ONE SOURCE OF SOLIDS: a tree with shapes, drawn by the mesh pipeline, draws every building at
+    // every distance in its own footprint -- the near cells would draw the same buildings again. They
+    // stream only for a tree of boxes (GALOD03) or none, or without mesh shaders.
+    const bool treeDrawsAll = m_lod && m_lod->Valid() && m_lod->HasShapes() && m_psoShape;
+    if (!m_cellsSaid) {
+        m_cellsSaid = true;
+        Log("[buildings] near cells: %s", treeDrawsAll ? "none -- the tree's shapes draw every building, near and far"
+                                                       : "streamed (the tree has no shapes, or there is no tree)");
+    }
     Upload(ctx);
-    Want(ctx.gpu, lat, lon, h);
+    if (!treeDrawsAll) Want(ctx.gpu, lat, lon, h);
     if (m_lod && m_lod->Valid() && ctx.height > 0) TreeFrame(ctx, lat, lon, h);
 }
 
