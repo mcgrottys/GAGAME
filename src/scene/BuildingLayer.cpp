@@ -336,23 +336,36 @@ void BuildingLayer::Want(Gpu* gpu, double latDeg, double lonDeg, double h) {
         m_shared->inflight.fetch_add(1);
         Threads().Submit(Lane::Io, "buildings.cell",
                          [shared = m_shared, stack = m_stack, place = m_place, ground = m_ground, gpu, k] {
+            // Still wanted: the cell within the keep reach of where the eye is NOW, not where it was asked.
+            auto wanted = [&] {
+                std::lock_guard<std::mutex> lk(shared->mx);
+                return ReachBox(k.first * kCellDeg, k.second * kCellDeg, kCellDeg, shared->eyeLat, shared->eyeLon,
+                                shared->eyeH) <= shared->keepM;
+            };
             if (!shared->cancel.load()) {
                 const auto t0 = std::chrono::steady_clock::now();
                 Built b;
                 b.key = k;
+                b.stale = !wanted();
                 const double x0 = k.first * kCellDeg, y0 = k.second * kCellDeg;
                 place(y0 + 0.5 * kCellDeg, x0 + 0.5 * kCellDeg, 0.0, b.origin);
                 // The margin: a footprint whose first point is a little over the edge still covers.
                 const std::vector<BuildingSolid> solids =
-                    stack->Compose(x0, y0, x0 + kCellDeg, y0 + kCellDeg, 0.002);
+                    b.stale ? std::vector<BuildingSolid>{} : stack->Compose(x0, y0, x0 + kCellDeg, y0 + kCellDeg, 0.002);
+                b.stale = b.stale || !wanted();
                 b.drawn.assign(stack->Sources(), 0);
                 std::vector<Vertex> verts;
-                for (const BuildingSolid& s : solids) {
+                for (size_t si = 0; si < solids.size() && !b.stale; ++si) {
+                    const BuildingSolid& s = solids[si];
                     if (shared->cancel.load()) break;
+                    if ((si & 1023u) == 1023u && !wanted()) {
+                        b.stale = true;
+                        break;
+                    }
                     Prisms(s, b.origin, place, ground, verts);
                     if (s.source >= 0) ++b.drawn[static_cast<size_t>(s.source)];
                 }
-                b.count = static_cast<uint32_t>(verts.size());
+                b.count = b.stale ? 0u : static_cast<uint32_t>(verts.size());
                 if (b.count && !shared->cancel.load()) {
                     const uint64_t bytes = verts.size() * sizeof(Vertex);
                     b.staging = gpu->CreateUploadBuffer(bytes, L"buildings.staging");
@@ -380,6 +393,13 @@ void BuildingLayer::Upload(const FrameContext& ctx) {
     for (Built& b : done) {
         const auto t0 = std::chrono::steady_clock::now();
         m_pending.erase(b.key);
+        if (b.stale) {   // the eye left before it was built: nothing to keep, asked again if it returns
+            ++m_staleBuilds;
+            Log("[buildings] frame %llu cell %d,%d dropped unbuilt after %.0f ms: the eye left its reach (%llu so far)",
+                static_cast<unsigned long long>(m_frame), b.key.first, b.key.second, b.ms,
+                static_cast<unsigned long long>(m_staleBuilds));
+            continue;
+        }
         Cell c{};
         for (int i = 0; i < 3; ++i) c.origin[i] = b.origin[i];
         c.count = b.vb.Valid() ? b.count : 0;
@@ -1130,6 +1150,13 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
     const double eye[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
     double lat = 0.0, lon = 0.0, h = 0.0;
     m_locate(eye, lat, lon, h);
+    {
+        std::lock_guard<std::mutex> lk(m_shared->mx);
+        m_shared->eyeLat = lat;
+        m_shared->eyeLon = lon;
+        m_shared->eyeH = h;
+        m_shared->keepM = kKeep * m_radius;
+    }
     {   // The instrument: where the layer believes the eye is, each time it enters another cell.
         const Key here{static_cast<int>(std::floor(lon / kCellDeg)), static_cast<int>(std::floor(lat / kCellDeg))};
         if (here != m_eyeCell) {

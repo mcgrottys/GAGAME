@@ -136,6 +136,7 @@ private:
         GpuBuffer staging, vb;          // made and filled on the pool (the device is free-threaded)
         std::vector<size_t> drawn;      // per source of the stack
         double ms = 0.0;
+        bool stale = false;             // the eye left its reach before it was built: nothing made
     };
     // THE TREE IN MEMORY: a page's nodes and buildings, their boxes already stood on the ground.
     struct RtBox {
@@ -213,6 +214,9 @@ private:
         // THE WALK'S BUFFERS, REUSED: a walk takes a retired one at least its size before it makes one.
         std::vector<GpuBuffer> freeStaging, freeBoxes;
         std::atomic<bool> cancel{false};
+        // THE EYE, as the frame last saw it (under mx): a cell build asks it whether its cell is still
+        // within the keep reach, before and while it builds, and stops when it is not.
+        double eyeLat = 0.0, eyeLon = 0.0, eyeH = 0.0, keepM = 0.0;
     };
     struct Cell {
         double origin[3];
@@ -256,7 +260,7 @@ private:
     std::set<Key> m_pending;
     std::vector<Retired> m_retired;
     uint64_t m_frame = 0;
-    uint64_t m_rewarmed = 0, m_built = 0;
+    uint64_t m_rewarmed = 0, m_built = 0, m_staleBuilds = 0;
     Key m_eyeCell{INT32_MIN, INT32_MIN};   // the instrument: cells taken back warm vs built
 
     std::shared_ptr<const BuildingLodFile> m_lod;
