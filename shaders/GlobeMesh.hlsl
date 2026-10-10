@@ -184,6 +184,7 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     o.lvl = rec.level;
     o.dir = dir;
     o.h = h;
+    o.dry = landness * (dispLand - gWavesB.w);   // its height over the water, by the share that is land
     if (fine) {
         o.rel = geo + rec.upT * disp;
     } else {
