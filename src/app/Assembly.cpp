@@ -10,6 +10,8 @@
 // ================================================================================================
 #include "app/Assembly.h"
 
+#include <filesystem>
+
 #include "compose/ColorStackSource.h"
 #include "compose/ExposureSource.h"
 #include "compose/GisMask.h"
@@ -1027,7 +1029,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // it already has -- the global cube is not repainted for this.
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
-                    gisMask.Load("data/gis/")) {
+                    gisMask.Load("data/gis/", S.streaming.gisLand)) {
                     srcGisMask.Refresh();   // the rings are loaded: declare the real box
                     srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
@@ -1195,6 +1197,52 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                             "classifier falls back to the height sign");
                     }
                 }
+                // THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h): the folded tree as three
+                // additive scalars a texel -- lambda_p, volume per area, lambda_f -- of the buildings
+                // narrower than the texel (the wider are the prisms'), on the colour's addresses
+                // and windows, its own tree on the NVMe. No tile = no building there.
+                if (S.streaming.colorTrees && S.LayerOn("buildings") && !marsMode) {
+                    const SceneLayer* bl = S.Layer("buildings");
+                    if (bl && !bl->lod.empty() && bl->field) {
+                        auto lodf = std::make_shared<BuildingLodFile>();
+                        std::string why;
+                        std::error_code ec;
+                        const auto man = std::filesystem::path(bl->lod) / "lod.json";
+                        const auto sz = std::filesystem::file_size(man, ec);
+                        const auto tm = ec ? 0 : std::filesystem::last_write_time(man, ec).time_since_epoch().count();
+                        if (lodf->Open(bl->lod, &why)) {
+                            A->bldLod = lodf;
+                            A->srcBldField = std::make_unique<BuildingFieldSource>(
+                                lodf, bl->lod + " (lod.json " + std::to_string(ec ? 0 : sz) + " B, " + std::to_string(tm) + ")");
+                            auto l = std::make_shared<ColorLayerSource>(A->srcBldField.get());
+                            keepAlive.push_back(l);
+                            A->bldFieldLeaf = l;
+                            A->bldFieldTree = std::make_unique<TileTree>(l.get());
+                            A->bldFieldTree->Print();
+                            TileTree* bt = A->bldFieldTree.get();
+                            hal::TenantDesc bd;
+                            bd.name = L"buildings.field (pages)";
+                            bd.astNode = "buildings.field";
+                            bd.fiber = {DXGI_FORMAT_R8G8B8A8_UNORM, 128, 128,
+                                        "r = lambda_p, g = volume per area / 64 m, b = lambda_f / 4: the "
+                                        "buildings narrower than the texel; no tile = none"};
+                            bd.semantics = hal::Semantics::Texture;
+                            bd.residence = hal::Residence::Streamable;
+                            bd.absence = hal::Absence::Unloaded;
+                            bd.slices = SurfaceFrame::WindowSlices();
+                            bd.bindings.push_back({0, 6, cCubeL, bt->Provider(cCubeL), "paint building field (cube faces)"});
+                            surface.WindowBlocks(bd.blocks,
+                                                 bt->Provider(hal::BlockBinding::Pyramid(bd.fiber.texW, bd.fiber.texH)),
+                                                 "paint building field (pyramid windows)");
+                            A->buildingTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(bd));
+                            A->buildingTenant.Bind(*bt);
+                            Log("[buildings] the field under a pixel is page tenant %d (lambda_p, volume, lambda_f) "
+                                "from %s", A->buildingTenant.Id(), bl->lod.c_str());
+                        } else {
+                            Log("[buildings] no field under a pixel: %s", why.c_str());
+                        }
+                    }
+                }
                 if (treeTool) {
                     exitCode = tools::RunTreeAudit(opt, compositor, hgtCh, resMgr, colCh,
                                                    megaTree, heightTree, surface);
@@ -1204,7 +1252,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // M12 step 4a: the tenants, now that they exist, into the surface's declaration
             // (ids and page slices read off hal::Tenant); the globe takes the surface itself
             // beside SetResidency below, where the old SetPlanetRadius was.
-            surface.Declare(colorTenant, heightTenant, landseaTenant);
+            surface.Declare(colorTenant, heightTenant, landseaTenant, A->buildingTenant);
 
             // ---- M9ae: WHAT THE DISK ALREADY HOLDS, in memory, once.
             //
@@ -1472,7 +1520,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             extra.push_back({"loader", "a field file type (core/FieldLoader.h LoaderRegistry)",
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
-                             {"bathy-map", "dump-water-state", "export", "fidelity-map",
+                             {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
                               "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
@@ -1558,6 +1606,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     constexpr double kRad = 3.14159265358979323846 / 180.0;
                     return ch >= 0 ? comp->SampleHeightStack(ch, lat * kRad, lon * kRad, 1.0) : 0.0;
                 });
+            if (!bl->lod.empty()) {   // the folded tree (docs/BUILDING_LOD.md): a missing one is named, not fatal
+                auto lodf = std::make_shared<BuildingLodFile>();
+                std::string why;
+                if (lodf->Open(bl->lod, &why)) {
+                    std::string per;
+                    for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
+                        per += (per.empty() ? "" : ", ") + std::to_string(L) + ":" + std::to_string(lodf->Pages(L));
+                    }
+                    Log("[buildings] the ranked tree from %s: each building from %.1f px, faded in to twice that; pages by "
+                        "level %s", bl->lod.c_str(), bl->lodPixels, per.c_str());
+                    blOwned->ConfigureFar(std::move(lodf), bl->lodPixels);
+                } else {
+                    Log("[buildings] no far boxes: %s", why.c_str());
+                }
+            }
             blOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             buildingLayer = blOwned.get();
             renderer.AddLayer(std::move(blOwned));

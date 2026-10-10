@@ -111,6 +111,8 @@ int main(int argc, char** argv) {
         // The prune tool: the tile trees' folders by last use, before any device and before any
         // tree exists -- it builds none, so it stamps none. Its keys are the scene's prune.*.
         if (S.Tool("tree-prune")) return tools::RunTreePrune(S.prune);
+        // The building pyramid: the stack's every cell, boxed, on the CPU (docs/BUILDING_LOD.md).
+        if (const SceneTool* t = S.Tool("building-lod")) return tools::RunBuildingLod(S, t->args);
         // One block of --selftest that needs no device: a raster by file and its own level; with
         // `:real`, the real height files against the harvester's grids (slice 3, part C).
         if (const SceneTool* t = S.Tool("rastertest")) {
@@ -135,7 +137,17 @@ int main(int argc, char** argv) {
         // declared AFTER the Assembly so it destructs first, as the session locals did before
         // the assembly locals. Run() is main()'s remaining span: Session(), the loop, Finish().
         auto loop = std::make_unique<FrameLoop>(topt, S, *A);
-        const int rc = loop->Run();
+        int rc = 0;
+        try {
+            rc = loop->Run();
+        } catch (const std::exception& e) {
+            // Said HERE, before the throw unwinds the frame loop: its teardown with the pool still
+            // running can end the process before main's own catch below is ever reached.
+            const HRESULT removed = A->gpu.Device() ? A->gpu.Device()->GetDeviceRemovedReason() : S_OK;
+            Log("[crash] the frame loop threw: %s (device removed reason %s)", e.what(), ga::HrString(removed).c_str());
+            if (removed != S_OK) A->gpu.ReportDeviceLost();
+            throw;
+        }
         // THE SHUTDOWN TRAIL (core/ExitTrail.h): the frame loop and then the assembly, the order
         // their scope always ended them in, each teardown marked from inside by its members.
         ExitStep("main: the frame loop destructs");

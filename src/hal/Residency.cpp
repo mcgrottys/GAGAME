@@ -415,7 +415,7 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
             br.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             cl->ResourceBarrier(1, &br);
-            tn.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            tn.state = br.Transition.StateAfter;   // the state it IS in (both reads), never half of it
             gpu.EndUpload();   // waits: the stage buffer may die, the tiles are real
             for (const BootTile& b : boot) {
                 auto tr = std::make_shared<Tracked>();

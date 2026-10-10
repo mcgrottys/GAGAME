@@ -202,6 +202,7 @@
       { "key": "directStorage", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "NVMe -> GPU tile reads (--no-direct-storage)" },
       { "key": "colorTrees", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "colour and height pages from the trees (--no-color-trees)" },
       { "key": "gisGate", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the vector land/sea gate on the bed (--no-gis-gate)" },
+      { "key": "gisLand", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the global coast: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py); \"\" = the New England survey alone" },
       { "key": "gisGrainM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 1, "reload": "restart", "doc": "the survey's grain: the finest level the land/sea mask has anything of its own for; a mask tile finer than it is its parent, magnified -- never painted, stored or loaded (HIERARCHY 4.20); 0 = every grain" },
       { "key": "seafloor", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the global seafloor relief source (--no-seafloor)" },
       { "key": "exposure", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the swell-exposure page (--no-exposure)" },
@@ -376,7 +377,10 @@
     { "type": "layer.buildings", "keys": [
       { "key": "levelHeight", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3, "reload": "restart", "doc": "what one tagged floor (building:levels) stands for, where no height is tagged" },
       { "key": "defaultHeight", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6, "reload": "restart", "doc": "a building with neither height nor floors tagged: the scene's assumption" },
-      { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3000, "reload": "restart", "doc": "cells of solids are streamed in within this distance of the eye (its altitude counted) and dropped beyond 1.25 times it" }
+      { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3000, "reload": "restart", "doc": "cells of solids are streamed in within this distance of the eye (its altitude counted) and dropped beyond 1.25 times it" },
+      { "key": "lod", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none" },
+      { "key": "lodPixels", "type": "number", "field": "f64", "quantity": "1", "unit": "px", "default": 1, "reload": "restart", "doc": "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's" },
+      { "key": "field", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls seen at an angle; needs `lod`" }
     ] },
     { "type": "layer.plain", "keys": [
     ] },

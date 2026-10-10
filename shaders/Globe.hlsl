@@ -1523,6 +1523,30 @@ float4 PsMain(VsOut i) : SV_Target {
     col += skyReflAdd * day * (1.0f - 0.6f * overhead);   // M7c: the reflected ray, skyward
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
 
+    // ---- THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h). The imagery is the city seen from
+    // above: roofs, and the ground between them. Seen at zenith angle z, the walls of the buildings
+    // too narrow to be drawn stand in front of that ground: a ray through the open share (1 - c)
+    // meets a wall with probability 1 - exp(-lambda_f tan z / (1 - c)) (a Boolean field of
+    // obstacles, frontal area lambda_f per ground area). That share of the pixel is wall, lit by
+    // the prisms' own law (Buildings.hlsl: the same palette, the same sky and sun), so a building
+    // that grows past a pixel and is drawn changes what carries it, not what it looks like.
+    if (CsBuildingFieldOn() && landness > 0.0f && gStreamF.z < 0.5f) {
+        const float2 bf = CsBuildingField(up, pA CS_WC);   // lambda_p, lambda_f under the pixel
+        const float3 vdir = normalize(i.rel);
+        const float cz = max(dot(-vdir, upT), 0.02f);
+        const float tz = sqrt(max(1.0f - cz * cz, 0.0f)) / cz;
+        const float open = max(1.0f - bf.x, 0.05f);
+        const float walls = open * (1.0f - exp(-bf.y * tz / open));
+        if (walls > 1e-4f) {
+            float3 nw = -vdir - dot(-vdir, upT) * upT;   // the walls that face the eye
+            nw = dot(nw, nw) > 1e-8f ? normalize(nw) : upT;
+            const float ndlW = saturate(dot(nw, GA_SUN_DIR)) * (1.0f - 0.75f * overhead) * sunVis;
+            // MIRRORS Buildings.hlsl kPalette[0] (the wall) and its light.
+            const float3 wallLit = float3(0.80f, 0.78f, 0.74f) * (SkyAmbient(nw, upT, hp) + ndlW * SunAt(upT, hp) * 1.15f);
+            col = lerp(col, wallLit, walls);
+        }
+    }
+
     // ---- M9bg: THE MIX. Land was lit above, per pixel; the water was lit at its VERTICES and
     // interpolated here. A shoreline pixel is landness of the one and (1 - landness) of the
     // other -- the same analog band that mixes the GEOMETRY in SurfaceVertex, so colour and

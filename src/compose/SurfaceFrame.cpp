@@ -569,11 +569,12 @@ SurfaceFrame SurfaceFrame::About(double planetR, bool stencil, double latDeg, do
 }
 
 void SurfaceFrame::Declare(const hal::Tenant& color, const hal::Tenant& height,
-                           const hal::Tenant& mask) {
+                           const hal::Tenant& mask, const hal::Tenant& buildings) {
     colorT = color.Id();
     hgtT = height.Id();
     hgtWindows = height.Valid() && !height.Desc().blocks.empty();
     maskT = mask.Id();
+    bldT = buildings.Id();
     // M12 step 4c: the tenants' own words for the diagram, read off the same declarations.
     // An empty Tenant's Desc() is the empty declaration: no node, no bindings, no row.
     auto words = [](const hal::Tenant& t) {
@@ -652,7 +653,6 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm,
     const bool pages = cubeOn;
     cb.u5[0] = pages ? rm.TextureSrv(colorCube) : UINT32_MAX;
     cb.u5[1] = pages ? rm.ResidencySrv(colorCube) : UINT32_MAX;
-    cb.u5[2] = cb.u5[3] = UINT32_MAX;
     cb.u[0] = cubeOn ? rm.TextureSrvCube(colorCube) : UINT32_MAX;
     cb.u[1] = cubeOn ? rm.ResidencySrvCube(colorCube) : UINT32_MAX;
     cb.u[2] = cb.u[3] = UINT32_MAX;
@@ -661,7 +661,13 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm,
     const bool hpages = hgtOn && hgtWindows;
     cb.u6[0] = hpages ? rm.TextureSrv(heightCube) : UINT32_MAX;
     cb.u6[1] = hpages ? rm.ResidencySrv(heightCube) : UINT32_MAX;
-    cb.u6[2] = cb.u6[3] = UINT32_MAX;
+    // THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h): the windows' array in u5.zw, the
+    // cube's in u6.zw -- the rows' spare halves, so the layout is unchanged.
+    const bool bldOn = bldT >= 0;
+    cb.u5[2] = bldOn ? rm.TextureSrv(bldT) : UINT32_MAX;
+    cb.u5[3] = bldOn ? rm.ResidencySrv(bldT) : UINT32_MAX;
+    cb.u6[2] = bldOn ? rm.TextureSrvCube(bldT) : UINT32_MAX;
+    cb.u6[3] = bldOn ? rm.ResidencySrvCube(bldT) : UINT32_MAX;
     cb.u2[0] = hgtOn ? (hpages ? rm.TextureSrvCube(heightCube) : rm.TextureSrv(heightCube))
                      : UINT32_MAX;
     cb.u2[1] = hgtOn ? (hpages ? rm.ResidencySrvCube(heightCube) : rm.ResidencySrv(heightCube))

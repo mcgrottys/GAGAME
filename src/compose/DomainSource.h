@@ -153,6 +153,11 @@ public:
     // of its own (Google) the finest it serves at the place; a product of the height the height's
     // grain there; -1, every level: a vector, exact at any grain.
     virtual int FinestMip(const Lattice& l, double, double, double, double) const { return OwnMip(l); }
+    // EVERY LEVEL ITS OWN: a node whose coarser tile is not the mean of its four children -- a
+    // field that holds, at each grain, only what is finer than that grain (compose/BuildingField.h)
+    // -- is painted at every level from its source and never folded upward: a child published
+    // does not rewrite its ancestors. False: the tree's fold-up, as every other node.
+    virtual bool LevelsOwn() const { return false; }
     // M9am: WHAT A CACHE MAY KEY THIS NODE'S OUTPUT ON. A leaf's tiles on disk are a function of
     // the data it reads and nothing else, so the default is name + unit; a loader that knows its
     // structure (a tile tree, a file version) says so, and a wrapper that changes nothing

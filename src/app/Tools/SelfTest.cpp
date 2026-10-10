@@ -2,6 +2,7 @@
 // Moved verbatim from main.cpp (M12 step 1b); declared in app/Tools.h.
 #include "app/Tools.h"
 
+#include "compose/BuildingMoments.h"
 #include "compose/BuildingSolids.h"
 #include "compose/Compositor.h"
 #include "compose/RasterFileSource.h"
@@ -76,6 +77,7 @@ int RunSelfTest(const Options& opt) {
                                        // registry template, the property table, the fold with
                                        // override, the placement sugar, the shim
     ok &= RunBuildingSelfTest();       // the building stack's laws: cover, remove, id, parts, heights
+    ok &= RunLodSelfTest();            // the building LOD algebra: fold, frame, sphere, box, level
     ok &= RunPruneSelfTest();          // the tree-prune tool's refusals, planted and caught on a
                                        // scratch root under out\prunetest, never the cache
     ok &= RunResidencySelfTest(gpu, sc, opt.shaderDir);   // the floor law: its arithmetic on the

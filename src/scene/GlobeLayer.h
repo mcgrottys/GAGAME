@@ -175,7 +175,8 @@ public:
         int waveMaxDepth = kMaxDepth;
         float pixAng = 1.0e-3f;     // one pixel's angle: the relief-mip selector
         bool wants = false;         // a residency manager and at least one cube tenant
-        int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1;
+        int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1, bldT = -1;
+        int bldFloorRungs = 0;   // the field is wanted at a window mip m >= rung - this (BuildingField)
         bool hgtWindows = false;   // PHASE B2: the height tenant reads the eye's windows too
         // PHASE A2: every slot's windows (SurfaceFrame::bound[s]), rank i + 1 at slice
         // SurfaceFrame::WindowSlice(s, i + 1) of the colour and the mask: its face, its rung and
@@ -790,6 +791,7 @@ private:
     int m_surfT = -1, m_normT = -1;
     int m_colorT = -1, m_hgtT = -1;
     int m_maskT = -1;   // M9ay: the survey mask page tenant
+    int m_bldT = -1;    // the buildings under a pixel (compose/BuildingField.h)
     bool m_streamMars = false;
     double m_radius = GlobeModel::kR;
     // M12 step 4a: THE SURFACE (SetSurface). The tenant, slice, origin and radius members

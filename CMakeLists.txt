@@ -24,6 +24,7 @@ add_executable(gagame
   src/app/Tools/WaterMap.cpp
   src/app/Tools/GisDump.cpp
   src/app/Tools/TreeAudit.cpp
+  src/app/Tools/BuildingLod.cpp
   src/app/Tools/TreePrune.cpp
   src/app/Tools/FidelityMap.cpp
   src/app/Tools/OceanProbe.cpp
@@ -71,6 +72,10 @@ add_executable(gagame
   src/compose/TreePruneTest.cpp
   src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
+  src/compose/BuildingLod.cpp
+  src/compose/BuildingField.cpp
+  src/compose/BuildingShape.cpp
+  src/compose/BuildingMoments.cpp
   src/compose/BuildingSolids.cpp
   src/compose/BuildingSolidsTest.cpp
   src/compose/RasterFileSource.cpp

@@ -20,6 +20,8 @@
 // ================================================================================================
 #pragma once
 
+#include <functional>
+
 #include "core/Common.h"
 
 #include <d3d12.h>
@@ -109,6 +111,13 @@ public:
     // panel's refresh rate -- the perceived rate under Present(1,0) that [perf]'s loop mean
     // cannot see (probe P12: is the owner's ~30 fps a present-path throughput limit?).
     void ReportPresentStats();
+    // After a lost device: DRED's breadcrumbs (the last op the GPU finished, per command list),
+    // its page fault (the VA and the allocations near it), and the VRAM budget against usage.
+    void ReportDeviceLost() const;
+    // A layer's own account of a lost device: called by ReportDeviceLost with k when the GPU stopped
+    // at the k-th DispatchMesh after the last BeginEvent (the layer's scope), so the layer can name
+    // what that dispatch drew.
+    std::function<void(uint32_t)> onLostDispatch;
 
     ID3D12Device* Device() const { return m_device.Get(); }
     // UpdateTileMappings lives on the queue, not the command list; the atlas needs this.
@@ -228,6 +237,7 @@ private:
 
     Com<IDXGIFactory6> m_factory;
     Com<ID3D12Device> m_device;
+    Com<IDXGIAdapter3> m_adapter3;   // the VRAM budget, for ReportDeviceLost
     Com<ID3D12CommandQueue> m_queue;
     Com<IDXGISwapChain3> m_swapchain;
     bool m_wantTearing = false;   // asked for (--no-vsync)
