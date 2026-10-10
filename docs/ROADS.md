@@ -108,13 +108,39 @@ Newburyport by `roads-probe`: with one reach of 60 m the railway's swing spans (
 US 1; with the shape reach at 5 m they do not, and the 10.6 m lift span remains on way 9111277.
 The NBI point goes to the nearest bridge way, `Bridge Road`, 65 m of overlap.
 
-## 5. What is derived, and not yet built
+## 5. The roads in the tree (built 2026-10-10, the same day)
 
-- **The centreline as motors M(s).** Biarcs through the polyline (arcs are CGA circles) give a G1
+A road joined the buildings' folded tree as a second SHAPE, not a layer of its own: nothing new
+streams, folds, pools or walks. A way is cut into pieces under 2.5 km (so a piece fits a decimetre
+record about its centroid); each piece's mass is the sum of its segments' slabs, a rectangle of
+the road's width from `kerb` under the ground to `kerb` over it, through the prisms' own
+`PrismMoments`, so it folds into its node exactly as a building does and sits at the level its
+length puts it (a long motorway way in a coarse quad, drawn from far). Its record (`kRibbon`) is
+the polyline, the width, and a height per vertex that the page's reader fills from the composed
+ground where a building finds its base: the profile's first form. The mesh shader extrudes each
+segment as a mitred quad through the walls' own task cut, at least a pixel wide on screen with its
+alpha the true share of that pixel, so a road at 20 km is a faint line and not a sparkle. Width is
+the file's where tagged, else lanes x `laneWidth`, else `defaultLanes` x `laneWidth`; a path class
+is `pathWidth`; all four are `layer.buildings` keys, visible as assumptions. Tunnels are not filed.
+Bridges ride the ground until the clearances give them a deck.
+
+Newburyport (`scenes/demos/newburyport_roads.json`, `--tool building-lod` over the town's box):
+7,526 ways to 7,528 pieces beside 16,312 solids, filed in 1 s; the market still (260 m, straight
+down) shows the multi-lane road as a wide grey band, the streets narrower, the paths lighter; the
+street still shows the grid between the blocks where the imagery has it. First render had the
+ribbons translucent: the width-on-screen law read the view-projection's diagonal as the
+projection's scale, which it is not once the view is folded in; the pixel's angle now travels in
+the constant buffer (the walk's own number). The planet tree with roads is one run of the same
+tool over the planet harvest (`D:\DataCache\OSMoads\planet-261005-roads-loc.roads.json`:
+268,036,135 ways in 2,437,980 cells, 63.6 GB, harvested in 15 min).
+
+## 6. What is derived, and not yet built
+
+- **The centreline as motors M(s)** (the ribbon draws the polyline's own corners today). Biarcs through the polyline (arcs are CGA circles) give a G1
   curve with no overshoot at sparse corners; a clothoid refinement is physics, since roads are built
   from arcs and spirals. OpenDRIVE hands these primitives over directly; a polyline is the all-lines
   case.
-- **The profile.** The smoothest height along s whose grade stays within road limits, that meets
+- **The profile.** Today each vertex rides the composed ground. Next: the smoothest height along s whose grade stays within road limits, that meets
   the ground at level-0 ends, and whose deck clears the crossed road by the measured clearance
   (NBI 54B, OSM `maxheight` on the lower way) or the design clearance where none is measured;
   over water the deck underside stands at the ENC clearance above its tide datum. Lidar decks
@@ -131,7 +157,7 @@ The NBI point goes to the nearest bridge way, `Bridge Road`, 65 m of overlap.
   rewritten because VsDevCmd fails under delayed expansion and the root `build.bat` may carry the
   same latent fault.
 
-## 6. Lines
+## 7. Lines
 
 | part | lines |
 |---|---|

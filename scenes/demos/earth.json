@@ -1,0 +1,21 @@
+{
+  "_readme": [
+    "THE EARTH FROM ORBIT -- the whole planet from 20,000 km, the eye on the radial through the",
+    "Merrimack, north up, looking at the planet's centre. Every drag gesture turns ABOUT THE",
+    "PLANET'S CENTRE (the camera rotor, 2026-10-10): the pan keeps the point under the cursor by",
+    "one turn about the centre line, rotate and tilt take the radial through the grabbed point as",
+    "the vertical, and no gesture sinks the eye. The scroll wheel closes the range; the planet's",
+    "buildings fold up to meet the eye as it comes down (docs/BUILDING_LOD.md).",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/earth.json",
+    "The view is the KML-named placement {lat, lon, alt, heading, tilt, roll, range}: all zero",
+    "looks at the centre, north up; `range` is the eye's distance from the point."
+  ],
+  "base": "scenes/demos/tokyo.json",
+  "scene": {"name": "earth", "mode": "world", "view": "orbit"},
+  "views": [
+    {"name": "orbit", "at": {"lat": 42.81, "lon": -70.87, "alt": 0, "heading": 0, "tilt": 0, "range": 20000000}, "fovY": 55, "gauge": "root", "nearZ": 1000},
+    {"name": "hemisphere", "at": {"lat": 20, "lon": -60, "alt": 0, "heading": 0, "tilt": 0, "range": 12000000}, "fovY": 55, "gauge": "root", "nearZ": 1000},
+    {"name": "continent", "at": {"lat": 42.81, "lon": -70.87, "alt": 0, "heading": 0, "tilt": 0, "range": 3000000}, "fovY": 55, "gauge": "root", "nearZ": 100}
+  ]
+}
