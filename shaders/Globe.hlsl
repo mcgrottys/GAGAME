@@ -653,6 +653,12 @@ struct VsOut {
     // pixel is 1 to 3 cm across. The mesh stage makes this from a fine meshlet's
     // double-precision anchor and small offsets, as it makes rel.
     float3 geo : TEXCOORD6;
+    // THE DRAWN POINT ABOVE THE WATER: how far this vertex stands over the live waterline, by the
+    // classifier's own share (landness x (land height - waterline); 0 on a water vertex, which IS
+    // the water's surface). Interpolated, it says of every fragment of a shore triangle whether
+    // the mesh drew it above the water -- a quay's face, which the mask (a map: it has no say on a
+    // vertical face) read as sea partway down. 0 on the VS fallback, which mixes no geometry.
+    float dry : TEXCOORD7;
 };
 
 #ifndef GA_MESH_PATH
@@ -712,6 +718,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // this path has no double-precision anchor to make it from.
     o.geo = dirT * gGlo.x - gCamAbs.xyz;
     o.wcol = WaterVertexColor(dir, o.rel, h);   // M9bg: the sea, shaded here and nowhere else
+    o.dry = 0.0f;
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
@@ -1265,9 +1272,12 @@ float4 PsMain(VsOut i) : SV_Target {
     // finer level -- half the staircase, same residency-stable contract.
     const float lodC = max(lod, -5.0f);   // the classifier's level: hp itself where no coarser
     const float hpC = ComposedHeightOn() ? ((lodC == lod) ? hp : ComposedHeightChain(up, lodC CS_WC)) : i.h;
+    // WATER CANNOT STAND ABOVE ITS OWN SURFACE: a fragment the mesh drew over the waterline is dry
+    // whatever the mask says of its map point (i.dry, made by SurfaceVertex). At and below the
+    // waterline the classifier decides as before; the shore band's 0.4 m grades the edge.
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : ComposedLandness(up, pA CS_WC, hpC, gWavesB.w);
+                            : max(ComposedLandness(up, pA CS_WC, hpC, gWavesB.w), saturate(i.dry / 0.4f));
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
