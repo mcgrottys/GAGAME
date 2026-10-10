@@ -24,7 +24,7 @@ BuildingLayer::~BuildingLayer() {
     // A job holds the stack and the ground's sources: none may outlive the layer's owner. Ask them
     // to stop and wait for the ones already running (a cell is tens of milliseconds).
     m_shared->cancel = true;
-    for (int i = 0; i < 2000 && (m_shared->inflight.load() > 0 || m_shared->farInflight.load() > 0); ++i) {
+    for (int i = 0; i < 2000 && (m_shared->inflight.load() > 0 || m_shared->pageInflight.load() > 0 || m_shared->walking.load() > 0); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
@@ -286,6 +286,7 @@ void BuildingLayer::Want(Gpu* gpu, double latDeg, double lonDeg, double h) {
             if (w != m_warm.end()) {   // back from the warm pool: drawn this frame, nothing built
                 m_warmBytes -= uint64_t(w->second.cell.count) * sizeof(Vertex);
                 m_cells[k] = std::move(w->second.cell);
+                ++m_cellsVersion;
                 m_warm.erase(w);
                 ++m_rewarmed;
                 continue;
@@ -373,6 +374,7 @@ void BuildingLayer::Upload(const FrameContext& ctx) {
             tally += (tally.empty() ? "" : ", ") + m_stack->Name(k) + " " + std::to_string(b.drawn[k]);
         }
         m_cells[b.key] = std::move(c);
+        ++m_cellsVersion;
         ++m_built;
         const double up = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         Log("[buildings] frame %llu cell %d,%d (%.2f, %.2f): %u vertices (%.1f MB), built %.0f ms, frame's upload %.2f ms, %zu "
@@ -409,115 +411,335 @@ void PointFrame(const BuildingLayer::Place& place, double lat, double lon, doubl
 }
 }  // namespace
 
-void BuildingLayer::WantFar(Gpu* gpu, double latDeg, double lonDeg, double h, double pixAng) {
-    constexpr double kDeg = 3.14159265358979323846 / 180.0;
-    std::vector<std::pair<double, FarKey>> want;
-    for (int k = lod::kMinLevel; k <= lod::kMaxLevel; ++k) {
-        if (!m_lod->Tiles(k)) continue;
-        const double reach = LodReach(k, m_lod->Rho0(), m_lodPixels, pixAng);
-        if (h > reach) continue;   // the eye's altitude alone puts the whole level under its pixels
-        const double T = lod::TileDeg(k);
-        const int ex = static_cast<int>(std::floor(lonDeg / T)), ey = static_cast<int>(std::floor(latDeg / T));
-        const double tileM = T * 111195.0 * (std::max)(0.2, std::cos(latDeg * kDeg));
-        const int spanX = (std::min)(static_cast<int>(std::ceil(reach / tileM)) + 1, 400);
-        const int spanY = (std::min)(static_cast<int>(std::ceil(reach / (T * 111195.0))) + 1, 400);
-        for (int dy = -spanY; dy <= spanY; ++dy) {
-            for (int dx = -spanX; dx <= spanX; ++dx) {
-                const int tx = ex + dx, ty = ey + dy;
-                const FarKey key{k, tx, ty};
-                if (m_far.count(key) || m_farPending.count(key) || !m_lod->Find(k, tx, ty)) continue;
-                const double r = ReachBox(tx * T, ty * T, T, latDeg, lonDeg, h);
-                if (r <= reach) want.push_back({r / reach, key});   // nearest within its own reach first
-            }
-        }
-    }
-    std::sort(want.begin(), want.end());
-    for (const auto& [r, key] : want) {
-        if (m_shared->farInflight.load() >= kFarInFlight) break;
-        const LodTile* tile = m_lod->Find(std::get<0>(key), std::get<1>(key), std::get<2>(key));
-        if (!tile) continue;
-        m_farPending.insert(key);
-        m_shared->farInflight.fetch_add(1);
-        Threads().Submit(Lane::Io, "buildings.far",
-                         [shared = m_shared, lodf = m_lod, place = m_place, ground = m_ground, gpu, key, t = *tile] {
-            if (!shared->cancel.load()) {
-                const auto t0 = std::chrono::steady_clock::now();
-                const int k = std::get<0>(key);
-                const double T = lod::TileDeg(k);
-                FarBuilt b;
-                b.key = key;
-                place((std::get<2>(key) + 0.5) * T, (std::get<1>(key) + 0.5) * T, 0.0, b.origin);
-                const std::vector<LodRecord> recs = lodf->Read(k, t);
-                std::vector<Box> boxes;
-                boxes.reserve(recs.size());
-                for (const LodRecord& r : recs) {
-                    if (shared->cancel.load()) break;
-                    const double lat = r.lat7 * 1e-7, lon = r.lon7 * 1e-7;
-                    double p[3], e[3], n[3], u[3];
-                    PointFrame(place, lat, lon, ground(lat, lon) + r.zc, p, e, n, u);
-                    const double ch = std::cos(r.heading), sh = std::sin(r.heading);
-                    Box x{};
-                    for (int i = 0; i < 3; ++i) {
-                        x.c[i] = static_cast<float>(p[i] - b.origin[i]);
-                        x.u[i] = static_cast<float>((ch * e[i] + sh * n[i]) * r.a1);
-                        x.v[i] = static_cast<float>((-sh * e[i] + ch * n[i]) * r.a2);
-                        x.w[i] = static_cast<float>(u[i] * r.hz);
-                    }
-                    const Key cell{r.cx, r.cy};
-                    if (b.runs.empty() || b.runs.back().cell != cell) b.runs.push_back({cell, static_cast<uint32_t>(boxes.size()), 0});
-                    ++b.runs.back().count;
-                    boxes.push_back(x);
-                }
-                b.count = static_cast<uint32_t>(boxes.size());
-                if (b.count && !shared->cancel.load()) {
-                    const uint64_t bytes = boxes.size() * sizeof(Box);
-                    b.staging = gpu->CreateUploadBuffer(bytes, L"buildings.far.staging");
-                    std::memcpy(b.staging.cpu, boxes.data(), bytes);
-                    b.vb = gpu->CreateDefaultBuffer(nullptr, bytes, L"buildings.far");
-                }
-                b.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-                std::lock_guard<std::mutex> lk(shared->mx);
-                shared->farDone.push_back(std::move(b));
-            }
-            shared->farInflight.fetch_sub(1);
-        });
-    }
+static int FloorDivI(int a, int n) { return a >= 0 ? a / n : -((-a + n - 1) / n); }
+
+static std::pair<int, int> CellOf(double lat, double lon) {
+    return {static_cast<int>(std::floor(lon / BuildingLayer::kCellDeg)), static_cast<int>(std::floor(lat / BuildingLayer::kCellDeg))};
 }
 
-void BuildingLayer::UploadFar(const FrameContext& ctx) {
-    std::vector<FarBuilt> done;
+void BuildingLayer::LoadPage(const PageKey& k) {
+    const int L = std::get<0>(k);
+    const LodPage* lp = m_lod->Find(L, std::get<1>(k), std::get<2>(k));
+    if (!lp) return;
+    m_pagePending.insert(k);
+    m_shared->pageInflight.fetch_add(1);
+    Threads().Submit(Lane::Io, "buildings.page",
+                     [shared = m_shared, lodf = m_lod, place = m_place, ground = m_ground, k, lp = *lp, L] {
+        auto page = std::make_shared<Page>();
+        std::vector<LodNode> nodes;
+        std::vector<LodBuilding> blds;
+        if (!shared->cancel.load() && lodf->Read(L, lp, nodes, blds)) {
+            page->L = L;
+            // A box stood on the composed ground at its centroid, on the prisms' own axes.
+            auto stand = [&](double lat, double lon, double zc, double hz, double a1, double a2, double hd, RtBox& o) {
+                if (!(hz > 0.0)) return;
+                double p[3], e[3], n[3], u[3];
+                PointFrame(place, lat, lon, ground(lat, lon) + zc, p, e, n, u);
+                const double ch = std::cos(hd), sh = std::sin(hd);
+                for (int i = 0; i < 3; ++i) {
+                    o.p[i] = p[i];
+                    o.u[i] = static_cast<float>((ch * e[i] + sh * n[i]) * a1);
+                    o.v[i] = static_cast<float>((-sh * e[i] + ch * n[i]) * a2);
+                    o.w[i] = static_cast<float>(u[i] * hz);
+                }
+                o.valid = true;
+            };
+            page->blds.resize(blds.size());
+            for (size_t i = 0; i < blds.size(); ++i) {
+                double lat, lon, zc, hz, a1, a2, hd;
+                int cx, cy;
+                LodUnpack(blds[i], lat, lon, zc, hz, a1, a2, hd, cx, cy);
+                RtBld& b = page->blds[i];
+                stand(lat, lon, zc, hz, a1, a2, hd, b.box);
+                b.cell = {cx, cy};
+                b.rho = static_cast<float>(std::sqrt(a1 * a1 + a2 * a2 + hz * hz));
+            }
+            const double Q = lod::QuadDeg(L), Qm = Q * lod::kMetresPerDeg;
+            page->nodes.resize(nodes.size());
+            for (size_t i = 0; i < nodes.size(); ++i) {
+                const LodNode& n = nodes[i];
+                RtNode& r = page->nodes[i];
+                r.x = n.x;
+                r.y = n.y;
+                r.own0 = static_cast<uint32_t>(n.ownFirst - lp.bldFirst);
+                r.ownN = n.ownCount;
+                r.rhoMin = n.ownRhoMin;
+                const double latc = (n.y + 0.5) * Q, lonc = (n.x + 0.5) * Q;
+                place(latc, lonc, ground(latc, lonc), r.c);
+                // THE FOLDS: its own, its descendants', and both together -- the moments added
+                // (FOLD), the sum's box (BoxOf), in the node's own frame.
+                Moments all;
+                auto fold = [&](const LodBox& b, RtBox& o, Key& cell) {
+                    if (!(b.hz > 0.0f)) return;
+                    const double lat = b.lat7 * 1e-7, lon = b.lon7 * 1e-7;
+                    stand(lat, lon, b.zc, b.hz, b.a1, b.a2, b.heading, o);
+                    cell = CellOf(lat, lon);
+                    all += LodBoxMoments(lat, lon, b.zc, b.hz, b.a1, b.a2, b.heading, latc, lonc);
+                };
+                fold(n.own, r.own, r.ownCell);
+                fold(n.desc, r.desc, r.descCell);
+                float top = 0.0f;
+                if (!all.Empty()) {
+                    const MomentBox mb = BoxOf(all);
+                    constexpr double kDeg = 3.14159265358979323846 / 180.0;
+                    const double mx = std::cos(latc * kDeg) * 6371008.8 * kDeg, my = 6371008.8 * kDeg;
+                    const double lat = latc + mb.c[1] / my, lon = lonc + mb.c[0] / mx;
+                    stand(lat, lon, mb.c[2], mb.half[2], mb.half[0], mb.half[1], mb.heading, r.all);
+                    r.allCell = CellOf(lat, lon);
+                    top = static_cast<float>(mb.c[2] + mb.half[2]);
+                }
+                // The quad's corners and what stands on it, from its centre.
+                r.rad = static_cast<float>(0.75 * Qm + (std::max)(top, (std::max)(n.own.zc + n.own.hz, n.desc.zc + n.desc.hz)) + 50.0);
+                page->at[{n.x, n.y}] = static_cast<uint32_t>(i);
+            }
+            page->bytes = nodes.size() * (sizeof(RtNode) + 48) + blds.size() * sizeof(RtBld);
+        }
+        std::lock_guard<std::mutex> lk(shared->mx);
+        shared->pagesDone.push_back({k, page});
+        shared->pageInflight.fetch_sub(1);
+    });
+}
+
+void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lonDeg, double h) {
+    // 1. What the pool finished: pages into the tree, a walk's boxes onto the GPU.
+    std::vector<std::pair<PageKey, std::shared_ptr<Page>>> pages;
+    std::vector<Walked> walked;
     {
         std::lock_guard<std::mutex> lk(m_shared->mx);
-        const size_t n = (std::min)(m_shared->farDone.size(), static_cast<size_t>(kUploadsPerFrame));
-        done.assign(std::make_move_iterator(m_shared->farDone.begin()),
-                    std::make_move_iterator(m_shared->farDone.begin() + static_cast<std::ptrdiff_t>(n)));
-        m_shared->farDone.erase(m_shared->farDone.begin(), m_shared->farDone.begin() + static_cast<std::ptrdiff_t>(n));
+        pages.swap(m_shared->pagesDone);
+        walked.swap(m_shared->walked);
     }
-    for (FarBuilt& b : done) {
-        m_farPending.erase(b.key);
-        Far f{};
-        for (int i = 0; i < 3; ++i) f.origin[i] = b.origin[i];
-        f.count = b.vb.Valid() ? b.count : 0;
-        f.runs = std::move(b.runs);
-        if (f.count) {   // the cells' own copy and barrier (Upload)
-            f.vb = std::move(b.vb);
+    for (auto& [k, p] : pages) {
+        m_pagePending.erase(k);
+        m_pageBytes += p->bytes;
+        ++m_pagesLoaded;
+        m_pageUsed[k] = m_frame;
+        m_pages[k] = std::move(p);
+        ++m_pagesVersion;
+    }
+    for (Walked& w : walked) {
+        if (w.count && w.vb.Valid()) {   // the cells' own copy and barrier (Upload)
             ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
-            cl->CopyBufferRegion(f.vb.res.Get(), 0, b.staging.res.Get(), 0, b.staging.size);
+            cl->CopyBufferRegion(w.vb.res.Get(), 0, w.staging.res.Get(), 0, w.staging.size);
             D3D12_RESOURCE_BARRIER br{};
             br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            br.Transition.pResource = f.vb.res.Get();
+            br.Transition.pResource = w.vb.res.Get();
             br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
             br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             cl->ResourceBarrier(1, &br);
-            m_retired.push_back({std::move(b.staging), m_frame});
+            m_retired.push_back({std::move(w.staging), m_frame});
         }
-        ++m_farBuilt;
-        Log("[buildings] frame %llu far level %d tile %d,%d: %u boxes in %zu detail cells, built %.0f ms (%zu far tiles)",
-            static_cast<unsigned long long>(m_frame), std::get<0>(b.key), std::get<1>(b.key), std::get<2>(b.key), f.count,
-            f.runs.size(), b.ms, m_far.size() + 1);
-        m_far[b.key] = std::move(f);
+        if (m_drawn.vb.Valid()) m_retired.push_back({std::move(m_drawn.vb), m_frame});
+        for (int i = 0; i < 3; ++i) m_drawn.origin[i] = w.origin[i];
+        m_drawn.count = w.vb.Valid() ? w.count : 0;
+        m_drawn.vb = std::move(w.vb);
+        for (const PageKey& k : w.used) m_pageUsed[k] = m_frame;
+        // The pages the walk wanted, the largest on screen first.
+        for (const auto& [px, k] : w.wants) {
+            if (m_shared->pageInflight.load() >= kPageInFlight) break;
+            if (m_pages.count(k) || m_pagePending.count(k)) continue;
+            LoadPage(k);
+        }
+        ++m_walks;
+        if (m_walks <= 3 || m_walks % 50 == 0) {
+            Log("[buildings] frame %llu walk %llu: %u boxes (%llu buildings, %llu folds) over %llu nodes in %.1f ms; %zu pages "
+                "(%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), static_cast<unsigned long long>(m_walks),
+                m_drawn.count, static_cast<unsigned long long>(w.singles), static_cast<unsigned long long>(w.folds),
+                static_cast<unsigned long long>(w.nodes), w.ms, m_pages.size(), m_pageBytes / 1048576.0, w.wants.size());
+        }
     }
+    // 2. The budget: the page no walk has used for longest goes first.
+    while (m_pageBytes > kPageBytes && !m_pages.empty()) {
+        auto old = m_pages.begin();
+        for (auto it = m_pages.begin(); it != m_pages.end(); ++it) {
+            if (m_pageUsed[it->first] < m_pageUsed[old->first]) old = it;
+        }
+        if (m_pageUsed[old->first] + 2 >= m_frame) break;   // all in use: over budget, not thrashing
+        m_pageBytes -= old->second->bytes;
+        m_pageUsed.erase(old->first);
+        m_pages.erase(old);
+        ++m_pagesVersion;
+    }
+    // 3. A new walk, when its inputs have moved and none is running.
+    if (m_shared->walking.load() || !ctx.height) return;
+    const double eye[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
+    const DirectX::XMFLOAT3 f3 = ctx.camera->Forward();
+    const double fwd[3] = {f3.x, f3.y, f3.z};
+    const double moved = std::sqrt((eye[0] - m_walkEye[0]) * (eye[0] - m_walkEye[0]) + (eye[1] - m_walkEye[1]) * (eye[1] - m_walkEye[1]) +
+                                   (eye[2] - m_walkEye[2]) * (eye[2] - m_walkEye[2]));
+    const double turned = fwd[0] * m_walkFwd[0] + fwd[1] * m_walkFwd[1] + fwd[2] * m_walkFwd[2];
+    if (moved < (std::max)(1.0, 0.002 * (std::max)(h, 0.0)) && turned > 0.99998 && m_walkCells == m_cellsVersion &&
+        m_walkPages == m_pagesVersion) {
+        return;
+    }
+    for (int i = 0; i < 3; ++i) {
+        m_walkEye[i] = eye[i];
+        m_walkFwd[i] = fwd[i];
+    }
+    m_walkCells = m_cellsVersion;
+    m_walkPages = m_pagesVersion;
+    struct In {
+        double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, tauB;
+        std::map<PageKey, std::shared_ptr<const Page>> pages;
+        std::set<Key> cells;
+    } in;
+    for (int i = 0; i < 3; ++i) {
+        in.eye[i] = eye[i];
+        in.fwd[i] = fwd[i];
+    }
+    in.lat = latDeg;
+    in.lon = lonDeg;
+    in.h = h;
+    in.pixAng = double(ctx.camera->fovY) / double(ctx.height);
+    const double aspect = ctx.width ? double(ctx.width) / double(ctx.height) : 16.0 / 9.0;
+    in.halfDiag = std::atan(std::tan(0.5 * double(ctx.camera->fovY)) * std::sqrt(1.0 + aspect * aspect));
+    in.tauB = m_lodPixels;
+    in.pages = m_pages;
+    for (const auto& [k, c] : m_cells) in.cells.insert(k);
+    m_shared->walking.store(1);
+    Threads().Submit(Lane::Io, "buildings.walk", [shared = m_shared, lodf = m_lod, gpu = ctx.gpu, in = std::move(in)] {
+        const auto t0 = std::chrono::steady_clock::now();
+        Walked w;
+        for (int i = 0; i < 3; ++i) w.origin[i] = in.eye[i];
+        std::vector<Box> out;
+        std::set<PageKey> used;
+        std::map<PageKey, double> wants;
+        constexpr double kR = 6371008.8;
+        // The horizon, and what stands above it a little beyond.
+        const double dh = std::sqrt((std::max)(in.h, 0.0) * (2.0 * kR + (std::max)(in.h, 0.0))) + 120000.0;
+        auto pageOf = [](int L, int x, int y) { return PageKey{L, FloorDivI(x, lod::kPageX), FloorDivI(y, lod::PageY(L))}; };
+        auto loaded = [&](const PageKey& k) -> const Page* {
+            auto it = in.pages.find(k);
+            return it == in.pages.end() ? nullptr : it->second.get();
+        };
+        auto emit = [&](const RtBox& b) {
+            if (!b.valid || out.size() >= kMaxBoxes) return;
+            Box x{};
+            for (int i = 0; i < 3; ++i) {
+                x.c[i] = static_cast<float>(b.p[i] - in.eye[i]);
+                x.u[i] = b.u[i];
+                x.v[i] = b.v[i];
+                x.w[i] = b.w[i];
+            }
+            out.push_back(x);
+        };
+        std::function<void(int, const Page&, const RtNode&)> visit = [&](int L, const Page& pg, const RtNode& n) {
+            ++w.nodes;
+            double v[3], dist = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                v[i] = n.c[i] - in.eye[i];
+                dist += v[i] * v[i];
+            }
+            dist = std::sqrt(dist);
+            if (dist - n.rad > dh) return;   // under the horizon
+            if (dist > n.rad) {              // outside the view's cone
+                const double ca = (v[0] * in.fwd[0] + v[1] * in.fwd[1] + v[2] * in.fwd[2]) / dist;
+                if (std::acos(std::clamp(ca, -1.0, 1.0)) - std::asin((std::min)(1.0, n.rad / dist)) > in.halfDiag) return;
+            }
+            const double dn = (std::max)(dist - n.rad, 1.0);
+            const double px = lod::QuadDeg(L) * lod::kMetresPerDeg / (dn * in.pixAng);
+            if (px < kQuadPixels) {          // the node is a few pixels: its fold stands for it all
+                if (!in.cells.count(n.allCell)) {
+                    emit(n.all);
+                    ++w.folds;
+                }
+                return;
+            }
+            if (n.ownN) {
+                if (2.0 * n.rhoMin / (dn * in.pixAng) >= in.tauB) {   // each covers a pixel: one by one
+                    for (uint32_t k = n.own0; k < n.own0 + n.ownN && k < pg.blds.size(); ++k) {
+                        if (in.cells.count(pg.blds[k].cell)) continue;   // its prisms are drawn
+                        emit(pg.blds[k].box);
+                        ++w.singles;
+                    }
+                } else if (!in.cells.count(n.ownCell)) {
+                    emit(n.own);
+                    ++w.folds;
+                }
+            }
+            if (L == lod::kLmin || !n.desc.valid) return;
+            // The children's pages: all loaded, the children are walked; else the descendants'
+            // fold stands in while the missing pages are asked for.
+            PageKey kids[4];
+            int nk = 0;
+            bool ready = true;
+            for (int j = 0; j < 2; ++j) {
+                for (int i = 0; i < 2; ++i) {
+                    const PageKey k = pageOf(L - 1, 2 * n.x + i, 2 * n.y + j);
+                    if (std::find(kids, kids + nk, k) != kids + nk) continue;
+                    kids[nk++] = k;
+                    if (!lodf->Find(L - 1, std::get<1>(k), std::get<2>(k))) continue;   // nothing there
+                    if (!loaded(k)) {
+                        ready = false;
+                        double& want = wants[k];
+                        want = (std::max)(want, px);
+                    }
+                }
+            }
+            if (!ready) {
+                if (!in.cells.count(n.descCell)) {
+                    emit(n.desc);
+                    ++w.folds;
+                }
+                return;
+            }
+            for (int j = 0; j < 2; ++j) {
+                for (int i = 0; i < 2; ++i) {
+                    const int cx = 2 * n.x + i, cy = 2 * n.y + j;
+                    const PageKey k = pageOf(L - 1, cx, cy);
+                    const Page* cp = loaded(k);
+                    if (!cp) continue;
+                    auto it = cp->at.find({cx, cy});
+                    if (it == cp->at.end()) continue;
+                    used.insert(k);
+                    visit(L - 1, *cp, cp->nodes[it->second]);
+                }
+            }
+        };
+        // THE ROOTS: the coarsest quads within the horizon.
+        {
+            const int L = lod::kLmax;
+            const double Q = lod::QuadDeg(L), span = dh / lod::kMetresPerDeg;
+            constexpr double kDeg = 3.14159265358979323846 / 180.0;
+            const double lat0 = (std::max)(-90.0, in.lat - span), lat1 = (std::min)(90.0, in.lat + span);
+            const double cl = (std::max)(0.05, std::cos((std::min)(89.0, std::abs(in.lat) + span) * kDeg));
+            const double lspan = (std::min)(180.0, span / cl);
+            const int y0 = static_cast<int>(std::floor(lat0 / Q)), y1 = static_cast<int>(std::floor(lat1 / Q));
+            const int x0 = static_cast<int>(std::floor((in.lon - lspan) / Q)), x1 = static_cast<int>(std::floor((in.lon + lspan) / Q));
+            const int wrap = static_cast<int>(std::lround(360.0 / Q));
+            for (int y = y0; y <= y1; ++y) {
+                for (int xx = x0; xx <= x1; ++xx) {
+                    // Longitude wraps at the date line: the quad's own index.
+                    const int x = ((xx + wrap / 2) % wrap + wrap) % wrap - wrap / 2;
+                    const PageKey k = pageOf(L, x, y);
+                    if (!lodf->Find(L, std::get<1>(k), std::get<2>(k))) continue;
+                    const Page* p = loaded(k);
+                    if (!p) {
+                        wants[k] = 1e12;   // the roots before anything
+                        continue;
+                    }
+                    used.insert(k);
+                    auto it = p->at.find({x, y});
+                    if (it != p->at.end()) visit(L, *p, p->nodes[it->second]);
+                }
+            }
+        }
+        w.count = static_cast<uint32_t>(out.size());
+        if (w.count && !shared->cancel.load()) {
+            const uint64_t bytes = out.size() * sizeof(Box);
+            w.staging = gpu->CreateUploadBuffer(bytes, L"buildings.walk.staging");
+            std::memcpy(w.staging.cpu, out.data(), bytes);
+            w.vb = gpu->CreateDefaultBuffer(nullptr, bytes, L"buildings.walk");
+        }
+        for (const auto& [k, px] : wants) w.wants.push_back({px, k});
+        std::sort(w.wants.begin(), w.wants.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        w.used.assign(used.begin(), used.end());
+        w.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::lock_guard<std::mutex> lk(shared->mx);
+        shared->walked.push_back(std::move(w));
+        shared->walking.store(0);
+    });
 }
 
 void BuildingLayer::Simulate(const FrameContext& ctx) {
@@ -545,6 +767,7 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
             m_warmBytes += uint64_t(it->second.count) * sizeof(Vertex);
             m_warm[it->first] = {std::move(it->second), m_frame};
             it = m_cells.erase(it);
+            ++m_cellsVersion;
         } else {
             ++it;
         }
@@ -558,30 +781,11 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
     }
     Upload(ctx);
     Want(ctx.gpu, lat, lon, h);
-    if (m_lod && m_lod->Valid() && ctx.height > 0) {
-        // The far boxes: each level's reach at this camera; tiles past kKeep x it dropped (small: no
-        // warm pool); each kept tile told whether a detail cell can stand in it, so the draw splits
-        // it into runs only where it must.
-        const double pixAng = double(ctx.camera->fovY) / double(ctx.height);
-        for (auto it = m_far.begin(); it != m_far.end();) {
-            const int k = std::get<0>(it->first);
-            const double T = lod::TileDeg(k);
-            const double r = ReachBox(std::get<1>(it->first) * T, std::get<2>(it->first) * T, T, lat, lon, h);
-            if (r > kKeep * LodReach(k, m_lod->Rho0(), m_lodPixels, pixAng)) {
-                if (it->second.vb.Valid()) m_retired.push_back({std::move(it->second.vb), m_frame});
-                it = m_far.erase(it);
-                continue;
-            }
-            it->second.nearDetail = r <= kKeep * m_radius + 1.0;
-            ++it;
-        }
-        UploadFar(ctx);
-        WantFar(ctx.gpu, lat, lon, h, pixAng);
-    }
+    if (m_lod && m_lod->Valid() && ctx.height > 0) TreeFrame(ctx, lat, lon, h);
 }
 
 void BuildingLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || (m_cells.empty() && m_far.empty()) || !ctx.camera) return;
+    if (!m_pso || (m_cells.empty() && !m_drawn.count) || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
     ctx.cmd->Pipeline(m_pso.Get());
@@ -601,41 +805,16 @@ void BuildingLayer::Render(const FrameContext& ctx) {
         ctx.cmd->GraphicsSrvAt(2, c.vb.gpu);
         ctx.cmd->Draw(c.count, 1, 0, 0);
     }
-    if (!m_psoBox || m_far.empty()) return;
-    // THE FAR BOXES: 36 vertices a box; where a tile can hold a resident detail cell, only the runs
-    // of the cells that are not resident (the cells' prisms draw the rest).
+    if (!m_psoBox || !m_drawn.count) return;
+    // THE TREE'S BOXES: the last walk's, one buffer about the eye it stood at, 36 vertices a box.
     ctx.cmd->Pipeline(m_psoBox.Get());
-    uint64_t boxes = 0, tiles = 0;
-    for (const auto& [key, f] : m_far) {
-        if (!f.count) continue;
-        cb.origin[0] = static_cast<float>(f.origin[0] - ctx.camera->px);
-        cb.origin[1] = static_cast<float>(f.origin[1] - ctx.camera->py);
-        cb.origin[2] = static_cast<float>(f.origin[2] - ctx.camera->pz);
-        cb.origin[3] = 1.0f;
-        ctx.cmd->GraphicsConstants(1, cb);
-        ctx.cmd->GraphicsSrvAt(2, f.vb.gpu);
-        ++tiles;
-        if (!f.nearDetail) {
-            ctx.cmd->Draw(f.count * 36u, 1, 0, 0);
-            boxes += f.count;
-            continue;
-        }
-        uint32_t first = 0, n = 0;   // consecutive drawable runs, merged into one draw
-        for (const Run& r : f.runs) {
-            if (m_cells.count(r.cell)) {
-                if (n) ctx.cmd->Draw(n * 36u, 1, first * 36u, 0);
-                boxes += n;
-                n = 0;
-                continue;
-            }
-            if (!n) first = r.first;
-            n += r.count;
-        }
-        if (n) ctx.cmd->Draw(n * 36u, 1, first * 36u, 0);
-        boxes += n;
-    }
-    m_farBoxesDrawn = boxes;
-    m_farTilesDrawn = tiles;
+    cb.origin[0] = static_cast<float>(m_drawn.origin[0] - ctx.camera->px);
+    cb.origin[1] = static_cast<float>(m_drawn.origin[1] - ctx.camera->py);
+    cb.origin[2] = static_cast<float>(m_drawn.origin[2] - ctx.camera->pz);
+    cb.origin[3] = 1.0f;
+    ctx.cmd->GraphicsConstants(1, cb);
+    ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
+    ctx.cmd->Draw(m_drawn.count * 36u, 1, 0, 0);
 }
 
 }  // namespace ga

@@ -29,16 +29,16 @@
 //  Drawn with no culling: a footprint's winding is the file's, and a solid's inside is occluded by
 //  its own walls anyway. Procedural fetch by SV_VertexID, as every layer here (no input assembler).
 //
-//  FAR BOXES (docs/BUILDING_LOD.md, step 3): past the detail cells, the size-stratified pyramid
-//  (compose/BuildingLod.h) streams the same way. Level k's tiles are wanted within its REACH,
-//  rho0 2^k / (lodPixels * pixAng) -- the span-over-distance measure of the globe's LeafWants, so a
-//  thing is drawn while it covers lodPixels -- with pixAng the camera's vertical field over the
-//  viewport's height, and dropped past kKeep x reach. Each tile's boxes are built on the pool (the
-//  ground asked under each centroid, its east/north/up taken from the same Place as the prisms)
-//  and drawn as 36 vertices a box. A box is SKIPPED where its detail cell is resident: the records
-//  are sorted by detail cell, so a tile near the eye draws the runs whose cell is not, and a tile
-//  beyond every resident cell draws whole. No building is drawn twice; one still building shows as
-//  its box until its cell lands.
+//  THE FOLDED TREE (docs/BUILDING_LOD.md, compose/BuildingLod.h): everything past what the detail
+//  cells draw. Its pages stream on the pool (each node's and building's box stood on the composed
+//  ground there, once), and a WALK of the loaded tree -- on the pool, again whenever the eye has
+//  moved, the view turned, a page landed or a detail cell came or went -- writes the boxes to draw:
+//  a node under kQuadPixels across draws its fold; else its own buildings one by one where each
+//  covers lodPixels (their fold where they do not) and its children are walked, or, where a child's
+//  page is not loaded yet, the fold of its descendants while the page is asked for, the largest on
+//  screen first. Every choice is per node at its own distance: no ring and no tile edge. A box
+//  whose detail cell is resident is not drawn (the cell's prisms are the building). The walk's
+//  boxes are one buffer and one draw, about the eye the walk stood at.
 // ================================================================================================
 #pragma once
 
@@ -71,7 +71,7 @@ public:
     ~BuildingLayer() override;
     void Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack, double radiusM,
                    Place place, Locate locate, Ground ground);
-    // The far boxes' pyramid (null = none) and the law's pixel count.
+    // The folded tree (null = none) and the pixels a building needs to be drawn on its own.
     void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels);
 
     const char* Name() const override { return "buildings"; }
@@ -94,11 +94,14 @@ public:
     static constexpr int kInFlight = 6, kUploadsPerFrame = 4;
     static constexpr uint64_t kWarmBytes = 512ull << 20;   // dropped cells' buffers kept for a return
     static constexpr uint64_t kRetireFrames = 4;
-    static constexpr int kFarInFlight = 4;
+    static constexpr int kPageInFlight = 6;
+    static constexpr double kQuadPixels = 4.0;          // a node's fold is drawn below this width
+    static constexpr uint64_t kPageBytes = 1024ull << 20;   // the loaded pages' budget (CPU)
+    static constexpr uint32_t kMaxBoxes = 2000000;
 
-    // Mirrors `struct BuildingBox` in shaders/Buildings.hlsl: a moment box about its tile's origin.
+    // Mirrors `struct BuildingBox` in shaders/Buildings.hlsl: a moment box about the walk's origin.
     struct Box {
-        float c[3], pad0;   // centre, metres from the tile's origin, flat frame
+        float c[3], pad0;   // centre, metres from the walk's origin, flat frame
         float u[3], pad1;   // the long half-axis (direction x half-extent)
         float v[3], pad2;   // the short half-axis
         float w[3], pad3;   // the up half-axis
@@ -116,24 +119,49 @@ private:
         std::vector<size_t> drawn;      // per source of the stack
         double ms = 0.0;
     };
-    using FarKey = std::tuple<int, int, int>;   // (level, tx, ty)
-    struct Run {                        // boxes [first, first + count) of one detail cell
-        Key cell;
-        uint32_t first = 0, count = 0;
+    // THE TREE IN MEMORY: a page's nodes and buildings, their boxes already stood on the ground.
+    struct RtBox {
+        double p[3];                    // centre, flat frame
+        float u[3], v[3], w[3];         // half-axes
+        bool valid = false;
     };
-    struct FarBuilt {
-        FarKey key;
+    struct RtNode {
+        int x, y;
+        uint32_t own0, ownN;            // its own buildings in the page's list
+        float rhoMin;
+        double c[3];                    // the quad's centre on the ground, flat frame
+        float rad;                      // a sphere about it holding the quad and its solids
+        RtBox own, desc, all;
+        Key ownCell, descCell, allCell; // the detail cell each fold's centroid stands in
+    };
+    struct RtBld {
+        RtBox box;
+        Key cell;
+        float rho;
+    };
+    struct Page {
+        int L = 0;
+        std::vector<RtNode> nodes;
+        std::map<std::pair<int, int>, uint32_t> at;   // (x, y) -> node
+        std::vector<RtBld> blds;
+        uint64_t bytes = 0;
+    };
+    using PageKey = std::tuple<int, int, int>;   // (level, px, py)
+    struct Walked {                     // a walk's answer
         double origin[3];
-        uint32_t count = 0;             // boxes
-        std::vector<Run> runs;
+        uint32_t count = 0;
         GpuBuffer staging, vb;
+        std::vector<std::pair<double, PageKey>> wants;   // pages asked for, by pixels (largest first)
+        std::vector<PageKey> used;
+        uint64_t nodes = 0, folds = 0, singles = 0;
         double ms = 0.0;
     };
     struct Shared {                     // what a pool job and the layer both hold
         std::mutex mx;
         std::vector<Built> done;
-        std::vector<FarBuilt> farDone;
-        std::atomic<int> inflight{0}, farInflight{0};
+        std::vector<std::pair<PageKey, std::shared_ptr<Page>>> pagesDone;
+        std::vector<Walked> walked;
+        std::atomic<int> inflight{0}, pageInflight{0}, walking{0};
         std::atomic<bool> cancel{false};
     };
     struct Cell {
@@ -150,8 +178,8 @@ private:
     double Reach(const Key& k, double latDeg, double lonDeg, double h) const;
     // ...of any box of `deg` with its south-west corner at (lon0, lat0).
     static double ReachBox(double lon0, double lat0, double deg, double latDeg, double lonDeg, double h);
-    void WantFar(Gpu* gpu, double latDeg, double lonDeg, double h, double pixAng);
-    void UploadFar(const FrameContext& ctx);
+    void TreeFrame(const FrameContext& ctx, double latDeg, double lonDeg, double h);
+    void LoadPage(const PageKey& k);
     void Want(Gpu* gpu, double latDeg, double lonDeg, double h);
     void Upload(const FrameContext& ctx);
 
@@ -177,20 +205,22 @@ private:
     uint64_t m_rewarmed = 0, m_built = 0;
     Key m_eyeCell{INT32_MIN, INT32_MIN};   // the instrument: cells taken back warm vs built
 
-    struct Far {
+    std::shared_ptr<const BuildingLodFile> m_lod;
+    double m_lodPixels = 1.0;
+    std::map<PageKey, std::shared_ptr<const Page>> m_pages;
+    std::map<PageKey, uint64_t> m_pageUsed;   // the frame a walk last used it
+    std::set<PageKey> m_pagePending;
+    uint64_t m_pageBytes = 0, m_pagesLoaded = 0;
+    uint64_t m_cellsVersion = 0, m_pagesVersion = 0;   // what a walk depends on, besides the eye
+    struct Drawn {
         double origin[3];
         GpuBuffer vb;
         uint32_t count = 0;
-        std::vector<Run> runs;
-        bool nearDetail = true;   // within reach of a resident detail cell: drawn run by run
-    };
-    std::shared_ptr<const BuildingLodFile> m_lod;
-    double m_lodPixels = 1.0;
-    std::map<FarKey, Far> m_far;
-    std::set<FarKey> m_farPending;
-    uint64_t m_farBuilt = 0;
-    uint64_t m_farBoxesDrawn = 0, m_farTilesDrawn = 0;   // the last frame's, for the instrument
-    int m_farLevelsLogged = -1;
+    } m_drawn;
+    // The last walk's inputs: a new one starts when they have moved.
+    double m_walkEye[3] = {1e30, 1e30, 1e30}, m_walkFwd[3] = {0, 0, 0};
+    uint64_t m_walkCells = ~0ull, m_walkPages = ~0ull;
+    uint64_t m_walks = 0;
 };
 
 }  // namespace ga

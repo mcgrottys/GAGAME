@@ -1,5 +1,5 @@
 // BuildingLod - --tool building-lod[:lon0,lat0,lon1,lat1]: the scene's building stack, every cell
-// composed and boxed into the size-stratified pyramid at layers.buildings.lod (compose/
+// composed, boxed and folded into the tree at layers.buildings.lod (compose/
 // BuildingLod.h, docs/BUILDING_LOD.md). On the CPU, before any device. Declared in app/Tools.h.
 #include "app/Tools.h"
 
@@ -33,19 +33,19 @@ int RunBuildingLod(const Scene& S, const std::string& args) {
     stack.Open(std::move(specs), {bl->levelHeight, bl->defaultHeight}, &log);
     for (size_t p0 = 0, p1; (p1 = log.find('\n', p0)) != std::string::npos; p0 = p1 + 1) Log("[lod] %s", log.substr(p0, p1 - p0).c_str());
     const int threads = static_cast<int>((std::max)(1u, std::thread::hardware_concurrency()));
-    Log("[lod] boxing every cell%s into %s (rho0 %.2f m, %d threads)", boxed ? " in the box" : "", bl->lod.c_str(),
-        bl->lodRho0, threads);
+    Log("[lod] folding every cell%s into the tree at %s (%d threads)", boxed ? " in the box" : "", bl->lod.c_str(), threads);
     LodBuildStats st;
     log.clear();
-    if (!BuildBuildingLod(stack, bl->lod, bl->lodRho0, boxed ? box : nullptr, threads, &st, &log)) {
+    if (!BuildBuildingLod(stack, bl->lod, boxed ? box : nullptr, threads, &st, &log)) {
         Log("[lod] refused: %s", log.c_str());
         return 2;
     }
-    Log("[lod] %llu cells, %llu solids in %.1f s", static_cast<unsigned long long>(st.cells),
-        static_cast<unsigned long long>(st.solids), st.seconds);
-    for (int k = lod::kMinLevel; k <= lod::kMaxLevel; ++k) {
-        Log("[lod]   level %d (rho >= %.0f m, tiles of %.2f deg): %llu boxes in %llu tiles", k, bl->lodRho0 * double(1 << k),
-            lod::TileDeg(k), static_cast<unsigned long long>(st.kept[k]), static_cast<unsigned long long>(st.tiles[k]));
+    Log("[lod] %llu cells, %llu solids (%llu with volume) in %.1f s", static_cast<unsigned long long>(st.cells),
+        static_cast<unsigned long long>(st.solids), static_cast<unsigned long long>(st.kept), st.seconds);
+    for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
+        Log("[lod]   level %+d (quads of %.0f m): %llu nodes, %llu buildings of their own", L,
+            lod::QuadDeg(L) * lod::kMetresPerDeg, static_cast<unsigned long long>(st.nodes[L - lod::kLmin]),
+            static_cast<unsigned long long>(st.owned[L - lod::kLmin]));
     }
     return 0;
 }

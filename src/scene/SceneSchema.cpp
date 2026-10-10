@@ -668,11 +668,9 @@ const Schema& BuildingsLayerSchema() {
                   "cells of solids are streamed in within this distance of the eye (its altitude counted) and "
                   "dropped beyond 1.25 times it", R)
             .BindPath("lod", kBuildings.lod,
-                      "the far boxes' pyramid (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
-            .Bind("lodRho0", kBuildings.lodRho0, Q::Length, "m",
-                  "the smallest size class: a thing of circumscribed radius rho lives at level floor(log2(rho/rho0))", R)
+                      "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
             .Bind("lodPixels", kBuildings.lodPixels, Q::Dimensionless, "px",
-                  "a far box is drawn while its size covers at least this many pixels", R);
+                  "a building is drawn on its own while it covers this many pixels; smaller ones are folded into their node's box", R);
         return sc;
     }();
     return *s;

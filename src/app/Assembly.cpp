@@ -1558,16 +1558,16 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     constexpr double kRad = 3.14159265358979323846 / 180.0;
                     return ch >= 0 ? comp->SampleHeightStack(ch, lat * kRad, lon * kRad, 1.0) : 0.0;
                 });
-            if (!bl->lod.empty()) {   // the far boxes (docs/BUILDING_LOD.md): a missing pyramid is named, not fatal
+            if (!bl->lod.empty()) {   // the folded tree (docs/BUILDING_LOD.md): a missing one is named, not fatal
                 auto lodf = std::make_shared<BuildingLodFile>();
                 std::string why;
                 if (lodf->Open(bl->lod, &why)) {
                     std::string per;
-                    for (int k = lod::kMinLevel; k <= lod::kMaxLevel; ++k) {
-                        per += (per.empty() ? "" : ", ") + std::to_string(k) + ":" + std::to_string(lodf->Tiles(k));
+                    for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
+                        per += (per.empty() ? "" : ", ") + std::to_string(L) + ":" + std::to_string(lodf->Pages(L));
                     }
-                    Log("[buildings] far boxes from %s: rho0 %.2f m, drawn while %.1f px; tiles by level %s", bl->lod.c_str(),
-                        lodf->Rho0(), bl->lodPixels, per.c_str());
+                    Log("[buildings] the folded tree from %s: buildings one by one from %.1f px, folds under %.0f px; pages by "
+                        "level %s", bl->lod.c_str(), bl->lodPixels, BuildingLayer::kQuadPixels, per.c_str());
                     blOwned->ConfigureFar(std::move(lodf), bl->lodPixels);
                 } else {
                     Log("[buildings] no far boxes: %s", why.c_str());

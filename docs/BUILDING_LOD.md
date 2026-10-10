@@ -64,104 +64,85 @@ One law for one building and for a crowd: a single prism returns its own height 
 heading**. Only the aspect is the moments' choice. A tower stays a tower and a block of row houses
 becomes one long low box. 12 triangles replace a footprint of any size.
 
-## 4. Where a building lives: size picks the level
+## 4. The correction (2026-10-10): fold, don't drop
 
-Each solid's size is its box's circumscribed radius `ρ = √(a₁² + a₂² + hz²)`. It lives at level
+The first build (steps 2–3, commit 23e8621) drew a building only while it covered a pixel and
+kept the rest out of view. From Tokyo at 9 km the owner saw what that does: a dense square of
+detail cells, a straight edge where it ends, and a thin scatter of large boxes beyond. **The
+city must stay full to the horizon, the important things loading first, with no tile or ring
+anywhere.** The algebra was already the answer: what is hidden keeps its mass, folded.
+The pyramid of size levels was replaced by the folded tree below.
 
-    k = ⌊log₂(ρ / ρ₀)⌋,   ρ₀ = 4 m
+## 5. The folded tree
 
-with its cell at that level chosen by its centroid (Ulrich). A level-`k` thing covers
-`ρ / (d · pixAng)` pixels at distance `d`, so level `k` is wanted out to
+**The structure.** A quadtree on the harvest's own degrees: quads of `0.05° × 2^L` for
+`L = −6 … +4` (87 m to 89 km). Each building's moment box lives in ONE node: the smallest quad
+at least four of its radii across (Ulrich's loose tree), picked by its centroid. A house is in
+the 87 m quads, a 500 m tower in the 2.8 km ones. Every node also holds two folds: **own**, the
+moments of its own buildings summed, and **desc**, those of all its descendants, each child's sum
+moved into the node's frame (`Moments::About`, the parallel-axis theorem, which §2 shows is the
+translator's sandwich) and added. A fold is a moment box: total volume, centroid, height and
+heading kept.
 
-    d_k = ρ₀ 2^k / (τ · pixAng)
+**The walk** (each time the eye moves 0.2% of its height or turns 0.3°, a page lands, or a detail
+cell comes or goes; on the pool, never on the frame):
 
-which is the globe's own `LeafWants` measure (span over distance times pixel angle), not a new
-one. With `pixAng ≈ 1e-3` and `τ = 1 px`: level 0 to 4 km, level 6 (ρ ≥ 256 m) to 256 km,
-level 8 (ρ ≥ 1 km) to 1000 km, which is near space. Cells at level `k` are `2^k` times the size of
-level 0's, so each level holds about the same number of cells in view. The tree is as deep as the
-largest structure, and there is no altitude switch: one inequality per level.
+- A node whose quad is under `kQuadPixels` (4 px) across draws its whole fold (own + desc) as one
+  box, and the walk stops there.
+- Otherwise its own buildings are drawn one by one where each covers `lodPixels` (1 px), else as
+  their fold. Then its children are walked; where a child's page is not loaded yet, the descendants'
+  fold stands in and the page is asked for.
+- A building whose 0.05° detail cell is drawn as prisms is not drawn again.
+- Pages are asked for in order of their nodes' size on screen, the largest first, so the roots
+  and the large structures come before the fill.
 
-## 5. What a hidden building leaves: geometry sheds to statistics
+Every decision is per node, by its own distance, so no ring and no tile edge exists to be seen.
+What is drawn is bounded by the screen's pixels (a node smaller than 4 px is one box) and not by
+how many buildings exist. The boxes are one buffer and one draw.
 
-Below a level's threshold a building's box is not drawn, but its `M` stays summed in its cell.
-The cell's residual mass (the sum of what is hidden) is the built-up **volume fraction, mean
-height and spread**, the same three numbers a sparse water voxel needs for porosity and blockage.
-Drawn, it darkens and roughens the ground instead of vanishing. This is the water's fold law
-(geometry → σ², energy kept) applied to buildings, and it is why a city does not pop out as you
-climb. It is step 4 below, not the first PR.
+**What a fold looks like.** A suburb at 30 km is one box per 87 m patch, standing at the patch's
+centroid with its total footprint and its height. It reads as built-up land in the street pattern.
+Up close it is faintly dot-like, and the dots resolve into houses as the eye comes nearer.
+
+**On disk** (`--tool building-lod`, `GALOD02`): per level, nodes (80 B), their own buildings
+(20 B, half floats) and an index of pages (32 quads wide, never crossing a 0.8° build band).
+Massachusetts: 4.75 M buildings, 2.87 M nodes, 325 MB, 15 s. The planet extrapolates to about
+49 GB, mostly nodes; a 56-byte node is the obvious next saving.
 
 ## 6. On the sparse structure
 
-**What was planned:** level-`k` cells as the cube lattice's tiles (`face, rung, x, y`), the
-lattice every tenant shares (HIERARCHY §0), with each tile's folded `M` beside its boxes.
-
-**What was built (steps 2–3), and why it differs:** the tiles are the building harvest's own
-0.05° grid, doubled per level (`lod::TileDeg`: 0.05° for level 2, up to 3.2° for level 8). Every
-record is filed by its *detail cell*, the 0.05° cell the streaming draws its full prisms in. A far box
-and its prisms therefore always agree on which cell owns the building, and the layer can skip
-exactly the boxes whose cell is drawn. On the cube lattice a tile would cut across those cells and
-that agreement would need a second index. Moving both to the cube lattice is one change, made
-together; it is not done here. The folded `M` per tile waits for step 4, its only reader.
+The tree is on the harvest's 0.05° grid doubled and halved, not on the cube lattice the other
+tenants share (HIERARCHY §0). This keeps every building's box in the same cell as its detail
+prisms, which is how a building is never drawn twice. Moving both to the cube lattice is one
+change, for later. The tree's folds are also what step 4 and the water's voxels want: a node's
+fold is that patch's built volume, height and spread.
 
 ## 7. Order of work
 
-1. **The moment algebra** (`compose/BuildingMoments`): prism moments, fold, frame change, CGA
-   vector, moment box, level law. Gate: `--selftest [lod]` pins §2's three facts and §3's limits.
-   **Done.**
-2. **The pyramid tool** (`--tool building-lod[:lon0,lat0,lon1,lat1]`, `compose/BuildingLod`): every
-   cell of the scene's stack composed by the streaming's own `Compose` (the stack laws hold),
-   boxed, filed by level and tile, 36 B a box. Latitude band by band (3.2°), so memory holds one
-   band. **Done.** Levels 0 and 1 reach no farther than 8 km, inside the detail radius, so they are
-   not kept: in Massachusetts level 1 alone was 58% of 4.75 M solids, and the kept levels 2–8 are
-   232,677 boxes (8.4 MB). The state takes 7.3 s on 16 threads.
-3. **The far layer** (`BuildingLayer`, `VsBox`): level `k`'s tiles are wanted within its reach
-   `ρ₀2^k/(τ·pixAng)` and dropped past 1.25× it. `pixAng` is the camera's vertical field over the
-   viewport's height. Each box is 36 vertices from `SV_VertexID`, stood on the composed ground at
-   its centroid on the prisms' own east/north/up. A tile within reach of a resident detail cell
-   draws only the runs of cells that are *not* resident, so by construction no building is drawn twice
-   (no instrument counts it yet). **Done.**
-   It uses the layer's own distance measure, not the globe walk's leaves: the same span-over-
-   distance law, not yet the same caller.
-   *Also:* buildings, prisms and boxes alike, are now seen through `AerialPerspective`, the
-   ground's own air. Without it far boxes stood at full contrast in haze that faded the land under
-   them.
-4. **The residual**: the hidden mass as a ground tenant (coverage, height, roughness).
+1. **The moment algebra**: done (`compose/BuildingMoments`, `--selftest [lod]`, now 14 checks,
+   including a box's own moments giving the box back and two folded boxes keeping their volume).
+2. **The folded tree's tool**: done (`compose/BuildingLod`).
+3. **The walk and the draw**: done (`BuildingLayer::TreeFrame`, `VsBox`). Buildings and boxes
+   are seen through `AerialPerspective`, the ground's own air.
+4. **The residual as a ground tenant**: open; the folds now carry most of it.
 
-### Measured (Massachusetts pyramid, 1600×900, frozen clock)
+### Measured (Massachusetts tree, Boston, 1600×900, frozen clock; pages still landing at capture)
 
-| view | eye | far tiles | boxes loaded | buildings GPU |
-|---|---|---|---|---|
-| downtown Newburyport | 141 m | 100 | 7,275 | 1.15 ms (0.39 ms without the air) |
-| Boston, range 30 km | 9.3 km up | 109 | 14,803 | 0.18 ms (0.05 ms without the air) |
-| Boston, range 100 km | 51 km up | 16 | 310 | < 0.01 ms |
-| Boston, range 300 km | 216 km up | 0 | 0 | 0 |
-
-### Measured (the planet pyramid, Tokyo Station, 1600×900, frozen clock)
-
-The planet: 712.7 M solids, 1.33 M cells, 35 min on 16 threads; 41.4 M boxes kept, 1.5 GB.
-Levels 2–8 hold 33.0 M, 7.2 M, 1.05 M, 108 k, 8,276, 428 and 98 boxes.
-
-| range | eye | detail cells | far tiles | boxes loaded | buildings GPU |
+| range | eye | boxes drawn (buildings + folds) | nodes walked | walk | buildings GPU |
 |---|---|---|---|---|---|
-| 9 km | 3.1 km up | 16 | 162 | 104,446 | 7.1 ms (4.4 ms without the air) |
-| 27 km | 9.3 km up | 0 | 145 | 47,043 | 0.51 ms |
-| 100 km | 51 km up | 0 | 54 | 1,636 | < 0.01 ms |
-| 400 km | 311 km up | 0 | 1 | 2 | 0 |
+| 30 km | 9.3 km up | 88,945 (22,564 + 66,381) | 100,442 | 53 ms | 0.61 ms |
+| 100 km | 51 km up | 69,545 (2,399 + 67,146) | 94,403 | 42 ms | 0.34 ms |
 
-Before the boxes, Tokyo at 27 km never finished streaming: its full prisms were tens of millions
-of vertices. ![Tokyo at four ranges](building_lod_tokyo.png)
+### Superseded: the first build's numbers (size levels, buildings under a pixel dropped)
 
-At 300 km nothing in Massachusetts covers a pixel: its largest structures are under 512 m, so
-level 7 is empty. The air costs 0.77 ms downtown and 2.7 ms over central Tokyo: every overdrawn
-prism pixel marches it (likely because the window chain's `discard` keeps the depth test late:
-unmeasured). Taken per
-vertex instead it cost 1.87 ms downtown, so it stays per pixel. The fix to try next is the
-overdraw itself: draw near to far, with an early-depth PSO wherever no window is open.
+Boston from 30 km drew 14,803 boxes; Tokyo from 27 km drew 47,043; the air cost 2.7 ms over
+Tokyo at 9 km (4.4 → 7.1 ms) and 0.77 ms downtown, and taken per vertex it cost more (1.87 ms).
 
 ## 8. Open for the owner
 
-- `ρ₀ = 4 m` and `τ = 1 px` are the two numbers the law needs. They are scene keys
-  (`layers.buildings.lodRho0`, `lodPixels`), not constants in code.
+- Two numbers decide the look: `lodPixels` (1 px, a scene key), when a building is drawn on its own,
+  and `kQuadPixels` (4 px, in code), how small a fold's patch gets. Halving the second roughly
+  quadruples the folds and makes the suburbs finer.
 - The box replaces a building's shape past its detail radius. An outline that matters at distance
   (a stadium's ring, the Pentagon) would need a second far shape. Level-2 rings simplified by the
   existing Visvalingam–Whyatt importance could serve; I left that out.

@@ -1,5 +1,7 @@
 #include "compose/BuildingMoments.h"
 
+#include "compose/BuildingLod.h"
+
 #include "core/Common.h"
 
 #include <algorithm>
@@ -249,6 +251,22 @@ bool RunLodSelfTest() {
         check(lv, "the level is floor(log2(rho / rho0))", LodLevel(1000.0, 4));
         const double reach = LodReach(8, 4.0, 1.0, 1e-3);
         check(std::abs(reach - 1024000.0) < 1e-6, "level 8 is wanted to 1024 km at 1 px of 1 mrad", reach);
+    }
+    // THE TREE'S FOLD: a box's own moments (LodBoxMoments) give the box back, and two boxes
+    // folded about a node keep their total volume and their common centroid.
+    {
+        const Moments m1 = LodBoxMoments(42.80, -70.87, 9.0, 9.0, 20.0, 6.0, 0.4, 42.8005, -70.8705);
+        const MomentBox b1 = BoxOf(m1);
+        const double e = std::max({std::abs(b1.half[0] - 20.0), std::abs(b1.half[1] - 6.0), std::abs(b1.half[2] - 9.0),
+                                   std::abs(std::remainder(b1.heading - 0.4, kPi)), std::abs(b1.c[2] - 9.0)});
+        check(e < 1e-9, "a box's own moments give the box back", e);
+        Moments both = m1;
+        both += LodBoxMoments(42.8009, -70.8698, 30.0, 30.0, 15.0, 15.0, 0.0, 42.8005, -70.8705);
+        const MomentBox bb = BoxOf(both);
+        const double vol = 8.0 * bb.half[0] * bb.half[1] * bb.half[2];
+        check(std::abs(vol - both.m) / both.m < 1e-9, "two boxes folded keep their volume", vol);
+        const bool lv = lod::LevelOf(7.0) == lod::kLmin && lod::LevelOf(500.0) == -1 && lod::LevelOf(1e6) == lod::kLmax;
+        check(lv, "a house lives in the finest quads, a 500 m tower in 2.8 km ones", lod::LevelOf(500.0));
     }
     Log("[lod] selftest %s", ok ? "PASS" : "FAIL");
     return ok;

@@ -362,7 +362,6 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.F64("defaultHeight", l.defaultHeight);
             r.F64("radius", l.radius);
             r.Str("lod", l.lod);
-            r.F64("lodRho0", l.lodRho0);
             r.F64("lodPixels", l.lodPixels);
             if (!ok) return false;
             out.layers.push_back(std::move(l));
