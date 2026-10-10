@@ -543,17 +543,43 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         m_drawn.vb = std::move(w.vb);
         for (const PageKey& k : w.used) m_pageUsed[k] = m_frame;
         // The pages the walk wanted, the largest on screen first.
-        for (const auto& [px, k] : w.wants) {
-            if (m_shared->pageInflight.load() >= kPageInFlight) break;
-            if (m_pages.count(k) || m_pagePending.count(k)) continue;
-            LoadPage(k);
-        }
+        m_wants = std::move(w.wants);
         ++m_walks;
         if (m_walks <= 3 || m_walks % 50 == 0) {
             Log("[buildings] frame %llu walk %llu: %u boxes (%llu buildings, %llu folds) over %llu nodes in %.1f ms; %zu pages "
                 "(%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), static_cast<unsigned long long>(m_walks),
                 m_drawn.count, static_cast<unsigned long long>(w.singles), static_cast<unsigned long long>(w.folds),
-                static_cast<unsigned long long>(w.nodes), w.ms, m_pages.size(), m_pageBytes / 1048576.0, w.wants.size());
+                static_cast<unsigned long long>(w.nodes), w.ms, m_pages.size(), m_pageBytes / 1048576.0, m_wants.size());
+        }
+    }
+    // THE TWO STREAMS. The coarse level is the coarsest still wanted or loading; the coarse stream
+    // sends its pages only, the fine stream every finer one by size on screen, each up to its own
+    // slots. A new walk (the eye moved) replaces the list: what it no longer wants is never sent.
+    {
+        int level = INT32_MIN;
+        for (const PageKey& k : m_pagePending) level = (std::max)(level, std::get<0>(k));
+        for (const auto& [px, k] : m_wants) {
+            if (!m_pages.count(k)) level = (std::max)(level, std::get<0>(k));
+        }
+        int coarse = 0, fine = 0;
+        for (const PageKey& k : m_pagePending) ++(std::get<0>(k) == level ? coarse : fine);
+        std::vector<std::pair<double, PageKey>> finer;
+        for (const auto& [px, k] : m_wants) {
+            if (m_pages.count(k) || m_pagePending.count(k)) continue;
+            if (std::get<0>(k) == level) {
+                if (coarse < kCoarseInFlight) {
+                    LoadPage(k);
+                    ++coarse;
+                }
+            } else {
+                finer.push_back({px, k});
+            }
+        }
+        std::sort(finer.begin(), finer.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (const auto& [px, k] : finer) {
+            if (fine >= kFineInFlight) break;
+            LoadPage(k);
+            ++fine;
         }
     }
     // 2. The budget: the page no walk has used for longest goes first.
@@ -745,7 +771,11 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             w.vb = gpu->CreateDefaultBuffer(nullptr, bytes, L"buildings.walk");
         }
         for (const auto& [k, px] : wants) w.wants.push_back({px, k});
-        std::sort(w.wants.begin(), w.wants.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        // COARSE BEFORE FINE: the coarsest level first, the largest on screen first within it.
+        std::sort(w.wants.begin(), w.wants.end(), [](const auto& a, const auto& b) {
+            const int la = std::get<0>(a.second), lb = std::get<0>(b.second);
+            return la != lb ? la > lb : a.first > b.first;
+        });
         w.used.assign(used.begin(), used.end());
         w.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         std::lock_guard<std::mutex> lk(shared->mx);

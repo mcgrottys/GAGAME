@@ -94,7 +94,11 @@ public:
     static constexpr int kInFlight = 6, kUploadsPerFrame = 4;
     static constexpr uint64_t kWarmBytes = 512ull << 20;   // dropped cells' buffers kept for a return
     static constexpr uint64_t kRetireFrames = 4;
-    static constexpr int kPageInFlight = 6;
+    // TWO STREAMS, each with its own slots (the owner, 2026-10-10): the COARSE one sends only the
+    // coarsest level still wanted, so the whole view's coarse pass lands first and nothing finer can
+    // queue ahead of it; the FINE one sends every other wanted page, the largest on screen first,
+    // beside it (the detail cells are the fine stream's too, on their own kInFlight).
+    static constexpr int kCoarseInFlight = 4, kFineInFlight = 4;
     static constexpr double kQuadPixels = 4.0;          // a node's fold is drawn below this width
     // A fold is drawn over its mass's spread, its footprints' coverage c shrinking it by c^kFoldShrink:
     // 1/2 keeps the footprint's area (a lattice of gaps in a dense city, which aliases), 0 fills the
@@ -229,6 +233,8 @@ private:
     double m_walkEye[3] = {1e30, 1e30, 1e30}, m_walkFwd[3] = {0, 0, 0};
     uint64_t m_walkCells = ~0ull, m_walkPages = ~0ull;
     uint64_t m_walks = 0;
+    // The pages the last walk asked for, coarsest level first (the two streams read it each frame).
+    std::vector<std::pair<double, PageKey>> m_wants;
 };
 
 }  // namespace ga
