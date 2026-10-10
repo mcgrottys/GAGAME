@@ -120,7 +120,7 @@ public:
         }
         m_bankExag = heightScale;
         m_bankBase = baseTexelM;
-        for (int i = 0; i < 12; ++i) m_bankOrg[i] = org12[i];
+        for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = org12[i];
     }
     // M12 step 4a: THE SURFACE, declared once (compose/SurfaceFrame.h). The globe keeps
     // copies of what its walk reads (the tenant ids and the radius: CaptureWalk captures them
@@ -385,12 +385,23 @@ public:
     // `gates`/`boxes`/`n`/`hole` are that eye's own windows (SetGates' arguments, from its own cone);
     // `rings`, when given, is the ring set its own world reads as its set A (its own bank, or the
     // first eye's where it stands at the first eye's place), with the cascade's plane at the eye.
+    // A ring set's rows: its six origins (12 floats), then its chart (WaterBankLayer::ChartRows,
+    // 16 floats: east, north, up in the tangent axes with the eye's coordinates, and a row the
+    // globe fills with the eye of the level the set stands at).
+    static constexpr int kBankRows = 28;
     struct EyeRings {
         uint32_t disp = 0, param = 0, detail = 0;
-        float org[12] = {};
+        float org[kBankRows] = {};
         WaveChart::Frame chart{};
         bool chartOn = false;
+        double chartUp[3] = {0.0, 1.0, 0.0};   // the rings' chart's up, planet frame
     };
+    // The up of set A's chart (WaterBankLayer::Chart), planet frame: the ripple chart's constants
+    // are taken about its tangent point, the point the pixel's offsets are measured from.
+    void SetBankChartUp(const double up[3]) {
+        for (int i = 0; i < 3; ++i) m_bankChartUp[i] = up[i];
+        m_bankChartUpSet = true;
+    }
     void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
                       double simTime, float exagg, const float skyUp[3], bool skyPass,
                       const GateWorld* gates = nullptr,
@@ -462,7 +473,7 @@ public:
         m_bankB[0] = disp;
         m_bankB[1] = param;
         m_bankB[2] = detail;
-        for (int i = 0; i < 12; ++i) m_bankBOrg[i] = org12 ? org12[i] : 0.0f;
+        for (int i = 0; i < kBankRows; ++i) m_bankBOrg[i] = org12 ? org12[i] : 0.0f;
         m_bankBOn = on;
     }
     // THE ADDRESS <-> PLACE maps of the walk's own quadtree (CubeDir's face convention): the
@@ -611,6 +622,11 @@ private:
         // (priors 22): the exposure's array SRV and residency SRV, the height windows' floor mip,
         // the exposure windows' floor mip (~0 = that tenant has no windows).
         uint32_t probeX[4];
+        // THE RINGS' CHARTS (WaterBankLayer::Chart), set A then set B -- appended at the END on
+        // both sides (priors 22): east, north (w = the eye's coordinate along each), up, and the
+        // eye of the level the set stands at, cast from that level's own row.
+        float bankChart[16];
+        float bankBChart[16];
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -812,7 +828,7 @@ private:
     float m_lensGeo[4] = {0, 0, 0, 0};
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;
-    float m_bankOrg[12] = {};
+    float m_bankOrg[kBankRows] = {};
 
     std::vector<NodeData> m_nodes;
     // M10: the Droste levels of this frame (slots 1..n; slot 0 is the camera's own).
@@ -863,7 +879,9 @@ private:
     WaveChart::Frame m_chartFrame;   // M13 step 2: the plane at the eye
     bool m_chartOn = false;
     uint32_t m_bankB[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
-    float m_bankBOrg[12] = {};
+    float m_bankBOrg[kBankRows] = {};
+    double m_bankChartUp[3] = {0.0, 1.0, 0.0};
+    bool m_bankChartUpSet = false;
     bool m_bankBOn = false;
     // M6j: the mesh-shader path.
     // M10: 2^17. DispatchMesh caps ONE dimension at 65535 groups, and that was the budget; the

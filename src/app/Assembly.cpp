@@ -719,6 +719,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // the world.flat chart: the rings' places (PHASE C5)
+        waterBank->SetMask(&gisMask);      // the coast's water makes a ring tile wet
         waterBank->flatBed = S.water.bank.flatBed;
         waterBank->flatBedNavd = S.water.bank.flatBedNavd;
         if (S.water.bank.flatBed) {
@@ -743,6 +744,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankB->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
+            waterBankB->SetMask(&gisMask);
             waterBankB->flatBed = S.water.bank.flatBed;
             waterBankB->flatBedNavd = S.water.bank.flatBedNavd;
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -758,6 +760,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankEye->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
             waterBankEye->SetBaseTexel(waterScene.bankTexelM);
             waterBankEye->SetSurface(&surface);
+            waterBankEye->SetMask(&gisMask);
             waterBankEye->flatBed = S.water.bank.flatBed;
             waterBankEye->flatBedNavd = S.water.bank.flatBedNavd;
             waterBankEye->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());

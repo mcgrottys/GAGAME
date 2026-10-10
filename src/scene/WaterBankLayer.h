@@ -62,7 +62,27 @@ public:
 
     // Per frame, BEFORE RenderFrame (the SeaLayer::SetTime pattern): ring anchors follow
     // the camera and tile residency commits here, so consumers bind THIS frame's origins.
-    void SetFrame(Gpu& gpu, double simUnix, double camX, double camZ);
+    // `eye` is the rings' eye in the flat frame (x east, y up, z north of world.flat's plane).
+    void SetFrame(Gpu& gpu, double simUnix, const double eye[3]);
+    // THE RINGS' CHART FLOATS WITH THE EYE. A ring is addressed by the radial projection onto a
+    // tangent plane, (x, z) = R (d.e, d.n) of a surface direction d -- linear in the point, so a
+    // reader needs only the plane's two axes and the eye's coordinate. That plane was the root's
+    // (place.anchor): exact at home, and past 90 degrees of arc (Tokyo from the Merrimack) no plane
+    // at all -- the eye's coordinate ten thousand km out, a metre of float grain, the waves in
+    // triangles (Mark, 2026-10-10). Now the plane is the bank's own: the root's while the eye is
+    // within kChartReachM of its anchor (so home reads bit for bit what it read), re-anchored on the
+    // ground under the eye when it leaves -- where the float grain of the eye's coordinate passes a
+    // millimetre and the plane's tilt a tenth of a degree.
+    static constexpr double kChartReachM = 16000.0;
+    const Space::Anchor& Chart() const { return m_chart; }
+    // A point of the flat frame (the probes', the fleet's) in the chart: R (d.e, d.n) of its
+    // direction for a surface point; for any point, its planet position's (P.e, P.n).
+    void ChartOfFlat(double x, double y, double z, double& cx, double& cz) const;
+    // The rows a reader needs, in the frame's TANGENT axes (east, up, north of world.flat): the
+    // chart's east and north (w = the eye's coordinate along each, in doubles before the cast),
+    // its up, and the eye itself, sphere-centred (the level's sLvlCamAbs, cast from the same
+    // doubles, so a reader standing at this eye cancels it exactly). 16 floats.
+    void ChartRows(float out[16]) const;
     // Per frame, BEFORE RenderFrame: the tide plane the solver is forced by this frame (the value
     // SeaLayer::SetTime hands it) -- inside the solver's domain the level IS that plane plus the
     // solver's deviation (the solver is truth), and the kernel needs the plane to say so.
@@ -131,6 +151,9 @@ public:
     // the surface, for the world.flat chart the rings' places are read through
     // (SurfaceFrame::FlatRows). Must precede the first Render.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
+    // The coast mask (GisVectorMask): a ring tile the survey calls water anywhere is wet, whatever
+    // the height under it says (TileWet).
+    void SetMask(const class GisVectorMask* m) { m_mask = m; }
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
     // the cascade closures outside the window, which is also the fallback everywhere).
     void SetWaveField(const class WaveField* wf) { m_wave = wf; }
@@ -152,10 +175,8 @@ public:
     // bank reads the LIVE values every frame, so an edit lands on the next recompose.
     void SetScene(const struct WaterSceneConfig* sc) { m_scene = sc; }
     // M8 wakes: the fleet table (8 slots, vqview layout). Disabled slots stay zero.
-    void SetBoats(const float* a32, const float* b32) {
-        memcpy(m_boatA, a32, sizeof(m_boatA));
-        memcpy(m_boatB, b32, sizeof(m_boatB));
-    }
+    // Positions and headings arrive in the flat frame and are said in the chart here.
+    void SetBoats(const float* a32, const float* b32);
     float BaseTexelM() const { return m_baseTexelM; }
     // M8h: ring density from the scene (data/wave_scene.json bankTexelM). Call BEFORE
     // Init -- the ring spans, the kernel's fold thresholds, the 9b emulator, and the
@@ -297,6 +318,7 @@ private:
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
     const SurfaceFrame* m_surface = nullptr;   // the world.flat chart (PHASE C5: exact)
+    const class GisVectorMask* m_mask = nullptr;   // SetMask
     uint64_t m_cbFp = 0;   // M12 step 4b: the [kernel] waterbank cb fingerprint's last value
     const GlobeModel* m_globe = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
@@ -328,7 +350,10 @@ private:
     float m_orgX[kMips] = {}, m_orgZ[kMips] = {};
     bool m_orgValid[kMips] = {};
     uint8_t m_wet[kMips][kRingTiles * kRingTiles] = {};   // per logical tile
-    double m_simUnix = 0, m_camX = 0, m_camZ = 0;
+    double m_simUnix = 0, m_camX = 0, m_camZ = 0;   // the eye in the chart
+    double m_eyeFlat[3] = {};                       // ...and in the flat frame
+    Space::Anchor m_chart{};                        // the rings' plane (Chart above)
+    bool m_chartSet = false;
     float m_tidePlane = 0.0f;   // SetTidePlane: the plane the solver's deviation is measured from
     D3D12_RESOURCE_STATES m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     bool m_ready = false;
