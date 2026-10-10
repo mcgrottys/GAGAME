@@ -151,6 +151,9 @@ public:
     // the surface, for the world.flat chart the rings' places are read through
     // (SurfaceFrame::FlatRows). Must precede the first Render.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
+    // The coast mask (GisVectorMask): a ring tile the survey calls water anywhere is wet, whatever
+    // the height under it says (TileWet).
+    void SetMask(const class GisVectorMask* m) { m_mask = m; }
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
     // the cascade closures outside the window, which is also the fallback everywhere).
     void SetWaveField(const class WaveField* wf) { m_wave = wf; }
@@ -315,6 +318,7 @@ private:
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
     const SurfaceFrame* m_surface = nullptr;   // the world.flat chart (PHASE C5: exact)
+    const class GisVectorMask* m_mask = nullptr;   // SetMask
     uint64_t m_cbFp = 0;   // M12 step 4b: the [kernel] waterbank cb fingerprint's last value
     const GlobeModel* m_globe = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)

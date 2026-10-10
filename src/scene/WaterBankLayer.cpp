@@ -1,5 +1,7 @@
 #include "scene/WaterBankLayer.h"
 
+#include "compose/GisMask.h"
+
 #include "hal/GpuProfiler.h"
 
 #include "core/Image.h"
@@ -219,6 +221,28 @@ void WaterBankLayer::PlaceOfRing(double wx, double wz, double& latDeg, double& l
 
 bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
     if (!m_comp || m_hgtCh < 0) return true;
+    // THE MASK GATES, THE HEIGHT REFINES -- here as in the colour and the classifier: a tile the
+    // survey calls water anywhere carries waves. The height test alone kept only what the height
+    // stack held under 2.5 m, and a place with no fine bathymetry has none: Tokyo Bay read +9 m
+    // at the relief's 4.9 km, every near ring came out dry and the sea under the eye flat (Mark,
+    // 2026-10-10). The height test stays for what the survey cannot know (a flat under the tide,
+    // a river the coast's polygons hold as land).
+    if (m_mask && m_mask->Ready()) {
+        double la0 = 90.0, la1 = -90.0, lo0 = 180.0, lo1 = -180.0, lc = 0.0, loc = 0.0;
+        PlaceOfRing(wx0 + 0.5 * spanM, wz0 + 0.5 * spanM, lc, loc);
+        for (int k = 0; k < 4; ++k) {
+            double la = 0.0, lo = 0.0;
+            PlaceOfRing(wx0 + (k & 1) * spanM, wz0 + (k >> 1) * spanM, la, lo);
+            lo = loc + Space::Anchor::WrapDeg(lo - loc);   // one side of the antimeridian
+            la0 = (std::min)(la0, la); la1 = (std::max)(la1, la);
+            lo0 = (std::min)(lo0, lo); lo1 = (std::max)(lo1, lo);
+        }
+        constexpr uint32_t kDim = 16;   // a 128-texel tile at 1/8 of its texels
+        std::vector<uint8_t> g;
+        m_mask->RasterizeGate(la0, la1, lo0, lo1, kDim, g);
+        for (uint32_t i = 0; i + 1 < g.size(); i += 2) {
+            if ((g[i + 1] & 1u) && g[i] >= 128u) return true;   // surveyed, and water
+        }
     }
     // Five-point test against the one height stack: any point at or below the high-water
     // margin keeps the tile; a tile of pure upland stays NULL.
