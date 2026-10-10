@@ -543,7 +543,22 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                     }
                     at += rb;
                 }
-                stand(lat, lon, ground(lat, lon), zc, hz, a1, a2, hd, b.box, b.shapeOff != UINT32_MAX ? &b : nullptr);
+                // THE GROUND BASE: a building stands on the LOWEST ground under its footprint -- its walls
+                // reach the ground on the downhill side, the uphill side is buried, the roof stays level.
+                // The centroid's ground alone floated a slope's low side and sank its high one.
+                double base = ground(lat, lon);
+                if (b.shapeOff != UINT32_MAX) {
+                    constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+                    const double mx = std::cos(lat * kDeg) * kR * kDeg, my = kR * kDeg;
+                    for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
+                        const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
+                        base = (std::min)(base, ground(lat + y / my, lon + x / mx));
+                    }
+                    page->baseDropMax = (std::max)(page->baseDropMax, float(ground(lat, lon) - base));
+                    page->baseDropSum += ground(lat, lon) - base;
+                    ++page->baseN;
+                }
+                stand(lat, lon, base, zc, hz, a1, a2, hd, b.box, b.shapeOff != UINT32_MAX ? &b : nullptr);
                 b.cell = {cx, cy};
                 b.rho = static_cast<float>(std::sqrt(a1 * a1 + a2 * a2 + hz * hz));
             }
@@ -650,6 +665,11 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             Log("[buildings] frame %llu: %u shape records over a %u KB slot keep their boxes (%llu so far)",
                 static_cast<unsigned long long>(m_frame), p->tooBig, kSlotBytes >> 10,
                 static_cast<unsigned long long>(m_tooBig));
+        }
+        if (p->baseN && m_pagesLoaded < 40) {
+            Log("[buildings] page L%d (%d,%d): %u shaped buildings stand %.2f m below their centre's ground on average, "
+                "%.2f m at most (the lowest ground under each footprint)", std::get<0>(k), std::get<1>(k), std::get<2>(k),
+                p->baseN, p->baseDropSum / p->baseN, p->baseDropMax);
         }
         m_pagePending.erase(k);
         m_pageBytes += p->bytes;

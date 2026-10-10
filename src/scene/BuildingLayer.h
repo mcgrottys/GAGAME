@@ -182,7 +182,10 @@ private:
         std::vector<uint32_t> slotUsed; // bytes used in each of its slots (no record crosses a slot)
         std::vector<uint32_t> slots;    // the pool slots holding them once it landed (empty: no shapes drawn)
         std::vector<uint8_t> packed;    // the same bytes on the CPU: what a lost device's report reads back
-        uint32_t tooBig = 0;            // records larger than a slot: those buildings keep their boxes
+        uint32_t tooBig = 0;
+        uint32_t baseN = 0;               // the ground base's report: shaped buildings, mean and largest drop (m)
+        double baseDropSum = 0.0;
+        float baseDropMax = 0.0f;            // records larger than a slot: those buildings keep their boxes
         float landed = 0.0f;            // the layer's clock (s) when it joined the tree: its boxes fade in from here
     };
     using PageKey = std::tuple<int, int, int>;   // (level, px, py)
