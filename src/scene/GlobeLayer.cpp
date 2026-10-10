@@ -2415,7 +2415,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         };
         double fromOrg[3];   // A - org, planet frame
-        for (int i = 0; i < 3; ++i) fromOrg[i] = m_radius * m_surface->up[i] - f.org[i];
+        // ...about the rings' chart's tangent point (its up; the root's until the chart floats).
+        const double* upA = m_bankChartUpSet ? m_bankChartUp : m_surface->up;
+        for (int i = 0; i < 3; ++i) fromOrg[i] = m_radius * upA[i] - f.org[i];
         const double ce = dot3(fromOrg, f.e) + f.off[0];
         const double cn = dot3(fromOrg, f.n) + f.off[1];
         // Into [0, L), as WaterBankLayer wraps the kernel's own rows.
@@ -2447,6 +2449,28 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     memcpy(m_cb.bankBOrg01, &m_bankBOrg[0], 16);
     memcpy(m_cb.bankBOrg23, &m_bankBOrg[4], 16);
     memcpy(m_cb.bankBOrg45, &m_bankBOrg[8], 16);
+    // THE RINGS' CHARTS, and the eye each set stands at as the level table holds it: set A at the
+    // camera's own level (slot 0), set B at the first level whose bank it is. A reader at that
+    // level then subtracts the very floats it holds, and its offset from the eye is exact.
+    // A set no bank ever stood (rows all zero) reads the root's chart about its level's eye: the
+    // identity axes and that eye's own coordinates -- what every reader read before charts floated.
+    auto chartRows = [&](float* dst, const float* src, const float* eye) {
+        memcpy(dst, src, 16 * sizeof(float));
+        if (src[0] == 0.0f && src[1] == 0.0f && src[2] == 0.0f) {
+            const float id[12] = {1.0f, 0.0f, 0.0f, eye[0], 0.0f, 0.0f, 1.0f, eye[2], 0.0f, 1.0f, 0.0f, 0.0f};
+            memcpy(dst, id, sizeof(id));
+        }
+        for (int i = 0; i < 3; ++i) dst[12 + i] = eye[i];
+        dst[15] = 0.0f;
+    };
+    chartRows(m_cb.bankChart, &m_bankOrg[12], &m_levelRows[0]);
+    const float* eyeB = &m_levelRows[0];
+    for (size_t li = 0; li < m_levels.size(); ++li) {
+        if (m_levels[li].bankSet != 1) continue;
+        eyeB = &m_levelRows[(li + 1) * 24u];
+        break;
+    }
+    chartRows(m_cb.bankBChart, &m_bankBOrg[12], eyeB);
 
     // The sky pass rebuilds pixel rays from this basis (b2). M6j: the ONE render basis --
     // the shell can no longer roll apart from the surface it wraps.
@@ -2720,9 +2744,10 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     memcpy(viewHole0, m_viewHole, sizeof(viewHole0));
     const int viewHoleN0 = m_viewHoleCount;
     uint32_t bankSrv0[3] = {m_bankSrv[0], m_bankSrv[1], m_bankSrv[2]};
-    float bankOrg0[12];
-    for (int i = 0; i < 12; ++i) bankOrg0[i] = m_bankOrg[i];
+    float bankOrg0[kBankRows];
+    for (int i = 0; i < kBankRows; ++i) bankOrg0[i] = m_bankOrg[i];
     const WaveChart::Frame chart0 = m_chartFrame;
+    double chartUp0[3] = {m_bankChartUp[0], m_bankChartUp[1], m_bankChartUp[2]};
     const bool chartOn0 = m_chartOn;
     const int sampler0 = m_sampler;
 
@@ -2738,9 +2763,10 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
         m_bankSrv[0] = rings->disp;
         m_bankSrv[1] = rings->param;
         m_bankSrv[2] = rings->detail;
-        for (int i = 0; i < 12; ++i) m_bankOrg[i] = rings->org[i];
+        for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = rings->org[i];
         m_chartFrame = rings->chart;
         m_chartOn = rings->chartOn;
+        for (int i = 0; i < 3; ++i) m_bankChartUp[i] = rings->chartUp[i];
     }
     if (o.sampler < 0) o.sampler = m_res->Sampler(("eye" + std::to_string(view)).c_str());
     m_sampler = o.sampler;
@@ -2784,9 +2810,10 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     memcpy(m_viewHole, viewHole0, sizeof(viewHole0));
     m_viewHoleCount = viewHoleN0;
     for (int i = 0; i < 3; ++i) m_bankSrv[i] = bankSrv0[i];
-    for (int i = 0; i < 12; ++i) m_bankOrg[i] = bankOrg0[i];
+    for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = bankOrg0[i];
     m_chartFrame = chart0;
     m_chartOn = chartOn0;
+    for (int i = 0; i < 3; ++i) m_bankChartUp[i] = chartUp0[i];
     m_sampler = sampler0;
 }
 

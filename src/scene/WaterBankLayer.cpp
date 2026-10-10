@@ -111,15 +111,99 @@ void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
                 "waterbank");
 }
 
-void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ) {
+void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, const double eye[3]) {
     m_simUnix = simUnix;
-    m_camX = camX;
-    m_camZ = camZ;
+    for (int i = 0; i < 3; ++i) m_eyeFlat[i] = eye[i];
+    // THE CHART (WaterBankLayer.h Chart): the root's until the eye leaves its reach, then the
+    // ground under the eye's. A new plane is a new address for every texel: the rings re-stand.
+    if (!m_chartSet && m_surface) {
+        m_chart = m_surface->flat;
+        m_chartSet = true;
+    }
+    if (m_surface && m_surface->flat.Exact()) {
+        double P[3];
+        m_surface->flat.PlanetOf(eye[0], eye[1], eye[2], P);
+        const double x = P[0] * m_chart.east[0] + P[1] * m_chart.east[1] + P[2] * m_chart.east[2];
+        const double z = P[0] * m_chart.north[0] + P[1] * m_chart.north[1] + P[2] * m_chart.north[2];
+        const double u = P[0] * m_chart.up[0] + P[1] * m_chart.up[1] + P[2] * m_chart.up[2];
+        if (!(u > 0.0) || x * x + z * z > kChartReachM * kChartReachM) {
+            double la = 0.0, lo = 0.0;
+            m_surface->flat.PlaceOf(eye[0], eye[1], eye[2], la, lo);
+            m_chart = Space::Anchor::About(la, lo, m_surface->flat.planetR);
+            for (int m = 0; m < kMips; ++m) m_orgValid[m] = false;
+            Log("[bank] the rings' chart re-anchored at %.5f N %.5f E: the eye stood %.1f km from the "
+                "last one's anchor (reach %.0f km)",
+                la, lo, std::sqrt(x * x + z * z) / 1000.0, kChartReachM / 1000.0);
+        }
+    }
+    ChartOfFlat(eye[0], eye[1], eye[2], m_camX, m_camZ);
+    const double camX = m_camX, camZ = m_camZ;
     // Where the rings stand is not a drawing decision: `enabled` says whether this frame FILLS
     // them (Render), and a bank anchored while nothing reads it is mapped and ready for the
     // frame that does (set B ahead of a window).
     if (!m_ready) return;
     for (int m = 0; m < kMips; ++m) ReanchorRing(gpu, m, camX, camZ);
+}
+
+// The chart is the root's own exactly while it is the root's: the flat frame's (x, z) ARE its
+// coordinates there (the identity, not a product of rows that rounds to it), so home reads the
+// bank at the very coordinates it always did.
+static bool SameRows(const Space::Anchor& a, const Space::Anchor& b) {
+    for (int i = 0; i < 3; ++i) {
+        if (a.east[i] != b.east[i] || a.up[i] != b.up[i] || a.north[i] != b.north[i]) return false;
+    }
+    return a.planetR == b.planetR;
+}
+
+void WaterBankLayer::ChartOfFlat(double x, double y, double z, double& cx, double& cz) const {
+    if (!m_surface || !m_chartSet || SameRows(m_chart, m_surface->flat)) {
+        cx = x;
+        cz = z;
+        return;
+    }
+    double P[3];
+    m_surface->flat.PlanetOf(x, y, z, P);
+    cx = P[0] * m_chart.east[0] + P[1] * m_chart.east[1] + P[2] * m_chart.east[2];
+    cz = P[0] * m_chart.north[0] + P[1] * m_chart.north[1] + P[2] * m_chart.north[2];
+}
+
+void WaterBankLayer::ChartRows(float out[16]) const {
+    for (int i = 0; i < 16; ++i) out[i] = 0.0f;
+    const bool root = !m_surface || !m_chartSet || SameRows(m_chart, m_surface->flat);
+    const double* ax[3] = {m_chart.east, m_chart.north, m_chart.up};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            // Row r of the chart, said in the frame's tangent axes (east, up, north).
+            double v = (r == 0 && c == 0) || (r == 1 && c == 2) || (r == 2 && c == 1) ? 1.0 : 0.0;
+            if (!root) {
+                const double* t = (c == 0) ? m_surface->flat.east : (c == 1) ? m_surface->flat.up
+                                                                             : m_surface->flat.north;
+                v = t[0] * ax[r][0] + t[1] * ax[r][1] + t[2] * ax[r][2];
+            }
+            out[r * 4 + c] = static_cast<float>(v);
+        }
+    }
+    out[3] = static_cast<float>(m_camX);
+    out[7] = static_cast<float>(m_camZ);
+    out[11] = root ? 0.0f : 1.0f;
+}
+
+void WaterBankLayer::SetBoats(const float* a32, const float* b32) {
+    memcpy(m_boatA, a32, sizeof(m_boatA));
+    memcpy(m_boatB, b32, sizeof(m_boatB));
+    // Said in the chart: the position, and the heading by where a metre ahead of it lands.
+    if (!m_surface || !m_chartSet || SameRows(m_chart, m_surface->flat)) return;
+    for (int b = 0; b < 8; ++b) {
+        float* A = m_boatA + b * 4;
+        if (A[3] < 0.5f) continue;
+        const double hd = A[2];
+        double x0, z0, x1, z1;
+        ChartOfFlat(A[0], 0.0, A[1], x0, z0);
+        ChartOfFlat(A[0] + std::cos(hd), 0.0, A[1] + std::sin(hd), x1, z1);
+        A[0] = static_cast<float>(x0);
+        A[1] = static_cast<float>(z0);
+        A[2] = static_cast<float>(std::atan2(z1 - z0, x1 - x0));
+    }
 }
 
 // M13 step 2: the place a ring point holds, on the sphere the mesh is drawn on. The rings are a
@@ -128,13 +212,14 @@ void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ
 // (Space::Anchor::PlaceOfProjected). PHASE C5: no anchor-linear fallback; a point past the frame's
 // horizon has no place, and answers the anchor's own.
 void WaterBankLayer::PlaceOfRing(double wx, double wz, double& latDeg, double& lonDeg) const {
-    if (m_surface && m_surface->flat.PlaceOfProjected(wx, wz, latDeg, lonDeg)) return;
-    latDeg = m_surface ? m_surface->flat.latDeg : 0.0;
-    lonDeg = m_surface ? m_surface->flat.lonDeg : 0.0;
+    if (m_surface && m_chart.PlaceOfProjected(wx, wz, latDeg, lonDeg)) return;
+    latDeg = m_chart.latDeg;
+    lonDeg = m_chart.lonDeg;
 }
 
 bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
     if (!m_comp || m_hgtCh < 0) return true;
+    }
     // Five-point test against the one height stack: any point at or below the high-water
     // margin keeps the tile; a tile of pure upland stays NULL.
     for (int k = 0; k < 5; ++k) {
@@ -263,7 +348,8 @@ void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, Bank
         w[3] = 0.5 * t3 - 0.5 * t2;
     };
     for (int i = 0; i < n; ++i) {
-        const double wx = worldXz[i * 2 + 0], wz = worldXz[i * 2 + 1];
+        double wx = 0.0, wz = 0.0;   // the probe's flat point, said in the chart
+        ChartOfFlat(worldXz[i * 2 + 0], 0.0, worldXz[i * 2 + 1], wx, wz);
         for (int m = 0; m < kMips; ++m) {
             if (!m_orgValid[m]) continue;
             const double texel = m_baseTexelM * (1 << m);
@@ -311,6 +397,7 @@ void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, Bank
 }
 
 void WaterBankLayer::TraceProbe(Gpu& gpu, double wx, double wz) {
+    ChartOfFlat(wx, 0.0, wz, wx, wz);   // the flat point, said in the chart
     for (int m = 0; m < kMips; ++m) {
         if (!m_orgValid[m]) continue;
         const double texel = m_baseTexelM * (1 << m);
@@ -510,7 +597,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     const double cz = oz + 0.5 * tileSpan;
                     double la0 = 0.0, lo0 = 0.0, dLatDx = 0.0, dLonDx = 0.0, dLatDz = 0.0,
                            dLonDz = 0.0;
-                    const Space::Anchor& chart = m_surface->flat;
+                    const Space::Anchor& chart = m_chart;
                     const bool ok = chart.Exact() && chart.PlaceOfProjected(ox, oz, la0, lo0) &&
                                     chart.PlaceJacobianProjected(cx, cz, 0.5 * texel, dLatDx,
                                                                  dLonDx, dLatDz, dLonDz);

@@ -150,7 +150,7 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         // coordinate made from dir has a third of a metre of grain at the helm (REVIEW finding
         // 42). A coarse one reads it as it always has; at its distances that grain is under a
         // pixel.
-        const float2 bankXZ = fine ? sLvlCamAbs.xz + geo.xz : (CsToTangent(dir) * gGlo.x).xz;
+        const float2 bankXZ = fine ? BankXZ(geo) : BankXZOfDir(CsToTangent(dir));
         float bT;
         float3 dDdx, dDdz;
         dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (bP.x + bD.y) : 0.0f;
@@ -189,7 +189,7 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     } else {
         o.rel = CsToTangent(dir) * (gGlo.x + disp) - sLvlCamAbs;
     }
-    o.rel += float3(latW.x, 0.0f, latW.y);
+    o.rel += BankVec(latW);   // the chart's east and north, in the tangent frame
     o.geo = geo;   // the label: the lateral term moves the drawn point, never where it is read
     // M9bg: the water's colour, shaded AT THIS VERTEX from its own wave normal (the bank's
     // Loads -- stage-proof) and the analytic sky. The pixel stage does no water work.

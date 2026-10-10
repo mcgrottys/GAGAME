@@ -124,6 +124,11 @@ cbuffer GlobeCb : register(b1) {
     // exposure's array SRV, y = its residency SRV, z = the height windows' floor mip, w = the
     // exposure windows' floor mip (~0 = that tenant has no windows).
     uint4 gProbeX;
+    // THE RINGS' CHARTS (WaterBankLayer::Chart), appended at the END (priors 22): set A's, then set
+    // B's -- east and north in the tangent axes (w = the eye's coordinate along each), up, and the
+    // eye of the level the set stands at, as the level table holds it. Read through BankXZ.
+    float4 gBankChart[4];
+    float4 gBankBChart[4];
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -282,6 +287,28 @@ float2 BankRingOrg(uint m) {
     return (m == 0) ? o01.xy : (m == 1) ? o01.zw : (m == 2) ? o23.xy
          : (m == 3) ? o23.zw : (m == 4) ? o45.xy : o45.zw;
 }
+// THE RINGS' COORDINATE of a point. A ring is addressed by the radial projection onto its chart's
+// tangent plane, R (d.e, d.n) -- linear in the point -- and the chart floats with the eye
+// (WaterBankLayer.h), so a reader needs its axes and the eye's coordinate, never a point's
+// absolute one: for a geoid point eye-relative in this level (geo), its offset from the eye the set
+// stands at, along each axis, plus that eye's coordinate (in doubles before the cast). At the set's
+// own level the two eyes are the same floats and cancel exactly; on the root's chart the axes are
+// (1,0,0) and (0,0,1) and this is eye.xz + geo.xz bit for bit (REVIEW finding 42's point).
+float4 BankChartRow(uint r) { return (sLvlBank == 1) ? gBankBChart[r] : gBankChart[r]; }
+float2 BankXZ(float3 geo) {
+    const float4 e = BankChartRow(0u), n = BankChartRow(1u);
+    const float3 q = (sLvlCamAbs - BankChartRow(3u).xyz) + geo;
+    return float2(e.w + dot(q, e.xyz), n.w + dot(q, n.xyz));
+}
+// ...and of a direction (the tangent frame's), read where no eye-relative point is carried: the
+// coarse meshlets and the vertex-shaded water, at the direction's own grain as before.
+float2 BankXZOfDir(float3 dirT) {
+    return gGlo.x * float2(dot(dirT, BankChartRow(0u).xyz), dot(dirT, BankChartRow(1u).xyz));
+}
+// A vector of the rings' plane (the lateral displacement, metres along the chart's east and north)
+// in the tangent frame.
+float3 BankVec(float2 v) { return BankChartRow(0u).xyz * v.x + BankChartRow(1u).xyz * v.y; }
+
 uint BankDispSrv() { return (sLvlBank == 1) ? gBankBU.x : gBankU.x; }
 uint BankParamSrv() { return (sLvlBank == 1) ? gBankBU.y : gBankU.y; }
 uint BankDetailSrv() { return (sLvlBank == 1) ? gBankBU.z : gBankU2.x; }
@@ -569,7 +596,7 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
         float4 bD, bP, bDet;
         float bT;
         float3 bDdx, bDdz;
-        const float2 wxz = (upT * gGlo.x).xz;
+        const float2 wxz = BankXZOfDir(upT);
         if (BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz)) {
             // THE FOLD, AT VERTEX DENSITY (ALGEBRA.md "fold"). The bank's sigma^2 floors at
             // 0.0015 because a PIXEL could resolve a lobe that sharp. A VERTEX cannot: a
@@ -908,7 +935,11 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             // Where the chart reads this point: the geoid point less the tangent point, in
             // tangent axes (ChartUOf). Its drop below the plane is R (upT.y - 1), written as
             // -(x^2 + z^2) / (R (1 + upT.y)) so that nothing near R cancels.
-            const float3 qA = float3(wxz.x, -dot(wxz, wxz) / (gGlo.x * (1.0f + upT.y)), wxz.y);
+            // FLOATING (WaterBankLayer.h Chart): the tangent point is the rings' chart's, so the
+            // point less it is said along that chart's axes; on the root's it is (x, drop, z).
+            const float3 uA = BankChartRow(2u).xyz;
+            const float3 qA = BankChartRow(0u).xyz * wxz.x + BankChartRow(1u).xyz * wxz.y +
+                              uA * (-dot(wxz, wxz) / (gGlo.x * (1.0f + dot(upT, uA))));
             [unroll] for (uint c = 0; c < 3; ++c) {
                 const float lam = 6.2831853f / gBankFold[c];    // M9c: the band's ENERGY, not
                 const float wRing =                             // its geometric midpoint
@@ -1233,7 +1264,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // it replaces -- for a point G of the geoid, (upT R).xz = G.xz = eye.xz + (G - eye).xz --
     // made from the record's doubles instead of from dir's third of a metre of grain, so the
     // footprint frame, its screen derivative, is the pixel's own ground and not that staircase.
-    const float2 wxzW = sLvlCamAbs.xz + i.geo.xz;
+    const float2 wxzW = BankXZ(i.geo);
     const float2 fpxW = ddx(wxzW);
     const float2 fpzW = ddy(wxzW);
     const float footPxW = length(i.rel) * gWavesB.z;
@@ -1336,7 +1367,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // residency heat. ring: the bank's rings with a 4-texel checker (bank addressing on
     // screen). These test the GA the cheap way: patterns survive correct products.
     if (gBankA.z > 0.5f && gBankA.z < 11.5f) {   // 12 and 13 are the mix lenses, at the end
-        const float2 wxzL = (CsToTangent(up) * gGlo.x).xz;
+        const float2 wxzL = BankXZOfDir(CsToTangent(up));
         const int lensId = (int)(gBankA.z + 0.5f);
         float3 lc = float3(0.05f, 0.05f, 0.08f);
         if (lensId == 1) {

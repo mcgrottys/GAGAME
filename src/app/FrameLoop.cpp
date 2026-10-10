@@ -3288,11 +3288,11 @@ bool FrameLoop::Frame() {
             // final (below, before the tide). A reader wants what it reads: every ring its bed at its
             // own grain, over its span, about the eye its rings stand at -- A's wants, then B's.
             const double camP[3] = {cam.px, cam.py, cam.pz};
-            float orgs[12];
+            float orgs[GlobeLayer::kBankRows];
             PROF_BEGIN();
             StandRings(waterBank, camP, m_A.surface.SlotRows(0), m_A.surface.slotEye[0].data(), orgs);
             PROF_END(3);
-            float orgB[12] = {};
+            float orgB[GlobeLayer::kBankRows] = {};
             if (waterBankB) {
                 double EB[3];
                 PlanetOf(m_A.surface, drosteOuterCam, EB);
@@ -3326,6 +3326,7 @@ bool FrameLoop::Frame() {
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs);
+            globe->SetBankChartUp(waterBank->Chart().up);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
             // bands -- the same plane the bank's texels were filled from (ChartOf).
             {
@@ -5225,13 +5226,14 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
 }
 
 void FrameLoop::StandRings(WaterBankLayer* bank, const double at[3], const SurfaceFrame::ChainRows& rows,
-                           const double rowsEye[3], float orgs[12]) {
+                           const double rowsEye[3], float* orgs) {
     auto& resMgr = m_A.resMgr;
     const int hgtTenant = m_A.hgtTenant;
-    bank->SetFrame(m_A.gpu, m_simUnix, at[0], at[2]);   // anchored and mapped: the bank's own tiles
+    bank->SetFrame(m_A.gpu, m_simUnix, at);   // anchored and mapped: the bank's own tiles
     for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
         bank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
     }
+    bank->ChartRows(orgs + 12);   // the rings' chart, after their origins (GlobeLayer::kBankRows)
     bank->injectPattern = m_opt.inject;
     bank->SetWindows(rows, rowsEye);
     // A READER WANTS WHAT IT READS -- every ring its bed at its own grain (the rung whose texel is at
@@ -5504,6 +5506,7 @@ void FrameLoop::MinimapFrame(float dt) {
         const SurfaceFrame::ChainRows rowsE =
             sE == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sE);
         StandRings(bankE, at, rowsE, sE == UINT32_MAX ? E : m_A.surface.slotEye[sE].data(), rings.org);
+        for (int i = 0; i < 3; ++i) rings.chartUp[i] = bankE->Chart().up[i];
         bankE->enabled = true;
         rings.disp = bankE->DispSrv();
         rings.param = bankE->ParamSrv();

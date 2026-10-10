@@ -361,7 +361,7 @@ private:
     // are given (taken about rowsEye), wanting the bed each ring reads at its own grain; `orgs` gets
     // the rings' origins for the globe. And the cascade sea's plane at an eye (sim/WaveChart.h).
     void StandRings(WaterBankLayer* bank, const double at[3], const SurfaceFrame::ChainRows& rows,
-                    const double rowsEye[3], float orgs[12]);
+                    const double rowsEye[3], float* orgs);   // GlobeLayer::kBankRows
     bool ChartOf(const Eye& e, WaveChart::Frame& out) const;
 
     // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
