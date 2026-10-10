@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <cctype>
 #include <mutex>
 #include <map>
 
@@ -110,10 +111,21 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer,
                     iq->RegisterMessageCallback(
                         [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id, LPCSTR text, void*) {
                             if (sev > D3D12_MESSAGE_SEVERITY_WARNING) return;
+                            // At most 20 of each distinct message (its addresses stripped), so one
+                            // noisy fault cannot hide another that shares its id.
                             static std::mutex mx;
-                            static std::map<int, int> seen;
+                            static std::map<std::string, int> seen;
+                            std::string key = std::to_string(static_cast<int>(id)) + ':';
+                            for (const char* c = text; *c; ++c) {
+                                if (c[0] == '0' && c[1] == 'x') {
+                                    c += 2;
+                                    while (std::isxdigit(static_cast<unsigned char>(*c))) ++c;
+                                    if (!*c) break;
+                                }
+                                key += *c;
+                            }
                             std::lock_guard<std::mutex> lk(mx);
-                            if (++seen[static_cast<int>(id)] > 20) return;
+                            if (++seen[key] > 20) return;
                             static const char* kSev[] = {"CORRUPTION", "ERROR", "WARNING"};
                             Log("[d3d12] %s #%d: %s", kSev[sev], static_cast<int>(id), text);
                         },
@@ -617,7 +629,26 @@ void Gpu::UploadTexture(GpuTexture& tex, const void* rows, uint32_t srcRowPitchB
     }
     (void)base;
 
+    // THE TEXTURE'S OWN STATE, honoured: it goes from the state its owner says it is in to
+    // COPY_DEST, takes the copy, and goes back. A texture born for this copy (COPY_DEST or COMMON)
+    // ends readable by the pixel shader, as it always did; one that lives elsewhere -- a residency
+    // map already read, a bank the compute kernels write as a UAV -- is returned to that state.
+    // (It once assumed COPY_DEST in and PIXEL_SHADER_RESOURCE out for every texture: the debug
+    // layer's #538/#527 on every residency-map flush and bank level, and GPU validation's #1358
+    // when MipReduce and GlobeWind then wrote, as UAVs, banks this had left readable.)
+    const D3D12_RESOURCE_STATES was = tex.state;
+    const bool born = was == D3D12_RESOURCE_STATE_COPY_DEST || was == D3D12_RESOURCE_STATE_COMMON;
+    const D3D12_RESOURCE_STATES after = born ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : was;
     auto* cl = BeginUpload();
+    D3D12_RESOURCE_BARRIER br{};
+    br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    br.Transition.pResource = tex.res.Get();
+    br.Transition.Subresource = mip;
+    if (was != D3D12_RESOURCE_STATE_COPY_DEST) {
+        br.Transition.StateBefore = was;
+        br.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        cl->ResourceBarrier(1, &br);
+    }
     D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
     dst.pResource = tex.res.Get();
     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -626,16 +657,12 @@ void Gpu::UploadTexture(GpuTexture& tex, const void* rows, uint32_t srcRowPitchB
     src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     src.PlacedFootprint = fp;
     cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    // Transition on the LAST mip only (mip uploads arrive 0..N-1; barriers per-subresource).
-    D3D12_RESOURCE_BARRIER br{};
-    br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    br.Transition.pResource = tex.res.Get();
-    br.Transition.Subresource = mip;
     br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    br.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    br.Transition.StateAfter = after;
     cl->ResourceBarrier(1, &br);
-    if (mip == 0) tex.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // A born texture's other mips still wait in COPY_DEST: its state turns readable with mip 0,
+    // the one every such caller uploads (and the only one, today).
+    if (!born || mip == 0) tex.state = after;
 
     m_uploadKeepAlive.push_back(staging.res);
     EndUpload();

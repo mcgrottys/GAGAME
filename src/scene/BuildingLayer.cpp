@@ -414,7 +414,7 @@ void BuildingLayer::Upload(const FrameContext& ctx) {
             br.Transition.pResource = c.vb.res.Get();
             br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            br.Transition.StateAfter = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;   // the root slot is seen by every stage
             cl->ResourceBarrier(1, &br);
             m_retired.push_back({std::move(b.staging), m_frame});   // freed once this frame has retired
         }
@@ -679,7 +679,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         br.Transition.pResource = m_pool.res.Get();
         br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        br.Transition.StateAfter = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;   // the root slot is seen by every stage
         ctx.cmd->Native()->ResourceBarrier(1, &br);
     }
     for (Walked& w : walked) {
@@ -692,7 +692,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             br.Transition.pResource = w.vb.res.Get();
             br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            br.Transition.StateAfter = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;   // the root slot is seen by every stage
             cl->ResourceBarrier(1, &br);
             m_retired.push_back({std::move(w.staging), m_frame, 1});
         }
