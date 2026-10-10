@@ -525,7 +525,8 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                 ShapeView sv;
                 if (at < shapeBytes.size() && ReadShape(shapeBytes.data() + at, shapeBytes.data() + shapeBytes.size(), sv)) {
                     const size_t rb = shape::Bytes(sv.head);
-                    if (sv.head.nVerts >= 3 && rb <= kSlotBytes) {
+                    const uint32_t minV = (sv.head.flags & shape::kRibbon) ? 2u : 3u;   // a ribbon is a line of two
+                    if (sv.head.nVerts >= minV && rb <= kSlotBytes) {
                         if (fill + rb > kSlotBytes) {
                             page->slotUsed.push_back(0);
                             packed.resize(page->slotUsed.size() * size_t(kSlotBytes), 0);
@@ -538,7 +539,7 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                         b.shapeOff = static_cast<uint32_t>(addr);   // (packed is kept: see Page::packed)
                         b.nV = sv.head.nVerts;
                         b.nT = sv.head.nTris;
-                    } else if (sv.head.nVerts >= 3) {
+                    } else if (sv.head.nVerts >= minV) {
                         ++page->tooBig;
                     }
                     at += rb;
@@ -547,7 +548,19 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                 // reach the ground on the downhill side, the uphill side is buried, the roof stays level.
                 // The centroid's ground alone floated a slope's low side and sank its high one.
                 double base = ground(lat, lon);
-                if (b.shapeOff != UINT32_MAX) {
+                if (b.shapeOff != UINT32_MAX && (sv.head.flags & shape::kRibbon)) {
+                    // A RIBBON RIDES THE GROUND: its base is the centroid's, and each vertex carries its
+                    // own height over that, read here from the composed ground -- the profile's first
+                    // form (the ground itself; a deck's clearance refines it later, docs/ROADS.md).
+                    constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+                    const double mx = std::cos(lat * kDeg) * kR * kDeg, my = kR * kDeg;
+                    int16_t* z = reinterpret_cast<int16_t*>(packed.data() + b.shapeOff + shape::ZOffset(sv.head));
+                    for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
+                        const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
+                        const double dz = ground(lat + y / my, lon + x / mx) - base;
+                        z[v] = static_cast<int16_t>(std::clamp(std::lround(dz * 10.0), -32767L, 32767L));
+                    }
+                } else if (b.shapeOff != UINT32_MAX) {
                     constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
                     const double mx = std::cos(lat * kDeg) * kR * kDeg, my = kR * kDeg;
                     for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
@@ -1337,6 +1350,8 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     cb.origin[3] = 1.0f;
     cb.time[0] = Now();
     cb.time[1] = kPageFadeS;
+    // z: a pixel's angle (rad), the walk's own -- the ribbons' width on screen (Buildings.hlsl MsShape).
+    cb.time[2] = static_cast<float>(double(ctx.camera->fovY) / double(ctx.height));
     if (m_psoBox && m_drawn.count) {
         // THE TREE'S BOXES: the buildings with no shape, one buffer about the walk's eye, 36 vertices a box.
         GpuScope boxScope(ctx.prof, ctx.cmd->Native(), "buildings.boxes");

@@ -14,7 +14,7 @@
 
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
-    float4 gBdTime;     // x = the layer's now (s), y = a page's fade-in (s); the boxes' and shapes' draws
+    float4 gBdTime;     // x = the layer's now (s), y = a page's fade-in (s), z = a pixel's angle (rad)
     uint4 gBdMesh;      // the shapes' draw: x first instance, y first task (float4 rows of the walk
                         // buffer), z tasks, w the shape pool's heap slot (compose/BuildingShape.h)
 };
@@ -35,11 +35,13 @@ struct VsOut {
     float alpha : TEXCOORD1;  // a far box fading in (1 for a prism)
 };
 
-static const float3 kPalette[4] = {
+static const float3 kPalette[6] = {
     float3(0.80, 0.78, 0.74),   // wall
     float3(0.52, 0.50, 0.49),   // roof
     float3(0.76, 0.74, 0.72),   // part wall
-    float3(0.48, 0.47, 0.47)    // part roof
+    float3(0.48, 0.47, 0.47),   // part roof
+    float3(0.30, 0.30, 0.31),   // a road's surface (asphalt)
+    float3(0.56, 0.53, 0.47)    // a path's
 };
 
 VsOut VsMain(uint vid : SV_VertexID) {
@@ -127,16 +129,56 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut
     const float unit = (flags & 2u) ? 1.0f : 0.1f;
     const float part = (flags & 1u) ? 2.0f : 0.0f;
     const bool roof = (code >> 31) != 0u;
+    const bool ribbon = (flags & 4u) != 0u;   // shape::kRibbon: a road piece, one quad a segment
     const uint first = (code & 0x7FFFFFFFu) * (roof ? kTaskTris : kTaskEdges);
-    const uint total = roof ? nTris : nVerts;
+    const uint total = ribbon ? nVerts - 1u : (roof ? nTris : nVerts);
     const uint n = live && first < total ? min(roof ? kTaskTris : kTaskEdges, total - first) : 0u;
     // One count for the group, set before any output (the validator's rule): 4 vertices and 2
-    // triangles an edge, or 3 and 1 a roof triangle.
+    // triangles an edge (a wall, or a ribbon's segment), or 3 and 1 a roof triangle.
     SetMeshOutputCounts(roof ? n * 3u : n * 4u, roof ? n : n * 2u);
     if (gi >= n) return;
     VsOut o;
     o.alpha = r0.w * saturate((gBdTime.x - r1.w) / max(gBdTime.y, 1e-3f));   // the page's fade-in, as VsBox
-    if (!roof) {   // the walls: edge e from its vertex to its ring's next
+    if (ribbon) {   // THE RIBBON: segment e of the polyline as a quad, mitred at both vertices
+        const uint zAt = triAt + 6u * nTris;                    // the heights the page's reader filled
+        const float w = float(ShapeU16(addr + 6u)) * 0.1f;      // ShapeHead.pad: the width, decimetres
+        const uint e = first + gi;
+        float3 P[4];   // prev, a, b, next (an end repeats itself)
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            const uint v = uint(clamp(int(e) - 1 + int(k), 0, int(nVerts) - 1));
+            P[k] = float3(ShapeI16(xyAt + 4u * v) * unit, ShapeI16(xyAt + 4u * v + 2u) * unit, ShapeI16(zAt + 2u * v) * 0.1f);
+        }
+        const float2 s = P[2].xy - P[1].xy;
+        const float sl = length(s);
+        const float2 sn = sl > 1e-4f ? float2(s.y, -s.x) / sl : float2(0.0f, 0.0f);   // the segment's right
+        // The miter at each end: the right of the bisector tangent, lengthened by 1 / cos of the
+        // half turn (held to 2: a hairpin does not spike), so neighbouring quads share their edge.
+        float2 m[2];
+        [unroll] for (uint q = 0u; q < 2u; ++q) {
+            const float2 t = P[q + 2u].xy - P[q].xy;
+            const float tl = length(t);
+            const float2 tn = tl > 1e-4f ? float2(t.y, -t.x) / tl : sn;
+            m[q] = tn / max(dot(tn, sn), 0.5f);
+        }
+        // The width on screen is at least a pixel, and the alpha its true share of that pixel: a
+        // road 20 km off is a faint line, never a sparkle. A pixel's metres at this distance is the
+        // distance times the pixel's angle (gBdTime.z, the walk's own).
+        const float3 mid = gBdOrigin.xyz + c + P[1].x * E + P[1].y * N;
+        const float px = length(mid) * gBdTime.z;
+        const float hw = 0.5f * max(w, px);
+        o.alpha *= saturate(w / max(px, 1e-3f));
+        o.n = U;
+        o.col = kPalette[(flags & 8u) ? 5u : 4u] * gBdOrigin.w;
+        const float2 xy[4] = {P[1].xy + m[0] * hw, P[1].xy - m[0] * hw, P[2].xy + m[1] * hw, P[2].xy - m[1] * hw};
+        const float zz[4] = {P[1].z + top, P[1].z + top, P[2].z + top, P[2].z + top};
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            o.rel = gBdOrigin.xyz + c + xy[k].x * E + xy[k].y * N + zz[k] * U;
+            o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+            verts[gi * 4u + k] = o;
+        }
+        tris[gi * 2u] = uint3(gi * 4u, gi * 4u + 2u, gi * 4u + 1u);
+        tris[gi * 2u + 1u] = uint3(gi * 4u + 1u, gi * 4u + 2u, gi * 4u + 3u);
+    } else if (!roof) {   // the walls: edge e from its vertex to its ring's next
         const uint e = first + gi;
         uint start = 0u, len = 0u;
         for (uint r = 0u; r < nRings; ++r) {

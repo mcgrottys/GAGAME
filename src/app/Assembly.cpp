@@ -295,6 +295,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         for (const scene::SourceProps& s : S.sources) {
             if (s.kind == "seastate") continue;   // PHASE C2: a sea state, not a raster (below)
             if (s.kind == "buildings") continue;  // solids, not a raster: the buildings layer's (below)
+            if (s.kind == "roads") continue;      // ways, not a raster: the tree's ribbons (--tool building-lod)
             entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
                                s.feather, s.unit, s.datum, s.offset, s.hasOffset});
         }
@@ -1525,7 +1526,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
                               "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles",
-                              "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
+                              "pack-trees", "rastertest", "roads-probe", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
                               "water-map", "wave-converge", "wave-map", "wave-recheck"}});

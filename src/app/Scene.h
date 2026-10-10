@@ -83,6 +83,7 @@ struct SceneLayer {
     std::string lod;                                                  // ...and its far boxes'
     double lodPixels = 1.0;
     bool field = true;                                                // ...and the field under a pixel
+    double laneWidth = 3.5, defaultLanes = 2.0, pathWidth = 2.0, kerb = 0.12;   // ...and the roads' ribbons
 };
 struct SceneTool {
     std::string name, args;

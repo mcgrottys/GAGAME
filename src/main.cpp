@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
 
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
         if (!topt.loadField.empty()) return tools::RunLoadField(topt);
+        if (const SceneTool* t = S.Tool("roads-probe")) return tools::RunRoadsProbe(t->args);
 
         if (S.Tool("selftest")) return tools::RunSelfTest(topt);
         // F25: a wave cache entry's own planes solved again by this binary, compared byte for byte.
