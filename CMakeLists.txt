@@ -43,6 +43,8 @@ add_executable(gagame
   src/core/GaAst.cpp
   src/core/Lattice.cpp
   src/core/SpaceTest.cpp
+  src/core/OriginLattice.cpp
+  src/core/OriginLatticeTest.cpp
   src/hal/PixEvents.cpp
   src/core/GaTest.cpp
   src/hal/DxTest.cpp

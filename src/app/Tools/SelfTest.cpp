@@ -1,6 +1,7 @@
 // SelfTest - --selftest.
 // Moved verbatim from main.cpp (M12 step 1b); declared in app/Tools.h.
 #include "app/Tools.h"
+#include "core/OriginLattice.h"
 
 #include "compose/BuildingMoments.h"
 #include "compose/BuildingSolids.h"
@@ -49,6 +50,9 @@ int RunSelfTest(const Options& opt) {
                                     // network
     ok &= RunSpaceSelfTest();     // M12: the frame calculus -- placements, the fold, the
                                   // Droste link through Space, the lattice against ColorFrame
+    ok &= RunOriginSelfTest();    // the lattice of floating origins: the inverse against brute
+                                  // force, the float bound on every shell, the motor between
+                                  // origins, the hysteresis, the centre (core/OriginLattice.h)
     ok &= RunFaceWindowSelfTest();   // HIERARCHY step 3: a face-plane window's address, the
                                      // float32 twin of PageTexel against doubles, and a plant
     ok &= hal::RunTenantBindingSelfTest();   // HIERARCHY 4.17 commit 1: a slice bound to one
