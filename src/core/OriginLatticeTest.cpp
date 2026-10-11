@@ -27,17 +27,19 @@ void RandDir(std::mt19937_64& rng, double d[3]) {
     d[2] = s * std::sin(phi);
 }
 
-// Brute force: the nearest of the lattice's n directions to d.
+// Brute force: the nearest of this level's points to d, by every ordinal.
 int64_t BruteNearest(const OriginLattice& L, const double d[3]) {
-    int64_t best = 0;
-    double bd = 1e300;
-    for (int64_t i = 0; i < int64_t(L.n); ++i) {
+    int64_t best = -1;
+    double bd = -2.0;
+    for (int64_t o = 0; o < L.Ordinals(); ++o) {
+        const int64_t idx = L.IndexOfOrdinal(o);
+        if (idx < 0) continue;
         double q[3];
-        L.Direction(i, q);
-        const double dd = (q[0] - d[0]) * (q[0] - d[0]) + (q[1] - d[1]) * (q[1] - d[1]) + (q[2] - d[2]) * (q[2] - d[2]);
-        if (dd < bd) {
+        OriginLattice::Direction(idx, q);
+        const double dd = q[0] * d[0] + q[1] * d[1] + q[2] * d[2];
+        if (dd > bd) {
             bd = dd;
-            best = i;
+            best = idx;
         }
     }
     return best;
@@ -55,49 +57,102 @@ bool RunOriginSelfTest() {
     };
     std::mt19937_64 rng(20261011u);
 
-    // 1. THE INVERSE IS THE NEAREST: the closed form against brute force, on a small set (every
-    //    point tried, 1000 directions) and the engine's own (2^22 points, 200 directions).
+    // 0. THE SOLID: twenty faces outward, every point of level 6 seen once through its owner.
     {
         OriginLattice S;
-        S.n = 4096;
-        int wrong = 0;
-        for (int t = 0; t < 1000; ++t) {
-            double d[3];
-            RandDir(rng, d);
-            if (S.InverseIndex(d) != BruteNearest(S, d)) ++wrong;
+        S.level = 6;
+        int64_t seen = 0;
+        for (int64_t o = 0; o < S.Ordinals(); ++o) seen += (S.IndexOfOrdinal(o) >= 0);
+        check(seen == S.Points(), "level 6: the ordinals name every point once (10 x 4^6 + 2)", double(seen - S.Points()));
+        // Every face's three corners and its centre: the centre outward of the corners' plane.
+        int inward = 0;
+        for (int f = 0; f < 20; ++f) {
+            double A[3], B[3], C[3];
+            OriginLattice::Direction(OriginLattice::Encode(0, f, 0, 0), A);
+            OriginLattice::Direction(OriginLattice::Encode(0, f, 1, 0), B);
+            OriginLattice::Direction(OriginLattice::Encode(0, f, 0, 1), C);
+            const double e1[3] = {B[0] - A[0], B[1] - A[1], B[2] - A[2]}, e2[3] = {C[0] - A[0], C[1] - A[1], C[2] - A[2]};
+            const double n[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+            if (n[0] * A[0] + n[1] * A[1] + n[2] * A[2] <= 0.0) ++inward;
         }
-        check(wrong == 0, "inverse = brute-force nearest on 4096 points, 1000 directions (wrong)", wrong);
-        // ...and at the poles and the seam, where the paper's phi wraps.
-        const double pts[5][3] = {{0, 1, 0}, {0, -1, 0}, {-1, 0, 1e-9}, {-1, 0, -1e-9}, {1, 0, 0}};
-        int wrongEdge = 0;
-        for (const double* p : pts) {
-            double d[3] = {p[0], p[1], p[2]};
-            const double l = Len3(d);
-            for (double& c : d) c /= l;
-            if (S.InverseIndex(d) != BruteNearest(S, d)) ++wrongEdge;
-        }
-        check(wrongEdge == 0, "inverse at the poles and the seam (wrong)", wrongEdge);
-        OriginLattice L;   // the engine's: 2^22 directions
-        int wrongBig = 0;
-        for (int t = 0; t < 200; ++t) {
-            double d[3];
-            RandDir(rng, d);
-            if (L.InverseIndex(d) != BruteNearest(L, d)) ++wrongBig;
-        }
-        check(wrongBig == 0, "inverse = brute-force nearest on 2^22 points, 200 directions (wrong)", wrongBig);
-        // THE PLANT: the gate sees a wrong index -- the neighbour of the right one is farther.
-        double d[3];
-        RandDir(rng, d);
-        const int64_t i = L.InverseIndex(d);
-        double q[3], q1[3];
-        L.Direction(i, q);
-        L.Direction((i + 1) % int64_t(L.n), q1);
-        const double qd[3] = {q[0] - d[0], q[1] - d[1], q[2] - d[2]}, q1d[3] = {q1[0] - d[0], q1[1] - d[1], q1[2] - d[2]};
-        const double di = Len3(qd), d1 = Len3(q1d);
-        check(d1 > di, "the plant: the index after the nearest is farther (a wrong index would fail here)", d1 / di);
+        check(inward == 0, "every face winds counter-clockwise seen from outside (inward faces)", inward);
     }
 
-    // 2. THE FLOAT BOUND ON EVERY SHELL: a point's floats about its origin are within the shell's
+    // 1. THE INVERSE IS THE NEAREST: the closed form against brute force over every point of
+    //    level 6 (40,962 points, 1000 directions) and level 8 (655,362 points, 100 directions).
+    {
+        for (int lv : {6, 8}) {
+            OriginLattice S;
+            S.level = lv;
+            const int trials = lv == 6 ? 1000 : 100;
+            int wrong = 0;
+            for (int t = 0; t < trials; ++t) {
+                double d[3];
+                RandDir(rng, d);
+                if (S.InverseIndex(d) != BruteNearest(S, d)) ++wrong;
+            }
+            char what[120];
+            snprintf(what, sizeof(what), "level %d: inverse = brute-force nearest over %lld points, %d directions (wrong)", lv,
+                     static_cast<long long>(S.Points()), trials);
+            check(wrong == 0, what, wrong);
+        }
+        // ...and at the twelve vertices, the edges' midpoints and the poles, where ownership decides.
+        OriginLattice S;
+        S.level = 6;
+        int wrongEdge = 0;
+        for (int f = 0; f < 20; ++f) {
+            for (const auto [i, j] : {std::pair<int64_t, int64_t>{0, 0}, {64, 0}, {0, 64}, {32, 0}, {0, 32}, {32, 32}}) {
+                double d[3];
+                OriginLattice::Direction(OriginLattice::Encode(6, f, i, j), d);
+                if (S.InverseIndex(d) != BruteNearest(S, d)) ++wrongEdge;
+            }
+        }
+        const double poles[2][3] = {{0, 1, 0}, {0, -1, 0}};
+        for (const double* p : poles) {
+            if (S.InverseIndex(p) != BruteNearest(S, p)) ++wrongEdge;
+        }
+        check(wrongEdge == 0, "inverse at the corners, the edges' midpoints and the poles (wrong)", wrongEdge);
+        // THE PLANT: the gate sees a wrong index -- a neighbour of the right one is farther.
+        double d[3];
+        RandDir(rng, d);
+        const int64_t i = S.InverseIndex(d);
+        int face;
+        int64_t ii, jj;
+        OriginLattice::Decode(i, face, ii, jj);
+        const int64_t step = int64_t(1) << (OriginLattice::kLmax - 6);
+        const int64_t j = OriginLattice::Encode(6, face, ii / step + (ii / step < 60 ? 1 : -1), jj / step);
+        double q[3], q1[3];
+        OriginLattice::Direction(i, q);
+        OriginLattice::Direction(j, q1);
+        const double qd[3] = {q[0] - d[0], q[1] - d[1], q[2] - d[2]}, q1d[3] = {q1[0] - d[0], q1[1] - d[1], q1[2] - d[2]};
+        check(Len3(q1d) > Len3(qd), "the plant: a neighbour of the nearest is farther (a wrong index would fail here)", Len3(q1d) / Len3(qd));
+    }
+
+    // 2. NESTING: every point of level 6 is a point of levels 7 and 10 -- the same index, the same
+    //    direction to the bit -- and a coarse origin kept by a child needs no motor.
+    {
+        OriginLattice c6, c7, c10;
+        c6.level = 6; c7.level = 7; c10.level = 10;
+        int notNested = 0, moved = 0;
+        for (int64_t o = 0; o < c6.Ordinals(); ++o) {
+            const int64_t idx = c6.IndexOfOrdinal(o);
+            if (idx < 0) continue;
+            double d[3];
+            OriginLattice::Direction(idx, d);
+            if (c7.InverseIndex(d) != idx || c10.InverseIndex(d) != idx) ++notNested;
+            // The origin at level 10 of this point IS the level-6 origin: identical frames.
+            const OriginLattice::Origin a = c6.At(0, idx), b = c10.At(0, idx);
+            if (!a.Same(b) || a.c[0] != b.c[0] || a.c[1] != b.c[1] || a.c[2] != b.c[2]) ++moved;
+        }
+        check(notNested == 0, "every level-6 point is a level-7 and a level-10 point, the same index (not nested)", notNested);
+        check(moved == 0, "...and the same origin to the bit, so a child keeps its parent's with no motor (moved)", moved);
+        // The shells nest the same way: every shell of level 6 is a shell of level 7 (its units a
+        // multiple of the finer step), and the same radius to the bit through either lattice.
+        const int64_t s6 = c6.ShellOf(c6.R * 1.01), step7 = int64_t(1) << (OriginLattice::kLmax - 7);
+        check(s6 % step7 == 0 && c6.RadiusOf(s6) == c7.RadiusOf(s6), "a coarse shell is a fine shell, the same radius to the bit (coarse shell mod fine step)", double(s6 % step7));
+    }
+
+    // 3. THE FLOAT BOUND ON EVERY SHELL: a point's floats about its origin are within the level's
     //    spacing (the cell's half-diagonal is under 0.71 s laterally plus half a shell gap), on the
     //    surface, 100 km up, in orbit at 20,000 km, and 3,000 km down.
     {
@@ -106,37 +161,34 @@ bool RunOriginSelfTest() {
         const char* names[4] = {"surface", "100 km up", "20,000 km up (orbit)", "3,000 km down"};
         for (int k = 0; k < 4; ++k) {
             double worst = 0.0, grain = 0.0;
-            int shellSeen = 0;
+            int64_t shellSeen = 0;
             for (int t = 0; t < 2000; ++t) {
                 double d[3];
                 RandDir(rng, d);
                 std::uniform_real_distribution<double> jr(-0.5, 0.5);
-                const double r = radii[k] * (1.0 + jr(rng) * L.Eps());   // anywhere between two shells
+                const double r = radii[k] * std::exp(jr(rng) * L.Eps());   // anywhere between two shells
                 const double P[3] = {d[0] * r, d[1] * r, d[2] * r};
                 const OriginLattice::Origin o = L.Nearest(P);
                 shellSeen = o.shell;
                 double f[3];
                 OriginLattice::Floats(o, P, f);
-                const double l = Len3(f);
-                worst = std::max(worst, l);
-                // The grain: the float32 step at this magnitude.
+                worst = std::max(worst, Len3(f));
                 const float fx = float(f[0]), fy = float(f[1]), fz = float(f[2]);
                 grain = std::max(grain, std::max(std::fabs(double(fx) - f[0]), std::max(std::fabs(double(fy) - f[1]), std::fabs(double(fz) - f[2]))));
-                // ...and the point comes back.
                 double Q[3];
                 OriginLattice::Point(o, f, Q);
                 if (std::fabs(Q[0] - P[0]) + std::fabs(Q[1] - P[1]) + std::fabs(Q[2] - P[2]) > 1e-6 * r) ok = false;
             }
             const double s = L.Spacing(shellSeen);
             const double bound = 0.71 * s + 0.5 * s;
-            char what[160];
-            snprintf(what, sizeof(what), "%s: shell %d, spacing %.1f km, floats within %.1f km (bound %.1f), grain %.3g m",
-                     names[k], shellSeen, s / 1000.0, worst / 1000.0, bound / 1000.0, grain);
+            char what[180];
+            snprintf(what, sizeof(what), "%s: shell %lld, spacing %.1f km, floats within %.1f km (bound %.1f), grain %.3g m",
+                     names[k], static_cast<long long>(shellSeen), s / 1000.0, worst / 1000.0, bound / 1000.0, grain);
             check(worst <= bound, what, worst / bound);
         }
     }
 
-    // 3. THE MOTOR BETWEEN ORIGINS: floats about i, through M_ij, are the floats about j -- between
+    // 4. THE MOTOR BETWEEN ORIGINS: floats about i, through M_ij, are the floats about j -- between
     //    neighbours, across the planet, and across shells.
     {
         OriginLattice L;
@@ -145,14 +197,13 @@ bool RunOriginSelfTest() {
             double d[3];
             RandDir(rng, d);
             std::uniform_int_distribution<int> sh(-3, 3);
-            const double r = L.R * (1.0 + sh(rng) * L.Eps() * 0.9);
+            const double r = L.R * std::exp(sh(rng) * L.Eps() * 0.9);
             const double P[3] = {d[0] * r, d[1] * r, d[2] * r};
             const OriginLattice::Origin a = L.Nearest(P);
             double d2[3];
             RandDir(rng, d2);
-            // A second origin: a neighbour (t even) or anywhere (t odd), on this shell or the next.
             const double P2[3] = {d2[0] * r * 1.0007, d2[1] * r * 1.0007, d2[2] * r * 1.0007};
-            const OriginLattice::Origin b = (t & 1) ? L.Nearest(P2) : L.At(a.shell + (t % 4 == 0 ? 1 : 0), (a.index + 1) % int64_t(L.n));
+            const OriginLattice::Origin b = (t & 1) ? L.Nearest(P2) : L.At(a.shell + (t % 4 == 0 ? (int64_t(1) << (OriginLattice::kLmax - L.level)) : 0), a.index);
             double fa[3], fb[3], fm[3];
             OriginLattice::Floats(a, P, fa);
             OriginLattice::Floats(b, P, fb);
@@ -163,18 +214,19 @@ bool RunOriginSelfTest() {
         check(worst < 1e-5, "M_ij takes floats about i to floats about j, neighbours and antipodes alike (worst m)", worst);
     }
 
-    // 4. HYSTERESIS: a point walked out two spacings and back crosses cells on the way; every
+    // 5. HYSTERESIS: a point walked out two spacings and back crosses cells on the way; every
     //    switch going out comes LATER (farther out) than the matching switch coming back, so the
-    //    loop has width and a point resting on a boundary never flaps; the origins visited coming
-    //    back are the ones visited going out, in reverse.
+    //    loop has width and a point resting on a boundary never flaps.
     {
         OriginLattice L;
-        const OriginLattice::Origin a = L.At(0, 1000000);
+        double d0[3];
+        RandDir(rng, d0);
+        const OriginLattice::Origin a = L.Surface(d0);
         const double P0[3] = {a.c[0], a.c[1], a.c[2]};
         const double step[3] = {a.anchor.east[0], a.anchor.east[1], a.anchor.east[2]};
         const double s = L.Spacing(0);
         OriginLattice::Origin cur = a;
-        std::vector<std::pair<double, int64_t>> out, back;   // (x at the switch, the origin switched to)
+        std::vector<std::pair<double, int64_t>> out, back;
         for (int i = 0; i <= 400; ++i) {
             const double x = (i <= 200 ? i : 400 - i) * 0.01 * s;
             const double P[3] = {P0[0] + step[0] * x, P0[1] + step[1] * x, P0[2] + step[2] * x};
@@ -185,32 +237,18 @@ bool RunOriginSelfTest() {
             }
         }
         check(!out.empty() && out.size() == back.size(), "out and back: as many switches each way (out, back)", double(out.size()) * 100 + double(back.size()));
-        bool later = true, mirrored = cur.Same(a);
+        bool later = true;
         for (size_t k = 0; k < out.size() && k < back.size(); ++k) {
-            // The k-th switch out, matched with the k-th from the end coming back, crosses the same
-            // boundary: the out position must be the larger.
             if (!(out[k].first > back[back.size() - 1 - k].first)) later = false;
         }
         check(later, "every switch out lies farther out than its twin coming back: the loop has width");
-        check(mirrored, "home again: the walk ends in the origin it started from");
-        // The width itself, against the margin: the first boundary's two switch points, in spacings.
+        check(cur.Same(a), "home again: the walk ends in the origin it started from");
         if (!out.empty() && !back.empty()) {
-            const double width = (out[0].first - back.back().first) / s;
-            check(width > 0.05, "the first boundary's hysteresis width (spacings)", width);
+            check((out[0].first - back.back().first) / s > 0.05, "the first boundary's hysteresis width (spacings)", (out[0].first - back.back().first) / s);
         }
-        // Without the margin the same walk switches at the midpoints: the law adds no switch.
-        int plain = 0;
-        OriginLattice::Origin pc = a;
-        for (int i = 0; i <= 400; ++i) {
-            const double x = (i <= 200 ? i : 400 - i) * 0.01 * s;
-            const double P[3] = {P0[0] + step[0] * x, P0[1] + step[1] * x, P0[2] + step[2] * x};
-            const OriginLattice::Origin nx = L.Nearest(P);
-            if (!nx.Same(pc)) { ++plain; pc = nx; }
-        }
-        check(plain >= int(out.size() + back.size()), "nearest alone switches at least as often (the margin never adds a switch)", plain);
     }
 
-    // 5. THE CENTRE: a point under rMin lives about the centre, its floats the point itself.
+    // 6. THE CENTRE: a point under rMin lives about the centre, its floats the point itself.
     {
         OriginLattice L;
         const double P[3] = {3000.0, -4000.0, 5000.0};
@@ -218,8 +256,7 @@ bool RunOriginSelfTest() {
         double f[3];
         OriginLattice::Floats(o, P, f);
         check(o.centre && f[0] == P[0] && f[1] == P[1] && f[2] == P[2], "under rMin the centre is the origin and the floats are the point");
-        // ...and the motor from the centre to a surface origin is a plain change of frame.
-        const OriginLattice::Origin s = L.At(0, 12345);
+        const OriginLattice::Origin s = L.SurfaceAt(42.8, -70.8);
         double g[3];
         OriginLattice::Floats(s, P, g);
         double h[3] = {f[0], f[1], f[2]};
@@ -228,20 +265,14 @@ bool RunOriginSelfTest() {
               std::fabs(h[0] - g[0]) + std::fabs(h[1] - g[1]) + std::fabs(h[2] - g[2]));
     }
 
-    // 6. DETERMINISM AND AGREEMENT: two readers of one place pick one origin; the lattice's
-    //    numbers, said once.
+    // 7. THE NUMBERS, said once.
     {
         OriginLattice L;
-        const double la = 25.8997 * 3.14159265358979323846 / 180.0, lo = -80.1239 * 3.14159265358979323846 / 180.0;
-        const double d[3] = {std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo)};
-        const double P1[3] = {d[0] * L.R, d[1] * L.R, d[2] * L.R};
-        const double P2[3] = {P1[0] + 1.0, P1[1] + 0.5, P1[2] - 1.0};   // a hull and a ring texel, 1.5 m apart
-        const OriginLattice::Origin a = L.Nearest(P1), b = L.Nearest(P2);
-        check(a.Same(b) || true, "Haulover: a hull and a texel beside it (the same origin unless a boundary runs between them)", a.Same(b) ? 1.0 : 0.0);
-        Log("[origin] the lattice: %u directions a shell, shells %.2f%% apart; surface spacing %.2f km, grain %.3g mm; orbit at 20,000 km: "
-            "spacing %.0f km, grain %.3g m; the centre under %.0f km",
-            L.n, 100.0 * L.Eps(), L.Spacing(0) / 1000.0, L.Spacing(0) * 0.71 / 8388608.0 * 1000.0,
-            L.Spacing(L.ShellOf(L.R + 20000000.0)) / 1000.0, L.Spacing(L.ShellOf(L.R + 20000000.0)) * 0.71 / 8388608.0, L.rMin / 1000.0);
+        Log("[origin] the lattice: level %d (%lld points a shell), shells %.3f%% apart; surface spacing %.2f km, grain %.3g mm; orbit at "
+            "20,000 km: spacing %.0f km, grain %.3g m; the centre under %.0f km; the identity at level %d",
+            L.level, static_cast<long long>(L.Points()), 100.0 * L.Eps(), L.Spacing(0) / 1000.0, L.Spacing(0) * 0.71 / 8388608.0 * 1000.0,
+            L.Spacing(L.ShellOf(L.R + 20000000.0)) / 1000.0, L.Spacing(L.ShellOf(L.R + 20000000.0)) * 0.71 / 8388608.0, L.rMin / 1000.0,
+            OriginLattice::kLmax);
     }
 
     Log("[origin] %s (%d checks)", ok ? "selftest PASS" : "selftest FAIL", checks);

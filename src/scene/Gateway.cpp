@@ -29,12 +29,9 @@ bool Place::Build(const Space& planet, double planetR, double lat, double lon,
         if (why) *why = "no tangent frame at the place's origin (too near a pole)";
         return false;
     }
-    space = Space{};
-    space.name = name;
+    space = SpaceAt(planet, o, name);   // on the cloud, by the one factory (Space::Declare's rule)
     space.unitM = planetR;
     space.extentM = 2.0 * planetR;
-    space.parent = &planet;
-    space.link = Placement::Frame(o.anchor.east, o.anchor.up, o.anchor.north, o.c);
     if (!space.Declare(why)) return false;
     chart = o.anchor;
     chart.planetR = planetR;

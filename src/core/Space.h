@@ -434,6 +434,18 @@ struct Space {
     double extentM = 0.0;         // the farthest point this space will ever name; 0 = unchecked
     const Space* parent = nullptr;
     Placement link;               // own -> parent
+    // THE CLOUD STAND (core/OriginLattice.h, 2026-10-11, the owner's doctrine): the point of its
+    // parent body's cloud this space stands on. A space on the cloud is made by
+    // OriginLattice::SpaceAt and nothing else writes `stand`; Declare refuses a space under a
+    // parent that stands on no cloud point, unless it is a body itself (no parent) or declared
+    // `legacy` -- the scene's tangent.anchor until the root world moves onto the cloud. So every
+    // leaf of the tree inherits the doctrine by being a Space, not by its author remembering.
+    struct CloudStand {
+        int64_t shell = 0, index = -1;
+        bool valid = false;
+    };
+    CloudStand stand;
+    bool legacy = false;
 
     // The chart onto the exchange frame (ATLAS tier 1) where this space has one: the space's own
     // tangent plane about its anchor, read as a RATIO OF PLANES in doubles (HIERARCHY 4.4).
@@ -594,6 +606,10 @@ struct Space {
     bool Declare(std::string* why = nullptr) const {
         if (unitM <= 0.0) {
             if (why) *why = name + ": unit length must be positive";
+            return false;
+        }
+        if (parent && !stand.valid && !legacy) {
+            if (why) *why = name + ": a space under " + parent->name + " must stand on a point of its cloud (OriginLattice::SpaceAt), or be declared legacy";
             return false;
         }
         if (extentM > 0.0 && extentM / unitM >= kCollapseRatio) {

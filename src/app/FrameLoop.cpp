@@ -768,6 +768,11 @@ std::optional<int> FrameLoop::Session() {
         m_tangentSpace.parent = &m_planetSpace;
         const double anchor[3] = {oDir[0] * planetR, oDir[1] * planetR, oDir[2] * planetR};
         m_tangentSpace.link = Placement::Frame(east0, oDir, north0, anchor);
+        // THE ONE LEGACY SPACE (core/Space.h CloudStand): the scene's own tangent frame stands at
+        // its place.anchor, not yet on the planet's cloud; every other space under the planet is
+        // made on the cloud (OriginLattice::SpaceAt) or Declare refuses it. The root world's move
+        // onto the cloud is the next step (docs/ORIGINS.md section 4).
+        m_tangentSpace.legacy = true;
         std::string why;
         if (!m_planetSpace.Declare(&why) || !m_tangentSpace.Declare(&why)) {
             Log("FATAL: [space] %s", why.c_str());

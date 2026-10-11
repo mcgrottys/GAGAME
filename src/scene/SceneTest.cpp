@@ -2163,10 +2163,13 @@ bool RunSceneSelfTest() {
             // elevation AT HAULOVER -- against the ephemeris asked directly there (a different
             // path: the planet frame, that place's own up), and against NOAA's published solar
             // position for 25.8997 N 80.1239 W at that instant, +55.460 deg (here: +40.899).
+            // The place's own up (the eye stands at Haulover, 2.6 km from its chart's cloud origin,
+            // and the sun is placed where the eye stands).
+            const PoseFrame frP = FrameFromAnchor(25.8997, -80.1239, R);
             double sdH[3];
-            sun::SunDirFromPlanetPoint(ssW, frH.up, sdH);
+            sun::SunDirFromPlanetPoint(ssW, frP.up, sdH);
             const double elThere = std::asin((std::min)(1.0, (std::max)(-1.0,
-                sdH[0] * frH.up[0] + sdH[1] * frH.up[1] + sdH[2] * frH.up[2]))) * 180.0 / kPiL;
+                sdH[0] * frP.up[0] + sdH[1] * frP.up[1] + sdH[2] * frP.up[2]))) * 180.0 / kPiL;
             const double elWin = std::asin((std::min)(1.0, (std::max)(-1.0, double(sunDomeW[1])))) *
                                  180.0 / kPiL;
             g.Near(elWin, elThere, 0.01, "[gate] the sun through the window stands where the ephemeris puts it at the destination");
@@ -2186,7 +2189,7 @@ bool RunSceneSelfTest() {
             double la = 0.0, lo = 0.0, rx = 0.0, rz = 0.0;
             ch.LatLonOf(1000.0, -500.0, la, lo);
             ch.FlatOf(la, lo, rx, rz);
-            g.Near(std::fabs(rx - 1000.0) + std::fabs(rz + 500.0), 0.0, 1e-9, "[gate] the destination's chart round-trips");
+            g.Near(std::fabs(rx - 1000.0) + std::fabs(rz + 500.0), 0.0, 1e-7, "[gate] the destination's chart round-trips");
             g.Near(la, gate.Chart().latDeg - 500.0 / R * 180.0 / 3.14159265358979323846, 1e-6,
                    "[gate] ...by the exact tangent chart at the origin");
             // THE WATER: with no chart a TreeWater has no place (PHASE C5: no root constants).

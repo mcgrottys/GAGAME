@@ -232,12 +232,9 @@ void Entity::Recentre(double simUnix) {
         fr.north[i] = o.anchor.north[i];
     }
     fr.valid = true;
-    Space next;
-    next.name = m_props.name + ".origin";
+    Space next = SpaceAt(*m_o.planet, o, m_props.name + ".origin");   // on the cloud, by the one factory
     next.unitM = R;
     next.extentM = 2.0 * R;
-    next.parent = m_o.planet;
-    next.link = Placement::Frame(fr.east, fr.up, fr.north, o.c);
     std::string why;
     if (!next.Declare(&why)) {
         Log("[vessel] '%s' could not re-centre: %s", m_props.name.c_str(), why.c_str());
