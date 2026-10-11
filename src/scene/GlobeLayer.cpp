@@ -2464,11 +2464,17 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         dst[15] = 0.0f;
     };
     chartRows(m_cb.bankChart, &m_bankOrg[12], &m_levelRows[0]);
+    // Set B's eye: the first slot of the TABLE whose bank is set B -- a Droste level or a gate
+    // world (the world behind a window is a gate world since the split, filed after the levels).
+    // Searching the Droste levels alone left set B about the camera's own eye, and every reader in
+    // the far world addressed its rings 2,000 km off: the sea through the window came out flat
+    // (2026-10-11, the portal scene; the bisect landed on the chart's floating).
     const float* eyeB = &m_levelRows[0];
-    for (size_t li = 0; li < m_levels.size(); ++li) {
-        if (m_levels[li].bankSet != 1) continue;
-        eyeB = &m_levelRows[(li + 1) * 24u];
-        break;
+    for (uint32_t slot = 1; slot < LevelSlots(); ++slot) {
+        if (m_levelRows[slot * 24u + 15] == 1.0f) {
+            eyeB = &m_levelRows[slot * 24u];
+            break;
+        }
     }
     chartRows(m_cb.bankBChart, &m_bankBOrg[12], eyeB);
 
