@@ -43,7 +43,8 @@ void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<con
     m_ground = std::move(ground);
 }
 
-void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels) {
+void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels) {
+    m_shapePixels = (std::max)(shapePixels, 0.0);
     m_lod = std::move(lod);
     m_lodPixels = pixels > 0.0 ? pixels : 1.0;
 }
@@ -832,7 +833,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     m_walkCells = m_cellsVersion;
     m_walkPages = m_pagesVersion;
     struct In {
-        double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB;
+        double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB, tauS;
         struct KeyHash {
             size_t operator()(const PageKey& k) const {
                 return std::hash<uint64_t>()((uint64_t(uint32_t(std::get<0>(k) + 64)) << 56) ^
@@ -860,6 +861,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     in.cosHalf = std::cos(in.halfDiag);
     in.sinHalf = std::sin(in.halfDiag);
     in.tauB = m_lodPixels;
+    in.tauS = m_shapePixels;   // its own form from here, its moment box below (the same mass)
     in.pages.reserve(m_pages.size());
     in.hold.reserve(m_pages.size());
     for (const auto& [k, p] : m_pages) {
@@ -985,7 +987,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
                     in.cells.count(b.cell)) {
                     continue;   // its prisms are drawn
                 }
-                if (in.shapes && b.shapeOff != UINT32_MAX && b.shapeOff / kSlotBytes < pg.slots.size()) {
+                if (in.shapes && sz >= in.tauS && b.shapeOff != UINT32_MAX && b.shapeOff / kSlotBytes < pg.slots.size()) {
                     emitShape(acc, b, (std::min)(a, 1.0), pg.landed,
                               uint64_t(pg.slots[b.shapeOff / kSlotBytes]) * kSlotBytes + b.shapeOff % kSlotBytes);
                 } else {

@@ -674,6 +674,9 @@ const Schema& BuildingsLayerSchema() {
                       "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
             .Bind("lodPixels", kBuildings.lodPixels, Q::Dimensionless, "px",
                   "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's", R)
+            .Bind("shapePixels", kBuildings.shapePixels, Q::Dimensionless, "px",
+                  "a building or road piece is drawn as its own form from this many pixels across, and as its "
+                  "moment box (the same volume, centroid and heading) below; 1 = always its form. Tokyo at 9 km: 16.5 ms of buildings at 1, 2.3 ms at 6, the stills alike", R)
             .Bind("field", kBuildings.field,
                   "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
                   "seen at an angle; needs `lod`", R)
