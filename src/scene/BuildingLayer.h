@@ -97,6 +97,20 @@ public:
     // next Simulate, with the first eye's.
     void SimulateEye(const FrameContext& ctx);
     static constexpr uint32_t kEyes = 2;   // the session's own and the minimap's (ViewContext index)
+    // THE WORLDS A VIEW REACHES THROUGH ITS WINDOWS (2026-10-11, the owner: the portal owns the
+    // residency of what it shows). An eye's walk is its own world's; each window world the view
+    // reaches is walked from the eye carried through that window (its camera in that world's own
+    // frame) and drawn pulled back through the window's motor, kept only where the window shows that
+    // depth (Buildings.hlsl PsMain, the hulls' rule). The frame loop says each eye's worlds every
+    // frame (FrameLoop::PublishBuildingWorlds); kWorlds - 1 windows deep at most -- the corridor
+    // beyond shows a window too small to hold a building.
+    struct WorldEye {
+        double cam[3] = {0.0, 0.0, 0.0};   // the eye in that world's frame (root coordinates)
+        double fwd[3] = {0.0, 0.0, 1.0};
+        Motor pull;                        // that world drawn in the true frame
+    };
+    static constexpr uint32_t kWorlds = 3;
+    void SetWorlds(uint32_t eye, std::vector<WorldEye> worlds) { if (eye < kEyes) m_worlds[eye] = std::move(worlds); }
 
     size_t ResidentCells() const { return m_cells.size(); }
 
@@ -270,7 +284,7 @@ private:
         };
         std::vector<StandDone> standDone;
         std::atomic<int> inflight{0}, pageInflight{0}, standInflight{0};
-        std::atomic<int> walking[kEyes] = {};   // one walk in flight per eye
+        std::atomic<int> walking[kEyes * kWorlds] = {};   // one walk in flight per eye and world
         // THE WALK'S BUFFERS, REUSED: a walk takes a retired one at least its size before it makes one.
         std::vector<GpuBuffer> freeStaging, freeBoxes;
         std::atomic<bool> cancel{false};
@@ -294,8 +308,12 @@ private:
     // ...of any box of `deg` with its south-west corner at (lon0, lat0).
     static double ReachBox(double lon0, double lat0, double deg, double latDeg, double lonDeg, double h);
     void TreeFrame(const FrameContext& ctx, double latDeg, double lonDeg, double h);
-    // The walk launched for one eye, when its inputs have moved and none of its is running.
-    void Walk(const FrameContext& ctx, uint32_t eye, double latDeg, double lonDeg, double h);
+    // The walk launched for one walker (an eye's world), from an eye and a forward, when its inputs
+    // have moved and none of its is running.
+    void Walk(const FrameContext& ctx, uint32_t walker, const double eye[3], const double fwd[3], double latDeg, double lonDeg, double h);
+    // Every world of an eye walked: its own from the context's camera, each window world from the
+    // eye carried through the window.
+    void WalkEye(const FrameContext& ctx, uint32_t eye);
     void LoadPage(const PageKey& k);
     void Want(Gpu* gpu, double latDeg, double lonDeg, double h);
     void Upload(const FrameContext& ctx);
@@ -388,7 +406,9 @@ private:
         // The pages the last walk asked for, coarsest level first (the two streams read it each frame).
         std::vector<std::pair<double, PageKey>> wants;
         std::vector<StandAsk> stands;   // the stands it asked for, the largest on screen first
-    } m_eyes[kEyes];
+    } m_eyes[kEyes * kWorlds];          // walker (eye, world) at eye * kWorlds + world
+    static uint32_t WalkerOf(uint32_t eye, uint32_t world) { return eye * kWorlds + world; }
+    std::vector<WorldEye> m_worlds[kEyes];
     // THE STANDS' STREAM: every eye's asks, each node once at the finest grain and with buildings if
     // any eye wants them, the largest on screen first; a job stands a batch of kStandBatch nodes,
     // kStandInFlight jobs at a time (a warm stand is 0.1 ms, a cold one 2.5: thousands a frame, or

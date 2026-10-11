@@ -2171,6 +2171,30 @@ std::vector<const scene::Gateway*> FrameLoop::GateList() const {
     return out;
 }
 
+// THE WORLDS EACH EYE'S BUILDINGS ARE WALKED IN (scene/BuildingLayer.h WorldEye): its own, then
+// each window world its chain reaches, the eye carried through the window (WindowLink::carry) and
+// the world drawn back by its pull -- the hulls' law (PublishHulls), for the walks.
+void FrameLoop::PublishBuildingWorlds() {
+    BuildingLayer* bl = m_A.buildingLayer;
+    if (!bl) return;
+    auto worldsOf = [](const Camera& cam, const std::vector<scene::WindowLink>& chain) {
+        std::vector<BuildingLayer::WorldEye> out;
+        const DirectX::XMFLOAT3 f3 = cam.Forward();
+        for (size_t k = 0; k < chain.size() && k + 1 < BuildingLayer::kWorlds; ++k) {
+            BuildingLayer::WorldEye w;
+            w.cam[0] = cam.px; w.cam[1] = cam.py; w.cam[2] = cam.pz;
+            w.fwd[0] = f3.x; w.fwd[1] = f3.y; w.fwd[2] = f3.z;
+            chain[k].carry.TransformPoint(w.cam[0], w.cam[1], w.cam[2]);
+            chain[k].carry.TransformDir(w.fwd[0], w.fwd[1], w.fwd[2]);
+            w.pull = chain[k].pull;
+            out.push_back(w);
+        }
+        return out;
+    };
+    bl->SetWorlds(0, worldsOf(m_cam, m_windows));
+    bl->SetWorlds(1, m_minimapDrawn ? worldsOf(m_minimap.Cam(), m_minimapChain) : std::vector<BuildingLayer::WorldEye>{});
+}
+
 void FrameLoop::PublishHulls() {
     VesselLayer* layer = m_A.vesselLayer;
     if (!layer) return;
@@ -4004,6 +4028,7 @@ bool FrameLoop::Frame() {
     // gravity-up and speed clamps, the Droste gauge, the bank's centre, the exposure and GIS
     // probes -- still reads `cam` directly (5d moves them, with the scene wired).
     PublishHulls();   // after the view has decided what it looks through this frame
+    PublishBuildingWorlds();   // ...and the worlds the buildings' walks run in, eye by eye
     MinimapFrame(dt);   // the second eye, walked after the first has settled
     DrawGlass(dt);    // the windshield's readouts, rebuilt for this frame
     scene::ViewSet viewSet =

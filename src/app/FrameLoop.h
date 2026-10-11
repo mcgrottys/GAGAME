@@ -296,6 +296,7 @@ private:
     // windows shows -- pulled back through the windows, so a boat is seen wherever a window shows
     // its place, its own reflection down the corridor included.
     void PublishHulls();
+    void PublishBuildingWorlds();
     // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
     void DrawGlass(float dt);
     // ---- AN EYE (step 3 of the HUD pass): one view of the frame -- the session's camera (view 0),

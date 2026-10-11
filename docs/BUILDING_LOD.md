@@ -240,3 +240,21 @@ Newburyport's market still is bit-identical to the one before; Tokyo under a pin
 178,740 stands in 400 frames at 0.1 ms each, the frame 16.5 ms (15.3 before), its still within
 4.7 % of pixels of the merged commit, all of them the far field still standing. The instrument
 for a page that is slow to parse stays, and `[buildings] at the end: N stands made` says the rest.
+
+## 12. The worlds a view reaches (2026-10-11)
+
+Through a gate's window the far world showed no buildings: the layer walked only from the eye's
+own position and cut away every pixel a window shows. The owner's law from the portal work -- the
+portal owns the residency of what it shows -- gives the form: an eye's walk is one of several, one
+per world the view reaches. Each window world is walked from the eye carried through that window
+(`WindowLink::carry` on the camera: its position and forward in that world's own frame), by the
+same walker as the eye's own (`BuildingLayer::Eye`, now `kEyes x kWorlds`, the frame loop saying
+each eye's worlds every frame in `PublishBuildingWorlds`), and drawn pulled back through the
+window's motor: the walk's origin through `pull` in doubles, the instances' centres and rotors
+composed with the pull's rotor (`gBdWorld`) on the GPU, and the pixels kept only where the ray
+reaches that world's depth (the hulls' rule, `WindowChainDepth`), lit by that window's sun and
+zenith. Two windows deep (`kWorlds` = 3); beyond that a window is too small to hold a building.
+
+Measured from the Merrimack's mouth looking through the Haulover gate (`out/roads/city_mouth.json`,
+a frozen still): the own world 227 boxes + 65 shapes, the Haulover world through the window 67 +
+171, the Merrimack again through two windows 312 + 99; the still unchanged from frame 400 to 1200.

@@ -29,15 +29,15 @@ BuildingLayer::~BuildingLayer() {
     // A job holds the stack and the ground's sources: none may outlive the layer's owner. Ask them
     // to stop and wait for the ones already running (a cell is tens of milliseconds).
     if (m_stands) Log("[buildings] at the end: %llu stands made, %.1f ms each on the pool", static_cast<unsigned long long>(m_stands), m_standMs / double(m_stands));
-    for (uint32_t k = 0; k < kEyes; ++k) {   // the instrument: what each eye's last walk drew
+    for (uint32_t k = 0; k < kEyes * kWorlds; ++k) {   // the instrument: what each walker's last walk drew
         const Eye& e = m_eyes[k];
         if (e.walks) {
-            Log("[buildings] eye %u at the end: %llu walks, the last %u boxes + %u shapes from %zu pages", k,
+            Log("[buildings] eye %u world %u at the end: %llu walks, the last %u boxes + %u shapes from %zu pages", k / kWorlds, k % kWorlds,
                 static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, e.drawnUsed.size());
         }
     }
     m_shared->cancel = true;
-    for (int i = 0; i < 2000 && (m_shared->inflight.load() > 0 || m_shared->pageInflight.load() > 0 || m_shared->walking[0].load() > 0 || m_shared->walking[1].load() > 0 || m_shared->standInflight.load() > 0); ++i) {
+    for (int i = 0; i < 2000 && (m_shared->inflight.load() > 0 || m_shared->pageInflight.load() > 0 || [this] { for (const auto& w : m_shared->walking) if (w.load() > 0) return true; return m_shared->standInflight.load() > 0; }()); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
@@ -782,7 +782,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         ctx.cmd->Native()->ResourceBarrier(1, &br);
     }
     for (Walked& w : walked) {
-        Eye& e = m_eyes[w.eye < kEyes ? w.eye : 0];
+        Eye& e = m_eyes[w.eye < kEyes * kWorlds ? w.eye : 0];
         if ((w.count || w.insts) && w.vb.Valid()) {   // the cells' own copy and barrier (Upload)
             ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
             const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + 15u) & ~uint64_t(15);
@@ -813,8 +813,8 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         const bool largest = e.drawn.insts > e.walkInstsMax;
         if (largest) e.walkInstsMax = e.drawn.insts;
         if (e.walks <= 3 || e.walks % 50 == 0 || (largest && e.drawn.insts > 200000u)) {
-            Log("[buildings] frame %llu eye %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes in %.1f ms (visit %.1f, "
-                "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), w.eye,
+            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes in %.1f ms (visit %.1f, "
+                "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), w.eye / kWorlds, w.eye % kWorlds,
                 static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, static_cast<unsigned long long>(w.singles),
                 static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), w.ms, w.msVisit, w.msSort,
                 w.msBuf, m_pages.size(), m_pageBytes / 1048576.0, e.wants.size());
@@ -979,8 +979,34 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
                 m_pages.size(), m_pageBytes / 1048576.0, m_pageBudget / 1048576.0, lowestKept >= 1e300 ? 0.0 : lowestKept);
         }
     }
-    // 3. The first eye's walk, when its inputs have moved and none of its is running.
-    Walk(ctx, 0, latDeg, lonDeg, h);
+    // 3. The first eye's walks -- its own world and each window world it reaches.
+    WalkEye(ctx, 0);
+}
+
+void BuildingLayer::WalkEye(const FrameContext& ctx, uint32_t eye) {
+    if (!ctx.camera || eye >= kEyes) return;
+    const double at[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
+    const DirectX::XMFLOAT3 f3 = ctx.camera->Forward();
+    const double fwd[3] = {f3.x, f3.y, f3.z};
+    double lat = 0.0, lon = 0.0, h = 0.0;
+    m_locate(at, lat, lon, h);
+    Walk(ctx, WalkerOf(eye, 0), at, fwd, lat, lon, h);
+    for (uint32_t k = 0; k + 1 < kWorlds; ++k) {
+        Eye& e = m_eyes[WalkerOf(eye, k + 1)];
+        if (k >= m_worlds[eye].size()) {   // no such world this frame: what it drew is let go
+            if (e.drawn.vb.Valid()) m_retired.push_back({std::move(e.drawn.vb), m_frame, 2});
+            e.drawn = Drawn{};
+            e.drawnUsed.clear();
+            e.drawnHold.clear();
+            e.wants.clear();
+            e.stands.clear();
+            e.walkEye[0] = e.walkEye[1] = e.walkEye[2] = 1e30;
+            continue;
+        }
+        const WorldEye& w = m_worlds[eye][k];
+        m_locate(w.cam, lat, lon, h);
+        Walk(ctx, WalkerOf(eye, k + 1), w.cam, w.fwd, lat, lon, h);
+    }
 }
 
 std::vector<std::pair<double, BuildingLayer::PageKey>> BuildingLayer::Wants() const {
@@ -1010,18 +1036,12 @@ void BuildingLayer::SimulateEye(const FrameContext& ctx) {
     if (!m_pso || !m_stack || !ctx.camera || !ctx.gpu || !m_lod || !m_lod->Valid() || !ctx.height) return;
     const uint32_t eye = ctx.viewIndex < kEyes ? ctx.viewIndex : 0;
     if (eye == 0) return;   // the first eye walks in Simulate
-    const double at[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
-    double lat = 0.0, lon = 0.0, h = 0.0;
-    m_locate(at, lat, lon, h);
-    Walk(ctx, eye, lat, lon, h);
+    WalkEye(ctx, eye);
 }
 
-void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, double latDeg, double lonDeg, double h) {
+void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const double eye[3], const double fwd[3], double latDeg, double lonDeg, double h) {
     Eye& E = m_eyes[eyeIndex];
     if (m_shared->walking[eyeIndex].load() || !ctx.height) return;
-    const double eye[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
-    const DirectX::XMFLOAT3 f3 = ctx.camera->Forward();
-    const double fwd[3] = {f3.x, f3.y, f3.z};
     const double moved = std::sqrt((eye[0] - E.walkEye[0]) * (eye[0] - E.walkEye[0]) + (eye[1] - E.walkEye[1]) * (eye[1] - E.walkEye[1]) +
                                    (eye[2] - E.walkEye[2]) * (eye[2] - E.walkEye[2]));
     const double turned = fwd[0] * E.walkFwd[0] + fwd[1] * E.walkFwd[1] + fwd[2] * E.walkFwd[2];
@@ -1063,8 +1083,8 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, double latD
         L.R = kR;
         const OriginLattice::Origin o = L.Pick(P, E.walkOriginSet ? &E.walkOrigin : nullptr);
         if (!E.walkOriginSet || !o.Same(E.walkOrigin)) {
-            Log("[buildings] eye %u: the walk's origin is the cloud's point %lld on shell %d (%.5f N %.5f E, %.0f m up): the eye stands %.1f km from it%s",
-                eyeIndex, static_cast<long long>(o.index), o.shell, o.anchor.latDeg, o.anchor.lonDeg, o.r - kR,
+            Log("[buildings] eye %u world %u: the walk's origin is the cloud's point %lld on shell %d (%.5f N %.5f E, %.0f m up): the eye stands %.1f km from it%s",
+                eyeIndex / kWorlds, eyeIndex % kWorlds, static_cast<long long>(o.index), o.shell, o.anchor.latDeg, o.anchor.lonDeg, o.r - kR,
                 std::sqrt((P[0] - o.c[0]) * (P[0] - o.c[0]) + (P[1] - o.c[1]) * (P[1] - o.c[1]) + (P[2] - o.c[2]) * (P[2] - o.c[2])) / 1000.0,
                 E.walkOriginSet ? " (a new cell)" : "");
             E.walkOrigin = o;
@@ -1601,7 +1621,7 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
         // A cell still handing off (its boxes not yet on screen) is drawn: it is not dropped.
         auto old = m_warm.end();
         for (auto it = m_warm.begin(); it != m_warm.end(); ++it) {
-            if (it->second.leftAt > m_eyes[0].drawnCells) continue;
+            if (it->second.leftAt > m_eyes[WalkerOf(0, 0)].drawnCells) continue;
             if (old == m_warm.end() || it->second.frame < old->second.frame) old = it;
         }
         if (old == m_warm.end()) break;
@@ -1694,10 +1714,12 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
 }
 
 void BuildingLayer::Render(const FrameContext& ctx) {
-    // THIS VIEW'S EYE: its own walk's boxes (the minimap's from its camera), the near cells the first's.
-    const Eye& e = m_eyes[ctx.viewIndex < kEyes ? ctx.viewIndex : 0];
-    const Drawn& m_drawn = e.drawn;
-    if (!m_pso || (m_cells.empty() && m_warm.empty() && !m_drawn.count && !m_drawn.insts) || !ctx.camera) return;
+    // THIS VIEW'S EYE: its own walk's boxes (the minimap's from its camera), the near cells the first's,
+    // and each window world it reaches, drawn pulled through the window.
+    const uint32_t eyeIndex = ctx.viewIndex < kEyes ? ctx.viewIndex : 0;
+    bool any = !m_cells.empty() || !m_warm.empty();
+    for (uint32_t k = 0; k < kWorlds; ++k) any = any || m_eyes[WalkerOf(eyeIndex, k)].drawn.count || m_eyes[WalkerOf(eyeIndex, k)].drawn.insts;
+    if (!m_pso || !any || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
     ctx.cmd->Pipeline(m_pso.Get());
@@ -1706,13 +1728,15 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     struct {
         float origin[4];   // xyz the cell's origin relative to the eye, w = brightness
         float time[4];     // x the layer's now (s), y the pages' fade-in (s)
-        uint32_t mesh[4];  // a draw of instances: the first's row, how many, -, the pool's heap slot
+        uint32_t mesh[4];  // a draw of instances: the first's row, how many, the world's depth, the pool's heap slot
+        float world[4];    // the world's turn in the true frame (a rotor; identity for the eye's own)
     } cb{};
+    cb.world[3] = 1.0f;
     // The resident cells, and the ones leaving whose boxes the drawn walk does not hold yet.
     std::vector<const Cell*> draw;
     for (const auto& [key, c] : m_cells) draw.push_back(&c);
     for (const auto& [key, wc] : m_warm) {
-        if (wc.leftAt > m_eyes[0].drawnCells) draw.push_back(&wc.cell);
+        if (wc.leftAt > m_eyes[WalkerOf(0, 0)].drawnCells) draw.push_back(&wc.cell);
     }
     {
     GpuScope cellScope(ctx.prof, ctx.cmd->Native(), "buildings.cells");
@@ -1729,15 +1753,35 @@ void BuildingLayer::Render(const FrameContext& ctx) {
         ctx.cmd->Draw(c.count, 1, 0, 0);
     }
     }
-    if (!m_drawn.vb.Valid()) return;
-    cb.origin[0] = static_cast<float>(m_drawn.origin[0] - ctx.camera->px);
-    cb.origin[1] = static_cast<float>(m_drawn.origin[1] - ctx.camera->py);
-    cb.origin[2] = static_cast<float>(m_drawn.origin[2] - ctx.camera->pz);
+    for (uint32_t world = 0; world < kWorlds; ++world) {
+    const Eye& e = m_eyes[WalkerOf(eyeIndex, world)];
+    const Drawn& m_drawn = e.drawn;
+    if (!m_drawn.vb.Valid()) continue;
+    if (world > 0 && world - 1 >= m_worlds[eyeIndex].size()) continue;
+    // THE WORLD'S PLACE IN THE TRUE FRAME: the walk's origin pulled through the window, the eye off
+    // it in doubles; its turn as the rotor the instances' own rotors are composed with.
+    double org[3] = {m_drawn.origin[0], m_drawn.origin[1], m_drawn.origin[2]};
+    if (world > 0) {
+        const Motor& pull = m_worlds[eyeIndex][world - 1].pull;
+        pull.TransformPoint(org[0], org[1], org[2]);
+        double E[3] = {1.0, 0.0, 0.0}, U[3] = {0.0, 1.0, 0.0}, N[3] = {0.0, 0.0, 1.0};
+        pull.TransformDir(E[0], E[1], E[2]);
+        pull.TransformDir(U[0], U[1], U[2]);
+        pull.TransformDir(N[0], N[1], N[2]);
+        RotorOf(E, U, N, cb.world);
+    } else {
+        cb.world[0] = cb.world[1] = cb.world[2] = 0.0f;
+        cb.world[3] = 1.0f;
+    }
+    cb.origin[0] = static_cast<float>(org[0] - ctx.camera->px);
+    cb.origin[1] = static_cast<float>(org[1] - ctx.camera->py);
+    cb.origin[2] = static_cast<float>(org[2] - ctx.camera->pz);
     cb.origin[3] = 1.0f;
     cb.time[0] = Now();
     cb.time[1] = kPageFadeS;
     // z: a pixel's angle (rad), the walk's own -- the ribbons' width on screen (Buildings.hlsl MsShape).
     cb.time[2] = static_cast<float>(double(ctx.camera->fovY) / double(ctx.height));
+    cb.mesh[2] = world;   // the depth the pixels must reach through the windows
     if (m_drawn.count && (m_psoBoxMesh || m_psoBox)) {
         // THE TREE'S BOXES, one buffer about the walk's eye: 8 vertices a box through the mesh stage
         // (16 a group; the groups in two dimensions past 65535), or 36 through the vertex stage.
@@ -1767,8 +1811,9 @@ void BuildingLayer::Render(const FrameContext& ctx) {
         cb.mesh[3] = m_poolSrv;
         ctx.cmd->GraphicsConstants(1, cb);
         ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-        if (ctx.viewIndex == 0) m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
+        if (ctx.viewIndex == 0 && world == 0) m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
         ctx.cmd->DispatchMesh((m_drawn.insts + kAsInsts - 1) / kAsInsts, 1, 1);   // kMaxBoxes / 64 < 65535
+    }
     }
 }
 

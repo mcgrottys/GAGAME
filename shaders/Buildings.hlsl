@@ -15,8 +15,11 @@
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
     float4 gBdTime;     // x = the layer's now (s), y = a page's fade-in (s), z = a pixel's angle (rad)
-    uint4 gBdMesh;      // a draw of the walk's instances: x the first instance's row (three float4
+    uint4 gBdMesh;      // ...z the depth of the world this draw is in (0 the eye's own: the hulls' rule);
+                        // a draw of the walk's instances: x the first instance's row (three float4
                         // rows each), y how many, w the shape pool's heap slot (compose/BuildingShape.h)
+    float4 gBdWorld;    // THE WORLD'S TURN in the true frame (a rotor, identity for the eye's own): a window
+                        // world's instances are composed with it, their centres turned by it, about gBdOrigin
 };
 
 struct BuildingVertex {
@@ -44,12 +47,17 @@ static const float3 kPalette[6] = {
     float3(0.56, 0.53, 0.47)    // a path's
 };
 
+// A rotor on a vector (q = (xyz, w)), and the rotor applying b then a (the Hamilton product).
+float3 Rotate(float4 q, float3 v) { return v + 2.0f * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+// The rotor applying b then a (the Hamilton product, w last).
+float4 QMul(float4 a, float4 b) { return float4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz)); }
+
 VsOut VsMain(uint vid : SV_VertexID) {
     const BuildingVertex v = gVerts[vid];
     VsOut o;
-    o.rel = gBdOrigin.xyz + v.pos;
+    o.rel = gBdOrigin.xyz + Rotate(gBdWorld, v.pos);
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
-    o.n = v.n;
+    o.n = Rotate(gBdWorld, v.n);
     o.col = kPalette[uint(v.kind) & 3u] * gBdOrigin.w;
     o.alpha = 1.0f;
     return o;
@@ -68,7 +76,6 @@ VsOut VsMain(uint vid : SV_VertexID) {
 StructuredBuffer<uint4> gWalk : register(t0, space0);
 StructuredBuffer<uint4> gShapePool[] : register(t0, space7);   // the heap's buffers (gWorlds' range)
 
-float3 Rotate(float4 q, float3 v) { return v + 2.0f * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
 struct Inst {
     float3 c; float alpha;
     float4 q;
@@ -105,7 +112,9 @@ void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut v
     SetMeshOutputCounts(n * 8u, n * 12u);
     const uint bi = gi >> 3, corner = gi & 7u;
     if (bi >= n) return;
-    const Inst b = ReadInst(gBdMesh.x + (b0 + bi) * 3u);
+    Inst b = ReadInst(gBdMesh.x + (b0 + bi) * 3u);
+    b.c = Rotate(gBdWorld, b.c);
+    b.q = QMul(gBdWorld, b.q);
     const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
     const float3 ext = asfloat(b.x.xyz);
     const float3 sgn = float3((corner & 1u) ? 1.0f : -1.0f, (corner & 2u) ? 1.0f : -1.0f, (corner & 4u) ? 1.0f : -1.0f);
@@ -124,7 +133,9 @@ void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut v
 
 // ...and the same boxes through the vertex stage where there are no mesh shaders (36 vertices a box).
 VsOut VsBox(uint vid : SV_VertexID) {
-    const Inst b = ReadInst(gBdMesh.x + (vid / 36u) * 3u);
+    Inst b = ReadInst(gBdMesh.x + (vid / 36u) * 3u);
+    b.c = Rotate(gBdWorld, b.c);
+    b.q = QMul(gBdWorld, b.q);
     const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
     const float3 ext = asfloat(b.x.xyz);
     const uint f = (vid % 36u) / 6u, t = vid % 6u;   // face, then its two triangles
@@ -233,7 +244,9 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
     const uint s = s0 + gi;
     const uint k = InstanceOf(pay, roof, s);
     const uint local = s - (roof ? pay.triStart[k] : pay.edgeStart[k]);
-    const Inst b = ReadInst(gBdMesh.x + (pay.instBase + k) * 3u);
+    Inst b = ReadInst(gBdMesh.x + (pay.instBase + k) * 3u);
+    b.c = Rotate(gBdWorld, b.c);
+    b.q = QMul(gBdWorld, b.q);
     const float3 c = b.c, E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
     const uint addr = b.x.x;
     const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
@@ -347,8 +360,13 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
 }
 
 float4 PsMain(VsOut i) : SV_Target {
-    // The solids stand in the eye's own world: cut away wherever a window shows another place.
-    if (WindowChainDepth(i.rel, 1u) != 0u) discard;
+    // THE HULLS' RULE (Vessel.hlsl): a pixel belongs to the world whose depth its ray reaches, and
+    // to no other -- the eye's own cut away where a window shows another place, a window world's
+    // kept only where the eye reaches it through every box before it.
+    const uint depth = gBdMesh.z;
+    if (WindowChainDepth(i.rel, depth + 1u) != depth) discard;
+    // The sun of that world, through its window (the hulls' law); its zenith likewise.
+    const float3 sunHere = (depth > 0u) ? normalize(WtWinSun(depth - 1u).xyz) : GA_SUN_DIR;
     // THE LAND'S LIGHT (Globe.hlsl's law, Common.hlsli's terms): the sky's irradiance on the face
     // plus the sun through the air, which the PLANET decides is up at this point -- never the face's
     // own tilt. The point's zenith and height are asked of the sphere (its centre at flat
@@ -356,8 +374,8 @@ float4 PsMain(VsOut i) : SV_Target {
     const float Rb = gSkyLut.y;
     const float3 fromCentre = gEyeRel.xyz + i.rel + float3(0.0f, Rb, 0.0f);
     const float r = length(fromCentre);
-    const float3 up = fromCentre / r;
-    const float h = r - Rb;
+    const float3 up = (depth > 0u) ? normalize(WtWinUp(depth - 1u).xyz) : fromCentre / r;
+    const float h = (depth > 0u) ? 0.0f : r - Rb;
     // A box's faces share their corners and carry no normal: the face's own, from the surface's
     // derivatives, turned to face the eye (the box is convex and culled, so the eye sees outsides);
     // its top is a roof by its tilt.
@@ -370,7 +388,7 @@ float4 PsMain(VsOut i) : SV_Target {
         if (dot(n, i.rel) > 0.0f) n = -n;
         if (dot(n, up) > 0.9f) col *= 0.65f;   // kPalette[1] / kPalette[0]: the roof's shade of the wall's
     }
-    const float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
+    const float ndl = saturate(dot(n, sunHere)) * PlanetShadow(up, sunHere, h, Rb);
     const float3 lit = col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f);
     // ...and seen through THE AIR IN FRONT OF IT, the ground's own law: a box 60 km off fades into
     // the same haze as the land under it, where it stood out at full contrast.
