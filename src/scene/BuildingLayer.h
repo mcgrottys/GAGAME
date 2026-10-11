@@ -44,6 +44,7 @@
 #pragma once
 
 #include "compose/BuildingLod.h"
+#include "core/OriginLattice.h"
 #include "compose/BuildingSolids.h"
 #include "scene/Layer.h"
 
@@ -312,6 +313,13 @@ private:
     std::chrono::steady_clock::time_point m_t0 = std::chrono::steady_clock::now();
     float Now() const { return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_t0).count(); }
     static constexpr float kPageFadeS = 0.6f;   // a page's buildings come in over this, not in one frame
+    // THE WALK'S ORIGIN (core/OriginLattice.h): the planet's cloud's origin at the eye -- its shell
+    // and direction -- kept by the lattice's hysteresis. Every instance of a walk is stated about
+    // it, not about the eye, so a camera moving inside the cell moves one float3 in the constants
+    // and not a buffer of instances; the walk itself is asked again only when the eye has moved
+    // 2 % of its height (it was 0.2 %), since its instances no longer go stale with the eye.
+    OriginLattice::Origin m_walkOrigin{};
+    bool m_walkOriginSet = false;
     // The last walk's inputs: a new one starts when they have moved.
     double m_walkEye[3] = {1e30, 1e30, 1e30}, m_walkFwd[3] = {0, 0, 0};
     uint64_t m_walkCells = ~0ull, m_walkPages = ~0ull;

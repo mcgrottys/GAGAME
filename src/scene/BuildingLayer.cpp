@@ -907,7 +907,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     const double moved = std::sqrt((eye[0] - m_walkEye[0]) * (eye[0] - m_walkEye[0]) + (eye[1] - m_walkEye[1]) * (eye[1] - m_walkEye[1]) +
                                    (eye[2] - m_walkEye[2]) * (eye[2] - m_walkEye[2]));
     const double turned = fwd[0] * m_walkFwd[0] + fwd[1] * m_walkFwd[1] + fwd[2] * m_walkFwd[2];
-    if (moved < (std::max)(1.0, 0.002 * (std::max)(h, 0.0)) && turned > 0.99998 && m_walkCells == m_cellsVersion &&
+    if (moved < (std::max)(1.0, 0.02 * (std::max)(h, 0.0)) && turned > 0.99998 && m_walkCells == m_cellsVersion &&
         m_walkPages == m_pagesVersion) {
         return;
     }
@@ -919,6 +919,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     m_walkPages = m_pagesVersion;
     struct In {
         double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB, tauS;
+        double org[3];   // the walk's origin (the cloud's, at the eye), flat frame: what the instances are about
         struct KeyHash {
             size_t operator()(const PageKey& k) const {
                 return std::hash<uint64_t>()((uint64_t(uint32_t(std::get<0>(k) + 64)) << 56) ^
@@ -935,6 +936,23 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     for (int i = 0; i < 3; ++i) {
         in.eye[i] = eye[i];
         in.fwd[i] = fwd[i];
+    }
+    {   // THE ORIGIN: the cloud's point at the eye (its shell at the eye's altitude), with hysteresis.
+        constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+        const double d[3] = {std::cos(latDeg * kDeg) * std::cos(lonDeg * kDeg), std::sin(latDeg * kDeg), std::cos(latDeg * kDeg) * std::sin(lonDeg * kDeg)};
+        const double P[3] = {d[0] * (kR + h), d[1] * (kR + h), d[2] * (kR + h)};
+        OriginLattice L;
+        L.R = kR;
+        const OriginLattice::Origin o = L.Pick(P, m_walkOriginSet ? &m_walkOrigin : nullptr);
+        if (!m_walkOriginSet || !o.Same(m_walkOrigin)) {
+            Log("[buildings] the walk's origin is the cloud's point %lld on shell %d (%.5f N %.5f E, %.0f m up): the eye stands %.1f km from it%s",
+                static_cast<long long>(o.index), o.shell, o.anchor.latDeg, o.anchor.lonDeg, o.r - kR,
+                std::sqrt((P[0] - o.c[0]) * (P[0] - o.c[0]) + (P[1] - o.c[1]) * (P[1] - o.c[1]) + (P[2] - o.c[2]) * (P[2] - o.c[2])) / 1000.0,
+                m_walkOriginSet ? " (a new cell)" : "");
+            m_walkOrigin = o;
+            m_walkOriginSet = true;
+        }
+        m_place(m_walkOrigin.anchor.latDeg, m_walkOrigin.anchor.lonDeg, m_walkOrigin.r - kR, in.org);
     }
     in.lat = latDeg;
     in.lon = lonDeg;
@@ -970,7 +988,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         const auto t0 = std::chrono::steady_clock::now();
         Walked w;
         w.cellsVersion = in.cellsVersion;
-        for (int i = 0; i < 3; ++i) w.origin[i] = in.eye[i];
+        for (int i = 0; i < 3; ++i) w.origin[i] = in.org[i];   // the instances are about the cloud's point
         // THE WALK IN PARALLEL: the coarse levels walked here down to kSplit, the subtrees below it
         // shared out to threads, each into its own accumulator; merged after. A pure function of `in`.
         struct Inst {   // a shaped instance and the counts its tasks are cut from
@@ -1016,7 +1034,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             if (a1 <= 1e-9) { E[0] = N[1] * U[2] - N[2] * U[1]; E[1] = N[2] * U[0] - N[0] * U[2]; E[2] = N[0] * U[1] - N[1] * U[0]; }
             if (a2 <= 1e-9) { N[0] = U[1] * E[2] - U[2] * E[1]; N[1] = U[2] * E[0] - U[0] * E[2]; N[2] = U[0] * E[1] - U[1] * E[0]; }
             Box x{};
-            for (int i = 0; i < 3; ++i) x.c[i] = static_cast<float>(b.p[i] - in.eye[i]);
+            for (int i = 0; i < 3; ++i) x.c[i] = static_cast<float>(b.p[i] - in.org[i]);
             x.alpha = static_cast<float>(alpha);
             RotorOf(E, U, N, x.q);
             x.x[0] = static_cast<float>(a1);
@@ -1030,7 +1048,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             if (acc.out.size() + acc.inst.size() >= kMaxBoxes) return;
             Inst x{};
             const double E[3] = {b.e[0], b.e[1], b.e[2]}, N[3] = {b.n[0], b.n[1], b.n[2]}, U[3] = {b.up[0], b.up[1], b.up[2]};
-            for (int i = 0; i < 3; ++i) x.b.c[i] = static_cast<float>(b.g[i] - in.eye[i]);
+            for (int i = 0; i < 3; ++i) x.b.c[i] = static_cast<float>(b.g[i] - in.org[i]);
             x.b.alpha = static_cast<float>(alpha);
             RotorOf(E, U, N, x.b.q);
             const uint32_t a32 = static_cast<uint32_t>(addr);
@@ -1187,15 +1205,16 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         w.fading = top.fading;
         const auto tV = std::chrono::steady_clock::now();
         w.msVisit = std::chrono::duration<double, std::milli>(tV - t0).count();
-        // Far to near: a building fading in blends over what stands behind it (painter's order, depth tested).
-        std::sort(std::execution::par, out.begin(), out.end(), [](const Box& a, const Box& b) {
-            return a.c[0] * a.c[0] + a.c[1] * a.c[1] + a.c[2] * a.c[2] > b.c[0] * b.c[0] + b.c[1] * b.c[1] + b.c[2] * b.c[2];
-        });
+        // Far to near FROM THE EYE (the instances are about the walk's origin, the eye a float3 off
+        // it): a building fading in blends over what stands behind it (painter's order, depth tested).
+        const float eo[3] = {float(in.eye[0] - in.org[0]), float(in.eye[1] - in.org[1]), float(in.eye[2] - in.org[2])};
+        auto d2 = [&eo](const float c[3]) {
+            const float x = c[0] - eo[0], y = c[1] - eo[1], z = c[2] - eo[2];
+            return x * x + y * y + z * z;
+        };
+        std::sort(std::execution::par, out.begin(), out.end(), [&](const Box& a, const Box& b) { return d2(a.c) > d2(b.c); });
         std::vector<Inst>& inst = top.inst;
-        std::sort(std::execution::par, inst.begin(), inst.end(), [](const Inst& a, const Inst& b) {
-            return a.b.c[0] * a.b.c[0] + a.b.c[1] * a.b.c[1] + a.b.c[2] * a.b.c[2] >
-                   b.b.c[0] * b.b.c[0] + b.b.c[1] * b.b.c[1] + b.b.c[2] * b.b.c[2];
-        });
+        std::sort(std::execution::par, inst.begin(), inst.end(), [&](const Inst& a, const Inst& b) { return d2(a.b.c) > d2(b.b.c); });
         // (No task list: the amplification stage cuts the instances' edges and roofs into groups.)
         const auto tS = std::chrono::steady_clock::now();
         w.msSort = std::chrono::duration<double, std::milli>(tS - tV).count();
