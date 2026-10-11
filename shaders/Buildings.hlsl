@@ -15,8 +15,8 @@
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
     float4 gBdTime;     // x = the layer's now (s), y = a page's fade-in (s), z = a pixel's angle (rad)
-    uint4 gBdMesh;      // the shapes' draw: x first instance, y first task (float4 rows of the walk
-                        // buffer), z tasks, w the shape pool's heap slot (compose/BuildingShape.h)
+    uint4 gBdMesh;      // a draw of the walk's instances: x the first instance's row (three float4
+                        // rows each), y how many, w the shape pool's heap slot (compose/BuildingShape.h)
 };
 
 struct BuildingVertex {
@@ -55,50 +55,103 @@ VsOut VsMain(uint vid : SV_VertexID) {
     return o;
 }
 
-// THE FAR BOXES (docs/BUILDING_LOD.md): a building past the detail cells as its own box, three
-// half-axes about a centre (metres from its TILE's origin), 36 vertices a box from SV_VertexID. The
-// buffer is bound at the same slot as the prisms' (one draw reads one of them).
-struct BuildingBox {
-    float3 c; float alpha;  // its fade-in: (pixels - lodPixels) / lodPixels, up to 1
-    float3 u; float landed; // long half-axis; its page's landing on the layer's clock (s)
-    float3 v; float pad2;   // short half-axis
-    float3 w; float pad3;   // up half-axis
-};
-StructuredBuffer<BuildingBox> gBoxes : register(t0, space0);
+// THE WALK'S INSTANCES (scene/BuildingLayer.h BuildingLayer::Inst, 48 bytes, three float4 rows):
+//   row 0  c.xyz, alpha      the centre (a box) or the ground under the centroid (a shape), metres
+//                            from the walk's origin; the fade-in alpha
+//   row 1  q                 THE ATTITUDE AS ONE ROTOR: east, up and north are q acting on the flat
+//                            frame's x, y and z (a right-handed triple) -- one object in place of
+//                            three unit vectors
+//   row 2  a box: a1, a2, hz, landed      the half-extents (long, short, up) and the page's landing
+//          a shape: addr, landed, 0, 0    the record's byte address in the shape pool (an integer)
+// Read as INTEGERS (a word of two 16-bit numbers is a denormal as a float, and a float load may
+// flush it to zero) and reinterpreted where a float is meant.
+StructuredBuffer<uint4> gWalk : register(t0, space0);
+StructuredBuffer<uint4> gShapePool[] : register(t0, space7);   // the heap's buffers (gWorlds' range)
 
+float3 Rotate(float4 q, float3 v) { return v + 2.0f * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+struct Inst {
+    float3 c; float alpha;
+    float4 q;
+    uint4 x;   // row 2 as read
+};
+Inst ReadInst(uint row) {
+    Inst o;
+    const float4 r0 = asfloat(gWalk[row]);
+    o.c = r0.xyz;
+    o.alpha = r0.w;
+    o.q = asfloat(gWalk[row + 1u]);
+    o.x = gWalk[row + 2u];
+    return o;
+}
+float FadeIn(float alpha, float landed) { return alpha * saturate((gBdTime.x - landed) / max(gBdTime.y, 1e-3f)); }
+
+// THE FAR BOXES (docs/BUILDING_LOD.md): a building past its own form as its moment box, 8 vertices
+// and 12 triangles a box, 16 boxes a mesh group. The faces share their corners, so no vertex carries
+// a normal: the pixel shader takes the face's from the surface's own derivatives (a flat face has
+// one), and reads the top as a roof by its tilt. Counter-clockwise from outside on every face.
+static const uint3 kBoxTris[12] = {
+    uint3(1, 3, 7), uint3(1, 7, 5),   // +east
+    uint3(0, 4, 6), uint3(0, 6, 2),   // -east
+    uint3(2, 6, 7), uint3(2, 7, 3),   // +north
+    uint3(0, 1, 5), uint3(0, 5, 4),   // -north
+    uint3(4, 5, 7), uint3(4, 7, 6),   // +up: the roof
+    uint3(0, 2, 3), uint3(0, 3, 1)    // -up
+};
+[outputtopology("triangle")]
+[numthreads(128, 1, 1)]
+void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut verts[128], out indices uint3 tris[192]) {
+    const uint b0 = (gid.x + gid.y * 65535u) * 16u;   // past 65535 groups the dispatch takes a second row
+    const uint n = b0 < gBdMesh.y ? min(16u, gBdMesh.y - b0) : 0u;
+    SetMeshOutputCounts(n * 8u, n * 12u);
+    const uint bi = gi >> 3, corner = gi & 7u;
+    if (bi >= n) return;
+    const Inst b = ReadInst(gBdMesh.x + (b0 + bi) * 3u);
+    const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
+    const float3 ext = asfloat(b.x.xyz);
+    const float3 sgn = float3((corner & 1u) ? 1.0f : -1.0f, (corner & 2u) ? 1.0f : -1.0f, (corner & 4u) ? 1.0f : -1.0f);
+    VsOut o;
+    o.rel = gBdOrigin.xyz + b.c + sgn.x * ext.x * E + sgn.y * ext.y * N + sgn.z * ext.z * U;
+    o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+    o.n = float3(0, 0, 0);   // flat: the pixel shader's derivatives
+    o.col = kPalette[0] * gBdOrigin.w;
+    o.alpha = FadeIn(b.alpha, asfloat(b.x.w));
+    verts[gi] = o;
+    // 12 triangles over 8 threads: each writes one, the first four write a second.
+    const uint tb = bi * 12u, vb = bi * 8u;
+    tris[tb + corner] = kBoxTris[corner] + vb;
+    if (corner < 4u) tris[tb + 8u + corner] = kBoxTris[8u + corner] + vb;
+}
+
+// ...and the same boxes through the vertex stage where there are no mesh shaders (36 vertices a box).
 VsOut VsBox(uint vid : SV_VertexID) {
-    const BuildingBox b = gBoxes[vid / 36u];
+    const Inst b = ReadInst(gBdMesh.x + (vid / 36u) * 3u);
+    const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
+    const float3 ext = asfloat(b.x.xyz);
     const uint f = (vid % 36u) / 6u, t = vid % 6u;   // face, then its two triangles
-    const float s = (f & 1u) ? -1.0f : 1.0f;         // faces in pairs along u, v, w
+    const float s = (f & 1u) ? -1.0f : 1.0f;         // faces in pairs along E, N, U
     const uint ax = f >> 1;
-    const float3 A = ax == 0u ? b.u : (ax == 1u ? b.v : b.w);
-    const float3 B = ax == 0u ? b.v : (ax == 1u ? b.w : b.u);
-    const float3 C = ax == 0u ? b.w : (ax == 1u ? b.u : b.v);
+    const float3 A = ax == 0u ? E * ext.x : (ax == 1u ? N * ext.y : U * ext.z);
+    const float3 B = ax == 0u ? N * ext.y : (ax == 1u ? U * ext.z : E * ext.x);
+    const float3 C = ax == 0u ? U * ext.z : (ax == 1u ? E * ext.x : N * ext.y);
     static const float2 kQuad[6] = {float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1)};
-    // Counter-clockwise seen from OUTSIDE on both faces of a pair: the -A face is the +A face
-    // mirrored, so its quad runs the other way (the layer culls back faces).
-    const float2 q = float2(kQuad[t].x * s, kQuad[t].y);
+    const float2 q = float2(kQuad[t].x * s, kQuad[t].y);   // counter-clockwise from outside on both faces
     VsOut o;
     o.rel = gBdOrigin.xyz + b.c + s * A + q.x * B + q.y * C;
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
-    o.n = s * A / max(length(A), 1e-6f);   // a box with no width keeps a finite normal
-    const bool roof = ax == 2u && s > 0.0f;
-    o.col = kPalette[roof ? 1u : 0u] * gBdOrigin.w;
-    // A page arrives whole; its buildings come in over gBdTime.y from its landing, not in one frame.
-    o.alpha = b.alpha * saturate((gBdTime.x - b.landed) / max(gBdTime.y, 1e-3f));
+    o.n = s * A / max(length(A), 1e-6f);
+    o.col = kPalette[(ax == 2u && s > 0.0f) ? 1u : 0u] * gBdOrigin.w;
+    o.alpha = FadeIn(b.alpha, asfloat(b.x.w));
     return o;
 }
 
-// THE BUILDINGS' OWN FORMS (compose/BuildingShape.h, GALOD04): one group a TASK of the walk's --
-// up to 32 edges of a building's walls, or up to 64 of its roof's triangles -- extruded here from the
-// footprint the shape pool holds, so a building is the solid it is at every distance, never a box.
-// The walk buffer (t0): instances of 4 rows (c ground under the centroid, alpha | east, landed |
-// north, shape address | up, -) about the walk's origin, then the tasks two a row (instance, code:
-// bit 31 roof, the rest the chunk).
-// Both read as INTEGERS: a word of two small 16-bit numbers is a denormal as a float, and a float
-// load may flush it to zero -- a roof triangle on vertex 0 collapsed, an instance index lost.
-StructuredBuffer<uint4> gWalk : register(t0, space0);
-StructuredBuffer<uint4> gShapePool[] : register(t0, space7);   // the heap's buffers (gWorlds' range)
+// THE BUILDINGS' OWN FORMS (compose/BuildingShape.h, GALOD04), extruded from the footprints the
+// shape pool holds, so a building is the solid it is at every distance, never a box.
+//
+// THE STREAMS (2026-10-10). An amplification group takes 64 instances, reads each record's counts
+// from the pool, and lays the group's walls end to end as one stream of EDGES and its roofs as one
+// stream of TRIANGLES; it launches a mesh group for every 64 of either, full whatever the buildings'
+// sizes (a four-edged house no longer takes a group of its own). A mesh thread finds its instance
+// by where its stream index falls among the payload's running counts.
 uint ShapeU32(uint b) {
     const uint4 q = gShapePool[gBdMesh.w][b >> 4];
     const uint k = (b >> 2) & 3u;
@@ -110,49 +163,100 @@ uint ShapeU16(uint b) {
 }
 float ShapeI16(uint b) { return float(int(ShapeU16(b) << 16) >> 16); }
 
-static const uint kTaskEdges = 32u, kTaskTris = 64u;   // MIRRORS BuildingLayer::kTaskEdges, kTaskTris
+struct ShapePayload {
+    uint instBase, edgeTotal, triTotal, pad;
+    uint edgeStart[64];   // edges before instance i of the group (exclusive)
+    uint triStart[64];    // roof triangles before it
+};
+groupshared ShapePayload sPay;
+groupshared uint sScanE[64], sScanT[64];
+
+[numthreads(64, 1, 1)]
+void AsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
+    const uint inst = gid.x * 64u + gi;
+    uint edges = 0u, tris = 0u;
+    if (inst < gBdMesh.y) {
+        const uint addr = gWalk[gBdMesh.x + inst * 3u + 2u].x;
+        const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
+        const uint nV = w0 & 0xFFFFu, flags = (w1 >> 8) & 0xFFu;
+        edges = (flags & 4u) ? max(nV, 1u) - 1u : nV;   // a ribbon of n points has n - 1 segments
+        tris = w0 >> 16;
+    }
+    // Exclusive running counts over the 64, a Hillis-Steele scan in groupshared (two waves or one).
+    sScanE[gi] = edges;
+    sScanT[gi] = tris;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint d = 1u; d < 64u; d <<= 1) {
+        const uint e = gi >= d ? sScanE[gi - d] : 0u, t = gi >= d ? sScanT[gi - d] : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        sScanE[gi] += e;
+        sScanT[gi] += t;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    sPay.edgeStart[gi] = sScanE[gi] - edges;   // inclusive -> exclusive
+    sPay.triStart[gi] = sScanT[gi] - tris;
+    if (gi == 63u) {
+        sPay.instBase = gid.x * 64u;
+        sPay.edgeTotal = sScanE[63];
+        sPay.triTotal = sScanT[63];
+        sPay.pad = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    const uint groups = (sPay.edgeTotal + 63u) / 64u + (sPay.triTotal + 63u) / 64u;
+    DispatchMesh(groups, 1, 1, sPay);
+}
+
+// The instance whose stream holds index s: the last i with start[i] <= s (six halvings over 64).
+uint InstanceOf(in ShapePayload pay, bool roof, uint s) {
+    uint lo = 0u, hi = 63u;
+    [unroll] for (uint k = 0u; k < 6u; ++k) {
+        const uint mid = (lo + hi + 1u) >> 1;
+        const uint st = roof ? pay.triStart[mid] : pay.edgeStart[mid];
+        if (st <= s) lo = mid; else hi = mid - 1u;
+    }
+    return lo;
+}
+
 [outputtopology("triangle")]
 [numthreads(64, 1, 1)]
-void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut verts[192],
-             out indices uint3 tris[64]) {
-    const uint t = gid.x + gid.y * 65535u;
-    const bool live = t < gBdMesh.z;
-    const uint4 tk = gWalk[gBdMesh.y + (min(t, max(gBdMesh.z, 1u) - 1u) >> 1)];
-    const uint inst = (t & 1u) ? tk.z : tk.x, code = (t & 1u) ? tk.w : tk.y;
-    const uint ib = gBdMesh.x + inst * 4u;
-    const float4 r0 = asfloat(gWalk[ib]), r1 = asfloat(gWalk[ib + 1u]), r2 = asfloat(gWalk[ib + 2u]),
-                 r3 = asfloat(gWalk[ib + 3u]);
-    const float3 c = r0.xyz, E = r1.xyz, N = r2.xyz, U = r3.xyz;
-    const uint addr = gWalk[ib + 2u].w;
+void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePayload pay,
+             out vertices VsOut verts[256], out indices uint3 tris[128]) {
+    const uint edgeGroups = (pay.edgeTotal + 63u) / 64u;
+    const bool roof = gid.x >= edgeGroups;
+    const uint s0 = (roof ? gid.x - edgeGroups : gid.x) * 64u;
+    const uint total = roof ? pay.triTotal : pay.edgeTotal;
+    const uint n = s0 < total ? min(64u, total - s0) : 0u;
+    // One count for the group, set before any output (the validator's rule): 4 vertices and 2
+    // triangles an edge (a wall, or a ribbon's segment), or 3 and 1 a roof triangle.
+    SetMeshOutputCounts(roof ? n * 3u : n * 4u, roof ? n : n * 2u);
+    if (gi >= n) return;
+    const uint s = s0 + gi;
+    const uint k = InstanceOf(pay, roof, s);
+    const uint local = s - (roof ? pay.triStart[k] : pay.edgeStart[k]);
+    const Inst b = ReadInst(gBdMesh.x + (pay.instBase + k) * 3u);
+    const float3 c = b.c, E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
+    const uint addr = b.x.x;
     const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
     const uint nVerts = w0 & 0xFFFFu, nTris = w0 >> 16, nRings = w1 & 0xFFu, flags = (w1 >> 8) & 0xFFu;
     const float bottom = asfloat(ShapeU32(addr + 8u)), top = asfloat(ShapeU32(addr + 12u));
     const uint ringAt = addr + 16u, xyAt = ringAt + 2u * nRings, triAt = xyAt + 4u * nVerts;
     const float unit = (flags & 2u) ? 1.0f : 0.1f;
     const float part = (flags & 1u) ? 2.0f : 0.0f;
-    const bool roof = (code >> 31) != 0u;
     const bool ribbon = (flags & 4u) != 0u;   // shape::kRibbon: a road piece, one quad a segment
-    const uint first = (code & 0x7FFFFFFFu) * (roof ? kTaskTris : kTaskEdges);
-    const uint total = ribbon ? nVerts - 1u : (roof ? nTris : nVerts);
-    const uint n = live && first < total ? min(roof ? kTaskTris : kTaskEdges, total - first) : 0u;
-    // One count for the group, set before any output (the validator's rule): 4 vertices and 2
-    // triangles an edge (a wall, or a ribbon's segment), or 3 and 1 a roof triangle.
-    SetMeshOutputCounts(roof ? n * 3u : n * 4u, roof ? n : n * 2u);
-    if (gi >= n) return;
     VsOut o;
-    o.alpha = r0.w * saturate((gBdTime.x - r1.w) / max(gBdTime.y, 1e-3f));   // the page's fade-in, as VsBox
+    o.alpha = FadeIn(b.alpha, asfloat(b.x.y));
     if (ribbon) {   // THE RIBBON: segment e of the polyline as a quad, mitred at both vertices
         const uint zAt = triAt + 6u * nTris;                    // the heights the page's reader filled
         const float w = float(ShapeU16(addr + 6u)) * 0.1f;      // ShapeHead.pad: the width, decimetres
-        const uint e = first + gi;
+        const uint e = local;
         float3 P[4];   // prev, a, b, next (an end repeats itself)
-        [unroll] for (uint k = 0u; k < 4u; ++k) {
-            const uint v = uint(clamp(int(e) - 1 + int(k), 0, int(nVerts) - 1));
-            P[k] = float3(ShapeI16(xyAt + 4u * v) * unit, ShapeI16(xyAt + 4u * v + 2u) * unit, ShapeI16(zAt + 2u * v) * 0.1f);
+        [unroll] for (uint j = 0u; j < 4u; ++j) {
+            const uint v = uint(clamp(int(e) - 1 + int(j), 0, int(nVerts) - 1));
+            P[j] = float3(ShapeI16(xyAt + 4u * v) * unit, ShapeI16(xyAt + 4u * v + 2u) * unit, ShapeI16(zAt + 2u * v) * 0.1f);
         }
-        const float2 s = P[2].xy - P[1].xy;
-        const float sl = length(s);
-        const float2 sn = sl > 1e-4f ? float2(s.y, -s.x) / sl : float2(0.0f, 0.0f);   // the segment's right
+        const float2 sg = P[2].xy - P[1].xy;
+        const float sl = length(sg);
+        const float2 sn = sl > 1e-4f ? float2(sg.y, -sg.x) / sl : float2(0.0f, 0.0f);   // the segment's right
         // The miter at each end: the right of the bisector tangent, lengthened by 1 / cos of the
         // half turn (held to 2: a hairpin does not spike), so neighbouring quads share their edge.
         float2 m[2];
@@ -173,15 +277,15 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut
         o.col = kPalette[(flags & 8u) ? 5u : 4u] * gBdOrigin.w;
         const float2 xy[4] = {P[1].xy + m[0] * hw, P[1].xy - m[0] * hw, P[2].xy + m[1] * hw, P[2].xy - m[1] * hw};
         const float zz[4] = {P[1].z + top, P[1].z + top, P[2].z + top, P[2].z + top};
-        [unroll] for (uint k = 0u; k < 4u; ++k) {
-            o.rel = gBdOrigin.xyz + c + xy[k].x * E + xy[k].y * N + zz[k] * U;
+        [unroll] for (uint j = 0u; j < 4u; ++j) {
+            o.rel = gBdOrigin.xyz + c + xy[j].x * E + xy[j].y * N + zz[j] * U;
             o.pos = mul(float4(o.rel, 1.0f), gViewProj);
-            verts[gi * 4u + k] = o;
+            verts[gi * 4u + j] = o;
         }
         tris[gi * 2u] = uint3(gi * 4u, gi * 4u + 2u, gi * 4u + 1u);
         tris[gi * 2u + 1u] = uint3(gi * 4u + 1u, gi * 4u + 2u, gi * 4u + 3u);
     } else if (!roof) {   // the walls: edge e from its vertex to its ring's next
-        const uint e = first + gi;
+        const uint e = local;
         uint start = 0u, len = 0u;
         for (uint r = 0u; r < nRings; ++r) {
             len = ShapeU16(ringAt + 2u * r);
@@ -190,30 +294,30 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut
         }
         const uint f = (e + 1u < start + len) ? e + 1u : start;
         const float2 a = float2(ShapeI16(xyAt + 4u * e), ShapeI16(xyAt + 4u * e + 2u)) * unit;
-        const float2 b = float2(ShapeI16(xyAt + 4u * f), ShapeI16(xyAt + 4u * f + 2u)) * unit;
-        const float2 d = b - a;
+        const float2 bb = float2(ShapeI16(xyAt + 4u * f), ShapeI16(xyAt + 4u * f + 2u)) * unit;
+        const float2 d = bb - a;
         const float l = length(d);
         const float2 out2 = l > 1e-4f ? float2(d.y, -d.x) / l : float2(0.0f, 0.0f);   // the edge's right: out
         o.n = out2.x * E + out2.y * N;
         o.col = kPalette[uint(part)] * gBdOrigin.w;
-        const float2 xy[4] = {a, b, b, a};
+        const float2 xy[4] = {a, bb, bb, a};
         const float zz[4] = {bottom, bottom, top, top};
-        [unroll] for (uint k = 0u; k < 4u; ++k) {
-            o.rel = gBdOrigin.xyz + c + xy[k].x * E + xy[k].y * N + zz[k] * U;
+        [unroll] for (uint j = 0u; j < 4u; ++j) {
+            o.rel = gBdOrigin.xyz + c + xy[j].x * E + xy[j].y * N + zz[j] * U;
             o.pos = mul(float4(o.rel, 1.0f), gViewProj);
-            verts[gi * 4u + k] = o;
+            verts[gi * 4u + j] = o;
         }
         tris[gi * 2u] = uint3(gi * 4u, gi * 4u + 1u, gi * 4u + 2u);
         tris[gi * 2u + 1u] = uint3(gi * 4u, gi * 4u + 2u, gi * 4u + 3u);
     } else {       // the roof: its triangle at the top
         o.n = U;
         o.col = kPalette[uint(part) + 1u] * gBdOrigin.w;
-        [unroll] for (uint k = 0u; k < 3u; ++k) {
-            const uint v = ShapeU16(triAt + 6u * (first + gi) + 2u * k);
+        [unroll] for (uint j = 0u; j < 3u; ++j) {
+            const uint v = ShapeU16(triAt + 6u * local + 2u * j);
             const float2 q = float2(ShapeI16(xyAt + 4u * v), ShapeI16(xyAt + 4u * v + 2u)) * unit;
             o.rel = gBdOrigin.xyz + c + q.x * E + q.y * N + top * U;
             o.pos = mul(float4(o.rel, 1.0f), gViewProj);
-            verts[gi * 3u + k] = o;
+            verts[gi * 3u + j] = o;
         }
         tris[gi] = uint3(gi * 3u, gi * 3u + 1u, gi * 3u + 2u);
     }
@@ -231,9 +335,20 @@ float4 PsMain(VsOut i) : SV_Target {
     const float r = length(fromCentre);
     const float3 up = fromCentre / r;
     const float h = r - Rb;
-    const float3 n = normalize(i.n);
+    // A box's faces share their corners and carry no normal: the face's own, from the surface's
+    // derivatives, turned to face the eye (the box is convex and culled, so the eye sees outsides);
+    // its top is a roof by its tilt.
+    float3 n;
+    float3 col = i.col;
+    if (dot(i.n, i.n) > 0.25f) {
+        n = normalize(i.n);
+    } else {
+        n = normalize(cross(ddy(i.rel), ddx(i.rel)));
+        if (dot(n, i.rel) > 0.0f) n = -n;
+        if (dot(n, up) > 0.9f) col *= 0.65f;   // kPalette[1] / kPalette[0]: the roof's shade of the wall's
+    }
     const float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
-    const float3 lit = i.col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f);
+    const float3 lit = col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f);
     // ...and seen through THE AIR IN FRONT OF IT, the ground's own law: a box 60 km off fades into
     // the same haze as the land under it, where it stood out at full contrast.
     const float range = length(i.rel);

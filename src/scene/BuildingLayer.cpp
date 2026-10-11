@@ -87,6 +87,7 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         o7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED) {
         hal::MeshPipelineDesc md;
         md.rootSig = m_rootSig;
+        md.as = sc.Compile(path, L"AsShape", L"as_6_5");   // the streams: 64 instances -> their edge and roof groups
         md.ms = sc.Compile(path, L"MsShape", L"ms_6_5");
         md.ps = sc.Compile(path, L"PsMain", L"ps_6_5");
         md.cull = D3D12_CULL_MODE_BACK;   // the outside is the front (above)
@@ -97,8 +98,15 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         md.blend = true;   // a building fading in, as the boxes
         md.srcBlend = D3D12_BLEND_SRC_ALPHA;
         md.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
-        if (md.ms.Valid() && md.ps.Valid()) {
+        if (md.as.Valid() && md.ms.Valid() && md.ps.Valid()) {
             hal::Reload(m_psoShape, [&] { return hal::BuildMesh(gpu, md, "buildings.shapes"); }, "buildings.shapes");
+        }
+        // The boxes by mesh shader too: 8 vertices and 12 triangles a box, 16 a group, no amplification.
+        hal::MeshPipelineDesc mb = md;
+        mb.as = ShaderBlob{};
+        mb.ms = sc.Compile(path, L"MsBox", L"ms_6_5");
+        if (mb.ms.Valid() && mb.ps.Valid()) {
+            hal::Reload(m_psoBoxMesh, [&] { return hal::BuildMesh(gpu, mb, "buildings.boxes.mesh"); }, "buildings.boxes.mesh");
         }
     }
     return okBox && ok;
@@ -479,6 +487,34 @@ void PointFrame(const BuildingLayer::Place& place, double lat, double lon, doubl
 
 static int FloorDivI(int a, int n) { return a >= 0 ? a / n : -((-a + n - 1) / n); }
 
+// THE ATTITUDE AS A ROTOR: the rotor taking the flat frame's axes (x east, y up, z north: a
+// right-handed triple) to the local east, up and north, as its four components (x, y, z, w) -- the
+// GPU rotates the axes back out (Buildings.hlsl Rotate). The order matters: (east, north, up) is
+// LEFT-handed in this frame, and a rotor cannot reach a mirror -- built from it, the footprints came
+// out mirrored, their near walls culled as backs and their far walls lit (2026-10-10). Shepperd's
+// choice of the largest diagonal keeps it exact for every attitude.
+static void RotorOf(const double E[3], const double U[3], const double N[3], float q[4]) {
+    // The matrix whose columns are E, U, N: m[row][col].
+    const double m00 = E[0], m10 = E[1], m20 = E[2], m01 = U[0], m11 = U[1], m21 = U[2], m02 = N[0], m12 = N[1], m22 = N[2];
+    const double tr = m00 + m11 + m22;
+    double x, y, z, w;
+    if (tr > 0.0) {
+        const double s = std::sqrt(tr + 1.0) * 2.0;
+        w = 0.25 * s; x = (m21 - m12) / s; y = (m02 - m20) / s; z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const double s = std::sqrt(1.0 + m00 - m11 - m22) * 2.0;
+        w = (m21 - m12) / s; x = 0.25 * s; y = (m01 + m10) / s; z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const double s = std::sqrt(1.0 + m11 - m00 - m22) * 2.0;
+        w = (m02 - m20) / s; x = (m01 + m10) / s; y = 0.25 * s; z = (m12 + m21) / s;
+    } else {
+        const double s = std::sqrt(1.0 + m22 - m00 - m11) * 2.0;
+        w = (m10 - m01) / s; x = (m02 + m20) / s; y = (m12 + m21) / s; z = 0.25 * s;
+    }
+    q[0] = float(x); q[1] = float(y); q[2] = float(z); q[3] = float(w);
+}
+static double Len3(const float v[3]) { return std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]); }
+
 static std::pair<int, int> CellOf(double lat, double lon) {
     return {static_cast<int>(std::floor(lon / BuildingLayer::kCellDeg)), static_cast<int>(std::floor(lat / BuildingLayer::kCellDeg))};
 }
@@ -728,7 +764,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     for (Walked& w : walked) {
         if ((w.count || w.insts) && w.vb.Valid()) {   // the cells' own copy and barrier (Upload)
             ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
-            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + uint64_t(w.tasks) * 8u + 15u) & ~uint64_t(15);
+            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + 15u) & ~uint64_t(15);
             cl->CopyBufferRegion(w.vb.res.Get(), 0, w.staging.res.Get(), 0, bytes);
             D3D12_RESOURCE_BARRIER br{};
             br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -743,7 +779,6 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         for (int i = 0; i < 3; ++i) m_drawn.origin[i] = w.origin[i];
         m_drawn.count = w.vb.Valid() ? w.count : 0;
         m_drawn.insts = w.vb.Valid() ? w.insts : 0;
-        m_drawn.tasks = w.vb.Valid() ? w.tasks : 0;
         m_drawnUsed = std::set<PageKey>(w.used.begin(), w.used.end());
         m_drawnHold = std::move(w.hold);
         m_drawn.cpu = std::move(w.cpu);
@@ -753,12 +788,12 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         // The pages the walk wanted, the largest on screen first.
         m_wants = std::move(w.wants);
         ++m_walks;
-        const bool largest = m_drawn.tasks > m_walkTasksMax;
-        if (largest) m_walkTasksMax = m_drawn.tasks;
-        if (m_walks <= 3 || m_walks % 50 == 0 || (largest && m_drawn.tasks > 500000u)) {
-            Log("[buildings] frame %llu walk %llu: %u boxes + %u shapes in %u mesh tasks (%llu buildings, %llu fading in) over %llu nodes in %.1f ms (visit %.1f, "
+        const bool largest = m_drawn.insts > m_walkInstsMax;
+        if (largest) m_walkInstsMax = m_drawn.insts;
+        if (m_walks <= 3 || m_walks % 50 == 0 || (largest && m_drawn.insts > 200000u)) {
+            Log("[buildings] frame %llu walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes in %.1f ms (visit %.1f, "
                 "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame),
-                static_cast<unsigned long long>(m_walks), m_drawn.count, m_drawn.insts, m_drawn.tasks, static_cast<unsigned long long>(w.singles),
+                static_cast<unsigned long long>(m_walks), m_drawn.count, m_drawn.insts, static_cast<unsigned long long>(w.singles),
                 static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), w.ms, w.msVisit, w.msSort,
                 w.msBuf, m_pages.size(), m_pageBytes / 1048576.0, m_wants.size());
         }
@@ -967,31 +1002,40 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         };
         auto emit = [&](Acc& acc, const RtBox& b, double alpha, float landed) {
             if (!b.valid || acc.out.size() >= kMaxBoxes) return;
-            Box x{};
+            // The half-axes as a rotor and three extents; an axis of no length takes its direction
+            // from the other two (a fold of no spread is still a box with an attitude).
+            const double a1 = Len3(b.u), a2 = Len3(b.v), hz = Len3(b.w);
+            double E[3], N[3], U[3];
             for (int i = 0; i < 3; ++i) {
-                x.c[i] = static_cast<float>(b.p[i] - in.eye[i]);
-                x.u[i] = b.u[i];
-                x.v[i] = b.v[i];
-                x.w[i] = b.w[i];
+                E[i] = a1 > 1e-9 ? b.u[i] / a1 : 0.0;
+                N[i] = a2 > 1e-9 ? b.v[i] / a2 : 0.0;
+                U[i] = hz > 1e-9 ? b.w[i] / hz : 0.0;
             }
+            if (hz <= 1e-9) return;   // nothing stands
+            if (a1 <= 1e-9 && a2 <= 1e-9) return;
+            if (a1 <= 1e-9) { E[0] = N[1] * U[2] - N[2] * U[1]; E[1] = N[2] * U[0] - N[0] * U[2]; E[2] = N[0] * U[1] - N[1] * U[0]; }
+            if (a2 <= 1e-9) { N[0] = U[1] * E[2] - U[2] * E[1]; N[1] = U[2] * E[0] - U[0] * E[2]; N[2] = U[0] * E[1] - U[1] * E[0]; }
+            Box x{};
+            for (int i = 0; i < 3; ++i) x.c[i] = static_cast<float>(b.p[i] - in.eye[i]);
             x.alpha = static_cast<float>(alpha);
-            x.pad1 = landed;   // Buildings.hlsl VsBox: its page's landing, for the fade-in
+            RotorOf(E, U, N, x.q);
+            x.x[0] = static_cast<float>(a1);
+            x.x[1] = static_cast<float>(a2);
+            x.x[2] = static_cast<float>(hz);
+            x.x[3] = landed;   // Buildings.hlsl: its page's landing, for the fade-in
             acc.out.push_back(x);
         };
         // ...or its own form: the ground frame under its centroid and its record in the pool (MsShape).
         auto emitShape = [&](Acc& acc, const RtBld& b, double alpha, float landed, uint64_t addr) {
             if (acc.out.size() + acc.inst.size() >= kMaxBoxes) return;
             Inst x{};
-            for (int i = 0; i < 3; ++i) {
-                x.b.c[i] = static_cast<float>(b.g[i] - in.eye[i]);
-                x.b.u[i] = b.e[i];
-                x.b.v[i] = b.n[i];
-                x.b.w[i] = b.up[i];
-            }
+            const double E[3] = {b.e[0], b.e[1], b.e[2]}, N[3] = {b.n[0], b.n[1], b.n[2]}, U[3] = {b.up[0], b.up[1], b.up[2]};
+            for (int i = 0; i < 3; ++i) x.b.c[i] = static_cast<float>(b.g[i] - in.eye[i]);
             x.b.alpha = static_cast<float>(alpha);
-            x.b.pad1 = landed;
+            RotorOf(E, U, N, x.b.q);
             const uint32_t a32 = static_cast<uint32_t>(addr);
-            std::memcpy(&x.b.pad2, &a32, 4);
+            std::memcpy(&x.b.x[0], &a32, 4);
+            x.b.x[1] = landed;
             x.nV = b.nV;
             x.nT = b.nT;
             acc.inst.push_back(x);
@@ -1152,28 +1196,20 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             return a.b.c[0] * a.b.c[0] + a.b.c[1] * a.b.c[1] + a.b.c[2] * a.b.c[2] >
                    b.b.c[0] * b.b.c[0] + b.b.c[1] * b.b.c[1] + b.b.c[2] * b.b.c[2];
         });
-        // THE TASKS, in the instances' order (the raster keeps the groups' order: far to near).
-        std::vector<uint32_t> tasks;
-        tasks.reserve(inst.size() * 4);
-        for (size_t i = 0; i < inst.size(); ++i) {
-            for (uint32_t c = 0; c * kTaskEdges < inst[i].nV; ++c) tasks.insert(tasks.end(), {uint32_t(i), c});
-            for (uint32_t c = 0; c * kTaskTris < inst[i].nT; ++c) tasks.insert(tasks.end(), {uint32_t(i), 0x80000000u | c});
-        }
+        // (No task list: the amplification stage cuts the instances' edges and roofs into groups.)
         const auto tS = std::chrono::steady_clock::now();
         w.msSort = std::chrono::duration<double, std::milli>(tS - tV).count();
         w.count = static_cast<uint32_t>(out.size());
         w.insts = static_cast<uint32_t>(inst.size());
-        w.tasks = static_cast<uint32_t>(tasks.size() / 2);
         {
             auto cpu = std::make_shared<DrawCpu>();
             cpu->inst.reserve(inst.size());
             for (const Inst& x : inst) cpu->inst.push_back(x.b);
-            cpu->tasks = tasks;
             w.cpu = std::move(cpu);
         }
         if ((w.count || w.insts) && !shared->cancel.load()) {
-            // One buffer: the boxes, the shaped instances, then the tasks (two uints each).
-            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + tasks.size() * 4u + 15u) & ~uint64_t(15);
+            // One buffer: the boxes, then the shaped instances, three rows each.
+            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + 15u) & ~uint64_t(15);
             auto take = [&](std::vector<GpuBuffer>& list) {
                 std::lock_guard<std::mutex> lk(shared->mx);
                 auto best = list.end();
@@ -1197,7 +1233,6 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
                 std::memcpy(dst, &x.b, sizeof(Box));
                 dst += sizeof(Box);
             }
-            if (!tasks.empty()) std::memcpy(dst, tasks.data(), tasks.size() * 4u);
             w.vb = take(shared->freeBoxes);
             if (!w.vb.Valid()) w.vb = gpu->CreateDefaultBuffer(nullptr, room, L"buildings.walk");
         }
@@ -1308,14 +1343,12 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
     for (const DrawLog& d : m_drawLog) {
         if (!d.cpu) continue;
         const DrawCpu& c = *d.cpu;
-        const size_t nTasks = c.tasks.size() / 2;
-        const size_t t0 = size_t(k) * kChunkGroups, t1 = (std::min)(nTasks, t0 + kChunkGroups);
-        if (t0 >= nTasks) {
-            Log("[crash] buildings, frame %llu's draw: chunk %u is past its %zu tasks", static_cast<unsigned long long>(d.frame), k, nTasks);
-            continue;
-        }
+        // The dispatch k is one of two a frame (the boxes, then the shapes); every shaped instance of
+        // the walk is read here, since the streams cut them on the GPU.
+        const size_t nTasks = c.inst.size();
+        const size_t t0 = 0, t1 = nTasks;
         std::set<uint32_t> insts;
-        for (size_t t = t0; t < t1; ++t) insts.insert(c.tasks[2 * t]);
+        for (size_t t = t0; t < t1; ++t) insts.insert(static_cast<uint32_t>(t));
         size_t found = 0, bad = 0, tall = 0, wide = 0;
         float maxTop = -1e30f, minBottom = 1e30f, maxExt = 0.0f, maxDist = 0.0f, minDist = 1e30f;
         uint32_t maxV = 0, maxT = 0;
@@ -1328,7 +1361,7 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
             minDist = (std::min)(minDist, dist);
             maxDist = (std::max)(maxDist, dist);
             uint32_t addr;
-            std::memcpy(&addr, &b.pad2, 4);
+            std::memcpy(&addr, &b.x[0], 4);
             const auto it = bySlot.find(addr / kSlotBytes);
             if (it == bySlot.end()) { ++bad; continue; }
             const std::vector<uint8_t>& pk = it->second.first->packed;
@@ -1370,7 +1403,7 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
 }
 
 void BuildingLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || (m_cells.empty() && m_warm.empty() && !m_drawn.count && !m_drawn.tasks) || !ctx.camera) return;
+    if (!m_pso || (m_cells.empty() && m_warm.empty() && !m_drawn.count && !m_drawn.insts) || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
     ctx.cmd->Pipeline(m_pso.Get());
@@ -1379,7 +1412,7 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     struct {
         float origin[4];   // xyz the cell's origin relative to the eye, w = brightness
         float time[4];     // x the layer's now (s), y the pages' fade-in (s)
-        uint32_t mesh[4];  // the shapes' draw: first instance row, first task row, tasks, pool slot
+        uint32_t mesh[4];  // a draw of instances: the first's row, how many, -, the pool's heap slot
     } cb{};
     // The resident cells, and the ones leaving whose boxes the drawn walk does not hold yet.
     std::vector<const Cell*> draw;
@@ -1411,38 +1444,37 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     cb.time[1] = kPageFadeS;
     // z: a pixel's angle (rad), the walk's own -- the ribbons' width on screen (Buildings.hlsl MsShape).
     cb.time[2] = static_cast<float>(double(ctx.camera->fovY) / double(ctx.height));
-    if (m_psoBox && m_drawn.count) {
-        // THE TREE'S BOXES: the buildings with no shape, one buffer about the walk's eye, 36 vertices a box.
+    if (m_drawn.count && (m_psoBoxMesh || m_psoBox)) {
+        // THE TREE'S BOXES, one buffer about the walk's eye: 8 vertices a box through the mesh stage
+        // (16 a group; the groups in two dimensions past 65535), or 36 through the vertex stage.
         GpuScope boxScope(ctx.prof, ctx.cmd->Native(), "buildings.boxes");
-        ctx.cmd->Pipeline(m_psoBox.Get());
-        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx.cmd->GraphicsConstants(1, cb);
-        ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-        ctx.cmd->Draw(m_drawn.count * 36u, 1, 0, 0);
-    }
-    if (m_psoShape && m_drawn.tasks && m_pool.Valid()) {
-        // THE SHAPES: one mesh group a task (Buildings.hlsl MsShape), the groups in the walk's order.
-        GpuScope shapeScope(ctx.prof, ctx.cmd->Native(), "buildings.shapes");
-        ctx.cmd->Pipeline(m_psoShape.Get());
-        cb.mesh[0] = m_drawn.count * 4u;                          // the first instance's row
-        cb.mesh[1] = (m_drawn.count + m_drawn.insts) * 4u;        // the first task's row
-        cb.mesh[2] = m_drawn.tasks;
+        cb.mesh[0] = 0;   // the first box's row
+        cb.mesh[1] = m_drawn.count;
         cb.mesh[3] = m_poolSrv;
         ctx.cmd->GraphicsConstants(1, cb);
         ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-        // One DispatchMesh may launch at most 2^22 groups (65535 x 64 here, an even count, so a
-        // chunk starts on a whole row of two tasks): a walk with more is drawn in chunks, each
-        // its first task row advanced -- one call past the limit is an invalid command.
-        constexpr uint32_t kChunk = kChunkGroups;   // even: a chunk starts on a whole row of two tasks
-        m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
-        for (uint32_t done = 0; done < m_drawn.tasks; done += kChunk) {
-            const uint32_t n = (std::min)(m_drawn.tasks - done, kChunk);
-            cb.mesh[1] = (m_drawn.count + m_drawn.insts) * 4u + done / 2u;
-            cb.mesh[2] = n;
-            ctx.cmd->GraphicsConstants(1, cb);
-            const uint32_t gx = (std::min)(n, 65535u), gy = (n + 65534u) / 65535u;
-            ctx.cmd->DispatchMesh(gx, gy, 1);
+        if (m_psoBoxMesh) {
+            ctx.cmd->Pipeline(m_psoBoxMesh.Get());
+            const uint32_t groups = (m_drawn.count + kBoxesPerGroup - 1) / kBoxesPerGroup;
+            ctx.cmd->DispatchMesh((std::min)(groups, 65535u), (groups + 65534u) / 65535u, 1);
+        } else {
+            ctx.cmd->Pipeline(m_psoBox.Get());
+            ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.cmd->Draw(m_drawn.count * 36u, 1, 0, 0);
         }
+    }
+    if (m_psoShape && m_drawn.insts && m_pool.Valid()) {
+        // THE SHAPES: an amplification group a kAsInsts instances (Buildings.hlsl AsShape) cuts their
+        // edges and roofs into full mesh groups; the groups keep the walk's order (far to near).
+        GpuScope shapeScope(ctx.prof, ctx.cmd->Native(), "buildings.shapes");
+        ctx.cmd->Pipeline(m_psoShape.Get());
+        cb.mesh[0] = m_drawn.count * 3u;   // the first shaped instance's row
+        cb.mesh[1] = m_drawn.insts;
+        cb.mesh[3] = m_poolSrv;
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
+        m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
+        ctx.cmd->DispatchMesh((m_drawn.insts + kAsInsts - 1) / kAsInsts, 1, 1);   // kMaxBoxes / 64 < 65535
     }
 }
 

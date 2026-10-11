@@ -114,17 +114,20 @@ public:
     // Tokyo tree's largest is 5.3 KB); a record over a slot keeps its box, and is counted.
     static constexpr uint32_t kSlotBytes = 64u << 10;
     static constexpr uint32_t kSlots = static_cast<uint32_t>(kPoolBytes / kSlotBytes);
-    static constexpr uint32_t kTaskEdges = 32, kTaskTris = 64;
+    // THE STREAMS (Buildings.hlsl AsShape): an amplification group takes kAsInsts instances and
+    // launches a mesh group for every kStream edges or roof triangles of them, end to end.
+    static constexpr uint32_t kAsInsts = 64, kStream = 64, kBoxesPerGroup = 16;
 
-    // Mirrors `struct BuildingBox` in shaders/Buildings.hlsl: a moment box about the walk's origin.
+    // ONE INSTANCE of the walk (Buildings.hlsl ReadInst), 48 bytes, three float4 rows: the centre
+    // and its fade-in; THE ATTITUDE AS ONE ROTOR (east, north and up are q acting on the flat
+    // frame's axes -- one object, not three unit vectors); and either a box's three half-extents
+    // with its page's landing, or a shape's record address (an integer) with its landing.
     struct Box {
-        float c[3], alpha;  // centre, metres from the walk's origin, flat frame; its fade-in
-        float u[3], pad1;   // the long half-axis (direction x half-extent); pad1 its page's landing
-        float v[3], pad2;   // the short half-axis
-        float w[3], pad3;   // the up half-axis
-        // A SHAPED instance is the same 64 bytes: c the ground under the centroid, u v w the unit
-        // east, north and up there, pad2 its record's byte address in the shape pool.
+        float c[3], alpha;   // the centre (a box) or the ground under the centroid (a shape)
+        float q[4];          // the rotor taking flat x, y, z to east, up, north: (x, y, z, w)
+        float x[4];          // a box: a1, a2, hz, landed; a shape: asuint(addr), landed, 0, 0
     };
+    static_assert(sizeof(Box) == 48, "three float4 rows");
 
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -190,14 +193,13 @@ private:
         float landed = 0.0f;            // the layer's clock (s) when it joined the tree: its boxes fade in from here
     };
     using PageKey = std::tuple<int, int, int>;   // (level, px, py)
-    struct DrawCpu {                    // a walk's shaped instances and tasks, as the GPU got them
+    struct DrawCpu {                    // a walk's shaped instances, as the GPU got them
         std::vector<Box> inst;
-        std::vector<uint32_t> tasks;    // two uints a task: instance, code
     };
     struct Walked {                     // a walk's answer
         double origin[3];
-        uint32_t count = 0;             // boxes, then insts shaped instances, then tasks (one buffer)
-        uint32_t insts = 0, tasks = 0;
+        uint32_t count = 0;             // boxes, then insts shaped instances (one buffer)
+        uint32_t insts = 0;
         GpuBuffer staging, vb;
         std::vector<std::pair<double, PageKey>> wants;   // pages asked for, by pixels (largest first)
         std::vector<PageKey> used;
@@ -278,12 +280,11 @@ private:
     struct Drawn {
         double origin[3];
         GpuBuffer vb;
-        uint32_t count = 0, insts = 0, tasks = 0;
-        std::shared_ptr<const DrawCpu> cpu;   // its instances and tasks, kept for a lost device's report
+        uint32_t count = 0, insts = 0;
+        std::shared_ptr<const DrawCpu> cpu;   // its instances, kept for a lost device's report
     } m_drawn;
-    // THE SHAPES' DRAW IN CHUNKS of kChunkGroups mesh groups, one DispatchMesh each: DRED then names
-    // the chunk the GPU stopped in, and DumpChunk names its buildings from the CPU's copy.
-    static constexpr uint32_t kChunkGroups = 16384;
+    // TWO DISPATCHES a frame (the boxes, then the shapes): DRED names the one the GPU stopped in,
+    // and DumpChunk reads every instance of that frame's walk from the CPU's copy.
     struct DrawLog { uint64_t frame = 0; std::shared_ptr<const DrawCpu> cpu; };
     DrawLog m_drawLog[3];
     void DumpChunk(uint32_t k) const;
@@ -303,9 +304,9 @@ private:
     // waits, no new page is asked for -- nothing is loaded that cannot land.
     std::vector<std::pair<PageKey, std::shared_ptr<Page>>> m_roomWait;
     uint64_t m_roomWaitFrames = 0, m_tooBig = 0;
-    uint32_t m_walkTasksMax = 0;   // the largest walk's mesh tasks so far (each new largest is logged)
+    uint32_t m_walkInstsMax = 0;   // the largest walk's shaped instances so far (each new largest is logged)
     std::vector<std::shared_ptr<const Page>> m_drawnHold;   // the drawn walk's pages (their slots wait on them)
-    hal::Pso m_psoShape;
+    hal::Pso m_psoShape, m_psoBoxMesh;   // AsShape + MsShape; MsBox (m_psoBox is VsBox: no mesh shaders)
     uint64_t m_drawnCells = 0;          // the cells version the drawn boxes were walked against
     // THE LAYER'S CLOCK (s): a page's landing and the frame's now, for the boxes' fade-in.
     std::chrono::steady_clock::time_point m_t0 = std::chrono::steady_clock::now();

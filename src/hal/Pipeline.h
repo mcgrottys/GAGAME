@@ -169,6 +169,7 @@ struct alignas(void*) StreamSub {
 // The stream itself: the ten subobjects the globe's mesh pipeline sets, in its order.
 struct MeshStream {
     StreamSub<ID3D12RootSignature*, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> rs;
+    StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS> as;   // empty = no amplification stage
     StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> ms;
     StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> ps;
     StreamSub<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND> blend;
@@ -182,7 +183,7 @@ struct MeshStream {
 
 struct MeshPipelineDesc {
     ID3D12RootSignature* rootSig = nullptr;
-    ShaderBlob ms, ps;
+    ShaderBlob as, ms, ps;   // `as` optional: the amplification stage before the mesh stage
     // blend (render target 0): the fields and defaults of GraphicsPipelineDesc
     bool blend = false;
     D3D12_BLEND srcBlend = D3D12_BLEND_ONE, dstBlend = D3D12_BLEND_ZERO;
@@ -214,6 +215,7 @@ struct MeshPipelineDesc {
         alignas(MeshStream) unsigned char zero[sizeof(MeshStream)] = {};
         MeshStream& s = *new (zero) MeshStream{};
         s.rs.val = rootSig;
+        s.as.val = as.Valid() ? D3D12_SHADER_BYTECODE{as.Data(), as.Size()} : D3D12_SHADER_BYTECODE{nullptr, 0};
         s.ms.val = {ms.Data(), ms.Size()};
         s.ps.val = {ps.Data(), ps.Size()};
         auto& rt = s.blend.val.RenderTarget[0];

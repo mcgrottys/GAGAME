@@ -372,7 +372,9 @@ bool RunDxSelfTest() {
             at = e;
             std::wstring wentry(entry.begin(), entry.end());
             std::wstring wpath(path.begin(), path.end());
-            if (mesh) {
+            // An amplification entry is named As... (Buildings.hlsl AsShape): it validates as as_6_5.
+            const bool amp = !mesh && entry.rfind("As", 0) == 0;
+            if (mesh || amp) {
                 // ---- 2b. M10: THE MESH STAGE COMPILES. The entries the sampler scan
                 // skips must compile and VALIDATE as ms_6_5. The CB-parity step above
                 // compiles PsMain only, so a mesh shader that failed validation passed
@@ -380,10 +382,10 @@ bool RunDxSelfTest() {
                 // (MEASURED, M10: a second SetMeshOutputCounts call site on an early-out
                 // path; the root planet vanished from a rail while --selftest said PASS).
                 ++meshEntries;
-                if (!sc.Compile(wpath, wentry.c_str(), L"ms_6_5").Valid()) {
-                    Log("[dxtest] FAIL mesh stage: %s::%s does not compile/validate as "
-                        "ms_6_5 -- the globe's mesh pipeline would silently fall back",
-                        path.c_str(), entry.c_str());
+                if (!sc.Compile(wpath, wentry.c_str(), mesh ? L"ms_6_5" : L"as_6_5").Valid()) {
+                    Log("[dxtest] FAIL %s stage: %s::%s does not compile/validate as "
+                        "%s -- its mesh pipeline would silently fall back", mesh ? "mesh" : "amplification",
+                        path.c_str(), entry.c_str(), mesh ? "ms_6_5" : "as_6_5");
                     ok = false;
                 }
                 continue;

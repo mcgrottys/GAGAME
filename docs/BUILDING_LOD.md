@@ -146,3 +146,40 @@ Tokyo at 9 km (4.4 → 7.1 ms) and 0.77 ms downtown, and taken per vertex it cos
 - The box replaces a building's shape past its detail radius. An outline that matters at distance
   (a stadium's ring, the Pentagon) would need a second far shape. Level-2 rings simplified by the
   existing Visvalingam–Whyatt importance could serve; I left that out.
+
+## 9. The GPU packing (2026-10-10, measured)
+
+The owner asked that the data be packed for the mesh and amplification stages. What changed, each
+measured on frozen Tokyo stills (`--scale 0 --settle-exact`, 400 frames, the city view at 9 km):
+
+- **An instance is 48 bytes, three float4 rows**, where it was 64: the centre and its fade-in; the
+  attitude as ONE ROTOR, the four components of the rotor taking the flat frame's x, y, z to east,
+  up, north (a right-handed triple: built from east, north, up it is a mirror, which a rotor cannot
+  reach, and the footprints came out inside-out); and a box's three half-extents with its landing,
+  or a shape's record address with its landing. The GPU rotates the axes back out (`Rotate`).
+- **No task list.** An amplification group takes 64 instances, reads each record's counts from the
+  pool, prefix-sums them in groupshared, and launches a mesh group for every 64 edges and every 64
+  roof triangles of the group's instances laid end to end -- full groups whatever the buildings'
+  sizes, where a four-edged house took a 32-edge group of its own. A mesh thread finds its instance
+  by six halvings over the payload's running counts. The walk's buffer phase and the 2^22-group
+  chunking are gone with it.
+- **Far boxes through a mesh shader**, 8 vertices and 12 triangles a box, 16 boxes a group; the
+  faces share corners, so the pixel shader takes the face's normal from the surface's derivatives
+  and reads the top as a roof by its tilt. The vertex-stage path (36 vertices a box) stays for a
+  device without mesh shaders, on the same 48-byte rows (unmeasured here).
+- **Culling** (same day): the outside is the front everywhere, counter-clockwise, and back faces
+  are dropped. **`shapePixels`** (default 4): a building is its own form from that many pixels
+  across and its moment box below, the same volume, centroid and heading.
+
+| still | pass | before | after |
+|---|---|---|---|
+| Tokyo, shapes from 1 px (430,606 shapes) | shapes | 16.1 ms | 6.5 ms |
+| Tokyo, shapes from 4 px (26k shapes, 404k boxes) | boxes + shapes | 1.71 + 1.18 ms | 1.42 + 0.70 ms |
+| Newburyport market | boxes + shapes | 0.59 + 0.36 ms | 0.38 + 0.34 ms |
+
+Newburyport is pixel for pixel the old still (13 of 1.44 M over 8 levels); Tokyo differs in 27k
+pixels over 8 levels, scattered at box edges where the derivative normal meets another face than
+the old per-vertex one did. The CPU walk at 1 px fell from 90 ms to 53 ms (its sort and buffer phases 27 + 14 ms to 8 + 7 ms).
+The pages are kept by their worth on screen (`layer.buildings.pageMB`; the law is in
+BuildingLayer::Simulate): a page is worth its width in pixels were the eye to look at it, the
+least worth goes first and never to make room for one worth less, so the coarse levels are the floor.
