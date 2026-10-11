@@ -76,7 +76,7 @@ type system, we have not seen named; it is the combination, and we claim it unte
 | the root world (`SurfaceFrame::About`, the tangent space) | the scene's `place.anchor`, a frame of its own and the one `legacy` space | the cloud's origin nearest the place; the place is a pose in it (`anchorFloats`, `anchorToRoot`), and every hand-written number of the scene -- views, spawns, interests, rails, the built-in sea pose, the root's gate places, the solver window -- comes in through that one motor (`Camera::Carry`, `Entity::CarrySpawn`, `PoseFrame::toRoot`) |
 | the wave bank's chart (sets A, B, the second eye) | the root's until the eye left a 16 km reach, then where the eye stood | the surface origin under the eye, by `PickSurface`; two banks at one place share it |
 | a gate's destination place | a tangent frame at the place | the cloud's origin nearest the place; the place stands at its floats there, the gate's boxes posed from their places |
-| a hull's own space (Entity::Recentre) | a frame at the hull's position, 60 km out | the surface origin under the hull, kept while it stands in its cell; the 60 m threshold stays as the moment a hull leaves the root's frame |
+| a hull's own space (Entity::Recentre, Entity::Carry) | a frame at the hull's position, 60 km out; a gate pointer, a gate chart and a root threshold inside the hull | the surface origin under the hull from its first step, by its position alone; a gate is a motor the frame loop carries it by (StepEntities), after which it re-picks by position -- the hull knows no gate and no root |
 | the buildings' walk | every instance about the walk's eye, a new walk every 0.2 % of height | every instance about the eye's cloud origin; the eye's offset is one float3 in the constants; a walk every 2 % of height |
 
 A lat/lon spelling needs nothing from the move: `FlatOf` is the root's. At Newburyport the scene's
@@ -88,6 +88,25 @@ the Haulover portal and mouth stills overlap the previous commit's to the pixel 
 (the sea below is the solver's window re-gridded about the new origin: same place, new cell
 phase); Newburyport's market differs in 0.87 % of pixels, all edge shimmer from re-addressing;
 the continent view in 0.09 %; Tokyo under a pinned clock in 0.35 %, the counter's digits.
+
+## 3a. The discipline (the owner, 2026-10-11)
+
+"The boat and the portal should not be aware of each other; the boat and the water should
+adjust to the correct floating origin as they move long distances." So: a body stands on the
+cloud's point under it, chosen by its position and nothing else, and moves to the next when the
+lattice says so. A gate is a motor between two spaces of the planet; the frame loop, which owns
+both lists, carries whatever enters a box by that motor (`Entity::Carry`, the same call for any
+motor into any space), and the gate's own residency asks for the water at its far side for
+whatever approaches. The hull's water is the sphere's plane in the hull's frame
+(`WaterSurface::PlaneOf`), so the hull floats on what is drawn wherever its frame's origin is.
+`Space` has no `legacy` stand any more and `recentreM` is gone from the schema: there is no
+threshold and no special case left between a hull and its frame.
+
+Measured with `--water-probe` on a driven hull (the fixed controller through the Haulover gate
+and back, and 8,000 frames east along the Merrimack across two wave-bucket swaps): the drawn
+surface minus the hull's water stays within 2-6 cm rms at every range to 300 m, with no drift
+by distance or time. The pre-cloud baseline (997dc09) measured 1.5-1.8 m rms at rest with the
+physics' waves anti-correlated to the drawn ones.
 
 ## 4. What remains
 

@@ -22,7 +22,7 @@
 //  that is a special case.
 //
 //  NOTHING ELSE MOVES. The world frame, the other bodies and every view stay where they are; the
-//  carried body changes its SPACE and its pose in it (Entity::Teleport). Two players on the two
+//  carried body changes its SPACE and its pose in it (Entity::Carry, by the frame loop). Two players on the two
 //  sides of a gate, or two views of one split screen, see one consistent world.
 //
 //  ONE-WAY. A gate is a box on one side only; a way back is another gate. Two gates that see each

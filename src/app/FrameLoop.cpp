@@ -1755,7 +1755,6 @@ std::optional<int> FrameLoop::Session() {
         eo.waterScene = &waterScene;
         eo.vesselLayer = vesselLayer;
         eo.gpu = &gpu;
-        eo.gates = &m_gates;
         eo.swellShadow = m_A.exposureShadow.get();
         eo.bed = m_A.heightBed.get();
         eo.rootChart = &m_A.surface.flat;   // M13 step 2: places, not the linear chart
@@ -1948,12 +1947,44 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     fi.frame = m_frame;
     fi.quanta = quanta;
     fi.asOf = m_weather.SolverAsOf();
+    // THE GATES CARRY WHAT ENTERS THEIR BOXES (the discipline, 2026-10-11): the loop owns both
+    // lists, so a hull knows no gate and a gate knows no hull. A gate is a motor between two
+    // spaces; a hull whose centre of gravity is inside the box, said in the gate's source space,
+    // is carried by it (Entity::Carry) -- after its step and before the hulls are published, so
+    // the frame that carries one draws it where it now is. And THE GATE'S OWN RESIDENCY: the
+    // water at its far side is asked for while a hull is still a second of travel from the box,
+    // at the point the carry would take it to now -- a sea the solver owns answers nothing it
+    // was not asked for, and an unanswered one would drop the hull onto it.
+    const double frameS = double((std::max)(quanta, 1)) * SimClock::kDt;
+    const double leadS = double(Gpu::kFrameCount + 1u) * frameS;
     for (auto& e : m_entities) {
         if (!e->Active()) continue;
         e->Update(fi);
         if (m_profOn) {
             m_profMs[11] += e->LastStepMs();
             if (m_profHelm) m_profHelmMs[11] += e->LastStepMs();
+        }
+        if (!e->Hull() || !e->Placed()) continue;
+        const double reach = e->Reach(), speed = e->SpeedMps();
+        for (const auto& g : m_gates) {
+            if (!g || !g->Valid()) continue;
+            double c[3];
+            if (!e->CgIn(g->Source(), c)) break;
+            if (g->Inside(c[0], c[1], c[2])) {
+                if (e->Carry(g->Destination(), g->Carry(), m_simUnix) && e.get() == m_followed) {
+                    m_followedGate = g.get();   // the view follows its subject through THIS window
+                }
+                break;
+            }
+            double l[3] = {c[0], c[1], c[2]};
+            g->Entry().Inverse().TransformPoint(l[0], l[1], l[2]);
+            const double* sz = g->Declared().size;
+            const double half = 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
+            if (std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]) > half + reach + speed) continue;
+            g->Carry().TransformPoint(c[0], c[1], c[2]);   // where it would stand, there
+            double laX = 0.0, loX = 0.0;
+            g->Chart().PlaceOf(c[0], c[1], c[2], laX, loX);
+            m_weather.RequestRegion(laX, loX, reach + speed * leadS);
         }
     }
     // ---- THE CHASE CAMERA. Gravity-up and roll-free by choice: a camera that heels
@@ -1968,7 +1999,7 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         // follow it in. So the eye owes that gate until the box takes the eye too.
         if (m_followed->Carries() != m_followCarries) {
             m_followCarries = m_followed->Carries();
-            if (const scene::Gateway* g = m_followed->LastGate()) {
+            if (const scene::Gateway* g = m_followedGate) {
                 if (m_eyeOwes.size() < kMaxEyeOwes) {
                     m_eyeOwes.push_back(g);
                     Log("[gate] '%s' went through '%s'; the eye stays on this side and follows it "

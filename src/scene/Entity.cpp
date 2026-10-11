@@ -192,30 +192,37 @@ void Entity::ResetAtRest() {
     }
 }
 
-// THE PER-SUBJECT FLOATING ORIGIN (M13 step 2). A space is flat; the planet is not. A hull sitting
-// d from its space's origin stands d^2/2R above the sphere its water is drawn on -- 8 cm at a
-// kilometre, 31 cm at two, 300 m at sixty, which is a hull flying over its own sea. So the hull
-// carries its space with it: past `recentreM` the space is rebuilt as the tangent frame AT THE
-// HULL'S OWN PLACE and the pose is carried into it by the relative placement, momenta and all.
-//
-// What does NOT happen: the world frame does not move, no other body or view is touched, and the
-// hull's state is unchanged in its own terms -- this is the floating origin done per subject,
-// which is the thing a world re-anchor was rejected for.
+// THE HULL'S OWN SPACE IS A POINT OF THE CLOUD (M13 step 2, restated on the cloud 2026-10-11).
+// A space is flat; the planet is not: a hull d from its space's origin stands d^2/2R above the
+// sphere its water is drawn on, and the water it is seated on is the sphere's own plane in that
+// frame (WaterSurface::PlaneOf). The hull takes the cloud's point under it, by its position and
+// nothing else (OriginLattice::PickSurface, with the lattice's own hysteresis), and moves to the
+// next when the lattice says so: the pose carried by the one motor between the two spaces,
+// momenta and all. No other body or view is touched: the floating origin done per subject.
+bool Entity::StandOn(const Space& s) {
+    if (!s.stand.valid || !m_o.rootSpace || !m_o.rootChart || !m_o.rootChart->Exact()) return false;
+    OriginLattice L;
+    L.R = m_o.rootChart->planetR;
+    m_origin = L.At(s.stand.shell, s.stand.index);
+    m_ownSpace = s;
+    m_ownChart = m_origin.anchor;   // the point's tangent frame, its radius on it (Exact)
+    m_ownValid = true;
+    m_space = &m_ownSpace;
+    m_spaceInRoot = m_ownSpace.To(*m_o.rootSpace).ToMotor();
+    m_sea.SetChart(&m_ownChart);
+    return true;
+}
+
 void Entity::Recentre(double simUnix) {
     (void)simUnix;
-    if (!m_boat || m_props.recentreM <= 0.0 || !m_o.rootChart || !m_o.rootChart->Exact()) return;
+    if (!m_boat || m_standRefused || !m_o.rootChart || !m_o.rootChart->Exact()) return;
     if (!m_o.planet || !m_o.rootSpace) return;
     RigidBody& b = m_boat->Body();
     double cg[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(cg[0], cg[1], cg[2]);
     const double reach = std::sqrt(cg[0] * cg[0] + cg[2] * cg[2]);
-    // Where the hull is, exactly (its own space's rows, on the sphere) -- and THE CLOUD'S ORIGIN
-    // under it (core/OriginLattice.h), kept while the hull stands in its cell. A hull in the root's
-    // or a gate's space leaves it for its own once it is `recentreM` out (the threshold that lets
-    // a hull at a scene's own place stay in the root's frame, which is not yet a cloud point); a
-    // hull in its own space moves to the next origin when the lattice says so, and no sooner.
-    const Space::Anchor& chart = m_ownValid ? m_ownChart : (m_space ? m_gateChart : *m_o.rootChart);
-    if (!m_ownValid && reach < m_props.recentreM) return;
+    // Where the hull is, exactly (its frame's rows, on the sphere), and the cloud's point under it.
+    const Space::Anchor& chart = m_ownValid ? m_ownChart : *m_o.rootChart;
     double P[3];
     chart.PlanetOf(cg[0], cg[1], cg[2], P);
     OriginLattice L;
@@ -223,100 +230,92 @@ void Entity::Recentre(double simUnix) {
     const OriginLattice::Origin o = L.PickSurface(P, m_ownValid ? &m_origin : nullptr);
     if (m_ownValid && o.Same(m_origin)) return;
     if (!(std::fabs(o.anchor.latDeg) < 89.0)) return;
-    const double lat = o.anchor.latDeg, lon = o.anchor.lonDeg;
-    const double R = chart.planetR;
-    PoseFrame fr;
-    for (int i = 0; i < 3; ++i) {
-        fr.east[i] = o.anchor.east[i];
-        fr.up[i] = o.anchor.up[i];
-        fr.north[i] = o.anchor.north[i];
-    }
-    fr.valid = true;
     Space next = SpaceAt(*m_o.planet, o, m_props.name + ".origin");   // on the cloud, by the one factory
-    next.unitM = R;
-    next.extentM = 2.0 * R;
+    next.unitM = chart.planetR;
+    next.extentM = 2.0 * chart.planetR;
     std::string why;
     if (!next.Declare(&why)) {
-        Log("[vessel] '%s' could not re-centre: %s", m_props.name.c_str(), why.c_str());
-        m_props.recentreM = 0.0;   // said once, then left alone
+        Log("[vessel] '%s' could not stand on the cloud: %s", m_props.name.c_str(), why.c_str());
+        m_standRefused = true;   // said once, then left alone
         return;
     }
-    // The pose, carried: the hull's own space into the new one, through the common ancestor.
+    // The pose, carried: the space it stands in into the new one, through the common ancestor.
     const Space& from = m_space ? *m_space : *m_o.rootSpace;
-    const Placement toNew = from.To(next);
-    b.Carry(toNew.ToMotor());
-    m_ownSpace = next;
-    m_ownChart = Space::Anchor{};
-    m_ownChart.latDeg = lat;
-    m_ownChart.lonDeg = lon;
-    for (int i = 0; i < 3; ++i) {
-        m_ownChart.east[i] = fr.east[i];
-        m_ownChart.up[i] = fr.up[i];
-        m_ownChart.north[i] = fr.north[i];
-    }
-    m_ownChart.planetR = R;
-    m_origin = o;
-    m_ownValid = true;
-    m_space = &m_ownSpace;
-    m_spaceInRoot = m_ownSpace.To(*m_o.rootSpace).ToMotor();
-    m_sea.SetChart(&m_ownChart);
+    b.Carry(from.To(next).ToMotor());
+    StandOn(next);
     double after[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(after[0], after[1], after[2]);
-    Log("[vessel] '%s' re-centred on the cloud's origin %lld at %.5f N %.5f E: it stood %.0f m out, where its flat "
+    Log("[vessel] '%s' stands on the cloud's origin %lld at %.5f N %.5f E: it stood %.0f m out, where its flat "
         "frame rides %.2f m over the sphere; now %.1f m out",
-        m_props.name.c_str(), static_cast<long long>(o.index), lat, lon, reach, reach * reach / (2.0 * R),
-        std::sqrt(after[0] * after[0] + after[2] * after[2]));
+        m_props.name.c_str(), static_cast<long long>(o.index), o.anchor.latDeg, o.anchor.lonDeg, reach,
+        reach * reach / (2.0 * chart.planetR), std::sqrt(after[0] * after[0] + after[2] * after[2]));
 }
 
-bool Entity::Teleport(const Gateway& gate, double simUnix) {
+bool Entity::CgIn(const Space& s, double out[3]) const {
+    if (!m_boat) return false;
+    double cg[3] = {0.0, 0.0, 0.0};
+    m_boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+    const Space* here = m_space ? m_space : m_o.rootSpace;
+    if (!here || here == &s) {
+        for (int i = 0; i < 3; ++i) out[i] = cg[i];
+        return true;
+    }
+    here->To(s).Apply(cg, out);
+    return true;
+}
+
+double Entity::Reach() const {
+    if (!m_boat) return 0.0;
+    return (std::max)(m_boat->Spec().loa.v, m_boat->Spec().beam.v);
+}
+
+double Entity::SpeedMps() const {
+    if (!m_boat) return 0.0;
+    const double bodyCg[3] = {0.0, 0.0, 0.0};
+    double v[3] = {0.0, 0.0, 0.0};
+    m_boat->Body().VelocityAtBody(bodyCg, v);
+    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+bool Entity::Carry(const Space& into, const Motor& m, double simUnix) {
     if (!m_boat) return false;
     RigidBody& b = m_boat->Body();
     double c0[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(c0[0], c0[1], c0[2]);
     double la0 = 0.0, lo0 = 0.0;
     m_sea.PlaceOf(c0[0], c0[2], la0, lo0);
+    // The surface in the frame it is LEAVING (WaterSurface::PlaneOf), before any chart changes.
     const SurfaceSample s0 = m_sea.At(c0[0], c0[2], simUnix);
-    double sp0[3] = {c0[0], 0.0, c0[2]}, sn0[3];   // the surface in the frame it is LEAVING, before SetChart
+    double sp0[3] = {c0[0], 0.0, c0[2]}, sn0[3];
     m_sea.PlaneOf(s0, c0[0], c0[2], sp0, sn0);
-    // The pose is said in the gate's own source frame first, when the hull stands in another one
-    // (its own re-centred space, or a place a gate at the far side of another built there).
-    const Space* from = m_space ? m_space : m_o.rootSpace;
-    if (from && from != &gate.Source()) b.Carry(from->To(gate.Source()).ToMotor());
-    // ONE PRODUCT: the pose and the momenta, by the gate's motor.
-    b.Carry(gate.Carry());
-    // A gate that leads back to the scene's own frame puts the hull back in the root space, where
-    // it started: the root is not a place like the others, it is the frame everything is drawn in.
-    const bool home = m_o.rootSpace && &gate.Destination() == m_o.rootSpace;
-    m_space = home ? nullptr : &gate.Destination();
-    m_lastGate = &gate;   // the view follows its subject through THIS window
+    // ONE PRODUCT: the pose and the momenta, by the motor.
+    b.Carry(m);
+    // It stands on `into`'s point of the cloud now -- and then on its own, by its position.
+    if (!StandOn(into)) {
+        Log("[vessel] '%s' was carried into '%s', which stands on no cloud point: it keeps its frame",
+            m_props.name.c_str(), into.name.c_str());
+    }
     ++m_carries;
-    m_spaceInRoot = home ? Motor::Identity() : gate.DestinationInRoot();
-    m_gateChart = gate.Chart();      // M13: kept, so a later re-centre knows this hull's chart
-    m_ownValid = false;              // the gate's space replaces any the hull carried
-    // The same sparse water, read at the destination's places.
-    m_sea.SetChart((home && m_o.rootChart) ? m_o.rootChart : &gate.Chart());
+    Recentre(simUnix);
+    // THE FREE SURFACE ONTO THE FREE SURFACE. The two seas stand at their own heights this
+    // instant (two tides, two sea states): the hull keeps its height above ITS water, or it
+    // arrives as a drop or a plunge and the buoyancy impulse capsizes it (the set-down's own
+    // finding). A translation of the pose; the momenta stand.
     double c1[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(c1[0], c1[1], c1[2]);
     const SurfaceSample s1 = m_sea.At(c1[0], c1[2], simUnix);
-    // THE FREE SURFACE ONTO THE FREE SURFACE. Both boxes sit at their own spaces' datum, and the
-    // two seas stand at their own heights this instant (two tides, two sea states): the hull keeps
-    // its height above ITS water, or it arrives as a drop or a plunge and the buoyancy impulse
-    // capsizes it (the set-down's own finding). A translation of the pose; the momenta stand.
-    // Each surface in ITS frame (WaterSurface::PlaneOf): the two boxes stand at their frames'
-    // origins' distance from them, where the sphere is under the plane by a different amount.
     double lift = 0.0;
     if (s0.valid && s1.valid) {
         double sp1[3], sn1[3];
         m_sea.PlaneOf(s1, c1[0], c1[2], sp1, sn1);
-        lift = sp1[1] - sp0[1];
+        lift = (c0[1] - sp0[1]) - (c1[1] - sp1[1]);   // the height it had above its water, restored
         b.pose = Motor::Translation(0.0, lift, 0.0) * b.pose;
     }
     double la1 = 0.0, lo1 = 0.0;
     m_sea.PlaceOf(c1[0], c1[2], la1, lo1);
-    Log("[gate] '%s' carried '%s' from %.5f N %.5f E to %.5f N %.5f E (%s): surface %+.3f -> %+.3f m, "
+    Log("[vessel] '%s' carried from %.5f N %.5f E to %.5f N %.5f E (into %s): surface %+.3f -> %+.3f m, "
         "lifted %+.3f m%s",
-        gate.Declared().name.c_str(), m_props.name.c_str(), la0, lo0, la1, lo1,
-        gate.Destination().name.c_str(), s0.valid ? s0.heightNavd : 0.0,
+        m_props.name.c_str(), la0, lo0, la1, lo1, into.name.c_str(), s0.valid ? s0.heightNavd : 0.0,
         s1.valid ? s1.heightNavd : 0.0, lift,
         (s0.valid && s1.valid) ? "" : " (a surface did not answer: no lift applied)");
     return true;
@@ -374,9 +373,8 @@ void Entity::Update(const FrameInfo& fi) {
     }
     boatSea.SetSwellShadow(m_o.swellShadow);
     boatSea.SetBed(m_o.bed);
-    // M13 step 2: the root space's exact chart, for a hull that has not been carried (a carried
-    // hull holds its gate's, set at the carry and not overwritten here), and the root's chart
-    // itself for the steps that cross spaces (the solved window, the wake table).
+    // The root space's exact chart until the hull stands on a point of its own (its first step),
+    // and the root's chart itself for the steps that cross spaces (the solved window, the wakes).
     if (!m_space) boatSea.SetChart(m_o.rootChart);
     boatSea.SetRootChart(m_o.rootChart);
     // THE SOLVER IS TRUTH, AND THE HULL ASKS FOR IT (the water match, step 1). Every frame, the
@@ -397,36 +395,10 @@ void Entity::Update(const FrameInfo& fi) {
         double latDeg = 0.0, lonDeg = 0.0;
         boatSea.PlaceOf(cg[0], cg[2], latDeg, lonDeg);
         weather->RequestRegion(latDeg, lonDeg, reach + speed * leadS);
-        // ...AND FOR WHERE A GATE IS ABOUT TO PUT IT. A hull closing on a box stands at the box's
-        // far side the frame its centre enters, and the carry seats it on the water there -- so
-        // that water is asked for while the hull is still a second of travel away, at the point
-        // the carry would take the hull to now. A sea the solver owns answers nothing it was not
-        // asked for, and an unanswered one would drop the hull onto it.
-        if (m_o.gates) {
-            const Space* here = m_space ? m_space : m_o.rootSpace;
-            for (const auto& g : *m_o.gates) {
-                if (!g || !g->Valid()) continue;
-                double c[3] = {cg[0], cg[1], cg[2]};
-                if (here && &g->Source() != here) {
-                    const double q[3] = {cg[0], cg[1], cg[2]};
-                    here->To(g->Source()).Apply(q, c);
-                }
-                double l[3] = {c[0], c[1], c[2]};
-                g->Entry().Inverse().TransformPoint(l[0], l[1], l[2]);
-                const double* sz = g->Declared().size;
-                const double half = 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
-                if (std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]) > half + reach + speed) continue;
-                g->Carry().TransformPoint(c[0], c[1], c[2]);   // where it would stand, there
-                double laX = 0.0, loX = 0.0;
-                g->Chart().PlaceOf(c[0], c[1], c[2], laX, loX);
-                weather->RequestRegion(laX, loX, reach + speed * leadS);
-            }
-        }
+        // (Where a gate is about to put it is the GATE's residency: FrameLoop::StepEntities.)
     }
-    // M13 step 2: THE HULL'S SPACE FOLLOWS THE HULL -- and it does so BEFORE the set-down and
-    // before the step, so the hull is seated on the water of the space it is actually in. Done
-    // after the step instead, a spawn 60 km from the anchor is set down on its old frame's flat
-    // sea, the re-centring then says honestly that this is 300 m of air, and the hull falls.
+    // THE HULL'S SPACE FOLLOWS THE HULL -- BEFORE the set-down and before the step, so the hull is
+    // seated on the water of the space it is actually in (its first step puts it on the cloud).
     Recentre(simUnix);
 
     // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
@@ -521,27 +493,7 @@ void Entity::Update(const FrameInfo& fi) {
     if (!boat->Body().Sane()) boatCtl = VesselControls{};
     m_stepMs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1000.0;
 
-    // THE GATES: a hull whose centre of gravity is inside a box is carried. The test is made in
-    // the GATE's own source space, so a hull that has re-centred (or been carried before) still
-    // meets the gates standing in that space -- the special case for "in the root space" went
-    // out with the floating origin, which gives every hull a space of its own.
-    if (m_o.gates) {
-        const Space* here = m_space ? m_space : m_o.rootSpace;
-        for (const auto& g : *m_o.gates) {
-            if (!g || !g->Valid()) continue;
-            double cg[3] = {0.0, 0.0, 0.0};
-            boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
-            if (here && &g->Source() != here) {   // into the gate's source space, through the common ancestor
-                const Placement toSrc = here->To(g->Source());
-                double q[3] = {cg[0], cg[1], cg[2]};
-                toSrc.Apply(q, cg);
-            }
-            if (g->Inside(cg[0], cg[1], cg[2])) {
-                Teleport(*g, simUnix);
-                break;
-            }
-        }
-    }
+    // (The gates' boxes are the frame loop's test, after this step: StepEntities.)
     StepTelemetry(boatSea, simUnix);
 }
 
