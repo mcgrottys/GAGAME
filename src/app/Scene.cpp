@@ -371,6 +371,9 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.F64("defaultLanes", l.defaultLanes);
             r.F64("pathWidth", l.pathWidth);
             r.F64("kerb", l.kerb);
+            r.F64("rampGrade", l.rampGrade);
+            r.F64("deckDepth", l.deckDepth);
+            r.F64("bridgeClearance", l.bridgeClearance);
             if (!ok) return false;
             out.layers.push_back(std::move(l));
         }

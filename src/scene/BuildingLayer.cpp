@@ -1576,11 +1576,17 @@ void BuildingLayer::StandBatch(std::vector<std::pair<std::shared_ptr<const Page>
                     if (shaped) {
                         const double mx = std::cos(lat * kDeg) * kR * kDeg, my = kR * kDeg;
                         if (sv.head.flags & shape::kRibbon) {
-                            // A RIBBON RIDES THE GROUND: each vertex's height over the centroid's, for the pool.
+                            // A RIBBON RIDES THE GROUND PLUS ITS OWN PROFILE (compose/BuildingShape.h kDeck): each
+                            // vertex's height over the centroid's ground, for the pool -- a deck's or a ramp's
+                            // profile stands over the higher of the ground and the sea, the surface it is
+                            // measured from; a road's (profile zero) is the ground itself.
                             std::vector<uint8_t> z(size_t(sv.head.nVerts) * 2);
+                            const bool deck = (sv.head.flags & shape::kDeck) != 0 && sv.z;
                             for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
                                 const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
-                                const double dz = gAt(lat + y / my, lon + x / mx) - base;
+                                const double g = gAt(lat + y / my, lon + x / mx);
+                                const double zp = deck ? double(sv.z[v]) * 0.1 : 0.0;
+                                const double dz = (zp > 0.0 ? (std::max)(g, 0.0) + zp : g) - base;
                                 const int16_t q = static_cast<int16_t>(std::clamp(std::lround(dz * 10.0), -32767L, 32767L));
                                 std::memcpy(&z[2 * v], &q, 2);
                             }

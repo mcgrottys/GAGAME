@@ -48,6 +48,12 @@ inline constexpr uint8_t kPart = 1;     // a building:part
 inline constexpr uint8_t kMetres = 2;   // xy in metres, not decimetres: a footprint over 3.2 km
 inline constexpr uint8_t kRibbon = 4;   // a road piece: an open polyline with a width and a z per vertex
 inline constexpr uint8_t kPath = 8;     // a ribbon that is a footway, path, cycleway, track or steps
+// A DECK (2026-10-11, docs/ROADS.md): a ribbon whose z[] is written on disk -- a bridge's deck at
+// its surveyed clearance plus its depth, and the approaches ramping down to the ground at the
+// declared grade. The stand adds the ground: a vertex with a profile stands that high above the
+// higher of the ground and the sea (the surface a deck is measured from), a vertex without stands
+// on the ground. One law for a road and a bridge: a ribbon rides the ground plus its own profile.
+inline constexpr uint8_t kDeck = 16;
 // Where a ribbon's z[] starts, from the record's first byte.
 inline size_t ZOffset(const ShapeHead& h) { return sizeof(ShapeHead) + 2u * h.nRings + 4u * h.nVerts + 6u * h.nTris; }
 inline size_t Bytes(const ShapeHead& h) {
@@ -77,7 +83,7 @@ bool ReadShape(const uint8_t* p, const uint8_t* end, ShapeView& v);
 // whether it is a path. z is written as zero: the page's reader fills it. False (nothing appended)
 // for a polyline too long for a record (over 32 km from its centroid) or too many points.
 bool EncodeRibbon(const std::vector<double>& xy, double widthM, double below, double above, bool path,
-                  std::vector<uint8_t>& out);
+                  std::vector<uint8_t>& out, const std::vector<double>* profileM = nullptr);
 
 // The roof of rings in a plane, outer counter-clockwise and holes clockwise (outer[i] marks the
 // outer ones): triangles as indices into the rings' concatenated vertices. Shared by the record and

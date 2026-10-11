@@ -690,6 +690,13 @@ const Schema& BuildingsLayerSchema() {
                   "a road with neither width nor lanes tagged: the scene's assumption", R)
             .Bind("pathWidth", kBuildings.pathWidth, Q::Length, "m",
                   "a footway, path, cycleway, track or steps with no width tagged", R)
+            .Bind("rampGrade", kBuildings.rampGrade, Q::Dimensionless, "1",
+                  "the approaches to a bridge fall at this grade (rise over run) from the deck to the ground, along the "
+                  "ways joining its ends through junctions of two", R)
+            .Bind("deckDepth", kBuildings.deckDepth, Q::Length, "m",
+                  "a bridge's deck is this deep: its surveyed clearance is to the underside, the road rides on top", R)
+            .Bind("bridgeClearance", kBuildings.bridgeClearance, Q::Length, "m",
+                  "a bridge no clearance survey (sources of kind \"bridges\") knows stands this high over what it crosses", R)
             .Bind("kerb", kBuildings.kerb, Q::Length, "m",
                   "a road's surface stands this much over the composed ground, and its mass as much under it", R);
         return sc;

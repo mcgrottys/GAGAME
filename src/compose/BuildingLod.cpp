@@ -1,3 +1,5 @@
+#include <limits>
+#include <unordered_map>
 #include "compose/BuildingLod.h"
 
 #include "compose/BuildingMoments.h"
@@ -96,11 +98,12 @@ constexpr double kPieceM = 2500.0;   // a piece fits a decimetre record (3.2 km 
 // gap): the piece's mass is a slab a segment -- the segment's rectangle of the road's width from
 // kerb under the ground to kerb over it -- summed; its record the polyline about the box's centroid.
 void RibbonItems(const RoadWay& w, const RoadRibbonDefaults& d, int cx, int cy, uint32_t arenaIdx,
-                 std::vector<uint8_t>& arena, std::vector<Item>& out) {
+                 std::vector<uint8_t>& arena, std::vector<Item>& out, const std::vector<double>* profile) {
     const size_t n = w.points.size();
     if (n < 2) return;
     const double width = RoadWidth(w, d), hw = 0.5 * width;
     const bool path = w.rank == 255;
+    const bool hasProfile = profile && profile->size() == n;
     const double lon0 = w.points[0].lon, lat0 = w.points[0].lat;
     const double mx = std::cos(lat0 * kDeg) * kR * kDeg, my = kR * kDeg;
     std::vector<double> xy(2 * n);
@@ -124,7 +127,10 @@ void RibbonItems(const RoadWay& w, const RoadRibbonDefaults& d, int cx, int cy, 
             const double nx = dy / l * hw, ny = -dx / l * hw;
             std::vector<std::vector<double>> ring{{xy[2 * i] + nx, xy[2 * i + 1] + ny, xy[2 * i + 2] + nx, xy[2 * i + 3] + ny,
                                                    xy[2 * i + 2] - nx, xy[2 * i + 3] - ny, xy[2 * i] - nx, xy[2 * i + 1] - ny}};
-            m += PrismMoments(ring, -d.kerb, d.kerb);
+            // A deck's slab is its depth under the surface (the clearance is to its underside).
+            double below = d.kerb;
+            if (hasProfile && ((*profile)[i] > 0.0 || (*profile)[i + 1] > 0.0)) below = d.deckDepth;
+            m += PrismMoments(ring, -below, d.kerb);
         }
         if (!m.Empty()) {
             const MomentBox box = BoxOf(m);
@@ -137,7 +143,15 @@ void RibbonItems(const RoadWay& w, const RoadRibbonDefaults& d, int cx, int cy, 
             }
             it.arena = arenaIdx;
             it.off = arena.size();
-            if (EncodeRibbon(local, width, d.kerb, d.kerb, path, arena)) it.len = static_cast<uint32_t>(arena.size() - it.off);
+            std::vector<double> z;
+            bool deck = false;
+            if (hasProfile) {
+                z.assign(profile->begin() + a, profile->begin() + b + 1);
+                for (double v : z) deck = deck || v > 0.0;
+            }
+            if (EncodeRibbon(local, width, deck ? d.deckDepth : d.kerb, d.kerb, path, arena, deck ? &z : nullptr)) {
+                it.len = static_cast<uint32_t>(arena.size() - it.off);
+            }
             out.push_back(it);
         }
         a = b;
@@ -204,8 +218,104 @@ Moments LodBoxMoments(double lat, double lon, double zc, double hz, double a1, d
     return m;
 }
 
+// THE DECKS AND THE RAMPS of a cell's ways (docs/ROADS.md): a profile per point of each way --
+// metres above what the road crosses; zero where it rides the ground. A bridge way's deck is its
+// matched span's clearance (the navigation clearance over water, else the clearance under it) plus
+// the deck's depth, `bridgeClearance` with no span; from each of its ends the approach ramps down
+// along the ways joining there at `rampGrade`, continuing through a junction of exactly two ways
+// (a road's own continuation) and stopping at any other, until the ramp has reached the ground.
+static void DeckProfiles(const std::vector<RoadWay>& ways, const std::vector<BridgeSpan>& spans, const RoadRibbonDefaults& rd,
+                         std::vector<std::vector<double>>& prof, uint64_t& decks, uint64_t& surveyed, uint64_t& ramps) {
+    prof.assign(ways.size(), {});
+    // The clearance each bridge way gets: the span it overlaps most.
+    std::vector<double> clr(ways.size(), std::numeric_limits<double>::quiet_NaN());
+    std::vector<double> best(ways.size(), 0.0);
+    if (!spans.empty()) {
+        for (const BridgeMatch& m : MatchBridges(ways, spans)) {
+            if (m.way >= ways.size() || m.span >= spans.size() || m.overlapM <= best[m.way]) continue;
+            const BridgeSpan& s = spans[m.span];
+            const double c = (s.vertClr == s.vertClr) ? double(s.vertClr) : (s.clrUnder == s.clrUnder) ? double(s.clrUnder) : -1.0;
+            if (!(c > 0.0 && c < 500.0)) continue;
+            clr[m.way] = c;
+            best[m.way] = m.overlapM;
+        }
+    }
+    // The node table: each node id -> the ways touching it and at which end (or inside).
+    struct Touch { size_t way; bool front, back; };
+    std::unordered_map<int64_t, std::vector<Touch>> at;
+    for (size_t i = 0; i < ways.size(); ++i) {
+        const RoadWay& w = ways[i];
+        for (size_t k = 0; k < w.points.size(); ++k) {
+            const int64_t id = w.points[k].nodeId;
+            if (!id) continue;
+            std::vector<Touch>& t = at[id];
+            if (!t.empty() && t.back().way == i) {
+                t.back().front = t.back().front || k == 0;
+                t.back().back = t.back().back || k + 1 == w.points.size();
+            } else {
+                t.push_back({i, k == 0, k + 1 == w.points.size()});
+            }
+        }
+    }
+    constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+    auto segM = [&](const RoadPoint& a, const RoadPoint& b) {
+        const double mx = std::cos(0.5 * (a.lat + b.lat) * kDeg) * kR * kDeg, my = kR * kDeg;
+        return std::hypot((b.lon - a.lon) * mx, (b.lat - a.lat) * my);
+    };
+    for (size_t i = 0; i < ways.size(); ++i) {
+        const RoadWay& w = ways[i];
+        if (w.structure != RoadStructure::Bridge || w.points.size() < 2) continue;
+        const double deck = ((clr[i] == clr[i]) ? clr[i] : rd.bridgeClearance) + rd.deckDepth;
+        prof[i].assign(w.points.size(), deck);
+        ++decks;
+        if (clr[i] == clr[i]) ++surveyed;
+        // THE RAMPS, from each end: along the ways that join there, downhill at the grade.
+        for (int end = 0; end < 2; ++end) {
+            int64_t node = end ? w.points.back().nodeId : w.points.front().nodeId;
+            size_t from = i;
+            double z = deck;
+            for (int hops = 0; hops < 64 && z > 0.0 && node; ++hops) {
+                auto it = at.find(node);
+                if (it == at.end()) break;
+                const std::vector<Touch>& t = it->second;
+                // A continuation: exactly one other way, joined at its end, not a bridge.
+                size_t nextWay = SIZE_MAX;
+                bool fromFront = false;
+                int others = 0;
+                for (const Touch& u : t) {
+                    if (u.way == from) continue;
+                    ++others;
+                    if ((u.front || u.back) && ways[u.way].structure != RoadStructure::Bridge) {
+                        nextWay = u.way;
+                        fromFront = u.front;
+                    }
+                }
+                if (others != 1 || nextWay == SIZE_MAX) break;
+                const RoadWay& u = ways[nextWay];
+                const size_t n = u.points.size();
+                if (n < 2) break;
+                if (prof[nextWay].empty()) prof[nextWay].assign(n, 0.0);
+                ++ramps;
+                // Walk from the joined end: the profile falls at the grade, kept to the higher of the two.
+                double s = 0.0;
+                size_t last = fromFront ? 0 : n - 1;
+                for (size_t k = 0; k < n; ++k) {
+                    const size_t p = fromFront ? k : n - 1 - k;
+                    if (k) s += segM(u.points[last], u.points[p]);
+                    last = p;
+                    prof[nextWay][p] = (std::max)(prof[nextWay][p], (std::max)(0.0, z - s * rd.rampGrade));
+                }
+                z = (std::max)(0.0, z - s * rd.rampGrade);
+                node = fromFront ? u.points.back().nodeId : u.points.front().nodeId;
+                from = nextWay;
+            }
+        }
+    }
+}
+
 bool BuildBuildingLod(const BuildingStack& stack, const std::vector<RoadFile>& roads, const RoadRibbonDefaults& rd,
-                      const std::string& dir, const double* box, int threads, LodBuildStats* stats, std::string* log) {
+                      const std::string& dir, const double* box, int threads, LodBuildStats* stats, std::string* log,
+                      const std::vector<BridgeSourceSpec>& bridges) {
     const auto t0 = std::chrono::steady_clock::now();
     LodBuildStats st;
     std::error_code ec;
@@ -258,7 +368,7 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::vector<RoadFile>& r
         while (b < cells.size() && FloorDiv(cells[b].second, cellsPerRoot) == band) ++b;
         // 1. Every solid of the band's cells, boxed and placed.
         std::atomic<size_t> next{a};
-        std::atomic<uint64_t> solids{0}, waysN{0}, ribbonsN{0}, tunnelsN{0};
+        std::atomic<uint64_t> solids{0}, waysN{0}, ribbonsN{0}, tunnelsN{0}, decksN{0}, surveyedN{0}, rampsN{0};
         std::mutex mx;
         std::vector<Item> items;
         std::vector<std::thread> pool;
@@ -289,17 +399,43 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::vector<RoadFile>& r
                     }
                     // The roads of the cell (by first point, as the harvest files them), as ribbons.
                     if (!roads.empty()) {
+                        // The cell's ways, with a margin's worth of their neighbours (the ramps and the
+                        // junctions see across the edge); only the cell's own are filed.
+                        constexpr double kMarginDeg = 0.004;
                         std::vector<RoadWay> ways;
-                        for (const RoadFile& rf : roads) rf.Read(x0, y0, x0 + lod::kDetailDeg, y0 + lod::kDetailDeg, ways);
-                        waysN += ways.size();
+                        for (const RoadFile& rf : roads) {
+                            rf.Read(x0 - kMarginDeg, y0 - kMarginDeg, x0 + lod::kDetailDeg + kMarginDeg, y0 + lod::kDetailDeg + kMarginDeg, ways);
+                        }
+                        std::vector<BridgeSpan> spans;
+                        for (const BridgeSourceSpec& bs : bridges) {
+                            std::string why;
+                            LoadBridgeSource(bs.path, x0 - kMarginDeg, y0 - kMarginDeg, x0 + lod::kDetailDeg + kMarginDeg,
+                                             y0 + lod::kDetailDeg + kMarginDeg, spans, &why);
+                        }
+                        std::vector<std::vector<double>> prof;
+                        uint64_t dk = 0, sv = 0, rp = 0;
+                        DeckProfiles(ways, spans, rd, prof, dk, sv, rp);
                         const size_t first = mine.size();
-                        for (const RoadWay& w : ways) {
+                        for (size_t wi = 0; wi < ways.size(); ++wi) {
+                            const RoadWay& w = ways[wi];
+                            if (w.points.empty() || w.points[0].lon < x0 || w.points[0].lon >= x0 + lod::kDetailDeg ||
+                                w.points[0].lat < y0 || w.points[0].lat >= y0 + lod::kDetailDeg) {
+                                continue;   // a neighbour's: filed by its own cell
+                            }
+                            ++waysN;
                             if (w.structure == RoadStructure::Tunnel) {
                                 ++tunnelsN;
                                 continue;
                             }
-                            RibbonItems(w, rd, cx, cy, static_cast<uint32_t>(t), arena, mine);
+                            if (w.structure == RoadStructure::Bridge) {
+                                ++decksN;
+                                if (!prof[wi].empty() && prof[wi][0] != rd.bridgeClearance + rd.deckDepth) ++surveyedN;
+                            } else if (!prof[wi].empty()) {
+                                ++rampsN;
+                            }
+                            RibbonItems(w, rd, cx, cy, static_cast<uint32_t>(t), arena, mine, prof[wi].empty() ? nullptr : &prof[wi]);
                         }
+                        (void)dk; (void)sv; (void)rp;
                         for (size_t k = first; k < mine.size(); ++k) {
                             const int rows = 1 << (lod::kLmax - mine[k].L);
                             mine[k].y = std::clamp(mine[k].y, band * rows, (band + 1) * rows - 1);
@@ -316,6 +452,9 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::vector<RoadFile>& r
         st.ways += waysN.load();
         st.ribbons += ribbonsN.load();
         st.tunnels += tunnelsN.load();
+        st.decks += decksN.load();
+        st.surveyed += surveyedN.load();
+        st.ramps += rampsN.load();
         st.cells += b - a;
         st.kept += items.size();
         // By node, and within a node the largest first: the walk stops at the first under a pixel.

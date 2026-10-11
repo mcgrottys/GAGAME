@@ -192,9 +192,13 @@ bool ReadShape(const uint8_t* p, const uint8_t* end, ShapeView& v) {
 }
 
 bool EncodeRibbon(const std::vector<double>& xy, double widthM, double below, double above, bool path,
-                  std::vector<uint8_t>& out) {
+                  std::vector<uint8_t>& out, const std::vector<double>* profileM) {
     const size_t n = xy.size() / 2;
     if (n < 2 || n > 65535) return false;
+    bool deck = false;
+    if (profileM && profileM->size() == n) {
+        for (double z : *profileM) deck = deck || z > 0.0;
+    }
     double ext = 0.0;
     for (double c : xy) ext = (std::max)(ext, std::abs(c));
     if (ext > 32000.0) return false;
@@ -204,7 +208,7 @@ bool EncodeRibbon(const std::vector<double>& xy, double widthM, double below, do
     h.nVerts = static_cast<uint16_t>(n);
     h.nTris = 0;
     h.nRings = 1;
-    h.flags = static_cast<uint8_t>(shape::kRibbon | (metres ? shape::kMetres : 0) | (path ? shape::kPath : 0));
+    h.flags = static_cast<uint8_t>(shape::kRibbon | (metres ? shape::kMetres : 0) | (path ? shape::kPath : 0) | (deck ? shape::kDeck : 0));
     h.pad = static_cast<uint16_t>(std::clamp(std::lround(widthM * 10.0), 1L, 65535L));
     h.bottom = static_cast<float>(-below);
     h.top = static_cast<float>(above);
@@ -219,6 +223,12 @@ bool EncodeRibbon(const std::vector<double>& xy, double widthM, double below, do
         const int16_t q = static_cast<int16_t>(std::lround(c / unit));
         std::memcpy(p, &q, 2);
         p += 2;
+    }
+    if (deck) {   // the profile, decimetres: z[] at ZOffset
+        int16_t* z = reinterpret_cast<int16_t*>(out.data() + at + shape::ZOffset(h));
+        for (size_t i = 0; i < n; ++i) {
+            z[i] = static_cast<int16_t>(std::clamp(std::lround((std::max)(0.0, (*profileM)[i]) * 10.0), 0L, 32767L));
+        }
     }
     return true;
 }

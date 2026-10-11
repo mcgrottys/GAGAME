@@ -84,6 +84,7 @@ struct SceneLayer {
     double lodPixels = 1.0, shapePixels = 4.0, pageMB = 1024.0, marginDeg = 5.0;
     bool field = true;                                                // ...and the field under a pixel
     double laneWidth = 3.5, defaultLanes = 2.0, pathWidth = 2.0, kerb = 0.12;   // ...and the roads' ribbons
+    double rampGrade = 0.06, deckDepth = 1.0, bridgeClearance = 5.0;             // ...and the bridges' decks
 };
 struct SceneTool {
     std::string name, args;

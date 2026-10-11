@@ -387,6 +387,9 @@
       { "key": "laneWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3.5, "reload": "restart", "doc": "a road in the tree (sources of kind \"roads\", docs/ROADS.md) is as wide as its file says, else its lanes times this" },
       { "key": "defaultLanes", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 2, "reload": "restart", "doc": "a road with neither width nor lanes tagged: the scene's assumption" },
       { "key": "pathWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "restart", "doc": "a footway, path, cycleway, track or steps with no width tagged" },
+      { "key": "rampGrade", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.06, "reload": "restart", "doc": "the approaches to a bridge fall at this grade (rise over run) from the deck to the ground, along the ways joining its ends through junctions of two" },
+      { "key": "deckDepth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 1, "reload": "restart", "doc": "a bridge's deck is this deep: its surveyed clearance is to the underside, the road rides on top" },
+      { "key": "bridgeClearance", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 5, "reload": "restart", "doc": "a bridge no clearance survey (sources of kind \"bridges\") knows stands this high over what it crosses" },
       { "key": "kerb", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.12, "reload": "restart", "doc": "a road's surface stands this much over the composed ground, and its mass as much under it" }
     ] },
     { "type": "layer.plain", "keys": [

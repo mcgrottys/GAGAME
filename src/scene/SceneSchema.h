@@ -399,6 +399,7 @@ struct BuildingsLayerProps {
     // THE ROADS IN THE SAME TREE (compose/BuildingLod.h RoadRibbonDefaults): the scene's assumptions
     // where a way's file is silent.
     double laneWidth = 3.5, defaultLanes = 2.0, pathWidth = 2.0, kerb = 0.12;
+    double rampGrade = 0.06, deckDepth = 1.0, bridgeClearance = 5.0;   // the decks and their ramps (docs/ROADS.md)
 };
 struct NodeProps {
     std::string name;
