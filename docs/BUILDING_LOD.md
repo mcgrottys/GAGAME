@@ -183,3 +183,23 @@ the old per-vertex one did. The CPU walk at 1 px fell from 90 ms to 53 ms (its s
 The pages are kept by their worth on screen (`layer.buildings.pageMB`; the law is in
 BuildingLayer::Simulate): a page is worth its width in pixels were the eye to look at it, the
 least worth goes first and never to make room for one worth less, so the coarse levels are the floor.
+
+## 10. A second eye (2026-10-11)
+
+The minimap is a view of its own (ViewContext index 1), and a walk culled to the first eye's
+frustum shows a second eye looking down almost nothing: 7 boxes over the Merrimack's mouth. So the
+walk is keyed by eye (`BuildingLayer::Eye`, `kEyes` = 2): each eye keeps its own cloud origin,
+last inputs, drawn buffer, held pages and wants; `SimulateEye` launches the second eye's walk
+from its own camera and rectangle (FrameLoop::MinimapFrame), its result lands in the next
+Simulate beside the first's, and Render draws the eye `ctx.viewIndex` names. The pages, the
+shape pool and the budget are the layer's, shared: the two streams send the union of the eyes'
+wants (each page once, at the most it is worth to either), and a page any eye's drawn walk reads
+is kept under it.
+
+What an eye draws is the scene's to say: `hud.minimap.layers` lists the layer names
+(`"globe vessels buildings sky"`), empty meaning that list; the sky only where the eye's own law
+hands it one. A gate would take the same key once what a window shows is decided per layer.
+
+Measured on `scenes/demos/haulover_city.json` (the gate scene with the planet's buildings and
+roads): over the harbour at 1.5 km the second eye's last walk drew 844 boxes + 2,164 shapes from
+19 pages beside the first eye's 3,252 + 2,734 from 70; the frame 24.7 ms headless with both.

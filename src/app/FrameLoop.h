@@ -411,6 +411,8 @@ private:
     static constexpr size_t kMaxEyeOwes = 4;
     std::vector<const scene::Gateway*> m_eyeOwes;
     uint32_t m_followCarries = 0;   // the subject's carry count as of the last frame
+    uint64_t m_minimapMask = 0;     // the layers the second eye draws (hud.minimap.layers)
+    bool m_minimapMaskSet = false;
     const scene::Gateway* m_followedGate = nullptr;   // the gate that last carried the subject (StepEntities)
     // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
     // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles

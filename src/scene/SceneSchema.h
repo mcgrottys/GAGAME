@@ -259,6 +259,7 @@ struct MinimapProps {
     double size = 0.34;            // the square's side, as a fraction of the target's height
     uint32_t margin = 16;          // px from the bottom-right corner
     double homeAltM = 6.0e6;       // Reset: this far above the followed entity, looking down
+    std::string layers;            // the layers this eye draws, by name, space-separated; empty = its own list
     double minAltM = 8.0;          // the zoom's floor above the sea (over a hull's console)
 };
 struct HudSection {

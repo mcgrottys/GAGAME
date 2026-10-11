@@ -1,0 +1,147 @@
+{
+  "_readme": [
+    "THE HAULOVER GATE, WITH THE TOWN -- the playable gate scene (scenes/demos/haulover_portal.json:",
+    "the RHIB at the helm, the gate at the Merrimack's mouth into Haulover Inlet and the one back,",
+    "the sea, the minimap) with the planet's buildings and roads drawn around both inlets from the",
+    "folded tree (docs/BUILDING_LOD.md, docs/ROADS.md). The minimap draws the buildings too: the",
+    "first eye's walk about its cloud origin, seen from the second eye; its home altitude is set",
+    "so the town is there when it resets.",
+    "",
+    "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
+    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "MINIMAP  drag to turn the planet, wheel to zoom, the button to reset over the boat"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "haulover-city",
+    "mode": "world",
+    "view": "sea"
+  },
+  "time": {
+    "start": "2026-08-28T19:30:00Z"
+  },
+  "sun": {
+    "_readme": "The sun is a light at 0,0,0 and the Earth is placed around it -- no clock involved, so the tide above keeps its own time. This placement puts the Merrimack at sunset (+1.5 deg) and Haulover in daylight (+20.0 deg): the sun lies along the great circle from one inlet through the other.",
+    "source": "earth",
+    "earth": {
+      "at": [
+        -115661585509.72832,
+        0.0,
+        94878451480.56392
+      ],
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "spin": 107.0777
+    }
+  },
+  "sea": {
+    "storm": {
+      "hs": 1.5,
+      "tp": 8,
+      "dir": 95
+    }
+  },
+  "hud": {
+    "fps": true,
+    "minimap": {"enabled": true, "follow": "boat", "homeAltM": 2500, "layers": "globe vessels buildings sky"}
+  },
+  "views": [
+    {
+      "name": "sea",
+      "follow": {
+        "target": "boat"
+      },
+      "interests": [
+        {
+          "name": "boat"
+        }
+      ]
+    }
+  ],
+  "entities": [
+    {
+      "name": "boat",
+      "vessel": "rhib.novurania18",
+      "at": {
+        "x": 120,
+        "alt": 0,
+        "z": -10,
+        "az": 86
+      },
+      "controller": "helm"
+    }
+  ],
+  "interests": [
+    {
+      "name": "boat",
+      "target": "boat",
+      "radius": 200
+    }
+  ],
+  "layers": [
+    {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
+     "lod": "D:/DataCache/OSM/buildings/planet-261010-roads.tree",
+     "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12}
+  ],
+  "gates": [
+    {
+      "name": "haulover",
+      "at": {
+        "x": 450,
+        "alt": 0,
+        "z": 0,
+        "az": 90
+      },
+      "size": [
+        120,
+        30,
+        10
+      ],
+      "toLat": 25.8997,
+      "toLon": -80.1239,
+      "toAz": 90
+    },
+    {
+      "name": "merrimack",
+      "fromLat": 25.8997,
+      "fromLon": -80.1239,
+      "at": {
+        "x": 200,
+        "alt": 0,
+        "z": 0,
+        "az": 90
+      },
+      "size": [
+        120,
+        30,
+        10
+      ],
+      "toAt": {
+        "x": 250,
+        "alt": 0,
+        "z": 0
+      },
+      "toAz": 90
+    }
+  ],
+  "sources": [
+    {
+      "name": "massgis.coq2023",
+      "manifest": "data/aerial/aerial.json",
+      "feather": 25
+    },
+    {"name": "osm.planet", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"},
+    {"name": "osm.roads.planet", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"},
+    {
+      "name": "noaa.cudem.haulover",
+      "folder": "D:/DataCache/GAGAME/cudem/FL",
+      "match": "ncei19_n26X*_w080X25_2018v1.tif",
+      "kind": "height",
+      "unit": "m",
+      "datum": "NAVD88"
+    }
+  ]
+}

@@ -84,6 +84,13 @@ public:
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Simulate(const FrameContext& ctx) override;   // the streaming: want, build, upload, drop
     void Render(const FrameContext& ctx) override;
+    // A SECOND EYE'S WALK (the minimap's, FrameLoop::MinimapFrame): the tree walked from that eye's
+    // own camera and rectangle, keyed by ctx.viewIndex, its boxes drawn when Render comes with that
+    // index. The pages, the pool and the budget are the layer's, shared by every eye; what one eye
+    // asks for the streams send, what any eye's drawn walk reads is kept. Its result lands in the
+    // next Simulate, with the first eye's.
+    void SimulateEye(const FrameContext& ctx);
+    static constexpr uint32_t kEyes = 2;   // the session's own and the minimap's (ViewContext index)
 
     size_t ResidentCells() const { return m_cells.size(); }
 
@@ -209,6 +216,7 @@ private:
         uint64_t nodes = 0, singles = 0, fading = 0;
         uint64_t cellsVersion = 0;      // the detail cells it skipped were these
         double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
+        uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)
 
         double ms = 0.0;
     };
@@ -217,7 +225,8 @@ private:
         std::vector<Built> done;
         std::vector<std::pair<PageKey, std::shared_ptr<Page>>> pagesDone;
         std::vector<Walked> walked;
-        std::atomic<int> inflight{0}, pageInflight{0}, walking{0};
+        std::atomic<int> inflight{0}, pageInflight{0};
+        std::atomic<int> walking[kEyes] = {};   // one walk in flight per eye
         // THE WALK'S BUFFERS, REUSED: a walk takes a retired one at least its size before it makes one.
         std::vector<GpuBuffer> freeStaging, freeBoxes;
         std::atomic<bool> cancel{false};
@@ -241,6 +250,8 @@ private:
     // ...of any box of `deg` with its south-west corner at (lon0, lat0).
     static double ReachBox(double lon0, double lat0, double deg, double latDeg, double lonDeg, double h);
     void TreeFrame(const FrameContext& ctx, double latDeg, double lonDeg, double h);
+    // The walk launched for one eye, when its inputs have moved and none of its is running.
+    void Walk(const FrameContext& ctx, uint32_t eye, double latDeg, double lonDeg, double h);
     void LoadPage(const PageKey& k);
     void Want(Gpu* gpu, double latDeg, double lonDeg, double h);
     void Upload(const FrameContext& ctx);
@@ -283,13 +294,12 @@ private:
         GpuBuffer vb;
         uint32_t count = 0, insts = 0;
         std::shared_ptr<const DrawCpu> cpu;   // its instances, kept for a lost device's report
-    } m_drawn;
+    };
     // TWO DISPATCHES a frame (the boxes, then the shapes): DRED names the one the GPU stopped in,
     // and DumpChunk reads every instance of that frame's walk from the CPU's copy.
     struct DrawLog { uint64_t frame = 0; std::shared_ptr<const DrawCpu> cpu; };
     DrawLog m_drawLog[3];
     void DumpChunk(uint32_t k) const;
-    std::set<PageKey> m_drawnUsed;      // the pages the drawn walk reads: not evicted under it
     // THE SHAPE POOL: one buffer, a heap SRV (StructuredBuffer<float4>), its free ranges.
     Gpu* m_gpu = nullptr;
     GpuBuffer m_pool;
@@ -305,27 +315,34 @@ private:
     // waits, no new page is asked for -- nothing is loaded that cannot land.
     std::vector<std::pair<PageKey, std::shared_ptr<Page>>> m_roomWait;
     uint64_t m_roomWaitFrames = 0, m_tooBig = 0;
-    uint32_t m_walkInstsMax = 0;   // the largest walk's shaped instances so far (each new largest is logged)
-    std::vector<std::shared_ptr<const Page>> m_drawnHold;   // the drawn walk's pages (their slots wait on them)
     hal::Pso m_psoShape, m_psoBoxMesh;   // AsShape + MsShape; MsBox (m_psoBox is VsBox: no mesh shaders)
-    uint64_t m_drawnCells = 0;          // the cells version the drawn boxes were walked against
     // THE LAYER'S CLOCK (s): a page's landing and the frame's now, for the boxes' fade-in.
     std::chrono::steady_clock::time_point m_t0 = std::chrono::steady_clock::now();
     float Now() const { return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_t0).count(); }
     static constexpr float kPageFadeS = 0.6f;   // a page's buildings come in over this, not in one frame
-    // THE WALK'S ORIGIN (core/OriginLattice.h): the planet's cloud's origin at the eye -- its shell
-    // and direction -- kept by the lattice's hysteresis. Every instance of a walk is stated about
-    // it, not about the eye, so a camera moving inside the cell moves one float3 in the constants
-    // and not a buffer of instances; the walk itself is asked again only when the eye has moved
-    // 2 % of its height (it was 0.2 %), since its instances no longer go stale with the eye.
-    OriginLattice::Origin m_walkOrigin{};
-    bool m_walkOriginSet = false;
-    // The last walk's inputs: a new one starts when they have moved.
-    double m_walkEye[3] = {1e30, 1e30, 1e30}, m_walkFwd[3] = {0, 0, 0};
-    uint64_t m_walkCells = ~0ull, m_walkPages = ~0ull;
-    uint64_t m_walks = 0;
-    // The pages the last walk asked for, coarsest level first (the two streams read it each frame).
-    std::vector<std::pair<double, PageKey>> m_wants;
+    // ONE EYE'S WALK (keyed by ctx.viewIndex: the session's own, the minimap's). THE WALK'S ORIGIN
+    // (core/OriginLattice.h): the planet's cloud's origin at the eye -- its shell and direction --
+    // kept by the lattice's hysteresis. Every instance of a walk is stated about it, not about the
+    // eye, so a camera moving inside the cell moves one float3 in the constants and not a buffer of
+    // instances; the walk itself is asked again only when the eye has moved 2 % of its height.
+    struct Eye {
+        OriginLattice::Origin walkOrigin{};
+        bool walkOriginSet = false;
+        // The last walk's inputs: a new one starts when they have moved.
+        double walkEye[3] = {1e30, 1e30, 1e30}, walkFwd[3] = {0, 0, 0};
+        uint64_t walkCells = ~0ull, walkPages = ~0ull;
+        uint64_t walks = 0;
+        uint32_t walkInstsMax = 0;      // the largest walk's shaped instances so far (each new largest is logged)
+        Drawn drawn;
+        std::set<PageKey> drawnUsed;    // the pages the drawn walk reads: not evicted under it
+        std::vector<std::shared_ptr<const Page>> drawnHold;   // the drawn walk's pages (their slots wait on them)
+        uint64_t drawnCells = 0;        // the cells version the drawn boxes were walked against
+        // The pages the last walk asked for, coarsest level first (the two streams read it each frame).
+        std::vector<std::pair<double, PageKey>> wants;
+    } m_eyes[kEyes];
+    // Every eye's wants as one list, each page once at the most it is worth to any eye.
+    std::vector<std::pair<double, PageKey>> Wants() const;
+    bool DrawnUses(const PageKey& k) const;
 };
 
 }  // namespace ga

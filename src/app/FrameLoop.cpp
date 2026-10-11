@@ -100,6 +100,7 @@
 #include <ctime>
 #include <fstream>
 #include <filesystem>
+#include <sstream>
 #include <string>
 
 using namespace ga;
@@ -4017,9 +4018,9 @@ bool FrameLoop::Frame() {
         scene::ViewContext v1 = renderer.ViewOf(
             mc, static_cast<float>(simUnix - startUnix), 1, uint32_t(r.x), uint32_t(r.y),
             uint32_t(r.w), uint32_t(r.h), m_minimapEyeRadius);
-        // ...and the hulls, from its own eye (VesselLayer: the ones standing in its world).
-        v1.drawMask = renderer.LayerBit("globe") | renderer.LayerBit("vessels") |
-                      (m_minimapSky ? renderer.LayerBit("sky") : 0);
+        // ...and what the scene lists for this eye (hud.minimap.layers; MinimapStep), the sky
+        // only where the eye's law hands it one.
+        v1.drawMask = m_minimapMask & ~(m_minimapSky ? 0ull : renderer.LayerBit("sky"));
         v1.surface = &m_minimapSurface;
         viewSet.views.push_back(v1);
     }
@@ -5505,6 +5506,25 @@ void FrameLoop::MinimapStep(float dt) {
         m_minimap.Configure(m_S.hud.minimap, m_A.planetR, pole);
         m_minimapReady = true;
     }
+    if (!m_minimapMaskSet) {
+        // THE EYE'S LAYERS (hud.minimap.layers): the names the scene lists, or the eye's own list --
+        // the planet, the hulls, the buildings and the sky (the sky by its law, MinimapFrame).
+        m_minimapMaskSet = true;
+        const std::string& list = m_S.hud.minimap.layers;
+        if (list.empty()) {
+            m_minimapMask = m_A.renderer.LayerBit("globe") | m_A.renderer.LayerBit("vessels") |
+                            m_A.renderer.LayerBit("buildings") | m_A.renderer.LayerBit("sky");
+        } else {
+            m_minimapMask = 0;
+            std::istringstream in(list);
+            std::string name;
+            while (in >> name) {
+                const uint64_t bit = m_A.renderer.LayerBit(name.c_str());
+                if (!bit) Log("[minimap] hud.minimap.layers names '%s', which is no layer of this scene: ignored", name.c_str());
+                m_minimapMask |= bit;
+            }
+        }
+    }
     m_minimapHasSubject = false;
     for (const auto& ent : m_entities) {
         if (!ent || !ent->Hull() || ent->Name() != m_S.hud.minimap.follow) continue;
@@ -5557,6 +5577,17 @@ void FrameLoop::MinimapFrame(float dt) {
         Log("[minimap] the eye reaches %d window%s deep", win.n, win.n == 1 ? "" : "s");
     }
     if (m_minimapSky) HandSky(eye, es, &win);
+    // ITS BUILDINGS: the tree walked from this eye (BuildingLayer::SimulateEye), when the scene's
+    // list for this eye names the layer; the result lands with the first eye's next frame.
+    if (BuildingLayer* bl = m_A.buildingLayer; bl && bl->enabled && (m_minimapMask & m_A.renderer.LayerBit("buildings"))) {
+        FrameContext fc;
+        fc.gpu = &m_A.gpu;
+        fc.camera = &mc;
+        fc.width = uint32_t(r.w);
+        fc.height = uint32_t(r.h);
+        fc.viewIndex = 1;
+        bl->SimulateEye(fc);
+    }
     // ITS RINGS (StandRings, the first eye's law): its own ladder when it stands low over the sea
     // and away from the first eye; the first eye's set A where it stands at the first eye's place
     // (they stand there already); none from high up, where no ring is finer than a pixel.
