@@ -10,6 +10,15 @@
 //  value a source carries (height tagged or assumed, which source won) without this file knowing.
 // ================================================================================================
 #define GA_NO_FIELD_BUFFER
+// THE WORLD BEING DRAWN (Globe.hlsl's law for its levels): the sky and haze helpers read the sun,
+// the zenith and the eye's radius through these names, so a window world's buildings are lit by
+// that world's sun and sky (the view's world table, loaded at the top of PsMain), not the eye's own.
+static float3 sLvlSun = float3(0.0f, 1.0f, 0.0f);
+static float3 sLvlSkyUp = float3(0.0f, 1.0f, 0.0f);
+static float sLvlSkyEyeR = 6371000.0f;
+#define GA_SKY_EYE_R (sLvlSkyEyeR)
+#define GA_SUN_DIR (sLvlSun)
+#define GA_SKY_UP (sLvlSkyUp)
 #include "Common.hlsli"
 
 cbuffer BuildingCb : register(b1) {
@@ -365,8 +374,15 @@ float4 PsMain(VsOut i) : SV_Target {
     // kept only where the eye reaches it through every box before it.
     const uint depth = gBdMesh.z;
     if (WindowChainDepth(i.rel, depth + 1u) != depth) discard;
-    // The sun of that world, through its window (the hulls' law); its zenith likewise.
-    const float3 sunHere = (depth > 0u) ? normalize(WtWinSun(depth - 1u).xyz) : GA_SUN_DIR;
+    // THAT WORLD'S LIGHT: its sun, its zenith and its eye's radius from the view's world table
+    // (Globe.hlsl LoadLevel), so the sky's irradiance, the sun through the air and the haze are the
+    // far place's through its window, not the eye's own.
+    {
+        const uint s = min(depth, max(WtLevels(), 1u) - 1u);
+        sLvlSun = (depth > 0u) ? normalize(WtLevelRow(s, 4u).xyz) : gSunDir.xyz;
+        sLvlSkyUp = (depth > 0u) ? normalize(WtLevelRow(s, 5u).xyz) : float3(0.0f, 1.0f, 0.0f);
+        sLvlSkyEyeR = length(WtLevelRow(s, 0u).xyz);
+    }
     // THE LAND'S LIGHT (Globe.hlsl's law, Common.hlsli's terms): the sky's irradiance on the face
     // plus the sun through the air, which the PLANET decides is up at this point -- never the face's
     // own tilt. The point's zenith and height are asked of the sphere (its centre at flat
@@ -374,7 +390,7 @@ float4 PsMain(VsOut i) : SV_Target {
     const float Rb = gSkyLut.y;
     const float3 fromCentre = gEyeRel.xyz + i.rel + float3(0.0f, Rb, 0.0f);
     const float r = length(fromCentre);
-    const float3 up = (depth > 0u) ? normalize(WtWinUp(depth - 1u).xyz) : fromCentre / r;
+    const float3 up = (depth > 0u) ? sLvlSkyUp : fromCentre / r;
     const float h = (depth > 0u) ? 0.0f : r - Rb;
     // A box's faces share their corners and carry no normal: the face's own, from the surface's
     // derivatives, turned to face the eye (the box is convex and culled, so the eye sees outsides);
@@ -388,7 +404,7 @@ float4 PsMain(VsOut i) : SV_Target {
         if (dot(n, i.rel) > 0.0f) n = -n;
         if (dot(n, up) > 0.9f) col *= 0.65f;   // kPalette[1] / kPalette[0]: the roof's shade of the wall's
     }
-    const float ndl = saturate(dot(n, sunHere)) * PlanetShadow(up, sunHere, h, Rb);
+    const float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
     const float3 lit = col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f);
     // ...and seen through THE AIR IN FRONT OF IT, the ground's own law: a box 60 km off fades into
     // the same haze as the land under it, where it stood out at full contrast.

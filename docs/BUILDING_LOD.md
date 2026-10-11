@@ -258,3 +258,10 @@ zenith. Two windows deep (`kWorlds` = 3); beyond that a window is too small to h
 Measured from the Merrimack's mouth looking through the Haulover gate (`out/roads/city_mouth.json`,
 a frozen still): the own world 227 boxes + 65 shapes, the Haulover world through the window 67 +
 171, the Merrimack again through two windows 312 + 99; the still unchanged from frame 400 to 1200.
+
+And lit as that world is lit: the owner saw the far side's buildings carrying the near side's
+sunset. Buildings.hlsl now defines the sun, the zenith and the eye's radius the sky and haze
+helpers read (`GA_SUN_DIR`, `GA_SKY_UP`, `GA_SKY_EYE_R`) as statics loaded at the top of PsMain
+from the view's world table at the pixel's depth -- Globe.hlsl's LoadLevel, for the buildings --
+so a window world's walls take its own sun through its own air and its own sky's irradiance.
+Through the Haulover gate at the Merrimack's sunset, the far towers stand in Florida's noon.
