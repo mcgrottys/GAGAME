@@ -67,6 +67,12 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
     const bool ok = hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "buildings"); }, "buildings");
     d.vs = sc.Compile(path, L"VsBox", L"vs_6_0");   // the tree's boxes: the same light, the same depth,
+    // THE OUTSIDE IS THE FRONT (2026-10-10): every surface of the tree winds counter-clockwise seen
+    // from outside -- the records' rings (BuildingShape.h), their walls to the edge's right, the
+    // roof's ears, a ribbon's quads, a box's six faces -- so the back faces are the insides and the
+    // undersides, which nothing sees, and the rasterizer drops them before a pixel is shaded.
+    d.cull = D3D12_CULL_MODE_BACK;
+    d.frontCcw = TRUE;
     d.blend = true;                                  // a fold's coverage as its alpha
     d.srcBlend = D3D12_BLEND_SRC_ALPHA;
     d.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
@@ -80,7 +86,8 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         md.rootSig = m_rootSig;
         md.ms = sc.Compile(path, L"MsShape", L"ms_6_5");
         md.ps = sc.Compile(path, L"PsMain", L"ps_6_5");
-        md.cull = D3D12_CULL_MODE_NONE;
+        md.cull = D3D12_CULL_MODE_BACK;   // the outside is the front (above)
+        md.frontCcw = TRUE;
         md.depthClip = TRUE;
         md.depthTest = true;
         md.depthWrite = true;

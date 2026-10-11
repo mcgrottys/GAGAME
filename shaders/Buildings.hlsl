@@ -75,7 +75,9 @@ VsOut VsBox(uint vid : SV_VertexID) {
     const float3 B = ax == 0u ? b.v : (ax == 1u ? b.w : b.u);
     const float3 C = ax == 0u ? b.w : (ax == 1u ? b.u : b.v);
     static const float2 kQuad[6] = {float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1)};
-    const float2 q = kQuad[t];
+    // Counter-clockwise seen from OUTSIDE on both faces of a pair: the -A face is the +A face
+    // mirrored, so its quad runs the other way (the layer culls back faces).
+    const float2 q = float2(kQuad[t].x * s, kQuad[t].y);
     VsOut o;
     o.rel = gBdOrigin.xyz + b.c + s * A + q.x * B + q.y * C;
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
