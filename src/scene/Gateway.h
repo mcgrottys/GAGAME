@@ -37,6 +37,7 @@
 // ================================================================================================
 #pragma once
 
+#include "core/OriginLattice.h"
 #include "core/Pga.h"
 #include "core/Space.h"
 #include "scene/SceneSchema.h"
@@ -48,10 +49,15 @@ namespace ga::scene {
 
 // A PLACE: a tangent frame of the planet (y up at its origin), hung under the planet by the rule
 // every frame in the engine is built by, and the chart that reads the planet's data there.
+// A PLACE'S SPACE IS THE PLANET'S CLOUD'S ORIGIN nearest to it (core/OriginLattice.h), and the
+// place itself stands at `offset` in that space: so a gate to a place and a hull or a bank at the
+// same place share one frame, by the formula and not by arrangement (2026-10-11).
 struct Place {
     Space space;
     Space::Anchor chart;
     double latDeg = 0.0, lonDeg = 0.0;
+    double offset[3] = {0.0, 0.0, 0.0};   // the place's point in its space (metres: east, up, north)
+    int64_t origin = -1;                  // the cloud's index
     bool Build(const Space& planet, double planetR, double latDeg, double lonDeg,
                const std::string& name, std::string* why);
 };

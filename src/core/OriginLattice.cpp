@@ -93,6 +93,30 @@ OriginLattice::Origin OriginLattice::Nearest(const double P[3]) const {
     return At(k, InverseIndex(d));
 }
 
+OriginLattice::Origin OriginLattice::Surface(const double P[3]) const {
+    const double r = std::sqrt(Dot(P, P));
+    if (!(r > 0.0)) return At(0, -1);
+    const double d[3] = {P[0] / r, P[1] / r, P[2] / r};
+    return At(0, InverseIndex(d));
+}
+
+OriginLattice::Origin OriginLattice::SurfaceAt(double latDeg, double lonDeg) const {
+    const double d2r = kPi / 180.0;
+    const double la = latDeg * d2r, lo = lonDeg * d2r;
+    const double d[3] = {std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo)};
+    return At(0, InverseIndex(d));
+}
+
+OriginLattice::Origin OriginLattice::PickSurface(const double P[3], const Origin* current, double margin) const {
+    const Origin best = Surface(P);
+    if (!current || current->centre || current->Same(best)) return best;
+    const double r = std::sqrt(Dot(P, P));
+    const double S[3] = {P[0] / r * R, P[1] / r * R, P[2] / r * R};   // the point brought to the shell
+    const double dn[3] = {S[0] - best.c[0], S[1] - best.c[1], S[2] - best.c[2]};
+    const double dc[3] = {S[0] - current->c[0], S[1] - current->c[1], S[2] - current->c[2]};
+    return std::sqrt(Dot(dc, dc)) <= (1.0 + margin) * std::sqrt(Dot(dn, dn)) ? *current : best;
+}
+
 OriginLattice::Origin OriginLattice::Pick(const double P[3], const Origin* current, double margin) const {
     const Origin best = Nearest(P);
     if (!current || current->Same(best)) return best;

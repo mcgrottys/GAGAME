@@ -41,6 +41,7 @@
 // ================================================================================================
 #pragma once
 
+#include "core/OriginLattice.h"
 #include "core/Pga.h"
 #include "scene/Component.h"
 #include "scene/SceneSchema.h"
@@ -203,6 +204,7 @@ private:
     // m_ownSpace once it has re-centred, or at a gate's destination after a carry.
     Space m_ownSpace;
     Space::Anchor m_ownChart, m_gateChart;
+    OriginLattice::Origin m_origin{};   // the cloud's origin the hull's own space stands on
     bool m_ownValid = false;
     Motor m_spaceInRoot;               // identity until a gate carries the hull
 };

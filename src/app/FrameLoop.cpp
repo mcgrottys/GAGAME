@@ -845,9 +845,13 @@ std::optional<int> FrameLoop::Session() {
             double lat = 0.0, lon = 0.0;
             const Space* space = nullptr;
             const Space::Anchor* chart = nullptr;
+            // THE PLACE'S POINT IN ITS SPACE (scene/Gateway.h Place): a place's space is the cloud's
+            // origin nearest to it, and a box declared "at the place" stands at these floats in it
+            // (the root's own frame is at its place: zero, until the root too is a cloud point).
+            double offset[3] = {0.0, 0.0, 0.0};
         };
         std::vector<PlaceRef> known;
-        known.push_back({rootChart.latDeg, rootChart.lonDeg, &m_tangentSpace, &rootChart});
+        known.push_back({rootChart.latDeg, rootChart.lonDeg, &m_tangentSpace, &rootChart, {0.0, 0.0, 0.0}});
         auto placeAt = [&](bool named, double lat, double lon, const std::string& gate,
                            PlaceRef& out) {
             if (!named) {
@@ -869,7 +873,9 @@ std::optional<int> FrameLoop::Session() {
                     lat, lon, why.c_str());
                 return false;
             }
-            out = PlaceRef{lat, lon, &pl->space, &pl->chart};
+            out = PlaceRef{lat, lon, &pl->space, &pl->chart, {pl->offset[0], pl->offset[1], pl->offset[2]}};
+            Log("[gate] the place %.5f N %.5f E stands at (%.1f, %.1f, %.1f) m in its space, the cloud's origin %lld",
+                lat, lon, pl->offset[0], pl->offset[1], pl->offset[2], static_cast<long long>(pl->origin));
             known.push_back(out);
             m_places.push_back(std::move(pl));
             return true;
@@ -920,6 +926,10 @@ std::optional<int> FrameLoop::Session() {
                 !placeAt(gd.hasTo, gd.p.toLat, gd.p.toLon, gd.p.name, to)) {
                 continue;
             }
+            // The sugar says where a box stands FROM ITS PLACE; the place stands at its offset in
+            // the space the box is posed in.
+            entry = Motor::Translation(from.offset[0], from.offset[1], from.offset[2]) * entry;
+            exit = Motor::Translation(to.offset[0], to.offset[1], to.offset[2]) * exit;
             auto gate = std::make_unique<scene::Gateway>();
             gate->Declared() = gd.p;
             if (gate->Build(*from.space, *to.space, *to.chart, m_tangentSpace, entry, exit)) {

@@ -209,24 +209,35 @@ void Entity::Recentre(double simUnix) {
     double cg[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(cg[0], cg[1], cg[2]);
     const double reach = std::sqrt(cg[0] * cg[0] + cg[2] * cg[2]);
-    if (reach < m_props.recentreM) return;
-
-    // Where the hull is, exactly (its own space's rows, on the sphere).
+    // Where the hull is, exactly (its own space's rows, on the sphere) -- and THE CLOUD'S ORIGIN
+    // under it (core/OriginLattice.h), kept while the hull stands in its cell. A hull in the root's
+    // or a gate's space leaves it for its own once it is `recentreM` out (the threshold that lets
+    // a hull at a scene's own place stay in the root's frame, which is not yet a cloud point); a
+    // hull in its own space moves to the next origin when the lattice says so, and no sooner.
     const Space::Anchor& chart = m_ownValid ? m_ownChart : (m_space ? m_gateChart : *m_o.rootChart);
-    double lat = 0.0, lon = 0.0;
-    chart.PlaceOf(cg[0], cg[1], cg[2], lat, lon);
-    // The new space: the tangent frame there, built by the rule every other frame in the engine
-    // is built by, hung under the planet.
+    if (!m_ownValid && reach < m_props.recentreM) return;
+    double P[3];
+    chart.PlanetOf(cg[0], cg[1], cg[2], P);
+    OriginLattice L;
+    L.R = chart.planetR;
+    const OriginLattice::Origin o = L.PickSurface(P, m_ownValid ? &m_origin : nullptr);
+    if (m_ownValid && o.Same(m_origin)) return;
+    if (!(std::fabs(o.anchor.latDeg) < 89.0)) return;
+    const double lat = o.anchor.latDeg, lon = o.anchor.lonDeg;
     const double R = chart.planetR;
-    const PoseFrame fr = FrameFromAnchor(lat, lon, R);
-    if (!fr.valid) return;
+    PoseFrame fr;
+    for (int i = 0; i < 3; ++i) {
+        fr.east[i] = o.anchor.east[i];
+        fr.up[i] = o.anchor.up[i];
+        fr.north[i] = o.anchor.north[i];
+    }
+    fr.valid = true;
     Space next;
     next.name = m_props.name + ".origin";
     next.unitM = R;
     next.extentM = 2.0 * R;
     next.parent = m_o.planet;
-    const double anchor[3] = {fr.up[0] * R, fr.up[1] * R, fr.up[2] * R};
-    next.link = Placement::Frame(fr.east, fr.up, fr.north, anchor);
+    next.link = Placement::Frame(fr.east, fr.up, fr.north, o.c);
     std::string why;
     if (!next.Declare(&why)) {
         Log("[vessel] '%s' could not re-centre: %s", m_props.name.c_str(), why.c_str());
@@ -247,15 +258,16 @@ void Entity::Recentre(double simUnix) {
         m_ownChart.north[i] = fr.north[i];
     }
     m_ownChart.planetR = R;
+    m_origin = o;
     m_ownValid = true;
     m_space = &m_ownSpace;
     m_spaceInRoot = m_ownSpace.To(*m_o.rootSpace).ToMotor();
     m_sea.SetChart(&m_ownChart);
     double after[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(after[0], after[1], after[2]);
-    Log("[vessel] '%s' re-centred its origin at %.5f N %.5f E: it stood %.0f m out, where its flat "
+    Log("[vessel] '%s' re-centred on the cloud's origin %lld at %.5f N %.5f E: it stood %.0f m out, where its flat "
         "frame rides %.2f m over the sphere; now %.1f m out",
-        m_props.name.c_str(), lat, lon, reach, reach * reach / (2.0 * R),
+        m_props.name.c_str(), static_cast<long long>(o.index), lat, lon, reach, reach * reach / (2.0 * R),
         std::sqrt(after[0] * after[0] + after[2] * after[2]));
 }
 

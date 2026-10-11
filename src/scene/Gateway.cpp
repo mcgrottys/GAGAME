@@ -19,32 +19,29 @@ bool Place::Build(const Space& planet, double planetR, double lat, double lon,
         if (why) *why = "a place needs a latitude off the poles and a finite longitude";
         return false;
     }
-    // The tangent frame there, built by the rule the root's is, hung under the planet.
-    const PoseFrame fr = FrameFromAnchor(lat, lon, planetR);
+    // THE FRAME IS THE CLOUD'S ORIGIN nearest the place (the surface shell), hung under the planet;
+    // the place itself is its floats about that origin. The chart is the origin's own tangent frame:
+    // the EXACT map (M13 step 2 / PHASE C5), the same rows the placement was built from.
+    OriginLattice L;
+    L.R = planetR;
+    const OriginLattice::Origin o = L.SurfaceAt(lat, lon);
+    if (!(std::fabs(o.anchor.latDeg) < 89.0)) {
+        if (why) *why = "no tangent frame at the place's origin (too near a pole)";
+        return false;
+    }
     space = Space{};
     space.name = name;
     space.unitM = planetR;
     space.extentM = 2.0 * planetR;
     space.parent = &planet;
-    const double anchor[3] = {fr.up[0] * planetR, fr.up[1] * planetR, fr.up[2] * planetR};
-    space.link = Placement::Frame(fr.east, fr.up, fr.north, anchor);
-    if (!fr.valid) {
-        if (why) *why = "no tangent frame at the place";
-        return false;
-    }
+    space.link = Placement::Frame(o.anchor.east, o.anchor.up, o.anchor.north, o.c);
     if (!space.Declare(why)) return false;
-    chart = Space::Anchor{};
-    chart.latDeg = lat;
-    chart.lonDeg = lon;
-    // M13 step 2 / PHASE C5: the EXACT map, the only one -- the frame's own rows (the same ones the space's
-    // placement was built from) and the planet's radius, so a carried hull's water is read at the
-    // place, not at the linear chart's drift from this anchor.
-    for (int i = 0; i < 3; ++i) {
-        chart.east[i] = fr.east[i];
-        chart.up[i] = fr.up[i];
-        chart.north[i] = fr.north[i];
-    }
+    chart = o.anchor;
     chart.planetR = planetR;
+    const double d[3] = {std::cos(lat * kDeg) * std::cos(lon * kDeg), std::sin(lat * kDeg), std::cos(lat * kDeg) * std::sin(lon * kDeg)};
+    const double P[3] = {d[0] * planetR, d[1] * planetR, d[2] * planetR};
+    OriginLattice::Floats(o, P, offset);
+    origin = o.index;
     latDeg = lat;
     lonDeg = lon;
     return true;
@@ -112,7 +109,7 @@ bool Gateway::Build(const Space& source, const Space& dest, const Space::Anchor&
     double sx = bx, sy = by, sz = bz;
     (source.To(root).ToMotor()).TransformPoint(sx, sy, sz);
     Log("[gate] '%s': a %.0f x %.0f x %.0f m box at (%.1f, %.1f, %.1f) in %s facing %.1f / %+.1f "
-        "carries to %.5f N %.5f E -- (%.1f, %.1f, %.1f) in %s, facing %.1f / %+.1f -- %.0f km away",
+        "carries into the cloud's origin at %.5f N %.5f E, standing at (%.1f, %.1f, %.1f) in %s, facing %.1f / %+.1f -- %.0f km away",
         m_props.name.c_str(), m_props.size[0], m_props.size[1], m_props.size[2], bx, by, bz,
         source.name.c_str(), azOf(bf), elOf(bf), destChart.latDeg, destChart.lonDeg, ex, ey, ez,
         dest.name.c_str(), azOf(ef), elOf(ef),
@@ -130,9 +127,10 @@ bool Gateway::Build(const Space& planet, const Space& source, double planetR, co
             why.c_str());
         return false;
     }
-    // The exit is the same structure at the place's origin, turned to the declared heading.
+    // The exit is the same structure AT THE PLACE -- its floats in the origin's space -- turned to
+    // the declared heading.
     return Build(source, m_ownDest.space, m_ownDest.chart, source, entry,
-                 BoxPose(0.0, 0.0, 0.0, m_props.toAz, 0.0));
+                 BoxPose(m_ownDest.offset[0], m_ownDest.offset[1], m_ownDest.offset[2], m_props.toAz, 0.0));
 }
 
 bool Gateway::SeenThrough(const double eye[3], const double p[3]) const {

@@ -71,6 +71,12 @@ struct OriginLattice {
     Origin At(int shell, int64_t index) const;
     // The origin nearest to P (planet frame, metres from the centre).
     Origin Nearest(const double P[3]) const;
+    // THE GROUND'S ORIGIN under a point: the surface shell's point in P's direction -- what a chart
+    // of the ground wants (the rings of the sea, a place, a hull), whatever the eye's altitude.
+    Origin Surface(const double P[3]) const;
+    Origin SurfaceAt(double latDeg, double lonDeg) const;
+    // Surface, with the same hysteresis as Pick, judged along the ground.
+    Origin PickSurface(const double P[3], const Origin* current, double margin = 0.25) const;
     // Nearest, with hysteresis: `current` (may be null) is kept while P stands within (1 + margin)
     // times its distance to the nearest -- one law, so a point on a cell's boundary never flaps.
     Origin Pick(const double P[3], const Origin* current, double margin = 0.25) const;
