@@ -276,6 +276,8 @@ bool Entity::Teleport(const Gateway& gate, double simUnix) {
     double la0 = 0.0, lo0 = 0.0;
     m_sea.PlaceOf(c0[0], c0[2], la0, lo0);
     const SurfaceSample s0 = m_sea.At(c0[0], c0[2], simUnix);
+    double sp0[3] = {c0[0], 0.0, c0[2]}, sn0[3];   // the surface in the frame it is LEAVING, before SetChart
+    m_sea.PlaneOf(s0, c0[0], c0[2], sp0, sn0);
     // The pose is said in the gate's own source frame first, when the hull stands in another one
     // (its own re-centred space, or a place a gate at the far side of another built there).
     const Space* from = m_space ? m_space : m_o.rootSpace;
@@ -300,9 +302,13 @@ bool Entity::Teleport(const Gateway& gate, double simUnix) {
     // two seas stand at their own heights this instant (two tides, two sea states): the hull keeps
     // its height above ITS water, or it arrives as a drop or a plunge and the buoyancy impulse
     // capsizes it (the set-down's own finding). A translation of the pose; the momenta stand.
+    // Each surface in ITS frame (WaterSurface::PlaneOf): the two boxes stand at their frames'
+    // origins' distance from them, where the sphere is under the plane by a different amount.
     double lift = 0.0;
     if (s0.valid && s1.valid) {
-        lift = s1.heightNavd - s0.heightNavd;
+        double sp1[3], sn1[3];
+        m_sea.PlaneOf(s1, c1[0], c1[2], sp1, sn1);
+        lift = sp1[1] - sp0[1];
         b.pose = Motor::Translation(0.0, lift, 0.0) * b.pose;
     }
     double la1 = 0.0, lo1 = 0.0;
@@ -447,7 +453,11 @@ void Entity::Update(const FrameInfo& fi) {
             }
             const double draft = (boat->Spec().draftStatic.v > 0.0)
                                      ? boat->Spec().draftStatic.v : -keel;
-            const double y0 = ss.heightNavd - keel - draft;
+            // The surface in the HULL'S FRAME (WaterSurface::PlaneOf): the sphere under the hull,
+            // not the datum height on a flat plane -- a metre apart 3.6 km from the frame's origin.
+            double sp[3], sn[3];
+            boatSea.PlaneOf(ss, bp0[0], bp0[2], sp, sn);
+            const double y0 = sp[1] - keel - draft;
             // THE SEAT KEEPS THE HEADING (the Haulover portal demo, 2026-09-14). The set-down
             // levels the hull at its draught; it never meant to turn it -- but a bare translation
             // turned every hull to north, which nothing noticed while no spawn declared a heading
