@@ -16,6 +16,7 @@
   ],
   "base": "scenes/demos/tokyo.json",
   "scene": {"name": "earth", "mode": "world", "view": "orbit"},
+  "hud": {"fps": true},
   "time": {"start": "2026-08-28T17:00:00Z"},
   "layers": [
     {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
