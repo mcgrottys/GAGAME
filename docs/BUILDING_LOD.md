@@ -203,3 +203,26 @@ hands it one. A gate would take the same key once what a window shows is decided
 Measured on `scenes/demos/haulover_city.json` (the gate scene with the planet's buildings and
 roads): over the harbour at 1.5 km the second eye's last walk drew 844 boxes + 2,164 shapes from
 19 pages beside the first eye's 3,252 + 2,734 from 70; the frame 24.7 ms headless with both.
+
+## 11. After a carry, the buildings are slow to come: measured, not yet fixed (2026-10-11)
+
+Through the Haulover gate the first eye's walk asks for its pages at once, but they land one every
+hundred frames. The instrument (`[buildings] page L.. : read, then standing N buildings on the
+ground; meanwhile M raster windows decoded`) says where the time is: a page job stands EVERY
+building of its page on the composed ground when the page loads, and a page is 32 quads wide --
+88 km at level -1 -- so the job pays for thousands of buildings the view never asks for. At the
+Merrimack that is hidden: its height source is one small raster that lives in memory (2,244
+buildings stood in 9 ms). Haulover's is two 200 MB tiled GeoTIFFs decoded by the window: the page
+over Bal Harbour at level -1 stood 3,466 buildings in 4.7 s, decoding 906 windows (more than the
+256-window cache holds, while the globe paints the same files). The stream sends the coarse level
+one page at a time, so the chain crawls.
+
+Tried and set aside: the ground memoised at the level's grain (`BuildingLayer::Ground` is now a
+field per job, kept: the right grain, but the windows dominate); the ground from the height tree's
+own tiles (a cold tile paints on the spot: seconds a page).
+
+The law that fits the owner's rule -- what is loaded and stood is by proximity and view, nowhere
+by place -- is to stand a building when the walk first sees it: the page load stands only its
+nodes (one sample each), the walk stands the buildings its cone, horizon and pixel tests keep,
+at the grain their distance earns, memoised in the page. The cost then follows the view, not the
+page. That is the next step on this branch.

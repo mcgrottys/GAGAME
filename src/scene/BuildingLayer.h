@@ -45,6 +45,7 @@
 
 #include "compose/BuildingLod.h"
 #include "core/OriginLattice.h"
+#include "sim/PlaceField.h"
 #include "compose/BuildingSolids.h"
 #include "scene/Layer.h"
 
@@ -70,7 +71,12 @@ public:
     using Locate = std::function<void(const double flat[3], double& latDeg, double& lonDeg, double& h)>;
     // The composed ground (metres on the height datum) under a point, degrees. Called from pool
     // threads.
-    using Ground = std::function<double(double latDeg, double lonDeg)>;
+    // THE GROUND, AT A GRAIN (2026-10-11): a field of the composed height at the grain asked for
+    // (compose/HeightPage: the pyramid's texels, memoised), made per job -- a page's buildings stand
+    // on the ground at the page's own level, a ribbon's profile and a near cell's prisms at a metre.
+    // The stack sampled raw at a metre for every footprint vertex cost 140 us a sample where the
+    // rasters were cold (Haulover after a carry: 1.4 s a page, the stream one page at a time).
+    using Ground = std::function<std::unique_ptr<PlaceField>(double resM)>;
 
     ~BuildingLayer() override;
     void Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack, double radiusM,
@@ -193,6 +199,7 @@ private:
         GpuBuffer shapeStaging;         // its shape records packed into whole slots, staged on the pool thread
         std::vector<uint32_t> slotUsed; // bytes used in each of its slots (no record crosses a slot)
         std::vector<uint32_t> slots;    // the pool slots holding them once it landed (empty: no shapes drawn)
+        double waitMs = 0.0, readMs = 0.0;   // the instrument: its job's wait in the lane, its read
         std::vector<uint8_t> packed;    // the same bytes on the CPU: what a lost device's report reads back
         uint32_t tooBig = 0;
         uint32_t baseN = 0;               // the ground base's report: shaped buildings, mean and largest drop (m)
@@ -287,6 +294,7 @@ private:
     std::map<PageKey, std::shared_ptr<const Page>> m_pages;
     std::map<PageKey, uint64_t> m_pageUsed;   // the frame a walk last used it
     std::set<PageKey> m_pagePending;
+    std::map<PageKey, uint64_t> m_pendingSince;   // the instrument: the frame each pending page was asked
     uint64_t m_pageBytes = 0, m_pagesLoaded = 0, m_evictions = 0;
     uint64_t m_cellsVersion = 0, m_pagesVersion = 0;   // what a walk depends on, besides the eye
     struct Drawn {
@@ -315,6 +323,9 @@ private:
     // waits, no new page is asked for -- nothing is loaded that cannot land.
     std::vector<std::pair<PageKey, std::shared_ptr<Page>>> m_roomWait;
     uint64_t m_roomWaitFrames = 0, m_tooBig = 0;
+    // THE LOADS' INSTRUMENT: what landed since the last line, and how long each waited and read.
+    uint32_t m_landN = 0;
+    double m_landWait = 0.0, m_landWaitMax = 0.0, m_landRead = 0.0, m_landReadMax = 0.0;
     hal::Pso m_psoShape, m_psoBoxMesh;   // AsShape + MsShape; MsBox (m_psoBox is VsBox: no mesh shaders)
     // THE LAYER'S CLOCK (s): a page's landing and the frame's now, for the boxes' fade-in.
     std::chrono::steady_clock::time_point m_t0 = std::chrono::steady_clock::now();

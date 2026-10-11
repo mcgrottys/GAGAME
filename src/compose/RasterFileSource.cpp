@@ -18,6 +18,8 @@
 
 namespace ga {
 
+std::atomic<uint64_t> RasterFileSource::s_decodes{0}, RasterFileSource::s_decodeUs{0};
+
 namespace {
 
 constexpr double kPi = 3.14159265358979323846, kD2R = kPi / 180.0;
@@ -328,7 +330,10 @@ std::shared_ptr<const std::vector<uint8_t>> RasterFileSource::Window(size_t file
     }
     auto px = std::make_shared<std::vector<uint8_t>>(size_t(kWin) * kWin * 4, uint8_t(m_height ? 0xFF : 0));
     TilePayload tp;
+    const auto tDec = std::chrono::steady_clock::now();
     const bool got = m_files[file]->loader->LoadTile(wx, wy, kWin, kWin, tp);
+    s_decodes.fetch_add(1, std::memory_order_relaxed);
+    s_decodeUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tDec).count()), std::memory_order_relaxed);
     if (m_height && tp.data.size() * 4 == px->size()) {
         std::memcpy(px->data(), tp.data.data(), px->size());   // a height's floats; NaN (0xFF..) is absence
     } else if (got && !m_height) {

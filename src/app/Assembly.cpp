@@ -1606,9 +1606,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     lon = std::atan2(P[2], P[0]) * kDegPerRad;
                     h = r - R;
                 },
-                [comp, ch](double lat, double lon) -> double {
-                    constexpr double kRad = 3.14159265358979323846 / 180.0;
-                    return ch >= 0 ? comp->SampleHeightStack(ch, lat * kRad, lon * kRad, 1.0) : 0.0;
+                // THE GROUND AT A GRAIN: the pyramid at the rung whose texel is at most the grain asked
+                // (the hull's bed law, above), memoised -- a field per job (BuildingLayer::Ground).
+                // (Measured 2026-10-11, docs/BUILDING_LOD.md section 11: the tree's own tiles read here
+                // paint on a miss, seconds a page where the archive is cold; the stack it is.)
+                [comp, ch, g0 = surface.cube.GroundRes(0)](double resM) -> std::unique_ptr<PlaceField> {
+                    if (ch < 0) return nullptr;
+                    const uint32_t rung = uint32_t(std::clamp(int(std::ceil(std::log2(g0 / (std::max)(resM, 1e-3)))), 0, 15));
+                    return std::make_unique<HeightPage>(comp, ch, rung);
                 });
             if (!bl->lod.empty()) {   // the folded tree (docs/BUILDING_LOD.md): a missing one is named, not fatal
                 auto lodf = std::make_shared<BuildingLodFile>();

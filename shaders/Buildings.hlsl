@@ -179,7 +179,7 @@ void AsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
         const uint addr = gWalk[gBdMesh.x + inst * 3u + 2u].x;
         const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
         const uint nV = w0 & 0xFFFFu, flags = (w1 >> 8) & 0xFFu;
-        edges = (flags & 4u) ? max(nV, 1u) - 1u : nV;   // a ribbon of n points has n - 1 segments
+        edges = (flags & 4u) ? 4u * (max(nV, 1u) - 1u) : nV;   // a ribbon of n points: n - 1 segments, four faces each
         tris = w0 >> 16;
     }
     // Exclusive running counts over the 64, a Hillis-Steele scan in groupshared (two waves or one).
@@ -245,10 +245,12 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
     const bool ribbon = (flags & 4u) != 0u;   // shape::kRibbon: a road piece, one quad a segment
     VsOut o;
     o.alpha = FadeIn(b.alpha, asfloat(b.x.y));
-    if (ribbon) {   // THE RIBBON: segment e of the polyline as a quad, mitred at both vertices
+    if (ribbon) {   // THE RIBBON IS A SLAB: segment e of the polyline, mitred at both vertices, as four
+        // one-sided faces -- top, underside, right and left -- so a bridge's deck has an underside for
+        // the eye on the water and the cull stays (the owner, 2026-10-11: keep the cull, lose no face).
         const uint zAt = triAt + 6u * nTris;                    // the heights the page's reader filled
         const float w = float(ShapeU16(addr + 6u)) * 0.1f;      // ShapeHead.pad: the width, decimetres
-        const uint e = local;
+        const uint e = local >> 2, face = local & 3u;
         float3 P[4];   // prev, a, b, next (an end repeats itself)
         [unroll] for (uint j = 0u; j < 4u; ++j) {
             const uint v = uint(clamp(int(e) - 1 + int(j), 0, int(nVerts) - 1));
@@ -273,17 +275,38 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
         const float px = length(mid) * gBdTime.z;
         const float hw = 0.5f * max(w, px);
         o.alpha *= saturate(w / max(px, 1e-3f));
-        o.n = U;
         o.col = kPalette[(flags & 8u) ? 5u : 4u] * gBdOrigin.w;
-        const float2 xy[4] = {P[1].xy + m[0] * hw, P[1].xy - m[0] * hw, P[2].xy + m[1] * hw, P[2].xy - m[1] * hw};
-        const float zz[4] = {P[1].z + top, P[1].z + top, P[2].z + top, P[2].z + top};
+        const float2 R1 = P[1].xy + m[0] * hw, L1 = P[1].xy - m[0] * hw, R2 = P[2].xy + m[1] * hw, L2 = P[2].xy - m[1] * hw;
+        const float t1 = P[1].z + top, t2 = P[2].z + top, b1 = P[1].z + bottom, b2 = P[2].z + bottom;
+        float2 xy[4];
+        float zz[4];
+        uint3 ta, tb;
+        if (face == 0u) {          // the top, as it was: seen from above
+            xy[0] = R1; xy[1] = L1; xy[2] = R2; xy[3] = L2;
+            zz[0] = t1; zz[1] = t1; zz[2] = t2; zz[3] = t2;
+            o.n = U;
+            ta = uint3(0u, 2u, 1u); tb = uint3(1u, 2u, 3u);
+        } else if (face == 1u) {   // the underside: the top's quad at the bottom, wound the other way
+            xy[0] = R1; xy[1] = L1; xy[2] = R2; xy[3] = L2;
+            zz[0] = b1; zz[1] = b1; zz[2] = b2; zz[3] = b2;
+            o.n = -U;
+            ta = uint3(0u, 1u, 2u); tb = uint3(1u, 3u, 2u);
+        } else {                   // a side: the wall's own law, its outward the edge's right
+            const bool right = face == 2u;
+            const float2 A = right ? R1 : L2, B = right ? R2 : L1;
+            const float zA0 = right ? b1 : b2, zB0 = right ? b2 : b1, zA1 = right ? t1 : t2, zB1 = right ? t2 : t1;
+            xy[0] = A; xy[1] = B; xy[2] = B; xy[3] = A;
+            zz[0] = zA0; zz[1] = zB0; zz[2] = zB1; zz[3] = zA1;
+            o.n = (right ? sn.x : -sn.x) * E + (right ? sn.y : -sn.y) * N;
+            ta = uint3(0u, 1u, 2u); tb = uint3(0u, 2u, 3u);
+        }
         [unroll] for (uint j = 0u; j < 4u; ++j) {
             o.rel = gBdOrigin.xyz + c + xy[j].x * E + xy[j].y * N + zz[j] * U;
             o.pos = mul(float4(o.rel, 1.0f), gViewProj);
             verts[gi * 4u + j] = o;
         }
-        tris[gi * 2u] = uint3(gi * 4u, gi * 4u + 2u, gi * 4u + 1u);
-        tris[gi * 2u + 1u] = uint3(gi * 4u + 1u, gi * 4u + 2u, gi * 4u + 3u);
+        tris[gi * 2u] = ta + gi * 4u;
+        tris[gi * 2u + 1u] = tb + gi * 4u;
     } else if (!roof) {   // the walls: edge e from its vertex to its ring's next
         const uint e = local;
         uint start = 0u, len = 0u;
