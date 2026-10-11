@@ -2193,6 +2193,28 @@ void FrameLoop::PublishBuildingWorlds() {
     };
     bl->SetWorlds(0, worldsOf(m_cam, m_windows));
     bl->SetWorlds(1, m_minimapDrawn ? worldsOf(m_minimap.Cam(), m_minimapChain) : std::vector<BuildingLayer::WorldEye>{});
+    // ...and each eye's occluder: the renderer's grid two frames back, with its camera's basis.
+    for (uint32_t v = 0; v < BuildingLayer::kEyes; ++v) {
+        const Renderer::Occluder* ro = m_A.renderer.OccluderOf(v);
+        if (!ro) {
+            bl->SetOccluder(v, nullptr);
+            continue;
+        }
+        auto o = std::make_shared<BuildingLayer::Occluder>();
+        o->w = ro->w;
+        o->h = ro->h;
+        o->dist = ro->dist;
+        o->eye[0] = ro->cam.px; o->eye[1] = ro->cam.py; o->eye[2] = ro->cam.pz;
+        DirectX::XMFLOAT3 f, r, u;
+        ro->cam.ViewBasis(f, r, u);
+        o->fwd[0] = f.x; o->fwd[1] = f.y; o->fwd[2] = f.z;
+        o->right[0] = r.x; o->right[1] = r.y; o->right[2] = r.z;
+        o->up[0] = u.x; o->up[1] = u.y; o->up[2] = u.z;
+        o->tanX = ro->tanX;
+        o->tanY = ro->tanY;
+        o->nearZ = ro->cam.nearZ;
+        bl->SetOccluder(v, std::move(o));
+    }
 }
 
 void FrameLoop::PublishHulls() {

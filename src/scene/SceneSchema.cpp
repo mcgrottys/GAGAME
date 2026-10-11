@@ -677,6 +677,9 @@ const Schema& BuildingsLayerSchema() {
             .Bind("pageMB", kBuildings.pageMB, Q::Dimensionless, "1",
                   "the tree's loaded pages' budget on the CPU; over it, the page worth the fewest pixels on screen "
                   "goes first, and never to make room for one worth fewer (the coarse levels are so the floor)", R)
+            .Bind("marginDeg", kBuildings.marginDeg, Q::Angle, "deg",
+                  "the walk's cone reaches this far past the view's edge, so what a turn brings into view has been "
+                  "asked for and stood already", R)
             .Bind("field", kBuildings.field,
                   "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
                   "seen at an angle; needs `lod`", R)

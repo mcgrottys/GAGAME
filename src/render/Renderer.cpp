@@ -147,6 +147,7 @@ void Renderer::CreateTargets(uint32_t width, uint32_t height) {
     m_sceneDepthSrv = m_gpu->CreateSrv(m_sceneDepth.res.Get(), DXGI_FORMAT_R32_FLOAT);
     Log("[renderer] targets %ux%u  sceneColor srv=%u depth srv=%u", m_width, m_height,
         m_sceneColor.srv, m_sceneDepthSrv);
+    BuildOccluder();
 }
 
 void Renderer::CreateTonemapPso() {
@@ -390,6 +391,23 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
     if (prof) prof->BeginFrame(cl, gpuFrameLabel);
     // Step 5 E, law 8: the residency turn, first in the frame's list, before any layer reads.
     if (atFrameHead) atFrameHead(cmd);
+    // THE OCCLUDERS DELIVERED: what this frame slot's previous frame copied, with the cameras it
+    // was drawn by (hal::RegionReadback: the ring already waited; nothing stalls here).
+    if (m_occRead.Ready()) {
+        const uint32_t slot = m_gpu->FrameIndex() % Gpu::kFrameCount;
+        m_occRead.BeginSlot(m_gpu->FrameIndex());
+        for (const hal::RegionReadback::Region& g : m_occRead.Delivered()) {
+            if (g.tag >= kOccViews || !m_occSlot[slot][g.tag].on || g.bytes.size() < size_t(g.w) * g.h * 4) continue;
+            Occluder& o = m_occ[g.tag];
+            o.w = g.w;
+            o.h = g.h;
+            o.dist.resize(size_t(g.w) * g.h);
+            memcpy(o.dist.data(), g.bytes.data(), o.dist.size() * 4);
+            o.cam = m_occSlot[slot][g.tag].cam;
+            o.tanX = m_occSlot[slot][g.tag].tanX;
+            o.tanY = m_occSlot[slot][g.tag].tanY;
+        }
+    }
 
     // ---- the constants: one b0 per view, pushed in VIEW ORDER, then the surface's b2 once.
     // With one view that is the ring's old two pushes in their old order, which is why the
@@ -482,6 +500,47 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         }
     }
 
+    // ---- THE OCCLUDER: each view's farthest drawn depth by cell, copied into the frame ring for
+    // the walks two frames on (shaders/Occluder.hlsl). The depth leaves DEPTH_WRITE here; the next
+    // frame's head puts it back before the clear.
+    if (m_occPso && m_occRead.Ready()) {
+        PixScope scope(cl, "occluder");
+        GpuScope gscope(prof, cl, "occluder");
+        cmd.Barrier(m_sceneDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cmd.ComputeRoot(m_occRs.Get());
+        cmd.ComputeBindless(1);
+        cmd.ComputeBindless(2);
+        cmd.Pipeline(m_occPso.Get());
+        const uint32_t slot = m_gpu->FrameIndex() % Gpu::kFrameCount;
+        for (size_t i = 0; i < n && i < kOccViews; ++i) {
+            const scene::ViewContext& v = set.views[i];
+            if (!m_occTex[i].Valid() || !v.legacy.camera || !v.viewport.w || !v.viewport.h) {
+                m_occSlot[slot][i].on = false;
+                continue;
+            }
+            struct { uint32_t a[4]; uint32_t b[4]; float c[4]; } cb{};
+            cb.a[0] = m_sceneDepthSrv;
+            cb.a[1] = m_occUav[i];
+            cb.a[2] = v.viewport.x;
+            cb.a[3] = v.viewport.y;
+            cb.b[0] = v.viewport.w;
+            cb.b[1] = v.viewport.h;
+            cb.b[2] = kOccW;
+            cb.b[3] = kOccH;
+            cb.c[0] = v.legacy.camera->nearZ;
+            cmd.Barrier(m_occTex[i], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cmd.ComputeConstants(0, cb);
+            cmd.Dispatch((kOccW + 7) / 8, (kOccH + 7) / 8, 1);
+            cmd.Barrier(m_occTex[i], D3D12_RESOURCE_STATE_COPY_SOURCE);
+            m_occRead.CopyRegion(cmd, m_occTex[i].res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, kOccW, kOccH, uint32_t(i));
+            OccSlot& os = m_occSlot[slot][i];
+            os.cam = *v.legacy.camera;
+            os.tanY = std::tan(0.5 * double(os.cam.fovY));
+            os.tanX = os.tanY * double(v.viewport.w) / double((std::max)(v.viewport.h, 1u));
+            os.on = true;
+        }
+    }
+
     // ---- tonemap HDR -> LDR
     {
         PixScope scope(cl, "tonemap");
@@ -546,6 +605,29 @@ bool Renderer::DumpRaw(std::vector<uint8_t>& out, uint32_t* rowPitch) {
     out = m_gpu->ReadbackTexture(m_ldrTarget, &rp);
     if (rowPitch) *rowPitch = rp;
     return !out.empty();
+}
+
+void Renderer::BuildOccluder() {
+    if (!m_occRs) {
+        m_occRs = hal::RootLayout{}
+                      .Cbv(0)
+                      .Table({hal::SrvRange(0, hal::kUnbounded, 1)})
+                      .Table({hal::UavRange(0, hal::kUnbounded, 2)})
+                      .Build(*m_gpu, "occluder");
+        if (!m_occRs) return;
+    }
+    if (!m_occPso) {
+        const std::wstring path = m_desc.shaderDir + L"/Occluder.hlsl";
+        hal::Reload(m_occPso, [&] { return hal::BuildCompute(*m_gpu, m_occRs.Get(), m_shaders.Compile(path, L"CsOccluder", L"cs_6_0"), "occluder"); }, "occluder");
+        if (!m_occPso) return;
+    }
+    for (uint32_t i = 0; i < kOccViews; ++i) {
+        if (m_occTex[i].Valid()) continue;
+        m_occTex[i] = m_gpu->CreateTexture2D(kOccW, kOccH, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"occluder.grid");
+        m_occUav[i] = m_gpu->CreateTextureUav(m_occTex[i].res.Get(), DXGI_FORMAT_R32_FLOAT, D3D12_UAV_DIMENSION_TEXTURE2D);
+    }
+    if (!m_occRead.Ready()) m_occRead.Init(*m_gpu, uint64_t(kOccViews) * kOccW * kOccH * 4u + 65536u, L"occluder.readback");
 }
 
 bool Renderer::ReadDepth(std::vector<float>& out) {

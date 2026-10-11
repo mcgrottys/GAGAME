@@ -265,3 +265,32 @@ helpers read (`GA_SUN_DIR`, `GA_SKY_UP`, `GA_SKY_EYE_R`) as statics loaded at th
 from the view's world table at the pixel's depth -- Globe.hlsl's LoadLevel, for the buildings --
 so a window world's walls take its own sun through its own air and its own sky's irradiance.
 Through the Haulover gate at the Merrimack's sunset, the far towers stand in Florida's noon.
+
+## 13. Occlusion by what the frame drew, and the cone's margin (2026-10-11)
+
+The owner: "avoid loading buildings that get blocked by terrain and closer buildings", and "widen
+the footprint of what we load a couple of degrees around the camera FOV". Both are tests of the
+same walk.
+
+**The occluder.** The depth the frame just drew already holds every occluder there is -- the
+ground, the sea, the hulls, the buildings themselves -- so the test needs no second model of any
+of them. After every view's layers the renderer reduces the view's rectangle to a 128 x 64 grid of
+the FARTHEST view-depth drawn in each cell (`shaders/Occluder.hlsl`; nothing drawn is the sky, no
+limit) and copies it back through the frame ring without a stall (`hal::RegionReadback`), so a
+walk two frames on has the grid and the camera it was drawn by (`Renderer::OccluderOf`). In the
+walk, after the horizon and the cone: a node's sphere is put on that grid in the true frame (a
+window world's node pulled through its window first), and it is hidden when its nearest point lies
+beyond the farthest surface of every cell it covers. Conservative by construction -- a cell's
+farthest surface is the most generous limit any pixel in it has, a sphere reaching past the grid's
+edge or the near plane is not judged, and a node hidden by a stale grid is back the frame the grid
+catches up. A hidden node asks for nothing: no page, no stand.
+
+**The margin.** `layers.buildings.marginDeg` (5 by default) widens the walk's cone past the
+view's half-diagonal, so what a turn brings into view has been asked for and stood already; the
+GPU clips what is outside the view, so a still does not change.
+
+Measured: Newburyport's market still bit-identical, Tokyo's and the Haulover mouth's within the
+frame counter's digits, `--selftest` exit 0, Tokyo's frame 14.6 ms. From the water through the
+Haulover window, 155 nodes of the far world hid behind Bal Harbour's towers; the market and Tokyo
+views look down on their towns and hid none, as they should. The instrument: `N nodes hidden by
+what the frame drew` on each walker's exit line.

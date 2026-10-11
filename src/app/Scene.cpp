@@ -365,6 +365,7 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.F64("lodPixels", l.lodPixels);
             r.F64("shapePixels", l.shapePixels);
             r.F64("pageMB", l.pageMB);
+            r.F64("marginDeg", l.marginDeg);
             r.Bool("field", l.field);
             r.F64("laneWidth", l.laneWidth);         // the roads in the tree
             r.F64("defaultLanes", l.defaultLanes);

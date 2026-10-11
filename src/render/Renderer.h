@@ -19,6 +19,7 @@
 
 #include "compose/Compositor.h"   // ComposedSurfaceCb: the surface constants on b2 (M12 step 4g)
 #include "hal/Gpu.h"
+#include "hal/Readback.h"
 #include "hal/GpuProfiler.h"
 #include "hal/Root.h"
 #include "hal/Shader.h"
@@ -171,6 +172,19 @@ public:
     // --water-probe: the scene depth (D32, reversed Z: nearZ / viewZ, 0 where nothing was drawn),
     // de-pitched into width*height floats. An instrument: it waits for the GPU.
     bool ReadDepth(std::vector<float>& out);
+    // THE OCCLUDER (shaders/Occluder.hlsl): each view's farthest drawn view-depth by cell, from the
+    // frame kFrameCount frames back with the camera it was drawn by, for the walks that decide what
+    // to load (BuildingLayer). Null until the ring has delivered one.
+    struct Occluder {
+        uint32_t w = 0, h = 0;
+        std::vector<float> dist;   // row-major, the view's rectangle: metres along the view axis; 1e30 where nothing was drawn
+        Camera cam;                // the eye it was drawn by
+        double tanX = 1.0, tanY = 1.0;
+    };
+    static constexpr uint32_t kOccViews = 2;   // the eyes the occluder serves: the session's own and the minimap's
+    const Occluder* OccluderOf(uint32_t view) const {
+        return (view < kOccViews && m_occ[view].w) ? &m_occ[view] : nullptr;
+    }
     uint32_t Width() const { return m_width; }
     uint32_t Height() const { return m_height; }
 
@@ -257,6 +271,18 @@ private:
 
     GpuTexture m_sceneColor;
     GpuTexture m_sceneDepth;
+    // The occluder's pass: its root, its kernel, a small R32F grid a view and the ring that brings
+    // it back; the cameras each slot's copies were drawn by.
+    hal::RootSignatureRef m_occRs;
+    hal::Pso m_occPso;
+    GpuTexture m_occTex[kOccViews];
+    uint32_t m_occUav[kOccViews] = {UINT32_MAX, UINT32_MAX};
+    hal::RegionReadback m_occRead;
+    struct OccSlot { Camera cam; double tanX = 1.0, tanY = 1.0; bool on = false; };
+    OccSlot m_occSlot[Gpu::kFrameCount][kOccViews];
+    Occluder m_occ[kOccViews];
+    static constexpr uint32_t kOccW = 128, kOccH = 64;
+    void BuildOccluder();
     GpuTexture m_ldrTarget;   // tonemap destination when headless; also the readback source
     uint32_t m_sceneColorRtv = UINT32_MAX;
     uint32_t m_sceneDepthDsv = UINT32_MAX;
