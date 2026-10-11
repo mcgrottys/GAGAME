@@ -183,6 +183,12 @@ void Camera::Update(const InputState& in, float dt) {
     pz += d[2];
 }
 
+void Camera::Carry(const Motor& m) {
+    m.TransformPoint(px, py, pz);
+    rot = Pure(Pure(m) * rot);   // Pure(m): the motor's rotor alone, kept unit
+    m.TransformDir(upRef[0], upRef[1], upRef[2]);
+}
+
 bool Camera::OrbitAboutLine(const double pivot[3], const double axis[3], double angleRad,
                             double minAltY) {
     double d[3] = {axis[0], axis[1], axis[2]};

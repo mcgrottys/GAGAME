@@ -118,6 +118,8 @@ public:
     const EntityProps& Declared() const { return m_props; }
     // The spawn in the FLAT world frame (the sugar's {x, alt, z}: a translation).
     void SetSpawn(double x, double y, double z);
+    // The spawn was written about the scene's place: said in the root by its motor.
+    void CarrySpawn(const Motor& toRoot) { m_spawn = toRoot * m_spawn; }
     // ...and the bow's compass heading when the sugar says one (`az`: 0 north, 90 east).
     void SetSpawn(double x, double y, double z, double headingDeg);
     const Motor& Spawn() const { return m_spawn; }

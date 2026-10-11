@@ -323,10 +323,11 @@ bool ReadEye(const SceneView* v, scene::PoseSugar& out) {
     }
     return true;
 }
-bool ViewEyeCompass(const SceneView* v, Camera& cam) {
+bool ViewEyeCompass(const SceneView* v, Camera& cam, const Motor& toRoot) {
     scene::PoseSugar s;
     if (!ReadEye(v, s) || s.kind != scene::PoseSugar::Kind::Compass) return false;
     cam.SetFromCompass(s.x, s.alt, s.z, static_cast<float>(s.az), static_cast<float>(s.pitch));
+    cam.Carry(toRoot);   // written about the scene's place, said in the root (the cloud's origin)
     return true;
 }
 bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
@@ -535,6 +536,7 @@ std::optional<int> FrameLoop::Session() {
             } else {
                 node->SetSpawn(es.x, es.alt, es.z);
             }
+            node->CarrySpawn(m_A.surface.anchorToRoot);   // about the scene's place -> the root
             m_entities.push_back(std::move(node));
         } else {
             // The shim already refuses `--boat` without `--campos` (the 1e9 sentinel spawn); a
@@ -676,7 +678,7 @@ std::optional<int> FrameLoop::Session() {
     // -- and then the chart view's declared eye, when it declares one (--cam with no mode flag).
     cam.fovY = scene::View::FovRadOf(startView.p.fovY);
     cam.speed = 150.0f;
-    ViewEyeCompass(S.View("chart"), cam);
+    ViewEyeCompass(S.View("chart"), cam, m_A.surface.anchorToRoot);
 
     // Chart and sea each keep their own camera; TAB cycles views and each resumes where you
     // left it. With bathymetry loaded, the sea default is the LITERAL vqview signature shot:
@@ -684,6 +686,7 @@ std::optional<int> FrameLoop::Session() {
     // back into the inlet.
     if (bathy.Ready()) camSea.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
     else camSea.SetFromCompass(0.0, 12.0, 0.0, 246.0f, -5.0f);
+    camSea.Carry(m_A.surface.anchorToRoot);   // the built-in pose is about the scene's place too
     // M12 step 5d: THE DECLARED EYE OVER THE ENGINE'S DEFAULT. --cam/--campos write into the
     // START view (`scene.view`), so that is read first; a scene whose start view is the orbit (or
     // is not written in the compass sugar at all) leaves the `sea` view's own declaration to say
@@ -694,8 +697,8 @@ std::optional<int> FrameLoop::Session() {
     // Merrimack, 2026-10-09). Its camera is its own: camGlobe stays the `orbit` view's bookmark.
     Camera camStart;
     const bool startOrbit = ViewEyeOrbit(&startView, planetR, camStart);
-    const bool startCompass = !startOrbit && ViewEyeCompass(&startView, camSea);
-    if (!startCompass) ViewEyeCompass(S.View("sea"), camSea);
+    const bool startCompass = !startOrbit && ViewEyeCompass(&startView, camSea, m_A.surface.anchorToRoot);
+    if (!startCompass) ViewEyeCompass(S.View("sea"), camSea, m_A.surface.anchorToRoot);
     if (mode == 1 && !startOrbit && !startCompass && !startView.p.name.empty() && startView.p.name != "orbit") {
         Log("[scene] start view '%s' places no eye this session can stand at (compass or lat/lon); "
             "the `sea` view's stands in", startView.p.name.c_str());
@@ -762,17 +765,17 @@ std::optional<int> FrameLoop::Session() {
         m_planetSpace.name = "planet.re";
         m_planetSpace.unitM = planetR;
         m_planetSpace.extentM = 2.0 * planetR;
-        m_tangentSpace.name = "tangent.anchor";   // PHASE C5: the scene's place.anchor
+        // THE ROOT WORLD ON THE CLOUD (2026-10-11): the tangent space is the cloud's origin nearest
+        // the scene's place (SurfaceFrame::About chose it; the rows above are its), made by the one
+        // factory like every other space under the planet. The scene's place stands in it at
+        // surface.anchorFloats, and its hand-written numbers come in through anchorToRoot.
+        m_tangentSpace = SpaceAt(m_planetSpace, m_A.surface.origin, "tangent.anchor");
         m_tangentSpace.unitM = planetR;
         m_tangentSpace.extentM = 2.0 * planetR;
-        m_tangentSpace.parent = &m_planetSpace;
-        const double anchor[3] = {oDir[0] * planetR, oDir[1] * planetR, oDir[2] * planetR};
-        m_tangentSpace.link = Placement::Frame(east0, oDir, north0, anchor);
-        // THE ONE LEGACY SPACE (core/Space.h CloudStand): the scene's own tangent frame stands at
-        // its place.anchor, not yet on the planet's cloud; every other space under the planet is
-        // made on the cloud (OriginLattice::SpaceAt) or Declare refuses it. The root world's move
-        // onto the cloud is the next step (docs/ORIGINS.md section 4).
-        m_tangentSpace.legacy = true;
+        Log("[space] the root world stands on the cloud's origin %lld at %.5f N %.5f E; the scene's place %.5f N %.5f E is at (%.1f, %.2f, %.1f) m in it",
+            static_cast<long long>(m_A.surface.origin.index), m_A.surface.flat.latDeg, m_A.surface.flat.lonDeg,
+            m_A.surface.anchorChart.latDeg, m_A.surface.anchorChart.lonDeg, m_A.surface.anchorFloats[0],
+            m_A.surface.anchorFloats[1], m_A.surface.anchorFloats[2]);
         std::string why;
         if (!m_planetSpace.Declare(&why) || !m_tangentSpace.Declare(&why)) {
             Log("FATAL: [space] %s", why.c_str());
@@ -850,13 +853,13 @@ std::optional<int> FrameLoop::Session() {
             double lat = 0.0, lon = 0.0;
             const Space* space = nullptr;
             const Space::Anchor* chart = nullptr;
-            // THE PLACE'S POINT IN ITS SPACE (scene/Gateway.h Place): a place's space is the cloud's
-            // origin nearest to it, and a box declared "at the place" stands at these floats in it
-            // (the root's own frame is at its place: zero, until the root too is a cloud point).
-            double offset[3] = {0.0, 0.0, 0.0};
+            // THE PLACE'S POSE IN ITS SPACE (scene/Gateway.h Place): a place's space is the cloud's
+            // origin nearest to it, and a box declared "at the place" is posed by this motor there
+            // -- the root's is the scene's anchorToRoot, a built place's its offset.
+            Motor toSpace = Motor::Identity();
         };
         std::vector<PlaceRef> known;
-        known.push_back({rootChart.latDeg, rootChart.lonDeg, &m_tangentSpace, &rootChart, {0.0, 0.0, 0.0}});
+        known.push_back({m_A.surface.anchorChart.latDeg, m_A.surface.anchorChart.lonDeg, &m_tangentSpace, &rootChart, m_A.surface.anchorToRoot});
         auto placeAt = [&](bool named, double lat, double lon, const std::string& gate,
                            PlaceRef& out) {
             if (!named) {
@@ -878,7 +881,7 @@ std::optional<int> FrameLoop::Session() {
                     lat, lon, why.c_str());
                 return false;
             }
-            out = PlaceRef{lat, lon, &pl->space, &pl->chart, {pl->offset[0], pl->offset[1], pl->offset[2]}};
+            out = PlaceRef{lat, lon, &pl->space, &pl->chart, Motor::Translation(pl->offset[0], pl->offset[1], pl->offset[2])};
             Log("[gate] the place %.5f N %.5f E stands at (%.1f, %.1f, %.1f) m in its space, the cloud's origin %lld",
                 lat, lon, pl->offset[0], pl->offset[1], pl->offset[2], static_cast<long long>(pl->origin));
             known.push_back(out);
@@ -933,8 +936,8 @@ std::optional<int> FrameLoop::Session() {
             }
             // The sugar says where a box stands FROM ITS PLACE; the place stands at its offset in
             // the space the box is posed in.
-            entry = Motor::Translation(from.offset[0], from.offset[1], from.offset[2]) * entry;
-            exit = Motor::Translation(to.offset[0], to.offset[1], to.offset[2]) * exit;
+            entry = from.toSpace * entry;
+            exit = to.toSpace * exit;
             auto gate = std::make_unique<scene::Gateway>();
             gate->Declared() = gd.p;
             if (gate->Build(*from.space, *to.space, *to.chart, m_tangentSpace, entry, exit)) {
@@ -1048,6 +1051,7 @@ std::optional<int> FrameLoop::Session() {
             m_railFrame.frame.north[i] = north0[i];
         }
         m_railFrame.frame.valid = true;
+        m_railFrame.frame.toRoot = m_A.surface.anchorToRoot;   // the rails' poses are about the scene's place
         m_railFrame.fovY = cam.fovY;
         m_railFrame.portal = &portal;
         m_railFrame.cycle = portal.Valid() ? &drosteLeaf : nullptr;
@@ -1296,10 +1300,14 @@ std::optional<int> FrameLoop::Session() {
     // state, the solve carries the structure, the GPU carries the phase.
     // The water scene is DATA (data/wave_scene.json, authored if absent, hot-reloaded
     // per frame): move the solved window, retune closures, save -- no recompile.
-    sceneToWaveCfg = [&opt](const WaterSceneConfig& s) {
+    const double anchorX = m_A.surface.anchorFloats[0], anchorZ = m_A.surface.anchorFloats[2];
+    sceneToWaveCfg = [&opt, anchorX, anchorZ](const WaterSceneConfig& s) {
         WaveFieldConfig c;
-        c.orgX = s.wfOrgX;
-        c.orgZ = s.wfOrgZ;
+        // The window's origin is written east/north of the scene's place; the place stands at
+        // anchorFloats in the root (a translation: the window stays an axis-aligned rectangle,
+        // 1.5 m of turn at its far edge left to the data's own margin).
+        c.orgX = s.wfOrgX + anchorX;
+        c.orgZ = s.wfOrgZ + anchorZ;
         c.nx = s.wfNx;
         c.ny = s.wfNy;
         c.cellM = s.wfCellM;
@@ -3869,8 +3877,10 @@ bool FrameLoop::Frame() {
                 std::string pwhy;
                 if (scene::ReadPoseSugar(si->at, "interests." + si->p.name + ".at", ps, &pwhy) &&
                     ps.kind == scene::PoseSugar::Kind::Compass) {
-                    cx = ps.x;
-                    cz = ps.z;
+                    double q[3] = {ps.x, 0.0, ps.z};   // about the scene's place -> the root
+                    m_A.surface.anchorToRoot.TransformPoint(q[0], q[1], q[2]);
+                    cx = q[0];
+                    cz = q[2];
                     placed = true;
                 }
             }
