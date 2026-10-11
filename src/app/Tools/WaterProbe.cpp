@@ -325,6 +325,8 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
         const double cgDrawn =
             std::sqrt(cgRoot[0] * cgRoot[0] + cgy * cgy + cgRoot[2] * cgRoot[2]) - planetR;
         const SurfaceSample atCg = sea.At(cg[0], cg[2], simUnix);
+        double cgPlane[3] = {cg[0], 0.0, cg[2]}, cgNorm[3];   // the surface in the hull's frame (PlaneOf)
+        sea.PlaneOf(atCg, cg[0], cg[2], cgPlane, cgNorm);
 
         Bin bins[] = {{0.0, 10.0}, {10.0, 30.0}, {30.0, 100.0}, {100.0, 300.0}, {300.0, 1e30}};
         int skippedDry = 0;
@@ -408,7 +410,7 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
         Log("[wprobe] rec%u '%s' cg (%.1f, %+.3f, %.1f) | freeboard in its water %+.3f m | "
             "plane-over-sphere lift %+.3f m | %zu samples (%d dry or uncovered, %d of another level "
             "left out) | reprojection max %.3f px | bow bearing %.1f deg in its space",
-            recFrame, e->Name(), cg[0], cg[1], cg[2], atCg.valid ? cg[1] - atCg.heightNavd : 0.0,
+            recFrame, e->Name(), cg[0], cg[1], cg[2], atCg.valid ? cg[1] - cgPlane[1] : 0.0,
             cgDrawn - cg[1], samples.size(), skippedDry, otherLevel, reprojMax, Bearing(bow[0], bow[2]));
         Log("[wprobe]   level at the hull (%.5f, %.5f): hull reads %+.3f | corner law (atlas @500 m) "
             "%+.3f | bank within 10 m %+.3f (n=%d) | ocean station %+.3f -> bank-corner %+.3f, "

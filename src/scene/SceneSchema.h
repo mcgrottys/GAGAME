@@ -369,10 +369,6 @@ struct EntityProps {
     int controller = 0;               // helm | fixed
     double throttle = 0.0, steer = 0.0;
     // M13: THE PER-SUBJECT FLOATING ORIGIN. A space is flat and the planet is not, so a hull d
-    // from its space's origin rides d^2/2R above the sphere its sea is drawn on. Past this reach
-    // the hull rebuilds its space at its own place and carries its pose into it (Entity::Recentre)
-    // -- 1 km of reach holds the error under 8 cm. 0 turns it off, and the hull keeps the drift.
-    double recentreM = 1000.0;
 };
 struct EffectProps {
     std::string name;
@@ -395,7 +391,12 @@ struct BuildingsLayerProps {
     double levelHeight = 3.0, defaultHeight = 6.0, radius = 3000.0;
     std::string lod;                 // the size-stratified pyramid's folder ("" = no far boxes)
     double lodPixels = 1.0;
+    double shapePixels = 4.0;        // a building is its own form from here; its moment box below
+    double pageMB = 1024.0;          // the loaded pages' budget (CPU); the shape pool on the GPU is fixed
     bool field = true;               // the buildings under a pixel as scalars (compose/BuildingField.h)
+    // THE ROADS IN THE SAME TREE (compose/BuildingLod.h RoadRibbonDefaults): the scene's assumptions
+    // where a way's file is silent.
+    double laneWidth = 3.5, defaultLanes = 2.0, pathWidth = 2.0, kerb = 0.12;
 };
 struct NodeProps {
     std::string name;

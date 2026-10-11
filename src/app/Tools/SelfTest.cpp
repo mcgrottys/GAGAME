@@ -1,9 +1,11 @@
 // SelfTest - --selftest.
 // Moved verbatim from main.cpp (M12 step 1b); declared in app/Tools.h.
 #include "app/Tools.h"
+#include "core/OriginLattice.h"
 
 #include "compose/BuildingMoments.h"
 #include "compose/BuildingSolids.h"
+#include "compose/RoadWays.h"
 #include "compose/Compositor.h"
 #include "compose/RasterFileSource.h"
 #include "compose/TreePrune.h"
@@ -48,6 +50,9 @@ int RunSelfTest(const Options& opt) {
                                     // network
     ok &= RunSpaceSelfTest();     // M12: the frame calculus -- placements, the fold, the
                                   // Droste link through Space, the lattice against ColorFrame
+    ok &= RunOriginSelfTest();    // the lattice of floating origins: the inverse against brute
+                                  // force, the float bound on every shell, the motor between
+                                  // origins, the hysteresis, the centre (core/OriginLattice.h)
     ok &= RunFaceWindowSelfTest();   // HIERARCHY step 3: a face-plane window's address, the
                                      // float32 twin of PageTexel against doubles, and a plant
     ok &= hal::RunTenantBindingSelfTest();   // HIERARCHY 4.17 commit 1: a slice bound to one
@@ -77,6 +82,7 @@ int RunSelfTest(const Options& opt) {
                                        // registry template, the property table, the fold with
                                        // override, the placement sugar, the shim
     ok &= RunBuildingSelfTest();       // the building stack's laws: cover, remove, id, parts, heights
+    ok &= RunRoadSelfTest();           // GAROAD01 / GABRDG01 by box, vocabularies, junctions, the bridge match
     ok &= RunLodSelfTest();            // the building LOD algebra: fold, frame, sphere, box, level
     ok &= RunPruneSelfTest();          // the tree-prune tool's refusals, planted and caught on a
                                        // scratch root under out\prunetest, never the cache

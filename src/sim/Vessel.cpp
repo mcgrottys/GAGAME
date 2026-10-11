@@ -829,6 +829,11 @@ public:
     void WindAt(double wx, double wz, double simUnix, double out[3]) const override {
         m_sea.WindAt(wx, wz, simUnix, out);
     }
+    // The plane is the sea's own (WaterSurface::PlaneOf): the table serves answers, it does not
+    // flatten them -- the hull floated a metre over its water through this wrapper's default.
+    void PlaneOf(const SurfaceSample& s, double wx, double wz, double sp[3], double n[3]) const override {
+        m_sea.PlaneOf(s, wx, wz, sp, n);
+    }
 private:
     const WaterSurface& m_sea;
     const std::vector<double>& m_xz;

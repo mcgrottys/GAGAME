@@ -335,8 +335,7 @@
 }, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)" },
       { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
       { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
-      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },
-      { "key": "recentreM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 1000, "reload": "hot", "doc": "how far this hull may sail from its space's origin before the space moves to its place (the per-subject floating origin; 0 = never, and it rides d^2/2R above the sphere)" }
+      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" }
     ] },
     { "type": "interest", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the interest's name (views[].interests names it)" },
@@ -380,7 +379,13 @@
       { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3000, "reload": "restart", "doc": "cells of solids are streamed in within this distance of the eye (its altitude counted) and dropped beyond 1.25 times it" },
       { "key": "lod", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none" },
       { "key": "lodPixels", "type": "number", "field": "f64", "quantity": "1", "unit": "px", "default": 1, "reload": "restart", "doc": "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's" },
-      { "key": "field", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls seen at an angle; needs `lod`" }
+      { "key": "shapePixels", "type": "number", "field": "f64", "quantity": "1", "unit": "px", "default": 4, "reload": "restart", "doc": "a building or road piece is drawn as its own form from this many pixels across, and as its moment box (the same volume, centroid and heading) below; 1 = always its form. Tokyo at 9 km: 16.5 ms of buildings at 1, 2.3 ms at 6, the stills alike" },
+      { "key": "pageMB", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1024, "reload": "restart", "doc": "the tree's loaded pages' budget on the CPU; over it, the page worth the fewest pixels on screen goes first, and never to make room for one worth fewer (the coarse levels are so the floor)" },
+      { "key": "field", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls seen at an angle; needs `lod`" },
+      { "key": "laneWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3.5, "reload": "restart", "doc": "a road in the tree (sources of kind \"roads\", docs/ROADS.md) is as wide as its file says, else its lanes times this" },
+      { "key": "defaultLanes", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 2, "reload": "restart", "doc": "a road with neither width nor lanes tagged: the scene's assumption" },
+      { "key": "pathWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "restart", "doc": "a footway, path, cycleway, track or steps with no width tagged" },
+      { "key": "kerb", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.12, "reload": "restart", "doc": "a road's surface stands this much over the composed ground, and its mass as much under it" }
     ] },
     { "type": "layer.plain", "keys": [
     ] },

@@ -183,6 +183,12 @@ void Camera::Update(const InputState& in, float dt) {
     pz += d[2];
 }
 
+void Camera::Carry(const Motor& m) {
+    m.TransformPoint(px, py, pz);
+    rot = Pure(Pure(m) * rot);   // Pure(m): the motor's rotor alone, kept unit
+    m.TransformDir(upRef[0], upRef[1], upRef[2]);
+}
+
 bool Camera::OrbitAboutLine(const double pivot[3], const double axis[3], double angleRad,
                             double minAltY) {
     double d[3] = {axis[0], axis[1], axis[2]};
@@ -195,6 +201,11 @@ bool Camera::OrbitAboutLine(const double pivot[3], const double axis[3], double 
     py = ny;
     pz = nz;
     rot = Pure(About(d, angleRad) * rot);   // the same motor's rotor turns the attitude
+    // ...and the up it was levelled against: the attitude and its up reference are ONE frame. Left
+    // behind, Transport's shortest arc from the stale up to the new local up turned the attitude a
+    // second time each frame -- unseen over the ground, and at 20,000 km a drag that should spin the
+    // planet under the cursor turned the eye off it (2026-10-10).
+    m.TransformDir(upRef[0], upRef[1], upRef[2]);
     return true;
 }
 

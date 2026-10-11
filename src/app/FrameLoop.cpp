@@ -323,10 +323,11 @@ bool ReadEye(const SceneView* v, scene::PoseSugar& out) {
     }
     return true;
 }
-bool ViewEyeCompass(const SceneView* v, Camera& cam) {
+bool ViewEyeCompass(const SceneView* v, Camera& cam, const Motor& toRoot) {
     scene::PoseSugar s;
     if (!ReadEye(v, s) || s.kind != scene::PoseSugar::Kind::Compass) return false;
     cam.SetFromCompass(s.x, s.alt, s.z, static_cast<float>(s.az), static_cast<float>(s.pitch));
+    cam.Carry(toRoot);   // written about the scene's place, said in the root (the cloud's origin)
     return true;
 }
 bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
@@ -535,6 +536,7 @@ std::optional<int> FrameLoop::Session() {
             } else {
                 node->SetSpawn(es.x, es.alt, es.z);
             }
+            node->CarrySpawn(m_A.surface.anchorToRoot);   // about the scene's place -> the root
             m_entities.push_back(std::move(node));
         } else {
             // The shim already refuses `--boat` without `--campos` (the 1e9 sentinel spawn); a
@@ -676,7 +678,7 @@ std::optional<int> FrameLoop::Session() {
     // -- and then the chart view's declared eye, when it declares one (--cam with no mode flag).
     cam.fovY = scene::View::FovRadOf(startView.p.fovY);
     cam.speed = 150.0f;
-    ViewEyeCompass(S.View("chart"), cam);
+    ViewEyeCompass(S.View("chart"), cam, m_A.surface.anchorToRoot);
 
     // Chart and sea each keep their own camera; TAB cycles views and each resumes where you
     // left it. With bathymetry loaded, the sea default is the LITERAL vqview signature shot:
@@ -684,6 +686,7 @@ std::optional<int> FrameLoop::Session() {
     // back into the inlet.
     if (bathy.Ready()) camSea.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
     else camSea.SetFromCompass(0.0, 12.0, 0.0, 246.0f, -5.0f);
+    camSea.Carry(m_A.surface.anchorToRoot);   // the built-in pose is about the scene's place too
     // M12 step 5d: THE DECLARED EYE OVER THE ENGINE'S DEFAULT. --cam/--campos write into the
     // START view (`scene.view`), so that is read first; a scene whose start view is the orbit (or
     // is not written in the compass sugar at all) leaves the `sea` view's own declaration to say
@@ -694,8 +697,8 @@ std::optional<int> FrameLoop::Session() {
     // Merrimack, 2026-10-09). Its camera is its own: camGlobe stays the `orbit` view's bookmark.
     Camera camStart;
     const bool startOrbit = ViewEyeOrbit(&startView, planetR, camStart);
-    const bool startCompass = !startOrbit && ViewEyeCompass(&startView, camSea);
-    if (!startCompass) ViewEyeCompass(S.View("sea"), camSea);
+    const bool startCompass = !startOrbit && ViewEyeCompass(&startView, camSea, m_A.surface.anchorToRoot);
+    if (!startCompass) ViewEyeCompass(S.View("sea"), camSea, m_A.surface.anchorToRoot);
     if (mode == 1 && !startOrbit && !startCompass && !startView.p.name.empty() && startView.p.name != "orbit") {
         Log("[scene] start view '%s' places no eye this session can stand at (compass or lat/lon); "
             "the `sea` view's stands in", startView.p.name.c_str());
@@ -762,12 +765,17 @@ std::optional<int> FrameLoop::Session() {
         m_planetSpace.name = "planet.re";
         m_planetSpace.unitM = planetR;
         m_planetSpace.extentM = 2.0 * planetR;
-        m_tangentSpace.name = "tangent.anchor";   // PHASE C5: the scene's place.anchor
+        // THE ROOT WORLD ON THE CLOUD (2026-10-11): the tangent space is the cloud's origin nearest
+        // the scene's place (SurfaceFrame::About chose it; the rows above are its), made by the one
+        // factory like every other space under the planet. The scene's place stands in it at
+        // surface.anchorFloats, and its hand-written numbers come in through anchorToRoot.
+        m_tangentSpace = SpaceAt(m_planetSpace, m_A.surface.origin, "tangent.anchor");
         m_tangentSpace.unitM = planetR;
         m_tangentSpace.extentM = 2.0 * planetR;
-        m_tangentSpace.parent = &m_planetSpace;
-        const double anchor[3] = {oDir[0] * planetR, oDir[1] * planetR, oDir[2] * planetR};
-        m_tangentSpace.link = Placement::Frame(east0, oDir, north0, anchor);
+        Log("[space] the root world stands on the cloud's origin %lld at %.5f N %.5f E; the scene's place %.5f N %.5f E is at (%.1f, %.2f, %.1f) m in it",
+            static_cast<long long>(m_A.surface.origin.index), m_A.surface.flat.latDeg, m_A.surface.flat.lonDeg,
+            m_A.surface.anchorChart.latDeg, m_A.surface.anchorChart.lonDeg, m_A.surface.anchorFloats[0],
+            m_A.surface.anchorFloats[1], m_A.surface.anchorFloats[2]);
         std::string why;
         if (!m_planetSpace.Declare(&why) || !m_tangentSpace.Declare(&why)) {
             Log("FATAL: [space] %s", why.c_str());
@@ -845,9 +853,13 @@ std::optional<int> FrameLoop::Session() {
             double lat = 0.0, lon = 0.0;
             const Space* space = nullptr;
             const Space::Anchor* chart = nullptr;
+            // THE PLACE'S POSE IN ITS SPACE (scene/Gateway.h Place): a place's space is the cloud's
+            // origin nearest to it, and a box declared "at the place" is posed by this motor there
+            // -- the root's is the scene's anchorToRoot, a built place's its offset.
+            Motor toSpace = Motor::Identity();
         };
         std::vector<PlaceRef> known;
-        known.push_back({rootChart.latDeg, rootChart.lonDeg, &m_tangentSpace, &rootChart});
+        known.push_back({m_A.surface.anchorChart.latDeg, m_A.surface.anchorChart.lonDeg, &m_tangentSpace, &rootChart, m_A.surface.anchorToRoot});
         auto placeAt = [&](bool named, double lat, double lon, const std::string& gate,
                            PlaceRef& out) {
             if (!named) {
@@ -869,7 +881,9 @@ std::optional<int> FrameLoop::Session() {
                     lat, lon, why.c_str());
                 return false;
             }
-            out = PlaceRef{lat, lon, &pl->space, &pl->chart};
+            out = PlaceRef{lat, lon, &pl->space, &pl->chart, Motor::Translation(pl->offset[0], pl->offset[1], pl->offset[2])};
+            Log("[gate] the place %.5f N %.5f E stands at (%.1f, %.1f, %.1f) m in its space, the cloud's origin %lld",
+                lat, lon, pl->offset[0], pl->offset[1], pl->offset[2], static_cast<long long>(pl->origin));
             known.push_back(out);
             m_places.push_back(std::move(pl));
             return true;
@@ -920,6 +934,10 @@ std::optional<int> FrameLoop::Session() {
                 !placeAt(gd.hasTo, gd.p.toLat, gd.p.toLon, gd.p.name, to)) {
                 continue;
             }
+            // The sugar says where a box stands FROM ITS PLACE; the place stands at its offset in
+            // the space the box is posed in.
+            entry = from.toSpace * entry;
+            exit = to.toSpace * exit;
             auto gate = std::make_unique<scene::Gateway>();
             gate->Declared() = gd.p;
             if (gate->Build(*from.space, *to.space, *to.chart, m_tangentSpace, entry, exit)) {
@@ -1033,6 +1051,7 @@ std::optional<int> FrameLoop::Session() {
             m_railFrame.frame.north[i] = north0[i];
         }
         m_railFrame.frame.valid = true;
+        m_railFrame.frame.toRoot = m_A.surface.anchorToRoot;   // the rails' poses are about the scene's place
         m_railFrame.fovY = cam.fovY;
         m_railFrame.portal = &portal;
         m_railFrame.cycle = portal.Valid() ? &drosteLeaf : nullptr;
@@ -1281,10 +1300,14 @@ std::optional<int> FrameLoop::Session() {
     // state, the solve carries the structure, the GPU carries the phase.
     // The water scene is DATA (data/wave_scene.json, authored if absent, hot-reloaded
     // per frame): move the solved window, retune closures, save -- no recompile.
-    sceneToWaveCfg = [&opt](const WaterSceneConfig& s) {
+    const double anchorX = m_A.surface.anchorFloats[0], anchorZ = m_A.surface.anchorFloats[2];
+    sceneToWaveCfg = [&opt, anchorX, anchorZ](const WaterSceneConfig& s) {
         WaveFieldConfig c;
-        c.orgX = s.wfOrgX;
-        c.orgZ = s.wfOrgZ;
+        // The window's origin is written east/north of the scene's place; the place stands at
+        // anchorFloats in the root (a translation: the window stays an axis-aligned rectangle,
+        // 1.5 m of turn at its far edge left to the data's own margin).
+        c.orgX = s.wfOrgX + anchorX;
+        c.orgZ = s.wfOrgZ + anchorZ;
         c.nx = s.wfNx;
         c.ny = s.wfNy;
         c.cellM = s.wfCellM;
@@ -1659,7 +1682,20 @@ std::optional<int> FrameLoop::Session() {
         const double b = cam.px * d[0] + oy * d[1] + cam.pz * d[2];
         const double c = cam.px * cam.px + oy * oy + cam.pz * cam.pz - planetR * planetR;
         const double disc = b * b - c;
-        if (disc < 0.0) return false;
+        if (disc < 0.0) {
+            // Past the limb: the sphere's point nearest the ray (the ray's closest approach to the
+            // centre, pushed out to the surface), so a drag that leaves the disc keeps spinning the
+            // planet instead of stopping dead at its edge.
+            const double t = -b;
+            if (t <= 0.0) return false;
+            double q[3] = {cam.px + d[0] * t, cam.py + planetR + d[1] * t, cam.pz + d[2] * t};
+            const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+            if (n < 1e-9) return false;
+            out[0] = q[0] / n * planetR;
+            out[1] = q[1] / n * planetR - planetR;
+            out[2] = q[2] / n * planetR;
+            return true;
+        }
         const double t = -b - std::sqrt(disc);
         if (t <= 0.0) return false;
         out[0] = cam.px + d[0] * t;
@@ -1719,7 +1755,6 @@ std::optional<int> FrameLoop::Session() {
         eo.waterScene = &waterScene;
         eo.vesselLayer = vesselLayer;
         eo.gpu = &gpu;
-        eo.gates = &m_gates;
         eo.swellShadow = m_A.exposureShadow.get();
         eo.bed = m_A.heightBed.get();
         eo.rootChart = &m_A.surface.flat;   // M13 step 2: places, not the linear chart
@@ -1912,12 +1947,44 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     fi.frame = m_frame;
     fi.quanta = quanta;
     fi.asOf = m_weather.SolverAsOf();
+    // THE GATES CARRY WHAT ENTERS THEIR BOXES (the discipline, 2026-10-11): the loop owns both
+    // lists, so a hull knows no gate and a gate knows no hull. A gate is a motor between two
+    // spaces; a hull whose centre of gravity is inside the box, said in the gate's source space,
+    // is carried by it (Entity::Carry) -- after its step and before the hulls are published, so
+    // the frame that carries one draws it where it now is. And THE GATE'S OWN RESIDENCY: the
+    // water at its far side is asked for while a hull is still a second of travel from the box,
+    // at the point the carry would take it to now -- a sea the solver owns answers nothing it
+    // was not asked for, and an unanswered one would drop the hull onto it.
+    const double frameS = double((std::max)(quanta, 1)) * SimClock::kDt;
+    const double leadS = double(Gpu::kFrameCount + 1u) * frameS;
     for (auto& e : m_entities) {
         if (!e->Active()) continue;
         e->Update(fi);
         if (m_profOn) {
             m_profMs[11] += e->LastStepMs();
             if (m_profHelm) m_profHelmMs[11] += e->LastStepMs();
+        }
+        if (!e->Hull() || !e->Placed()) continue;
+        const double reach = e->Reach(), speed = e->SpeedMps();
+        for (const auto& g : m_gates) {
+            if (!g || !g->Valid()) continue;
+            double c[3];
+            if (!e->CgIn(g->Source(), c)) break;
+            if (g->Inside(c[0], c[1], c[2])) {
+                if (e->Carry(g->Destination(), g->Carry(), m_simUnix) && e.get() == m_followed) {
+                    m_followedGate = g.get();   // the view follows its subject through THIS window
+                }
+                break;
+            }
+            double l[3] = {c[0], c[1], c[2]};
+            g->Entry().Inverse().TransformPoint(l[0], l[1], l[2]);
+            const double* sz = g->Declared().size;
+            const double half = 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
+            if (std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]) > half + reach + speed) continue;
+            g->Carry().TransformPoint(c[0], c[1], c[2]);   // where it would stand, there
+            double laX = 0.0, loX = 0.0;
+            g->Chart().PlaceOf(c[0], c[1], c[2], laX, loX);
+            m_weather.RequestRegion(laX, loX, reach + speed * leadS);
         }
     }
     // ---- THE CHASE CAMERA. Gravity-up and roll-free by choice: a camera that heels
@@ -1932,7 +1999,7 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         // follow it in. So the eye owes that gate until the box takes the eye too.
         if (m_followed->Carries() != m_followCarries) {
             m_followCarries = m_followed->Carries();
-            if (const scene::Gateway* g = m_followed->LastGate()) {
+            if (const scene::Gateway* g = m_followedGate) {
                 if (m_eyeOwes.size() < kMaxEyeOwes) {
                     m_eyeOwes.push_back(g);
                     Log("[gate] '%s' went through '%s'; the eye stays on this side and follows it "
@@ -3841,8 +3908,10 @@ bool FrameLoop::Frame() {
                 std::string pwhy;
                 if (scene::ReadPoseSugar(si->at, "interests." + si->p.name + ".at", ps, &pwhy) &&
                     ps.kind == scene::PoseSugar::Kind::Compass) {
-                    cx = ps.x;
-                    cz = ps.z;
+                    double q[3] = {ps.x, 0.0, ps.z};   // about the scene's place -> the root
+                    m_A.surface.anchorToRoot.TransformPoint(q[0], q[1], q[2]);
+                    cx = q[0];
+                    cz = q[2];
                     placed = true;
                 }
             }

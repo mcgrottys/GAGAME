@@ -271,6 +271,7 @@ bool Rail::ResolvePose(const PoseDecl& d, const RailFrame& frame, RailPose& out,
         switch (s.kind) {
             case PoseSugar::Kind::Compass:
                 c.SetFromCompass(s.x, s.alt, s.z, static_cast<float>(s.az), static_cast<float>(s.pitch));
+                c.Carry(frame.frame.toRoot);   // written about the scene's place, said in the root
                 break;
             case PoseSugar::Kind::Orbit: {
                 const Camera g = LatLonPose(s.lat, s.lon, s.alt, s.lookAt, s.tLat, s.tLon, s.heading, s.tilt,
@@ -282,6 +283,7 @@ bool Rail::ResolvePose(const PoseDecl& d, const RailFrame& frame, RailPose& out,
             default: {
                 Motor m;
                 if (!ResolveMotorSugar(d.at, frame.frame, m_path + ".poses." + d.name + ".at", m, why)) return false;
+                m = frame.frame.toRoot * m;   // written about the scene's place, said in the root
                 ToCamera(m, c);
                 break;
             }
@@ -335,7 +337,11 @@ bool Rail::KeyMotor(const Segment& s, size_t i, const RailFrame& frame, Motor& o
         // at 2.1 planet radii, aimed at the centre -- stands in when it declares none, which is
         // what the session's camGlobe was before the view's own `at` overrode it.
         const JsonValue* at = frame.viewAt ? frame.viewAt(s.keyView[i]) : nullptr;
-        if (at) return ResolveMotorSugar(*at, frame.frame, path + ".view", out, why);
+        if (at) {
+            if (!ResolveMotorSugar(*at, frame.frame, path + ".view", out, why)) return false;
+            out = frame.frame.toRoot * out;
+            return true;
+        }
         if (s.keyView[i] != "orbit") {
             return Refuse(why, path + ".view: view '" + s.keyView[i] + "' declares no eye");
         }
@@ -344,7 +350,9 @@ bool Rail::KeyMotor(const Segment& s, size_t i, const RailFrame& frame, Motor& o
         out = FromCamera(PlanetToFlatPose(g, frame.frame.east, frame.frame.up, frame.frame.north, R));
         return true;
     }
-    return ResolveMotorSugar(s.keyAt[i], frame.frame, path + ".at", out, why);
+    if (!ResolveMotorSugar(s.keyAt[i], frame.frame, path + ".at", out, why)) return false;
+    out = frame.frame.toRoot * out;
+    return true;
 }
 
 bool Rail::Resolve(const RailFrame& frame, std::string* why) {

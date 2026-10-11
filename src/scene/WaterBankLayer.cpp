@@ -116,27 +116,31 @@ void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, const double eye[3]) {
     m_simUnix = simUnix;
     for (int i = 0; i < 3; ++i) m_eyeFlat[i] = eye[i];
-    // THE CHART (WaterBankLayer.h Chart): the root's until the eye leaves its reach, then the
-    // ground under the eye's. A new plane is a new address for every texel: the rings re-stand.
-    if (!m_chartSet && m_surface) {
-        m_chart = m_surface->flat;
-        m_chartSet = true;
-    }
+    // THE CHART (WaterBankLayer.h Chart) IS THE PLANET'S CLOUD'S ORIGIN UNDER THE EYE
+    // (core/OriginLattice.h): the surface shell's point nearest the eye's direction, kept until the
+    // eye has left its cell by the lattice's margin. Two readers of one place -- this bank, a hull,
+    // a gate world -- pick the same origin by the same formula, told nothing. A new origin is a new
+    // address for every texel: the rings re-stand.
     if (m_surface && m_surface->flat.Exact()) {
         double P[3];
         m_surface->flat.PlanetOf(eye[0], eye[1], eye[2], P);
-        const double x = P[0] * m_chart.east[0] + P[1] * m_chart.east[1] + P[2] * m_chart.east[2];
-        const double z = P[0] * m_chart.north[0] + P[1] * m_chart.north[1] + P[2] * m_chart.north[2];
-        const double u = P[0] * m_chart.up[0] + P[1] * m_chart.up[1] + P[2] * m_chart.up[2];
-        if (!(u > 0.0) || x * x + z * z > kChartReachM * kChartReachM) {
-            double la = 0.0, lo = 0.0;
-            m_surface->flat.PlaceOf(eye[0], eye[1], eye[2], la, lo);
-            m_chart = Space::Anchor::About(la, lo, m_surface->flat.planetR);
+        OriginLattice L;
+        L.R = m_surface->flat.planetR;
+        const OriginLattice::Origin o = L.PickSurface(P, m_originSet ? &m_origin : nullptr);
+        if (!m_originSet || !o.Same(m_origin)) {
+            const double d[3] = {P[0] - o.c[0], P[1] - o.c[1], P[2] - o.c[2]};
+            Log("[bank] the rings' chart is the cloud's origin %lld (%.5f N %.5f E): the eye stands %.1f km from it%s",
+                static_cast<long long>(o.index), o.anchor.latDeg, o.anchor.lonDeg,
+                std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / 1000.0, m_originSet ? " (a new cell)" : "");
+            m_origin = o;
+            m_originSet = true;
+            m_chart = o.anchor;
+            m_chartSet = true;
             for (int m = 0; m < kMips; ++m) m_orgValid[m] = false;
-            Log("[bank] the rings' chart re-anchored at %.5f N %.5f E: the eye stood %.1f km from the "
-                "last one's anchor (reach %.0f km)",
-                la, lo, std::sqrt(x * x + z * z) / 1000.0, kChartReachM / 1000.0);
         }
+    } else if (!m_chartSet && m_surface) {
+        m_chart = m_surface->flat;   // a frame with no exact chart (the flat world): the root's
+        m_chartSet = true;
     }
     ChartOfFlat(eye[0], eye[1], eye[2], m_camX, m_camZ);
     const double camX = m_camX, camZ = m_camZ;

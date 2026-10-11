@@ -107,6 +107,45 @@ void TreeWater::PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) co
     if (m_hasChart) m_chart.PlaceOf(wx, 0.0, wz, latDeg, lonDeg);
 }
 
+// THE SPHERE'S PLANE IN THE CHART'S FRAME (WaterSurface::PlaneOf). The surface point is the
+// sphere of radius R + h in the direction of the frame point (wx, 0, wz) -- the same direction
+// PlaceOf reads the sample at, so the height and the place are one statement -- said in the
+// frame's rows. The normal: the sample's slopes are taken along the frame's x and z, which on the
+// ground at the point are the frame's east and north transported there (each less its part along
+// the radial), so the surface's normal is the sample's about that local triple, carried into the
+// frame by the rows. At the origin this is the identity, bit for bit.
+void TreeWater::PlaneOf(const SurfaceSample& s, double wx, double wz, double sp[3], double n[3]) const {
+    if (!m_hasChart || !m_chart.Exact()) {
+        WaterSurface::PlaneOf(s, wx, wz, sp, n);
+        return;
+    }
+    const Space::Anchor& c = m_chart;
+    double p[3];
+    c.PlanetOf(wx, 0.0, wz, p);
+    const double len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    const double d[3] = {p[0] / len, p[1] / len, p[2] / len};
+    const double r = c.planetR + s.heightNavd;
+    const double P[3] = {d[0] * r, d[1] * r, d[2] * r};
+    auto dot = [](const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    sp[0] = dot(c.east, P);
+    sp[1] = dot(c.up, P) - c.planetR;
+    sp[2] = dot(c.north, P);
+    // The local triple: the frame's east and north transported to d (less their radial parts).
+    double e[3], nn[3];
+    const double ed = dot(c.east, d), nd = dot(c.north, d);
+    for (int i = 0; i < 3; ++i) {
+        e[i] = c.east[i] - d[i] * ed;
+        nn[i] = c.north[i] - d[i] * nd;
+    }
+    const double el = std::sqrt(dot(e, e)), nl = std::sqrt(dot(nn, nn));
+    double np[3];
+    for (int i = 0; i < 3; ++i) np[i] = s.nx * e[i] / el + s.ny * d[i] + s.nz * nn[i] / nl;
+    const double inv = 1.0 / std::sqrt(dot(np, np));
+    n[0] = dot(c.east, np) * inv;
+    n[1] = dot(c.up, np) * inv;
+    n[2] = dot(c.north, np) * inv;
+}
+
 // The same point said in the ROOT space's flat frame -- the frame the solved wave field's window
 // and the wake table are expressed in. M13 step 2: where both charts carry their rows this is the
 // geometry itself (the point into the planet frame by its own space's rows, then onto the root's),

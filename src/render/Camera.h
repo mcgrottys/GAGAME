@@ -76,6 +76,9 @@ public:
     // Google-Earth-style orbit: ONE rigid rotation of the camera (position and aim together)
     // about an arbitrary world line, done with a PGA motor (core/Pga.h). Returns false -- and
     // changes nothing -- if the result would sink below minAltY.
+    // THE POSE CARRIED BY A MOTOR: the position through it, the attitude and its up reference by
+    // its rotor -- a pose written in one frame said in another (the scene's place to the root).
+    void Carry(const Motor& m);
     bool OrbitAboutLine(const double pivot[3], const double axis[3], double angleRad,
                         double minAltY);
     // Wheel zoom: close `frac` of the distance to a world target (negative backs away).

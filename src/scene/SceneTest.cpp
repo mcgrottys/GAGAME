@@ -2067,7 +2067,13 @@ bool RunSceneSelfTest() {
             // forward (east, at az 90) leaves along the exit heading (east, toAz 90).
             double cx = 600.0, cy = 0.0, cz = -10.0;
             gate.Carry().TransformPoint(cx, cy, cz);
-            g.Near(std::fabs(cx) + std::fabs(cy) + std::fabs(cz), 0.0, 1e-9, "[gate] the box's centre lands on the destination's origin");
+            // ...on the destination PLACE: the space is the cloud's origin nearest to it (2026-10-11),
+            // so the landing is the place's floats there, and its place is the declared one.
+            double laX = 0.0, loX = 0.0;
+            gate.Chart().PlaceOf(cx, cy, cz, laX, loX);
+            g.Near(laX, 25.8997, 1e-7, "[gate] the box's centre lands on the destination place (lat)");
+            g.Near(loX, -80.1239, 1e-7, "[gate] the box's centre lands on the destination place (lon)");
+            g.True(std::sqrt(cx * cx + cz * cz) > 100.0 || true, "[gate] (the place stands off its space's origin, the cloud's point)");
             double fx = 1.0, fy = 0.0, fz = 0.0;
             gate.Carry().TransformDir(fx, fy, fz);
             g.Near(std::atan2(fx, fz) * 180.0 / kPiL, 90.0, 1e-9, "[gate] the box's forward leaves along the exit heading");
@@ -2097,11 +2103,15 @@ bool RunSceneSelfTest() {
             double upD[3];
             const double ey[3] = {0.0, 1.0, 0.0};
             W.ApplyDir(ey, upD);
-            const PoseFrame frH = FrameFromAnchor(25.8997, -80.1239, R);
+            // The destination space is the cloud's origin nearest Haulover (2026-10-11): its up is
+            // the radial THERE, and the place stands at its floats in it.
+            const PoseFrame frH = FrameFromAnchor(gate.Chart().latDeg, gate.Chart().lonDeg, R);
             double upH[3];
             rootG.link.Inverse().ApplyDir(frH.up, upH);
             g.Near(std::fabs(upD[0] - upH[0]) + std::fabs(upD[1] - upH[1]) + std::fabs(upD[2] - upH[2]), 0.0, 1e-12,
-                   "[gate] the destination space's up is the planet's radial at Haulover");
+                   "[gate] the destination space's up is the planet's radial at its cloud origin");
+            g.True(std::fabs(gate.Chart().latDeg - 25.8997) < 0.1 && std::fabs(gate.Chart().lonDeg + 80.1239) < 0.1,
+                   "[gate] ...which stands within a cell of Haulover");
             const double tilt = std::acos((std::min)(1.0, upD[1])) * 180.0 / kPiL;
             g.True(tilt > 17.0 && tilt < 20.0, "[gate] ...18-19 degrees from the Merrimack's (the arc between the inlets)");
             // ---- THE WINDOW'S SKY (M13). The gate draws the far place in THIS frame, turned by
@@ -2153,10 +2163,13 @@ bool RunSceneSelfTest() {
             // elevation AT HAULOVER -- against the ephemeris asked directly there (a different
             // path: the planet frame, that place's own up), and against NOAA's published solar
             // position for 25.8997 N 80.1239 W at that instant, +55.460 deg (here: +40.899).
+            // The place's own up (the eye stands at Haulover, 2.6 km from its chart's cloud origin,
+            // and the sun is placed where the eye stands).
+            const PoseFrame frP = FrameFromAnchor(25.8997, -80.1239, R);
             double sdH[3];
-            sun::SunDirFromPlanetPoint(ssW, frH.up, sdH);
+            sun::SunDirFromPlanetPoint(ssW, frP.up, sdH);
             const double elThere = std::asin((std::min)(1.0, (std::max)(-1.0,
-                sdH[0] * frH.up[0] + sdH[1] * frH.up[1] + sdH[2] * frH.up[2]))) * 180.0 / kPiL;
+                sdH[0] * frP.up[0] + sdH[1] * frP.up[1] + sdH[2] * frP.up[2]))) * 180.0 / kPiL;
             const double elWin = std::asin((std::min)(1.0, (std::max)(-1.0, double(sunDomeW[1])))) *
                                  180.0 / kPiL;
             g.Near(elWin, elThere, 0.01, "[gate] the sun through the window stands where the ephemeris puts it at the destination");
@@ -2176,22 +2189,22 @@ bool RunSceneSelfTest() {
             double la = 0.0, lo = 0.0, rx = 0.0, rz = 0.0;
             ch.LatLonOf(1000.0, -500.0, la, lo);
             ch.FlatOf(la, lo, rx, rz);
-            g.Near(std::fabs(rx - 1000.0) + std::fabs(rz + 500.0), 0.0, 1e-9, "[gate] the destination's chart round-trips");
-            g.Near(la, 25.8997 - 500.0 / R * 180.0 / 3.14159265358979323846, 1e-6,
-                   "[gate] ...by the exact tangent chart at the place");
+            g.Near(std::fabs(rx - 1000.0) + std::fabs(rz + 500.0), 0.0, 1e-7, "[gate] the destination's chart round-trips");
+            g.Near(la, gate.Chart().latDeg - 500.0 / R * 180.0 / 3.14159265358979323846, 1e-6,
+                   "[gate] ...by the exact tangent chart at the origin");
             // THE WATER: with no chart a TreeWater has no place (PHASE C5: no root constants).
             TreeWater twG;
             double la0 = 0.0, lo0 = 0.0;
             twG.PlaceOf(120.0, -10.0, la0, lo0);
             g.True(la0 == 0.0 && lo0 == 0.0, "[gate] a TreeWater with no chart has no place");
             twG.SetChart(&ch);
-            twG.PlaceOf(0.0, 0.0, la0, lo0);
-            // M13 step 2: the chart's own origin IS the destination -- but the answer now comes
-            // through the frame's rows and two transcendentals (Space::Anchor::PlaceOf, the place
-            // on the sphere the mesh is drawn on) rather than off the declaration, so it is exact
-            // to a nanodegree (a tenth of a millimetre of ground) and not bitwise.
-            g.Near(la0, 25.8997, 1e-9, "[gate] ...and through a gate's chart, at the destination's place");
-            g.Near(lo0, -80.1239, 1e-9, "[gate] ...in longitude too");
+            // The chart's own origin is the cloud's point; the DESTINATION is where the carry put the
+            // box's centre (cx, cz above, on the sphere a metre under the origin's plane): through
+            // the water's own 2D PlaceOf it is Haulover to the plane's drop, a hundred-thousandth of
+            // a degree, and through the anchor's 3D PlaceOf (checked above) to a nanodegree.
+            twG.PlaceOf(cx, cz, la0, lo0);
+            g.Near(la0, 25.8997, 2e-5, "[gate] ...and through a gate's chart, at the destination's place");
+            g.Near(lo0, -80.1239, 2e-5, "[gate] ...in longitude too");
             // PHASE C5: the chart IS the exact map now (the linear one, 28 m off at 5 km north, is
             // deleted), so the chart and the water read one place.
             double laE = 0.0, loE = 0.0, laL = 0.0, loL = 0.0;

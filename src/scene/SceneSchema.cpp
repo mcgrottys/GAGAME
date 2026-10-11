@@ -614,11 +614,7 @@ const Schema& EntitySchema_() {
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)
-            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H)
-            .Bind("recentreM", kEntity.recentreM, Q::Length, "m",
-                  "how far this hull may sail from its space's origin before the space moves to "
-                  "its place (the per-subject floating origin; 0 = never, and it rides d^2/2R "
-                  "above the sphere)", H);
+            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H);
         return sc;
     }();
     return *s;
@@ -674,9 +670,24 @@ const Schema& BuildingsLayerSchema() {
                       "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
             .Bind("lodPixels", kBuildings.lodPixels, Q::Dimensionless, "px",
                   "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's", R)
+            .Bind("shapePixels", kBuildings.shapePixels, Q::Dimensionless, "px",
+                  "a building or road piece is drawn as its own form from this many pixels across, and as its "
+                  "moment box (the same volume, centroid and heading) below; 1 = always its form. Tokyo at 9 km: 16.5 ms of buildings at 1, 2.3 ms at 6, the stills alike", R)
+            .Bind("pageMB", kBuildings.pageMB, Q::Dimensionless, "1",
+                  "the tree's loaded pages' budget on the CPU; over it, the page worth the fewest pixels on screen "
+                  "goes first, and never to make room for one worth fewer (the coarse levels are so the floor)", R)
             .Bind("field", kBuildings.field,
                   "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
-                  "seen at an angle; needs `lod`", R);
+                  "seen at an angle; needs `lod`", R)
+            .Bind("laneWidth", kBuildings.laneWidth, Q::Length, "m",
+                  "a road in the tree (sources of kind \"roads\", docs/ROADS.md) is as wide as its file says, else its "
+                  "lanes times this", R)
+            .Bind("defaultLanes", kBuildings.defaultLanes, Q::Dimensionless, "1",
+                  "a road with neither width nor lanes tagged: the scene's assumption", R)
+            .Bind("pathWidth", kBuildings.pathWidth, Q::Length, "m",
+                  "a footway, path, cycleway, track or steps with no width tagged", R)
+            .Bind("kerb", kBuildings.kerb, Q::Length, "m",
+                  "a road's surface stands this much over the composed ground, and its mass as much under it", R);
         return sc;
     }();
     return *s;

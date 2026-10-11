@@ -185,7 +185,41 @@ bool ReadShape(const uint8_t* p, const uint8_t* end, ShapeView& v) {
     v.xy = reinterpret_cast<const int16_t*>(q);
     q += 4u * v.head.nVerts;
     v.tri = reinterpret_cast<const uint16_t*>(q);
+    q += 6u * v.head.nTris;
+    v.z = (v.head.flags & shape::kRibbon) ? reinterpret_cast<const int16_t*>(q) : nullptr;
     v.unit = (v.head.flags & shape::kMetres) ? 1.0f : 0.1f;
+    return true;
+}
+
+bool EncodeRibbon(const std::vector<double>& xy, double widthM, double below, double above, bool path,
+                  std::vector<uint8_t>& out) {
+    const size_t n = xy.size() / 2;
+    if (n < 2 || n > 65535) return false;
+    double ext = 0.0;
+    for (double c : xy) ext = (std::max)(ext, std::abs(c));
+    if (ext > 32000.0) return false;
+    const bool metres = ext > 3200.0;
+    const double unit = metres ? 1.0 : 0.1;
+    ShapeHead h{};
+    h.nVerts = static_cast<uint16_t>(n);
+    h.nTris = 0;
+    h.nRings = 1;
+    h.flags = static_cast<uint8_t>(shape::kRibbon | (metres ? shape::kMetres : 0) | (path ? shape::kPath : 0));
+    h.pad = static_cast<uint16_t>(std::clamp(std::lround(widthM * 10.0), 1L, 65535L));
+    h.bottom = static_cast<float>(-below);
+    h.top = static_cast<float>(above);
+    const size_t at = out.size();
+    out.resize(at + shape::Bytes(h), 0);   // z[] stays zero: the page's reader fills it
+    uint8_t* p = out.data() + at;
+    std::memcpy(p, &h, sizeof(h));
+    p += sizeof(h);
+    std::memcpy(p, &h.nVerts, 2);
+    p += 2;
+    for (double c : xy) {
+        const int16_t q = static_cast<int16_t>(std::lround(c / unit));
+        std::memcpy(p, &q, 2);
+        p += 2;
+    }
     return true;
 }
 

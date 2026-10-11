@@ -13,7 +13,17 @@
 //      uint16 ringLen[nRings]           vertices per ring, the rings one after another
 //      int16  xy[2 nVerts]              east, north: decimetres (kMetres: metres) from the centroid
 //      uint16 tri[3 nTris]              the roof, indices into xy
+//      int16  z[nVerts]                 kRibbon only: height of each vertex above the ground under
+//                                       the centroid, decimetres -- ZERO on disk, filled when the
+//                                       page is read (scene/BuildingLayer LoadPage: the composed
+//                                       ground under each vertex), as a building finds its base
 //      pad to 4
+//
+//  A RIBBON (kRibbon, 2026-10-10): a road way's piece as the same record -- its polyline as one
+//  "ring" of nVerts points (open, not closed), no roof triangles, its width in `pad` (decimetres),
+//  `bottom` and `top` the kerb below and above the ground -- extruded by Buildings.hlsl MsShape as
+//  mitred quads, one a segment, through the same tasks that cut a building's walls. kPath marks a
+//  footway, path, cycleway or steps (drawn lighter); the road classes are asphalt.
 // ================================================================================================
 #pragma once
 
@@ -27,17 +37,21 @@ namespace ga {
 #pragma pack(push, 1)
 struct ShapeHead {
     uint16_t nVerts, nTris;
-    uint8_t nRings, flags;   // flags: kPart, kMetres
-    uint16_t pad;
-    float bottom, top;       // metres above the ground under the centroid
+    uint8_t nRings, flags;   // flags: kPart, kMetres, kRibbon, kPath
+    uint16_t pad;            // a ribbon's width, decimetres; 0 for a building
+    float bottom, top;       // metres above the ground under the centroid (a ribbon: under each vertex)
 };
 #pragma pack(pop)
 
 namespace shape {
 inline constexpr uint8_t kPart = 1;     // a building:part
 inline constexpr uint8_t kMetres = 2;   // xy in metres, not decimetres: a footprint over 3.2 km
+inline constexpr uint8_t kRibbon = 4;   // a road piece: an open polyline with a width and a z per vertex
+inline constexpr uint8_t kPath = 8;     // a ribbon that is a footway, path, cycleway, track or steps
+// Where a ribbon's z[] starts, from the record's first byte.
+inline size_t ZOffset(const ShapeHead& h) { return sizeof(ShapeHead) + 2u * h.nRings + 4u * h.nVerts + 6u * h.nTris; }
 inline size_t Bytes(const ShapeHead& h) {
-    const size_t n = sizeof(ShapeHead) + 2u * h.nRings + 4u * h.nVerts + 6u * h.nTris;
+    const size_t n = ZOffset(h) + ((h.flags & kRibbon) ? 2u * h.nVerts : 0u);
     return (n + 3u) & ~size_t(3);
 }
 }  // namespace shape
@@ -52,10 +66,18 @@ struct ShapeView {
     const uint16_t* ringLen = nullptr;
     const int16_t* xy = nullptr;
     const uint16_t* tri = nullptr;
+    const int16_t* z = nullptr;   // a ribbon's heights (decimetres); null for a building
     float unit = 0.1f;   // metres per xy step
 };
 // The record at p (inside [p, end)); false if it does not fit.
 bool ReadShape(const uint8_t* p, const uint8_t* end, ShapeView& v);
+
+// A road piece's record: its polyline in metres east/north of the centroid (x0, y0, x1, y1, ...; at
+// least two points), its width, the kerb below and above the ground (metres, both positive), and
+// whether it is a path. z is written as zero: the page's reader fills it. False (nothing appended)
+// for a polyline too long for a record (over 32 km from its centroid) or too many points.
+bool EncodeRibbon(const std::vector<double>& xy, double widthM, double below, double above, bool path,
+                  std::vector<uint8_t>& out);
 
 // The roof of rings in a plane, outer counter-clockwise and holes clockwise (outer[i] marks the
 // outer ones): triangles as indices into the rings' concatenated vertices. Shared by the record and

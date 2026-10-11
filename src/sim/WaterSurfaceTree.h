@@ -125,6 +125,9 @@ public:
     // M13 step 2: the ROOT space's chart beside this hull's own -- RootOf (the solved window's
     // frame, the wake table's) is a geometric step between two spaces and needs both ends.
     void SetRootChart(const Space::Anchor* chart);
+    // The free surface as the sphere's plane in this water's chart frame (WaterSurface::PlaneOf):
+    // the identity where the chart has no rows.
+    void PlaneOf(const SurfaceSample& s, double wx, double wz, double sp[3], double n[3]) const override;
     // The place (lat, lon) of a point of this water's flat frame.
     void PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const;
 

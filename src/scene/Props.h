@@ -110,6 +110,9 @@ struct PoseFrame {
     double up[3] = {0.0, 1.0, 0.0};
     double north[3] = {0.0, 0.0, 1.0};
     bool valid = false;
+    // A compass or motor pose is written about the scene's place; the frame it resolves in is the
+    // root (the cloud's origin), and this is the one motor between them (SurfaceFrame::anchorToRoot).
+    Motor toRoot = Motor::Identity();
 };
 
 // ================================================================================================

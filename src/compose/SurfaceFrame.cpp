@@ -559,9 +559,23 @@ SurfaceFrame SurfaceFrame::About(double planetR, bool stencil, double latDeg, do
     SurfaceFrame s;
     s.planetR = planetR;
     s.stencil = stencil;
-    // PHASE C4: the world.flat chart is the tangent plane about the SCENE's place (place.anchor),
-    // exact: a ratio of planes in doubles, no metres-per-degree.
-    s.flat = Space::Anchor::About(latDeg, lonDeg, planetR);
+    // PHASE C4: the world.flat chart is exact, a ratio of planes in doubles. 2026-10-11: it is the
+    // tangent frame of the cloud's origin nearest the scene's place; the place stands in it at
+    // anchorFloats, and anchorToRoot carries the scene's own numbers there (SurfaceFrame.h).
+    OriginLattice L;
+    L.R = planetR;
+    s.origin = L.SurfaceAt(latDeg, lonDeg);
+    s.flat = s.origin.anchor;
+    s.flat.planetR = planetR;
+    s.anchorChart = Space::Anchor::About(latDeg, lonDeg, planetR);
+    OriginLattice::Origin a;   // the scene's place as a frame of its own (not a cloud point: index -2)
+    a.shell = 0;
+    a.index = -2;
+    a.r = planetR;
+    a.anchor = s.anchorChart;
+    for (int i = 0; i < 3; ++i) a.c[i] = s.anchorChart.up[i] * planetR;
+    s.anchorToRoot = OriginLattice::Between(a, s.origin);
+    OriginLattice::Floats(s.origin, a.c, s.anchorFloats);
     // The 16k quad-sphere in the two tile shapes.
     s.cube = Lattice::Cube(Lattice::kFaceDim);
     s.cubeH = Lattice::Cube(Lattice::kFaceDim, 256, 128);

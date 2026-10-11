@@ -43,7 +43,10 @@ void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<con
     m_ground = std::move(ground);
 }
 
-void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels) {
+void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels,
+                                 double pageMB) {
+    m_shapePixels = (std::max)(shapePixels, 0.0);
+    m_pageBudget = static_cast<uint64_t>((std::max)(pageMB, 1.0) * 1048576.0);
     m_lod = std::move(lod);
     m_lodPixels = pixels > 0.0 ? pixels : 1.0;
 }
@@ -67,6 +70,12 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
     const bool ok = hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "buildings"); }, "buildings");
     d.vs = sc.Compile(path, L"VsBox", L"vs_6_0");   // the tree's boxes: the same light, the same depth,
+    // THE OUTSIDE IS THE FRONT (2026-10-10): every surface of the tree winds counter-clockwise seen
+    // from outside -- the records' rings (BuildingShape.h), their walls to the edge's right, the
+    // roof's ears, a ribbon's quads, a box's six faces -- so the back faces are the insides and the
+    // undersides, which nothing sees, and the rasterizer drops them before a pixel is shaded.
+    d.cull = D3D12_CULL_MODE_BACK;
+    d.frontCcw = TRUE;
     d.blend = true;                                  // a fold's coverage as its alpha
     d.srcBlend = D3D12_BLEND_SRC_ALPHA;
     d.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
@@ -78,17 +87,26 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         o7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED) {
         hal::MeshPipelineDesc md;
         md.rootSig = m_rootSig;
+        md.as = sc.Compile(path, L"AsShape", L"as_6_5");   // the streams: 64 instances -> their edge and roof groups
         md.ms = sc.Compile(path, L"MsShape", L"ms_6_5");
         md.ps = sc.Compile(path, L"PsMain", L"ps_6_5");
-        md.cull = D3D12_CULL_MODE_NONE;
+        md.cull = D3D12_CULL_MODE_BACK;   // the outside is the front (above)
+        md.frontCcw = TRUE;
         md.depthClip = TRUE;
         md.depthTest = true;
         md.depthWrite = true;
         md.blend = true;   // a building fading in, as the boxes
         md.srcBlend = D3D12_BLEND_SRC_ALPHA;
         md.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
-        if (md.ms.Valid() && md.ps.Valid()) {
+        if (md.as.Valid() && md.ms.Valid() && md.ps.Valid()) {
             hal::Reload(m_psoShape, [&] { return hal::BuildMesh(gpu, md, "buildings.shapes"); }, "buildings.shapes");
+        }
+        // The boxes by mesh shader too: 8 vertices and 12 triangles a box, 16 a group, no amplification.
+        hal::MeshPipelineDesc mb = md;
+        mb.as = ShaderBlob{};
+        mb.ms = sc.Compile(path, L"MsBox", L"ms_6_5");
+        if (mb.ms.Valid() && mb.ps.Valid()) {
+            hal::Reload(m_psoBoxMesh, [&] { return hal::BuildMesh(gpu, mb, "buildings.boxes.mesh"); }, "buildings.boxes.mesh");
         }
     }
     return okBox && ok;
@@ -469,6 +487,34 @@ void PointFrame(const BuildingLayer::Place& place, double lat, double lon, doubl
 
 static int FloorDivI(int a, int n) { return a >= 0 ? a / n : -((-a + n - 1) / n); }
 
+// THE ATTITUDE AS A ROTOR: the rotor taking the flat frame's axes (x east, y up, z north: a
+// right-handed triple) to the local east, up and north, as its four components (x, y, z, w) -- the
+// GPU rotates the axes back out (Buildings.hlsl Rotate). The order matters: (east, north, up) is
+// LEFT-handed in this frame, and a rotor cannot reach a mirror -- built from it, the footprints came
+// out mirrored, their near walls culled as backs and their far walls lit (2026-10-10). Shepperd's
+// choice of the largest diagonal keeps it exact for every attitude.
+static void RotorOf(const double E[3], const double U[3], const double N[3], float q[4]) {
+    // The matrix whose columns are E, U, N: m[row][col].
+    const double m00 = E[0], m10 = E[1], m20 = E[2], m01 = U[0], m11 = U[1], m21 = U[2], m02 = N[0], m12 = N[1], m22 = N[2];
+    const double tr = m00 + m11 + m22;
+    double x, y, z, w;
+    if (tr > 0.0) {
+        const double s = std::sqrt(tr + 1.0) * 2.0;
+        w = 0.25 * s; x = (m21 - m12) / s; y = (m02 - m20) / s; z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const double s = std::sqrt(1.0 + m00 - m11 - m22) * 2.0;
+        w = (m21 - m12) / s; x = 0.25 * s; y = (m01 + m10) / s; z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const double s = std::sqrt(1.0 + m11 - m00 - m22) * 2.0;
+        w = (m02 - m20) / s; x = (m01 + m10) / s; y = 0.25 * s; z = (m12 + m21) / s;
+    } else {
+        const double s = std::sqrt(1.0 + m22 - m00 - m11) * 2.0;
+        w = (m10 - m01) / s; x = (m02 + m20) / s; y = (m12 + m21) / s; z = 0.25 * s;
+    }
+    q[0] = float(x); q[1] = float(y); q[2] = float(z); q[3] = float(w);
+}
+static double Len3(const float v[3]) { return std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]); }
+
 static std::pair<int, int> CellOf(double lat, double lon) {
     return {static_cast<int>(std::floor(lon / BuildingLayer::kCellDeg)), static_cast<int>(std::floor(lat / BuildingLayer::kCellDeg))};
 }
@@ -525,7 +571,8 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                 ShapeView sv;
                 if (at < shapeBytes.size() && ReadShape(shapeBytes.data() + at, shapeBytes.data() + shapeBytes.size(), sv)) {
                     const size_t rb = shape::Bytes(sv.head);
-                    if (sv.head.nVerts >= 3 && rb <= kSlotBytes) {
+                    const uint32_t minV = (sv.head.flags & shape::kRibbon) ? 2u : 3u;   // a ribbon is a line of two
+                    if (sv.head.nVerts >= minV && rb <= kSlotBytes) {
                         if (fill + rb > kSlotBytes) {
                             page->slotUsed.push_back(0);
                             packed.resize(page->slotUsed.size() * size_t(kSlotBytes), 0);
@@ -538,7 +585,7 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                         b.shapeOff = static_cast<uint32_t>(addr);   // (packed is kept: see Page::packed)
                         b.nV = sv.head.nVerts;
                         b.nT = sv.head.nTris;
-                    } else if (sv.head.nVerts >= 3) {
+                    } else if (sv.head.nVerts >= minV) {
                         ++page->tooBig;
                     }
                     at += rb;
@@ -547,7 +594,19 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                 // reach the ground on the downhill side, the uphill side is buried, the roof stays level.
                 // The centroid's ground alone floated a slope's low side and sank its high one.
                 double base = ground(lat, lon);
-                if (b.shapeOff != UINT32_MAX) {
+                if (b.shapeOff != UINT32_MAX && (sv.head.flags & shape::kRibbon)) {
+                    // A RIBBON RIDES THE GROUND: its base is the centroid's, and each vertex carries its
+                    // own height over that, read here from the composed ground -- the profile's first
+                    // form (the ground itself; a deck's clearance refines it later, docs/ROADS.md).
+                    constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+                    const double mx = std::cos(lat * kDeg) * kR * kDeg, my = kR * kDeg;
+                    int16_t* z = reinterpret_cast<int16_t*>(packed.data() + b.shapeOff + shape::ZOffset(sv.head));
+                    for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
+                        const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
+                        const double dz = ground(lat + y / my, lon + x / mx) - base;
+                        z[v] = static_cast<int16_t>(std::clamp(std::lround(dz * 10.0), -32767L, 32767L));
+                    }
+                } else if (b.shapeOff != UINT32_MAX) {
                     constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
                     const double mx = std::cos(lat * kDeg) * kR * kDeg, my = kR * kDeg;
                     for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
@@ -705,7 +764,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     for (Walked& w : walked) {
         if ((w.count || w.insts) && w.vb.Valid()) {   // the cells' own copy and barrier (Upload)
             ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
-            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + uint64_t(w.tasks) * 8u + 15u) & ~uint64_t(15);
+            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + 15u) & ~uint64_t(15);
             cl->CopyBufferRegion(w.vb.res.Get(), 0, w.staging.res.Get(), 0, bytes);
             D3D12_RESOURCE_BARRIER br{};
             br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -720,7 +779,6 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         for (int i = 0; i < 3; ++i) m_drawn.origin[i] = w.origin[i];
         m_drawn.count = w.vb.Valid() ? w.count : 0;
         m_drawn.insts = w.vb.Valid() ? w.insts : 0;
-        m_drawn.tasks = w.vb.Valid() ? w.tasks : 0;
         m_drawnUsed = std::set<PageKey>(w.used.begin(), w.used.end());
         m_drawnHold = std::move(w.hold);
         m_drawn.cpu = std::move(w.cpu);
@@ -730,12 +788,12 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         // The pages the walk wanted, the largest on screen first.
         m_wants = std::move(w.wants);
         ++m_walks;
-        const bool largest = m_drawn.tasks > m_walkTasksMax;
-        if (largest) m_walkTasksMax = m_drawn.tasks;
-        if (m_walks <= 3 || m_walks % 50 == 0 || (largest && m_drawn.tasks > 500000u)) {
-            Log("[buildings] frame %llu walk %llu: %u boxes + %u shapes in %u mesh tasks (%llu buildings, %llu fading in) over %llu nodes in %.1f ms (visit %.1f, "
+        const bool largest = m_drawn.insts > m_walkInstsMax;
+        if (largest) m_walkInstsMax = m_drawn.insts;
+        if (m_walks <= 3 || m_walks % 50 == 0 || (largest && m_drawn.insts > 200000u)) {
+            Log("[buildings] frame %llu walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes in %.1f ms (visit %.1f, "
                 "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame),
-                static_cast<unsigned long long>(m_walks), m_drawn.count, m_drawn.insts, m_drawn.tasks, static_cast<unsigned long long>(w.singles),
+                static_cast<unsigned long long>(m_walks), m_drawn.count, m_drawn.insts, static_cast<unsigned long long>(w.singles),
                 static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), w.ms, w.msVisit, w.msSort,
                 w.msBuf, m_pages.size(), m_pageBytes / 1048576.0, m_wants.size());
         }
@@ -771,27 +829,75 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             ++fine;
         }
     }
-    // 2. The budget: the page no walk has used for longest goes first.
-    // ONE EVICTION FOR BOTH LIMITS: the page no walk has used for longest goes, while the pages'
-    // memory is over its budget OR the pages waiting to land want more slots than will be free.
+    // 2. THE BUDGET, BY VALUE (2026-10-10, the owner's distinction: a coarse page IS the far picture
+    // and must stay while the fine ones fill in; a texture's fine tile supersedes its coarse one, a
+    // building's fine page only adds). A page's VALUE is its width on screen were the eye to look
+    // at it: its quads in metres over its distance, in pixels -- one law at every level, so a
+    // coarse page near the horizon is worth thousands of pixels, a fine page under the eye
+    // hundreds, a fine page fifty kilometres off a fraction. Over the budget (or short of slots
+    // for the pages waiting to land) the page worth the FEWEST pixels goes first, and no page goes
+    // to make room for one worth fewer than it: the coarse levels are so the floor, with no case
+    // for them. The walk's want order (pixels on screen, largest first) and this agree.
     auto slotsShort = [this] {
         size_t want = 0, coming = m_freeSlots.size();
         for (const auto& w : m_roomWait) want += w.second->slotUsed.size();
         for (const SlotsRetired& r : m_slotsRetired) coming += r.slots.size();
         return want > coming;
     };
-    while (!m_pages.empty() && (m_pageBytes > kPageBytes || slotsShort())) {
-        auto old = m_pages.begin();
-        for (auto it = m_pages.begin(); it != m_pages.end(); ++it) {
-            if (m_pageUsed[it->first] < m_pageUsed[old->first]) old = it;
+    if (!m_pages.empty() && (m_pageBytes > m_pageBudget || slotsShort()) && ctx.camera && ctx.height) {
+        const double eye[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
+        const double pixAng = double(ctx.camera->fovY) / double(ctx.height);
+        auto value = [&](const PageKey& k) {
+            const int L = std::get<0>(k);
+            const double Q = lod::QuadDeg(L), PY = lod::PageY(L);
+            const double lat = (std::get<2>(k) + 0.5) * PY * Q, lon = (std::get<1>(k) + 0.5) * lod::kPageX * Q;
+            double p[3];
+            m_place(lat, lon, 0.0, p);
+            const double d = std::sqrt((p[0] - eye[0]) * (p[0] - eye[0]) + (p[1] - eye[1]) * (p[1] - eye[1]) +
+                                       (p[2] - eye[2]) * (p[2] - eye[2]));
+            const double widthM = (std::max)(lod::kPageX * Q, PY * Q) * lod::kMetresPerDeg * std::cos(lat * 3.14159265358979323846 / 180.0);
+            return widthM / (std::max)(d - 0.5 * widthM, 1.0) / pixAng;
+        };
+        // What the room is for: the least valuable of the pages landing or wanted and not loaded.
+        double need = 1e300;
+        for (const auto& w : m_roomWait) need = (std::min)(need, value(w.first));
+        for (const PageKey& k : m_pagePending) need = (std::min)(need, value(k));
+        for (const auto& [px, k] : m_wants) {
+            if (!m_pages.count(k) && !m_pagePending.count(k)) need = (std::min)(need, value(k));
         }
-        if (m_pageUsed[old->first] + 2 >= m_frame) break;   // all in use: over budget, not thrashing
-        if (m_drawnUsed.count(old->first)) break;   // the drawn walk reads its shapes
-        if (!old->second->slots.empty()) m_slotsRetired.push_back({old->second->slots, m_frame, old->second});
-        m_pageBytes -= old->second->bytes;
-        m_pageUsed.erase(old->first);
-        m_pages.erase(old);
-        ++m_pagesVersion;
+        std::vector<std::pair<double, PageKey>> byValue;
+        byValue.reserve(m_pages.size());
+        for (const auto& [k, pg] : m_pages) byValue.push_back({value(k), k});
+        std::sort(byValue.begin(), byValue.end());
+        uint32_t gone = 0, goneByLevel[lod::kLevels] = {};
+        double lowestKept = 1e300, highestGone = 0.0;
+        for (const auto& [v, k] : byValue) {
+            if (!(m_pageBytes > m_pageBudget || slotsShort())) break;
+            if (v >= need) break;   // the room would be made for a page worth less: over budget stands
+            if (m_drawnUsed.count(k)) continue;   // the drawn walk reads its shapes
+            auto it = m_pages.find(k);
+            if (!it->second->slots.empty()) m_slotsRetired.push_back({it->second->slots, m_frame, it->second});
+            m_pageBytes -= it->second->bytes;
+            m_pageUsed.erase(k);
+            m_pages.erase(it);
+            ++m_pagesVersion;
+            ++gone;
+            ++goneByLevel[std::get<0>(k) - lod::kLmin];
+            highestGone = (std::max)(highestGone, v);
+        }
+        for (const auto& [v, k] : byValue) {
+            if (m_pages.count(k)) lowestKept = (std::min)(lowestKept, v);
+        }
+        if (gone && (m_evictions++ < 8 || m_evictions % 50 == 0)) {
+            std::string per;
+            for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
+                if (goneByLevel[L - lod::kLmin]) per += " L" + std::to_string(L) + ":" + std::to_string(goneByLevel[L - lod::kLmin]);
+            }
+            Log("[buildings] frame %llu: %u pages let go (%s) worth up to %.1f px, for pages worth %.1f px and more; %zu kept "
+                "(%.0f MB of %.0f), the least worth %.1f px",
+                static_cast<unsigned long long>(m_frame), gone, per.c_str(), highestGone, need >= 1e300 ? 0.0 : need,
+                m_pages.size(), m_pageBytes / 1048576.0, m_pageBudget / 1048576.0, lowestKept >= 1e300 ? 0.0 : lowestKept);
+        }
     }
     // 3. A new walk, when its inputs have moved and none is running.
     if (m_shared->walking.load() || !ctx.height) return;
@@ -801,7 +907,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     const double moved = std::sqrt((eye[0] - m_walkEye[0]) * (eye[0] - m_walkEye[0]) + (eye[1] - m_walkEye[1]) * (eye[1] - m_walkEye[1]) +
                                    (eye[2] - m_walkEye[2]) * (eye[2] - m_walkEye[2]));
     const double turned = fwd[0] * m_walkFwd[0] + fwd[1] * m_walkFwd[1] + fwd[2] * m_walkFwd[2];
-    if (moved < (std::max)(1.0, 0.002 * (std::max)(h, 0.0)) && turned > 0.99998 && m_walkCells == m_cellsVersion &&
+    if (moved < (std::max)(1.0, 0.02 * (std::max)(h, 0.0)) && turned > 0.99998 && m_walkCells == m_cellsVersion &&
         m_walkPages == m_pagesVersion) {
         return;
     }
@@ -812,7 +918,8 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     m_walkCells = m_cellsVersion;
     m_walkPages = m_pagesVersion;
     struct In {
-        double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB;
+        double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB, tauS;
+        double org[3];   // the walk's origin (the cloud's, at the eye), flat frame: what the instances are about
         struct KeyHash {
             size_t operator()(const PageKey& k) const {
                 return std::hash<uint64_t>()((uint64_t(uint32_t(std::get<0>(k) + 64)) << 56) ^
@@ -830,6 +937,23 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         in.eye[i] = eye[i];
         in.fwd[i] = fwd[i];
     }
+    {   // THE ORIGIN: the cloud's point at the eye (its shell at the eye's altitude), with hysteresis.
+        constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+        const double d[3] = {std::cos(latDeg * kDeg) * std::cos(lonDeg * kDeg), std::sin(latDeg * kDeg), std::cos(latDeg * kDeg) * std::sin(lonDeg * kDeg)};
+        const double P[3] = {d[0] * (kR + h), d[1] * (kR + h), d[2] * (kR + h)};
+        OriginLattice L;
+        L.R = kR;
+        const OriginLattice::Origin o = L.Pick(P, m_walkOriginSet ? &m_walkOrigin : nullptr);
+        if (!m_walkOriginSet || !o.Same(m_walkOrigin)) {
+            Log("[buildings] the walk's origin is the cloud's point %lld on shell %d (%.5f N %.5f E, %.0f m up): the eye stands %.1f km from it%s",
+                static_cast<long long>(o.index), o.shell, o.anchor.latDeg, o.anchor.lonDeg, o.r - kR,
+                std::sqrt((P[0] - o.c[0]) * (P[0] - o.c[0]) + (P[1] - o.c[1]) * (P[1] - o.c[1]) + (P[2] - o.c[2]) * (P[2] - o.c[2])) / 1000.0,
+                m_walkOriginSet ? " (a new cell)" : "");
+            m_walkOrigin = o;
+            m_walkOriginSet = true;
+        }
+        m_place(m_walkOrigin.anchor.latDeg, m_walkOrigin.anchor.lonDeg, m_walkOrigin.r - kR, in.org);
+    }
     in.lat = latDeg;
     in.lon = lonDeg;
     in.h = h;
@@ -840,6 +964,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     in.cosHalf = std::cos(in.halfDiag);
     in.sinHalf = std::sin(in.halfDiag);
     in.tauB = m_lodPixels;
+    in.tauS = m_shapePixels;   // its own form from here, its moment box below (the same mass)
     in.pages.reserve(m_pages.size());
     in.hold.reserve(m_pages.size());
     for (const auto& [k, p] : m_pages) {
@@ -863,7 +988,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         const auto t0 = std::chrono::steady_clock::now();
         Walked w;
         w.cellsVersion = in.cellsVersion;
-        for (int i = 0; i < 3; ++i) w.origin[i] = in.eye[i];
+        for (int i = 0; i < 3; ++i) w.origin[i] = in.org[i];   // the instances are about the cloud's point
         // THE WALK IN PARALLEL: the coarse levels walked here down to kSplit, the subtrees below it
         // shared out to threads, each into its own accumulator; merged after. A pure function of `in`.
         struct Inst {   // a shaped instance and the counts its tasks are cut from
@@ -895,31 +1020,40 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         };
         auto emit = [&](Acc& acc, const RtBox& b, double alpha, float landed) {
             if (!b.valid || acc.out.size() >= kMaxBoxes) return;
-            Box x{};
+            // The half-axes as a rotor and three extents; an axis of no length takes its direction
+            // from the other two (a fold of no spread is still a box with an attitude).
+            const double a1 = Len3(b.u), a2 = Len3(b.v), hz = Len3(b.w);
+            double E[3], N[3], U[3];
             for (int i = 0; i < 3; ++i) {
-                x.c[i] = static_cast<float>(b.p[i] - in.eye[i]);
-                x.u[i] = b.u[i];
-                x.v[i] = b.v[i];
-                x.w[i] = b.w[i];
+                E[i] = a1 > 1e-9 ? b.u[i] / a1 : 0.0;
+                N[i] = a2 > 1e-9 ? b.v[i] / a2 : 0.0;
+                U[i] = hz > 1e-9 ? b.w[i] / hz : 0.0;
             }
+            if (hz <= 1e-9) return;   // nothing stands
+            if (a1 <= 1e-9 && a2 <= 1e-9) return;
+            if (a1 <= 1e-9) { E[0] = N[1] * U[2] - N[2] * U[1]; E[1] = N[2] * U[0] - N[0] * U[2]; E[2] = N[0] * U[1] - N[1] * U[0]; }
+            if (a2 <= 1e-9) { N[0] = U[1] * E[2] - U[2] * E[1]; N[1] = U[2] * E[0] - U[0] * E[2]; N[2] = U[0] * E[1] - U[1] * E[0]; }
+            Box x{};
+            for (int i = 0; i < 3; ++i) x.c[i] = static_cast<float>(b.p[i] - in.org[i]);
             x.alpha = static_cast<float>(alpha);
-            x.pad1 = landed;   // Buildings.hlsl VsBox: its page's landing, for the fade-in
+            RotorOf(E, U, N, x.q);
+            x.x[0] = static_cast<float>(a1);
+            x.x[1] = static_cast<float>(a2);
+            x.x[2] = static_cast<float>(hz);
+            x.x[3] = landed;   // Buildings.hlsl: its page's landing, for the fade-in
             acc.out.push_back(x);
         };
         // ...or its own form: the ground frame under its centroid and its record in the pool (MsShape).
         auto emitShape = [&](Acc& acc, const RtBld& b, double alpha, float landed, uint64_t addr) {
             if (acc.out.size() + acc.inst.size() >= kMaxBoxes) return;
             Inst x{};
-            for (int i = 0; i < 3; ++i) {
-                x.b.c[i] = static_cast<float>(b.g[i] - in.eye[i]);
-                x.b.u[i] = b.e[i];
-                x.b.v[i] = b.n[i];
-                x.b.w[i] = b.up[i];
-            }
+            const double E[3] = {b.e[0], b.e[1], b.e[2]}, N[3] = {b.n[0], b.n[1], b.n[2]}, U[3] = {b.up[0], b.up[1], b.up[2]};
+            for (int i = 0; i < 3; ++i) x.b.c[i] = static_cast<float>(b.g[i] - in.org[i]);
             x.b.alpha = static_cast<float>(alpha);
-            x.b.pad1 = landed;
+            RotorOf(E, U, N, x.b.q);
             const uint32_t a32 = static_cast<uint32_t>(addr);
-            std::memcpy(&x.b.pad2, &a32, 4);
+            std::memcpy(&x.b.x[0], &a32, 4);
+            x.b.x[1] = landed;
             x.nV = b.nV;
             x.nT = b.nT;
             acc.inst.push_back(x);
@@ -965,7 +1099,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
                     in.cells.count(b.cell)) {
                     continue;   // its prisms are drawn
                 }
-                if (in.shapes && b.shapeOff != UINT32_MAX && b.shapeOff / kSlotBytes < pg.slots.size()) {
+                if (in.shapes && sz >= in.tauS && b.shapeOff != UINT32_MAX && b.shapeOff / kSlotBytes < pg.slots.size()) {
                     emitShape(acc, b, (std::min)(a, 1.0), pg.landed,
                               uint64_t(pg.slots[b.shapeOff / kSlotBytes]) * kSlotBytes + b.shapeOff % kSlotBytes);
                 } else {
@@ -1071,37 +1205,30 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         w.fading = top.fading;
         const auto tV = std::chrono::steady_clock::now();
         w.msVisit = std::chrono::duration<double, std::milli>(tV - t0).count();
-        // Far to near: a building fading in blends over what stands behind it (painter's order, depth tested).
-        std::sort(std::execution::par, out.begin(), out.end(), [](const Box& a, const Box& b) {
-            return a.c[0] * a.c[0] + a.c[1] * a.c[1] + a.c[2] * a.c[2] > b.c[0] * b.c[0] + b.c[1] * b.c[1] + b.c[2] * b.c[2];
-        });
+        // Far to near FROM THE EYE (the instances are about the walk's origin, the eye a float3 off
+        // it): a building fading in blends over what stands behind it (painter's order, depth tested).
+        const float eo[3] = {float(in.eye[0] - in.org[0]), float(in.eye[1] - in.org[1]), float(in.eye[2] - in.org[2])};
+        auto d2 = [&eo](const float c[3]) {
+            const float x = c[0] - eo[0], y = c[1] - eo[1], z = c[2] - eo[2];
+            return x * x + y * y + z * z;
+        };
+        std::sort(std::execution::par, out.begin(), out.end(), [&](const Box& a, const Box& b) { return d2(a.c) > d2(b.c); });
         std::vector<Inst>& inst = top.inst;
-        std::sort(std::execution::par, inst.begin(), inst.end(), [](const Inst& a, const Inst& b) {
-            return a.b.c[0] * a.b.c[0] + a.b.c[1] * a.b.c[1] + a.b.c[2] * a.b.c[2] >
-                   b.b.c[0] * b.b.c[0] + b.b.c[1] * b.b.c[1] + b.b.c[2] * b.b.c[2];
-        });
-        // THE TASKS, in the instances' order (the raster keeps the groups' order: far to near).
-        std::vector<uint32_t> tasks;
-        tasks.reserve(inst.size() * 4);
-        for (size_t i = 0; i < inst.size(); ++i) {
-            for (uint32_t c = 0; c * kTaskEdges < inst[i].nV; ++c) tasks.insert(tasks.end(), {uint32_t(i), c});
-            for (uint32_t c = 0; c * kTaskTris < inst[i].nT; ++c) tasks.insert(tasks.end(), {uint32_t(i), 0x80000000u | c});
-        }
+        std::sort(std::execution::par, inst.begin(), inst.end(), [&](const Inst& a, const Inst& b) { return d2(a.b.c) > d2(b.b.c); });
+        // (No task list: the amplification stage cuts the instances' edges and roofs into groups.)
         const auto tS = std::chrono::steady_clock::now();
         w.msSort = std::chrono::duration<double, std::milli>(tS - tV).count();
         w.count = static_cast<uint32_t>(out.size());
         w.insts = static_cast<uint32_t>(inst.size());
-        w.tasks = static_cast<uint32_t>(tasks.size() / 2);
         {
             auto cpu = std::make_shared<DrawCpu>();
             cpu->inst.reserve(inst.size());
             for (const Inst& x : inst) cpu->inst.push_back(x.b);
-            cpu->tasks = tasks;
             w.cpu = std::move(cpu);
         }
         if ((w.count || w.insts) && !shared->cancel.load()) {
-            // One buffer: the boxes, the shaped instances, then the tasks (two uints each).
-            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + tasks.size() * 4u + 15u) & ~uint64_t(15);
+            // One buffer: the boxes, then the shaped instances, three rows each.
+            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + 15u) & ~uint64_t(15);
             auto take = [&](std::vector<GpuBuffer>& list) {
                 std::lock_guard<std::mutex> lk(shared->mx);
                 auto best = list.end();
@@ -1125,7 +1252,6 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
                 std::memcpy(dst, &x.b, sizeof(Box));
                 dst += sizeof(Box);
             }
-            if (!tasks.empty()) std::memcpy(dst, tasks.data(), tasks.size() * 4u);
             w.vb = take(shared->freeBoxes);
             if (!w.vb.Valid()) w.vb = gpu->CreateDefaultBuffer(nullptr, room, L"buildings.walk");
         }
@@ -1236,14 +1362,12 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
     for (const DrawLog& d : m_drawLog) {
         if (!d.cpu) continue;
         const DrawCpu& c = *d.cpu;
-        const size_t nTasks = c.tasks.size() / 2;
-        const size_t t0 = size_t(k) * kChunkGroups, t1 = (std::min)(nTasks, t0 + kChunkGroups);
-        if (t0 >= nTasks) {
-            Log("[crash] buildings, frame %llu's draw: chunk %u is past its %zu tasks", static_cast<unsigned long long>(d.frame), k, nTasks);
-            continue;
-        }
+        // The dispatch k is one of two a frame (the boxes, then the shapes); every shaped instance of
+        // the walk is read here, since the streams cut them on the GPU.
+        const size_t nTasks = c.inst.size();
+        const size_t t0 = 0, t1 = nTasks;
         std::set<uint32_t> insts;
-        for (size_t t = t0; t < t1; ++t) insts.insert(c.tasks[2 * t]);
+        for (size_t t = t0; t < t1; ++t) insts.insert(static_cast<uint32_t>(t));
         size_t found = 0, bad = 0, tall = 0, wide = 0;
         float maxTop = -1e30f, minBottom = 1e30f, maxExt = 0.0f, maxDist = 0.0f, minDist = 1e30f;
         uint32_t maxV = 0, maxT = 0;
@@ -1256,7 +1380,7 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
             minDist = (std::min)(minDist, dist);
             maxDist = (std::max)(maxDist, dist);
             uint32_t addr;
-            std::memcpy(&addr, &b.pad2, 4);
+            std::memcpy(&addr, &b.x[0], 4);
             const auto it = bySlot.find(addr / kSlotBytes);
             if (it == bySlot.end()) { ++bad; continue; }
             const std::vector<uint8_t>& pk = it->second.first->packed;
@@ -1298,7 +1422,7 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
 }
 
 void BuildingLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || (m_cells.empty() && m_warm.empty() && !m_drawn.count && !m_drawn.tasks) || !ctx.camera) return;
+    if (!m_pso || (m_cells.empty() && m_warm.empty() && !m_drawn.count && !m_drawn.insts) || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
     ctx.cmd->Pipeline(m_pso.Get());
@@ -1307,7 +1431,7 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     struct {
         float origin[4];   // xyz the cell's origin relative to the eye, w = brightness
         float time[4];     // x the layer's now (s), y the pages' fade-in (s)
-        uint32_t mesh[4];  // the shapes' draw: first instance row, first task row, tasks, pool slot
+        uint32_t mesh[4];  // a draw of instances: the first's row, how many, -, the pool's heap slot
     } cb{};
     // The resident cells, and the ones leaving whose boxes the drawn walk does not hold yet.
     std::vector<const Cell*> draw;
@@ -1337,38 +1461,39 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     cb.origin[3] = 1.0f;
     cb.time[0] = Now();
     cb.time[1] = kPageFadeS;
-    if (m_psoBox && m_drawn.count) {
-        // THE TREE'S BOXES: the buildings with no shape, one buffer about the walk's eye, 36 vertices a box.
+    // z: a pixel's angle (rad), the walk's own -- the ribbons' width on screen (Buildings.hlsl MsShape).
+    cb.time[2] = static_cast<float>(double(ctx.camera->fovY) / double(ctx.height));
+    if (m_drawn.count && (m_psoBoxMesh || m_psoBox)) {
+        // THE TREE'S BOXES, one buffer about the walk's eye: 8 vertices a box through the mesh stage
+        // (16 a group; the groups in two dimensions past 65535), or 36 through the vertex stage.
         GpuScope boxScope(ctx.prof, ctx.cmd->Native(), "buildings.boxes");
-        ctx.cmd->Pipeline(m_psoBox.Get());
-        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx.cmd->GraphicsConstants(1, cb);
-        ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-        ctx.cmd->Draw(m_drawn.count * 36u, 1, 0, 0);
-    }
-    if (m_psoShape && m_drawn.tasks && m_pool.Valid()) {
-        // THE SHAPES: one mesh group a task (Buildings.hlsl MsShape), the groups in the walk's order.
-        GpuScope shapeScope(ctx.prof, ctx.cmd->Native(), "buildings.shapes");
-        ctx.cmd->Pipeline(m_psoShape.Get());
-        cb.mesh[0] = m_drawn.count * 4u;                          // the first instance's row
-        cb.mesh[1] = (m_drawn.count + m_drawn.insts) * 4u;        // the first task's row
-        cb.mesh[2] = m_drawn.tasks;
+        cb.mesh[0] = 0;   // the first box's row
+        cb.mesh[1] = m_drawn.count;
         cb.mesh[3] = m_poolSrv;
         ctx.cmd->GraphicsConstants(1, cb);
         ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-        // One DispatchMesh may launch at most 2^22 groups (65535 x 64 here, an even count, so a
-        // chunk starts on a whole row of two tasks): a walk with more is drawn in chunks, each
-        // its first task row advanced -- one call past the limit is an invalid command.
-        constexpr uint32_t kChunk = kChunkGroups;   // even: a chunk starts on a whole row of two tasks
-        m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
-        for (uint32_t done = 0; done < m_drawn.tasks; done += kChunk) {
-            const uint32_t n = (std::min)(m_drawn.tasks - done, kChunk);
-            cb.mesh[1] = (m_drawn.count + m_drawn.insts) * 4u + done / 2u;
-            cb.mesh[2] = n;
-            ctx.cmd->GraphicsConstants(1, cb);
-            const uint32_t gx = (std::min)(n, 65535u), gy = (n + 65534u) / 65535u;
-            ctx.cmd->DispatchMesh(gx, gy, 1);
+        if (m_psoBoxMesh) {
+            ctx.cmd->Pipeline(m_psoBoxMesh.Get());
+            const uint32_t groups = (m_drawn.count + kBoxesPerGroup - 1) / kBoxesPerGroup;
+            ctx.cmd->DispatchMesh((std::min)(groups, 65535u), (groups + 65534u) / 65535u, 1);
+        } else {
+            ctx.cmd->Pipeline(m_psoBox.Get());
+            ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.cmd->Draw(m_drawn.count * 36u, 1, 0, 0);
         }
+    }
+    if (m_psoShape && m_drawn.insts && m_pool.Valid()) {
+        // THE SHAPES: an amplification group a kAsInsts instances (Buildings.hlsl AsShape) cuts their
+        // edges and roofs into full mesh groups; the groups keep the walk's order (far to near).
+        GpuScope shapeScope(ctx.prof, ctx.cmd->Native(), "buildings.shapes");
+        ctx.cmd->Pipeline(m_psoShape.Get());
+        cb.mesh[0] = m_drawn.count * 3u;   // the first shaped instance's row
+        cb.mesh[1] = m_drawn.insts;
+        cb.mesh[3] = m_poolSrv;
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
+        m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
+        ctx.cmd->DispatchMesh((m_drawn.insts + kAsInsts - 1) / kAsInsts, 1, 1);   // kMaxBoxes / 64 < 65535
     }
 }
 

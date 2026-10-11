@@ -50,6 +50,7 @@
 #pragma once
 
 #include "core/Lattice.h"
+#include "core/OriginLattice.h"
 #include "core/Space.h"
 #include "hal/Tenant.h"
 
@@ -70,6 +71,16 @@ struct SurfaceFrame {
     double east[3] = {1.0, 0.0, 0.0};
     double up[3] = {0.0, 1.0, 0.0};
     double north[3] = {0.0, 0.0, 1.0};
+    // THE ROOT WORLD STANDS ON THE CLOUD (core/OriginLattice.h, 2026-10-11): `flat` is the tangent
+    // frame of the planet's cloud's origin nearest the scene's place.anchor, and the scene's own
+    // place -- where every hand-written x, alt, z of its views, spawns, gates, rails and interests
+    // is measured from -- stands at `anchorFloats` in it, its tangent frame turned by the small
+    // angle between the two places: `anchorToRoot` is that pose as one motor, applied once where
+    // the scene's numbers enter the frame. A lat/lon spelling needs nothing: FlatOf is the root's.
+    OriginLattice::Origin origin;
+    Space::Anchor anchorChart;                 // the scene's own place, the chart it used to be
+    Motor anchorToRoot = Motor::Identity();    // the anchor's tangent frame -> the root frame
+    double anchorFloats[3] = {0.0, 0.0, 0.0};  // the anchor's point in the root frame
     // The lattices (core/Lattice.h): the colour and the survey on the cube's 128x128 tiles, the
     // height and the exposure on its 256x128 tiles.
     Lattice cube;    // the 16k quad-sphere, 128x128 tiles

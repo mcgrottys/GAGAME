@@ -38,10 +38,13 @@ add_executable(gagame
   src/app/Tools/WaterProbe.cpp
   src/app/Tools/HullProbe.cpp
   src/app/Tools/BedTrace.cpp
+  src/app/Tools/RoadsProbe.cpp
   src/core/BuildInfo.cpp
   src/core/GaAst.cpp
   src/core/Lattice.cpp
   src/core/SpaceTest.cpp
+  src/core/OriginLattice.cpp
+  src/core/OriginLatticeTest.cpp
   src/hal/PixEvents.cpp
   src/core/GaTest.cpp
   src/hal/DxTest.cpp
@@ -78,6 +81,8 @@ add_executable(gagame
   src/compose/BuildingMoments.cpp
   src/compose/BuildingSolids.cpp
   src/compose/BuildingSolidsTest.cpp
+  src/compose/RoadWays.cpp
+  src/compose/RoadWaysTest.cpp
   src/compose/RasterFileSource.cpp
   src/compose/RasterFileTest.cpp
   src/compose/GisMask.cpp

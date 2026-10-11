@@ -23,6 +23,7 @@
 #include "compose/SurfaceFrame.h"
 #include "compose/WaterAtlas.h"
 #include "hal/TileAtlas.h"
+#include "core/OriginLattice.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
 #include "sim/WaveChart.h"
@@ -73,7 +74,8 @@ public:
     // within kChartReachM of its anchor (so home reads bit for bit what it read), re-anchored on the
     // ground under the eye when it leaves -- where the float grain of the eye's coordinate passes a
     // millimetre and the plane's tilt a tenth of a degree.
-    static constexpr double kChartReachM = 16000.0;
+    // (2026-10-11: the chart is the LATTICE ORIGIN under the eye, core/OriginLattice.h -- the reach
+    // rule above is history; the hysteresis is the lattice's.)
     const Space::Anchor& Chart() const { return m_chart; }
     // A point of the flat frame (the probes', the fleet's) in the chart: R (d.e, d.n) of its
     // direction for a surface point; for any point, its planet position's (P.e, P.n).
@@ -353,6 +355,8 @@ private:
     double m_simUnix = 0, m_camX = 0, m_camZ = 0;   // the eye in the chart
     double m_eyeFlat[3] = {};                       // ...and in the flat frame
     Space::Anchor m_chart{};                        // the rings' plane (Chart above)
+    OriginLattice::Origin m_origin{};               // ...which is this origin of the planet's cloud
+    bool m_originSet = false;
     bool m_chartSet = false;
     float m_tidePlane = 0.0f;   // SetTidePlane: the plane the solver's deviation is measured from
     D3D12_RESOURCE_STATES m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;

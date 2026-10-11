@@ -66,6 +66,20 @@ public:
         m.vx = s.vx; m.vy = s.vy; m.vz = s.vz;
         return m;
     }
+    // THE FREE SURFACE IN THE ASKING FRAME (2026-10-11). A sample's height is a DATUM height: the
+    // surface's radius less the planet's, what the bank, the twin and the probes compare. The
+    // frame a hull is stepped in is flat, and a flat frame on a sphere is only the sphere at its
+    // origin: at d from it the sphere stands d^2/2R below the plane -- 0.5 m at Haulover, 1.0 m at
+    // the Merrimack once the frames became the cloud's origins (core/OriginLattice.h, 3.5 km
+    // apart at most). The old answer was to keep the hull's frame at the hull (Entity::Recentre's
+    // 60 m); the one law is that the plane the hull is seated on is the sphere's own: the point at
+    // radius R + h under the frame's vertical through (wx, wz), its normal the surface's normal
+    // there carried into the frame. A water with no chart (a declared still sea, a test table) is
+    // flat by right: the plane at (wx, h, wz) with the sample's normal.
+    virtual void PlaneOf(const SurfaceSample& s, double wx, double wz, double sp[3], double n[3]) const {
+        sp[0] = wx; sp[1] = s.heightNavd; sp[2] = wz;
+        n[0] = s.nx; n[1] = s.ny; n[2] = s.nz;
+    }
     Medium AirAt(double wx, double wz, double simUnix) const {
         const SurfaceSample s = At(wx, wz, simUnix);
         Medium m = Medium::Air();
@@ -77,9 +91,10 @@ public:
     }
 
 private:
-    static void FillSurface(Medium& m, const SurfaceSample& s, double wx, double wz) {
-        m.sp[0] = wx; m.sp[1] = s.heightNavd; m.sp[2] = wz;
-        m.nx = s.nx; m.ny = s.ny; m.nz = s.nz;
+    void FillSurface(Medium& m, const SurfaceSample& s, double wx, double wz) const {
+        double n[3];
+        PlaneOf(s, wx, wz, m.sp, n);
+        m.nx = n[0]; m.ny = n[1]; m.nz = n[2];
     }
 };
 
