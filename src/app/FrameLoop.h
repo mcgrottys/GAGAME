@@ -540,6 +540,11 @@ private:
     static constexpr int kInResTurn = kInPhases, kInBankList = kInPhases + 1,
                          kInMeshCopy = kInPhases + 2, kInN = kInPhases + 3;
     double m_profInMs[kInN] = {}, m_profInHelmMs[kInN] = {};
+    // SINCE THE HOLD WAS EXACT (ResidencyManager::sinceExact): the brackets and the frame sum as they
+    // stood on the first frame the hold read exact.
+    double m_profSince[kProfN] = {}, m_profInSince[kInN] = {}, m_frameMsSince = 0.0;
+    uint32_t m_frameNSince = 0;
+    bool m_sinceTaken = false;
     std::vector<std::array<float, kInN>> m_railInMs;
     // metrics.csv pairs loop_ms with its own frame: the interval measured at the top of an
     // iteration is the PREVIOUS frame's, so it closes the row that frame opened.

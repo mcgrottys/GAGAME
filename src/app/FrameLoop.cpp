@@ -4181,11 +4181,16 @@ bool FrameLoop::Frame() {
         inMs[kInMeshCopy] = static_cast<float>(globe->meshletCopyMs);
         globe->meshletCopyMs = 0.0;
     }
-    if (profOn) {
-        for (int k = 0; k < kInN; ++k) {
-            profInMs[k] += inMs[k];
-            if (profHelm) profInHelmMs[k] += inMs[k];
-        }
+    for (int k = 0; k < kInN; ++k) {   // every measured run (the still's exit line reads them)
+        profInMs[k] += inMs[k];
+        if (profOn && profHelm) profInHelmMs[k] += inMs[k];
+    }
+    if (!m_sinceTaken && resMgr.sinceExact.frame) {   // the hold's first exact turn: the brackets as they stand
+        m_sinceTaken = true;
+        for (int k = 0; k < kProfN; ++k) m_profSince[k] = profMs[k];
+        for (int k = 0; k < kInN; ++k) m_profInSince[k] = profInMs[k];
+        m_frameMsSince = frameMsSum;
+        m_frameNSince = frameMsN;
     }
 
     if (!S.railDirW.empty() && frame >= 150u && opt.bench) {
@@ -4936,6 +4941,91 @@ int FrameLoop::Finish() {
             }
             Log("[cpu] the frame's brackets, a frame's mean (ms): %s | bracketed %.2f of the %.2f ms frame", cpu.c_str(), sum,
                 frameMsSum / frameMsN);
+            {   // the residency turn by phase, a frame's mean, and the order's passes made and skipped
+                std::string ph;
+                for (int k = 0; k < kInPhases; ++k) {
+                    char b[96];
+                    snprintf(b, sizeof(b), "%s%s %.2f", k ? ", " : "", ResidencyManager::PhaseName(k),
+                             m_profInMs[k] / (std::max)(1u, frameMsN));
+                    ph += b;
+                }
+                Log("[cpu]   the residency turn %.2f ms a frame: %s | the order's pass ran on %llu turns, skipped on %llu "
+                    "(no reader said something else, no landing, no failure, no expiry)",
+                    m_profInMs[kInResTurn] / (std::max)(1u, frameMsN), ph.c_str(),
+                    static_cast<unsigned long long>(resMgr.passTurns), static_cast<unsigned long long>(resMgr.passSkipped));
+                std::string q, why;
+                double qsum = 0.0;
+                const double qn = double((std::max)(resMgr.quietTurns, uint64_t(1)));
+                for (int k = 0; k < kInPhases; ++k) {
+                    char b[96];
+                    const double v = resMgr.quietPhaseMs[k] / qn;
+                    qsum += v;
+                    snprintf(b, sizeof(b), "%s%s %.3f", k ? ", " : "", ResidencyManager::PhaseName(k), v);
+                    q += b;
+                }
+                for (int s = 0; s < ResidencyManager::kMaxSamplers; ++s) {
+                    if (!resMgr.passWhySpoke[s]) continue;
+                    char b[64];
+                    snprintf(b, sizeof(b), " %s %llu;", resMgr.SamplerName(s), static_cast<unsigned long long>(resMgr.passWhySpoke[s]));
+                    why += b;
+                }
+                Log("[cpu]   the quiet turn (nothing landed, mapped, refilled, invalidated or changed, no pass): %llu of the turns, "
+                    "%.3f ms each: %s",
+                    static_cast<unsigned long long>(resMgr.quietTurns), qsum, q.c_str());
+                Log("[cpu]   the pass's reasons (a turn may have several): a reader said something else --%s first %llu, "
+                    "tracked set changed %llu, failures %llu, claims %llu, expiry %llu, hold %llu",
+                    why.empty() ? " none;" : why.c_str(), static_cast<unsigned long long>(resMgr.passWhyFirst),
+                    static_cast<unsigned long long>(resMgr.passWhyEpoch), static_cast<unsigned long long>(resMgr.passWhyFail),
+                    static_cast<unsigned long long>(resMgr.passWhyClaim), static_cast<unsigned long long>(resMgr.passWhyExpiry),
+                    static_cast<unsigned long long>(resMgr.passWhyHold));
+                if (m_sinceTaken && frameMsN > m_frameNSince) {   // THE SETTLED REGIME: since the hold was exact
+                    const ResidencyManager::Since& s = resMgr.sinceExact;
+                    const double nf = double(frameMsN - m_frameNSince);
+                    std::string br, ph2, why2;
+                    double bsum = 0.0;
+                    for (int k = 0; k < kProfN; ++k) {
+                        char b[64];
+                        const double v = (m_profMs[k] - m_profSince[k]) / nf;
+                        bsum += v;
+                        snprintf(b, sizeof(b), "%s%s %.2f", k ? ", " : "", kProfName[k], v);
+                        br += b;
+                    }
+                    for (int k = 0; k < kInPhases; ++k) {
+                        char b[96];
+                        snprintf(b, sizeof(b), "%s%s %.3f", k ? ", " : "", ResidencyManager::PhaseName(k),
+                                 (m_profInMs[k] - m_profInSince[k]) / nf);
+                        ph2 += b;
+                    }
+                    for (int sid = 0; sid < ResidencyManager::kMaxSamplers; ++sid) {
+                        const uint64_t d = resMgr.passWhySpoke[sid] - s.whySpoke[sid];
+                        if (!d) continue;
+                        char b[64];
+                        snprintf(b, sizeof(b), " %s %llu;", resMgr.SamplerName(sid), static_cast<unsigned long long>(d));
+                        why2 += b;
+                    }
+                    Log("[settled] since the hold was exact at f%u: %u frames, %.2f ms a frame | brackets: %s | bracketed %.2f",
+                        s.frame, frameMsN - m_frameNSince, (frameMsSum - m_frameMsSince) / nf, br.c_str(), bsum);
+                    Log("[settled]   the turn %.3f ms a frame: %s", (m_profInMs[kInResTurn] - m_profInSince[kInResTurn]) / nf,
+                        ph2.c_str());
+                    Log("[settled]   turns: quiet %llu, the pass ran %llu, skipped %llu | reasons: a reader said something else --%s "
+                        "tracked set changed %llu, failures %llu, claims %llu, expiry %llu | reads issued %llu, refills %llu, "
+                        "slots to held bytes %llu, mapped %llu, released %llu, let go %llu, invalidations %llu",
+                        static_cast<unsigned long long>(resMgr.quietTurns - s.quietTurns),
+                        static_cast<unsigned long long>(resMgr.passTurns - s.passTurns),
+                        static_cast<unsigned long long>(resMgr.passSkipped - s.passSkipped), why2.empty() ? " none;" : why2.c_str(),
+                        static_cast<unsigned long long>(resMgr.passWhyEpoch - s.whyEpoch),
+                        static_cast<unsigned long long>(resMgr.passWhyFail - s.whyFail),
+                        static_cast<unsigned long long>(resMgr.passWhyClaim - s.whyClaim),
+                        static_cast<unsigned long long>(resMgr.passWhyExpiry - s.whyExpiry),
+                        static_cast<unsigned long long>(resMgr.loader.reads - s.reads),
+                        static_cast<unsigned long long>(resMgr.loader.refills - s.refills),
+                        static_cast<unsigned long long>(resMgr.loader.aliases - s.aliases),
+                        static_cast<unsigned long long>(resMgr.mappedTotal - s.mapped),
+                        static_cast<unsigned long long>(resMgr.releasedTotal - s.released),
+                        static_cast<unsigned long long>(resMgr.letGoTotal - s.letGo),
+                        static_cast<unsigned long long>(resMgr.invalidationsTotal - s.invalidations));
+                }
+            }
             Log("[cpu]   the cascade sea on the CPU: %.0f samples a frame, the rotors built %.1f times a frame (F21)",
                 double(OceanCpu::s_samples.load()) / (std::max)(1u, frameMsN),
                 double(OceanCpu::s_rotorBuilds.load()) / (std::max)(1u, frameMsN));

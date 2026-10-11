@@ -1250,6 +1250,15 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     const bool dirty = spoke || passTurns == 0 || m_trackEpoch != m_passEpoch ||
                        m_failEvents != m_passFails || m_claimEvents != m_passClaims ||
                        m_frame >= m_nextExpiry || settleExact != m_passHold;
+    if (dirty) {   // why (every reason that held, not the first)
+        for (int s = 0; s < kMaxSamplers; ++s) passWhySpoke[s] += (L.spoke >> s) & 1u;
+        passWhyFirst += passTurns == 0;
+        passWhyEpoch += m_trackEpoch != m_passEpoch;
+        passWhyFail += m_failEvents != m_passFails;
+        passWhyClaim += m_claimEvents != m_passClaims;
+        passWhyExpiry += m_frame >= m_nextExpiry;
+        passWhyHold += settleExact != m_passHold;
+    }
     L.pass = dirty ? 1u : 0u;
     if (dirty) OrderPass(L);
     else ++passSkipped;

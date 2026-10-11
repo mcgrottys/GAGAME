@@ -1145,6 +1145,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             q.swap(m_invQ);
         }
         bool compact = false;
+        turn.invalidations = static_cast<uint32_t>(q.size());
         for (const Inv& inv : q) {
             const int tenant = inv.tenant;
             const TileRequest& r = inv.req;
@@ -1309,6 +1310,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         Threads().Submit(Lane::Io, "residency.load", [this, tile] { RunLoad(tile); });
     }
 
+    turn.refills = static_cast<uint32_t>(refills.size());
     if (!batch.empty() || !refills.empty()) MapAndFill(gpu, cl, batch, refills);   // phases 6..8
     // ---- THE BARRIER THE LANDED COPIES NEVER HAD. The landed loop above moves a tenant to
     // COPY_DEST and records the CopyTiles that swizzle its arrived tiles in; the transition back
@@ -1401,11 +1403,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     // WHAT GOES UP IS THE TRUE MAP. The floor law (Residency.h) would stage FloorMap(resCpu)
     // here instead, and was measured unsound under the colour's anisotropic sampler; it is
     // not staged.
+    turn.changed = static_cast<uint32_t>(m_changed.size());
     ApplyChanged();   // law 1: every footprint that changed, from the held set
     uint64_t mapStage = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536;
     for (auto& t : m_tenants) {
         if (!t.resDirty) continue;
         t.resDirty = false;
+        ++turn.mapsUp;
         const uint32_t rdim = t.resMap.width;
         const uint32_t pitch = (rdim + 255u) & ~255u;
         // Every face's placed footprint starts on D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512): the
@@ -1483,6 +1487,24 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     }
     KeepPoolAhead(gpu);    // the next chunk, off the turn, before the free list runs dry
     turnMs = std::chrono::duration<double, std::milli>(Clock::now() - turn0).count();
+    if (!turn.landedTiles && !turn.batch && !turn.refills && !turn.invalidations && !turn.changed &&
+        !turn.mapsUp && !turn.evicted && !orderTurn.pass) {   // the quiet turn (Residency.h quietTurns)
+        ++quietTurns;
+        for (int k = 0; k < kPhases; ++k) quietPhaseMs[k] += phaseMs[k];
+    }
+    turnMsSum += turnMs;
+    invalidationsTotal += turn.invalidations;
+    if (settleExact && settleTurn.exact && !sinceExact.frame) {   // the first exact turn: the counters as they stand
+        Since& s = sinceExact;
+        s.frame = m_frame;
+        s.passTurns = passTurns; s.passSkipped = passSkipped; s.quietTurns = quietTurns;
+        s.reads = loader.reads; s.aliases = loader.aliases; s.refills = loader.refills;
+        s.mapped = mappedTotal; s.released = releasedTotal; s.letGo = letGoTotal; s.invalidations = invalidationsTotal;
+        for (int k = 0; k < kMaxSamplers; ++k) s.whySpoke[k] = passWhySpoke[k];
+        s.whyEpoch = passWhyEpoch; s.whyFail = passWhyFail; s.whyClaim = passWhyClaim; s.whyExpiry = passWhyExpiry;
+        s.turnMsSum = turnMsSum;
+        for (int k = 0; k < kPhases; ++k) s.quietPhaseMs[k] = quietPhaseMs[k];
+    }
     // The residency audit (ResidencyAudit.cpp): the turn's bytes against its tiles, outside turnMs.
     if (auditEvery && (m_frame % auditEvery) == 0u) LogAudit();
 }

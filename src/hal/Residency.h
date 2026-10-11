@@ -465,6 +465,7 @@ public:
         uint32_t landedOnly = 0;    // 1: tiles landed and no batch was mapped this turn
         uint32_t barriered = 0;     // tenants transitioned back to shader reads after the copies
         uint32_t stageFree = 0, stageRetiring = 0, inFlightTiles = 0;   // after the turn
+        uint32_t invalidations = 0, refills = 0, changed = 0, mapsUp = 0;   // the quiet turn's test
     };
     TurnLedger turn;
     uint64_t ringNoBytesTotal = 0, landedUnownedTotal = 0, landedOnlyTurns = 0;
@@ -497,6 +498,26 @@ public:
     // Decision 5: the order's pass runs on events only. Its turns, the turns it skipped, the
     // entries it ordered and its time by part: statements, candidates, sort + cut, release + forget.
     uint64_t passTurns = 0, passSkipped = 0, passEntries = 0;
+    // THE QUIET TURN (2026-10-11): a turn in which nothing landed, nothing was mapped or refilled,
+    // no invalidation arrived, no footprint changed and the order's pass did not run -- the turn
+    // a still scene pays for nothing. Its phases, summed over quiet turns alone, are the cost of
+    // the manager's standing; and the pass's reasons, counted, say what wakes it.
+    uint64_t quietTurns = 0;
+    double quietPhaseMs[kPhases] = {};
+    uint64_t passWhySpoke[kMaxSamplers] = {}, passWhyEpoch = 0, passWhyFail = 0, passWhyClaim = 0,
+             passWhyExpiry = 0, passWhyHold = 0, passWhyFirst = 0;
+    // SINCE THE HOLD WAS EXACT: the counters as they stood on the first exact turn, so the exit
+    // line can say what the settled regime alone cost (a run's loading phase varies run to run).
+    struct Since {
+        uint32_t frame = 0;   // 0: never exact
+        uint64_t passTurns = 0, passSkipped = 0, quietTurns = 0, reads = 0, aliases = 0, refills = 0;
+        uint64_t mapped = 0, released = 0, letGo = 0, invalidations = 0;
+        uint64_t whySpoke[kMaxSamplers] = {}, whyEpoch = 0, whyFail = 0, whyClaim = 0, whyExpiry = 0;
+        double turnMsSum = 0.0, quietPhaseMs[kPhases] = {};
+    };
+    Since sinceExact;
+    double turnMsSum = 0.0;
+    uint64_t invalidationsTotal = 0;
     double passMs[4] = {};
     // ...inside passMs[2]: the sort of the first P not held, its length, and where the loader stopped.
     double passSortMs = 0.0;
