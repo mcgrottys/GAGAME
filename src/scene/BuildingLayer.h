@@ -75,7 +75,8 @@ public:
     void Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack, double radiusM,
                    Place place, Locate locate, Ground ground);
     // The folded tree (null = none) and the pixels a building needs to be drawn on its own.
-    void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 4.0);
+    void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 4.0,
+                      double pageMB = 1024.0);
 
     const char* Name() const override { return "buildings"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields, hal::RootSignature rootSig) override;
@@ -102,7 +103,7 @@ public:
     // queue ahead of it; the FINE one sends every other wanted page, the largest on screen first,
     // beside it (the detail cells are the fine stream's too, on their own kInFlight).
     static constexpr int kCoarseInFlight = 4, kFineInFlight = 4;
-    static constexpr uint64_t kPageBytes = 1024ull << 20;   // the loaded pages' budget (CPU)
+    uint64_t m_pageBudget = 1024ull << 20;   // the loaded pages' budget (CPU): layer.buildings.pageMB
     static constexpr uint32_t kMaxBoxes = 2000000;
     // THE SHAPES (GALOD04, compose/BuildingShape.h): a loaded page's footprints in one GPU pool,
     // extruded by Buildings.hlsl MsShape one TASK at a time -- kTaskEdges walls or kTaskTris roof
@@ -272,7 +273,7 @@ private:
     std::map<PageKey, std::shared_ptr<const Page>> m_pages;
     std::map<PageKey, uint64_t> m_pageUsed;   // the frame a walk last used it
     std::set<PageKey> m_pagePending;
-    uint64_t m_pageBytes = 0, m_pagesLoaded = 0;
+    uint64_t m_pageBytes = 0, m_pagesLoaded = 0, m_evictions = 0;
     uint64_t m_cellsVersion = 0, m_pagesVersion = 0;   // what a walk depends on, besides the eye
     struct Drawn {
         double origin[3];

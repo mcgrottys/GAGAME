@@ -396,6 +396,7 @@ struct BuildingsLayerProps {
     std::string lod;                 // the size-stratified pyramid's folder ("" = no far boxes)
     double lodPixels = 1.0;
     double shapePixels = 4.0;        // a building is its own form from here; its moment box below
+    double pageMB = 1024.0;          // the loaded pages' budget (CPU); the shape pool on the GPU is fixed
     bool field = true;               // the buildings under a pixel as scalars (compose/BuildingField.h)
     // THE ROADS IN THE SAME TREE (compose/BuildingLod.h RoadRibbonDefaults): the scene's assumptions
     // where a way's file is silent.

@@ -677,6 +677,9 @@ const Schema& BuildingsLayerSchema() {
             .Bind("shapePixels", kBuildings.shapePixels, Q::Dimensionless, "px",
                   "a building or road piece is drawn as its own form from this many pixels across, and as its "
                   "moment box (the same volume, centroid and heading) below; 1 = always its form. Tokyo at 9 km: 16.5 ms of buildings at 1, 2.3 ms at 6, the stills alike", R)
+            .Bind("pageMB", kBuildings.pageMB, Q::Dimensionless, "1",
+                  "the tree's loaded pages' budget on the CPU; over it, the page worth the fewest pixels on screen "
+                  "goes first, and never to make room for one worth fewer (the coarse levels are so the floor)", R)
             .Bind("field", kBuildings.field,
                   "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
                   "seen at an angle; needs `lod`", R)

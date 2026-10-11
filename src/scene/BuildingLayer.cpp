@@ -43,8 +43,10 @@ void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<con
     m_ground = std::move(ground);
 }
 
-void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels) {
+void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels,
+                                 double pageMB) {
     m_shapePixels = (std::max)(shapePixels, 0.0);
+    m_pageBudget = static_cast<uint64_t>((std::max)(pageMB, 1.0) * 1048576.0);
     m_lod = std::move(lod);
     m_lodPixels = pixels > 0.0 ? pixels : 1.0;
 }
@@ -792,27 +794,75 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             ++fine;
         }
     }
-    // 2. The budget: the page no walk has used for longest goes first.
-    // ONE EVICTION FOR BOTH LIMITS: the page no walk has used for longest goes, while the pages'
-    // memory is over its budget OR the pages waiting to land want more slots than will be free.
+    // 2. THE BUDGET, BY VALUE (2026-10-10, the owner's distinction: a coarse page IS the far picture
+    // and must stay while the fine ones fill in; a texture's fine tile supersedes its coarse one, a
+    // building's fine page only adds). A page's VALUE is its width on screen were the eye to look
+    // at it: its quads in metres over its distance, in pixels -- one law at every level, so a
+    // coarse page near the horizon is worth thousands of pixels, a fine page under the eye
+    // hundreds, a fine page fifty kilometres off a fraction. Over the budget (or short of slots
+    // for the pages waiting to land) the page worth the FEWEST pixels goes first, and no page goes
+    // to make room for one worth fewer than it: the coarse levels are so the floor, with no case
+    // for them. The walk's want order (pixels on screen, largest first) and this agree.
     auto slotsShort = [this] {
         size_t want = 0, coming = m_freeSlots.size();
         for (const auto& w : m_roomWait) want += w.second->slotUsed.size();
         for (const SlotsRetired& r : m_slotsRetired) coming += r.slots.size();
         return want > coming;
     };
-    while (!m_pages.empty() && (m_pageBytes > kPageBytes || slotsShort())) {
-        auto old = m_pages.begin();
-        for (auto it = m_pages.begin(); it != m_pages.end(); ++it) {
-            if (m_pageUsed[it->first] < m_pageUsed[old->first]) old = it;
+    if (!m_pages.empty() && (m_pageBytes > m_pageBudget || slotsShort()) && ctx.camera && ctx.height) {
+        const double eye[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
+        const double pixAng = double(ctx.camera->fovY) / double(ctx.height);
+        auto value = [&](const PageKey& k) {
+            const int L = std::get<0>(k);
+            const double Q = lod::QuadDeg(L), PY = lod::PageY(L);
+            const double lat = (std::get<2>(k) + 0.5) * PY * Q, lon = (std::get<1>(k) + 0.5) * lod::kPageX * Q;
+            double p[3];
+            m_place(lat, lon, 0.0, p);
+            const double d = std::sqrt((p[0] - eye[0]) * (p[0] - eye[0]) + (p[1] - eye[1]) * (p[1] - eye[1]) +
+                                       (p[2] - eye[2]) * (p[2] - eye[2]));
+            const double widthM = (std::max)(lod::kPageX * Q, PY * Q) * lod::kMetresPerDeg * std::cos(lat * 3.14159265358979323846 / 180.0);
+            return widthM / (std::max)(d - 0.5 * widthM, 1.0) / pixAng;
+        };
+        // What the room is for: the least valuable of the pages landing or wanted and not loaded.
+        double need = 1e300;
+        for (const auto& w : m_roomWait) need = (std::min)(need, value(w.first));
+        for (const PageKey& k : m_pagePending) need = (std::min)(need, value(k));
+        for (const auto& [px, k] : m_wants) {
+            if (!m_pages.count(k) && !m_pagePending.count(k)) need = (std::min)(need, value(k));
         }
-        if (m_pageUsed[old->first] + 2 >= m_frame) break;   // all in use: over budget, not thrashing
-        if (m_drawnUsed.count(old->first)) break;   // the drawn walk reads its shapes
-        if (!old->second->slots.empty()) m_slotsRetired.push_back({old->second->slots, m_frame, old->second});
-        m_pageBytes -= old->second->bytes;
-        m_pageUsed.erase(old->first);
-        m_pages.erase(old);
-        ++m_pagesVersion;
+        std::vector<std::pair<double, PageKey>> byValue;
+        byValue.reserve(m_pages.size());
+        for (const auto& [k, pg] : m_pages) byValue.push_back({value(k), k});
+        std::sort(byValue.begin(), byValue.end());
+        uint32_t gone = 0, goneByLevel[lod::kLevels] = {};
+        double lowestKept = 1e300, highestGone = 0.0;
+        for (const auto& [v, k] : byValue) {
+            if (!(m_pageBytes > m_pageBudget || slotsShort())) break;
+            if (v >= need) break;   // the room would be made for a page worth less: over budget stands
+            if (m_drawnUsed.count(k)) continue;   // the drawn walk reads its shapes
+            auto it = m_pages.find(k);
+            if (!it->second->slots.empty()) m_slotsRetired.push_back({it->second->slots, m_frame, it->second});
+            m_pageBytes -= it->second->bytes;
+            m_pageUsed.erase(k);
+            m_pages.erase(it);
+            ++m_pagesVersion;
+            ++gone;
+            ++goneByLevel[std::get<0>(k) - lod::kLmin];
+            highestGone = (std::max)(highestGone, v);
+        }
+        for (const auto& [v, k] : byValue) {
+            if (m_pages.count(k)) lowestKept = (std::min)(lowestKept, v);
+        }
+        if (gone && (m_evictions++ < 8 || m_evictions % 50 == 0)) {
+            std::string per;
+            for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
+                if (goneByLevel[L - lod::kLmin]) per += " L" + std::to_string(L) + ":" + std::to_string(goneByLevel[L - lod::kLmin]);
+            }
+            Log("[buildings] frame %llu: %u pages let go (%s) worth up to %.1f px, for pages worth %.1f px and more; %zu kept "
+                "(%.0f MB of %.0f), the least worth %.1f px",
+                static_cast<unsigned long long>(m_frame), gone, per.c_str(), highestGone, need >= 1e300 ? 0.0 : need,
+                m_pages.size(), m_pageBytes / 1048576.0, m_pageBudget / 1048576.0, lowestKept >= 1e300 ? 0.0 : lowestKept);
+        }
     }
     // 3. A new walk, when its inputs have moved and none is running.
     if (m_shared->walking.load() || !ctx.height) return;
