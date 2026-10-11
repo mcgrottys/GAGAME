@@ -4921,7 +4921,9 @@ int FrameLoop::Finish() {
             s += b;
         }
         Log("[perf] slowest frames: %s", s.c_str());
-        Log("[perf] globe.SetView (the walk) %.2f ms a frame on average", m_profMs[7] / (std::max)(1u, frameMsN));
+        Log("[perf] globe.SetView (the walk) %.2f ms a frame on average; %llu walks made, %llu kept (the eye, the view and the residency unchanged)",
+            m_profMs[7] / (std::max)(1u, frameMsN), static_cast<unsigned long long>(globe ? globe->WalksMade() : 0u),
+            static_cast<unsigned long long>(globe ? globe->WalksKept() : 0u));
         {   // F21: THE CPU FRAME'S BRACKETS, a frame's mean, every measured run (the rail printed them alone)
             std::string cpu;
             double sum = 0.0;

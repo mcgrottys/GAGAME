@@ -79,6 +79,9 @@ public:
     // Once per frame before RenderFrame: camera in the PLANET frame + projection aspect and
     // viewport height in pixels (the relief-mip selector needs the pixel's angular size).
     void SetView(const Camera& cam, float aspect, float viewportH, double simTime);
+    // The walks SetView made and kept (the header's note on m_walkDigest): the frame loop's exit line.
+    uint64_t WalksMade() const { return walksMade; }
+    uint64_t WalksKept() const { return walksKept; }
 
     // M6e: streamed planet surface. surf/norm are ResidencyManager tenant ids (-1 = none);
     // isMars switches the whole shading path (no relief, no live-Earth fields, BC5 normals).
@@ -901,6 +904,26 @@ private:
     hal::Pso m_msPsoLens, m_psoLens;
     bool ResidencyLensOn() const { return (debugLens >= 9 && debugLens <= 11) || debugLens >= 14; }
     std::vector<MeshletRec> m_meshlets;
+    // THE WALK KEPT (2026-10-11, the owner: "the math gives us things for free"). The walk is a
+    // pure function of the eye, the view, the levels and gates, the windows' table and what is
+    // resident. Its inputs are digested into bytes each SetView; when the bytes and the residency's
+    // generation are the last walk's, the nodes, meshlets, leaf keys and level records stand as
+    // they are, and the wants the walk made are replayed to the residency from the log the walk
+    // wrote -- the same calls, so every residency law sees what a walk would have said. Measured:
+    // a still eye at the Merrimack's mouth walked 5,566 nodes a frame for 13.5 ms; kept, the
+    // replay costs the wants alone.
+    std::vector<uint8_t> m_walkDigest;
+    uint64_t m_walkGen = 0;
+    bool m_walkKept = false;
+    struct WantRec {
+        int sampler, tenant;
+        uint32_t face, mip;
+        float u0, v0, u1, v1, nearM;
+    };
+    std::vector<WantRec> m_wantLog;   // the last walk's wants, in order
+    bool m_wantLogging = false;
+    mutable uint64_t walksKept = 0, walksMade = 0;
+    int m_walkWhySaid = 0;
     GpuBuffer m_recBuf[Gpu::kFrameCount];
     GlobeCbData m_cb{};
     SkyCbData m_skyCb{};

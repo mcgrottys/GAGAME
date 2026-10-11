@@ -1475,6 +1475,12 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                  f.bytes() / 1048576.0);
         stats += fs;
     }
+    // THE GENERATION: anything the turn mapped, landed, let go, dropped or invalidated moves it.
+    if (turn.landedTiles || turn.batch || turn.evicted || turn.reclaimed || releaseLedger.invalidated ||
+        releaseLedger.cut || m_mapped.size() != m_genMapped) {
+        ++m_gen;
+        m_genMapped = m_mapped.size();
+    }
     KeepPoolAhead(gpu);    // the next chunk, off the turn, before the free list runs dry
     turnMs = std::chrono::duration<double, std::milli>(Clock::now() - turn0).count();
     // The residency audit (ResidencyAudit.cpp): the turn's bytes against its tiles, outside turnMs.

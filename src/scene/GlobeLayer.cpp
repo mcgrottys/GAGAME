@@ -1790,6 +1790,7 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
         auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
                         float v1r, float nearW) {
             m_res->Want(sampler, tenant, f, mip, u0r, v0r, u1r, v1r, false, nearW);
+            if (m_wantLogging) m_wantLog.push_back({sampler, tenant, f, mip, u0r, v0r, u1r, v1r, nearW});
         };
         LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit, &leafStats);
         const auto wt1 = std::chrono::steady_clock::now();
@@ -1984,6 +1985,79 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     plane(4, m._13, m._23, m._33, m._43);                                    // near (z >= 0)
     m_wp.planeCount = 5;
 
+    // THE WALK'S INPUTS, AS BYTES (the header's note on m_walkDigest): the eye and its basis, the
+    // optics and the viewport, the walk's parameters, the levels, the gates, the first window's
+    // cone, the portal; and the residency's generation beside them.
+    std::vector<uint8_t> digest;
+    {
+        auto put = [&](const void* p, size_t n) {
+            const uint8_t* b = static_cast<const uint8_t*>(p);
+            digest.insert(digest.end(), b, b + n);
+        };
+        auto putD = [&](double v) { put(&v, sizeof(v)); };
+        auto putF = [&](float v) { put(&v, sizeof(v)); };
+        auto putI = [&](int v) { put(&v, sizeof(v)); };
+        putD(cam.px); putD(cam.py); putD(cam.pz);
+        XMFLOAT3 bf, br, bu;
+        cam.ViewBasis(bf, br, bu);
+        put(&bf, sizeof(bf)); put(&br, sizeof(br)); put(&bu, sizeof(bu));
+        putF(cam.fovY); putF(cam.nearZ); putF(aspect); putF(viewportH);
+        putD(m_wp.R);
+        put(m_wp.frameE, sizeof(m_wp.frameE)); put(m_wp.frameU, sizeof(m_wp.frameU)); put(m_wp.frameN, sizeof(m_wp.frameN));
+        put(m_wp.camPos, sizeof(m_wp.camPos)); put(m_wp.camPlanet, sizeof(m_wp.camPlanet));
+        putI(m_wp.camFace); putF(m_wp.reliefExagg); putI(m_wp.maxDepth); putF(m_wp.waveGrainM); putI(m_wp.waveMaxDepth);
+        putF(m_wp.pixAng); putI(m_wp.wants ? 1 : 0);
+        putI(m_wp.surfT); putI(m_wp.normT); putI(m_wp.colorT); putI(m_wp.hgtT); putI(m_wp.maskT); putI(m_wp.bldT);
+        putI(m_wp.bldFloorRungs); putI(m_wp.hgtWindows ? 1 : 0); put(&m_wp.walkSlot, sizeof(m_wp.walkSlot));
+        if (!m_wp.wnSetOf.empty()) put(m_wp.wnSetOf.data(), m_wp.wnSetOf.size() * sizeof(uint32_t));
+        put(m_wp.wnK, sizeof(m_wp.wnK)); put(m_wp.wnFace, sizeof(m_wp.wnFace)); put(m_wp.wnRung, sizeof(m_wp.wnRung));
+        put(m_wp.wnAx, sizeof(m_wp.wnAx)); put(m_wp.wnAy, sizeof(m_wp.wnAy)); put(m_wp.wnSlice, sizeof(m_wp.wnSlice));
+        putI(m_wp.probeCullFar ? 1 : 0); put(m_wp.occ, sizeof(m_wp.occ));
+        putI(static_cast<int>(m_levels.size()));
+        for (const DrosteLevel& L : m_levels) {
+            putI(L.rel); put(L.cam, sizeof(L.cam)); putD(L.sigma); put(L.Q, sizeof(L.Q)); putF(L.reliefExagg); putI(L.bankSet);
+        }
+        putI(static_cast<int>(m_gates.size()));
+        for (const GateWorld& G : m_gates) {
+            put(G.cam, sizeof(G.cam)); put(G.Q, sizeof(G.Q)); putI(G.bankSet); putI(G.sampler);
+            put(G.planes, sizeof(G.planes)); put(G.hole, sizeof(G.hole));
+        }
+        putI(m_viewHoleCount); put(m_viewHole, sizeof(m_viewHole)); put(m_portal, sizeof(m_portal));
+        putI(m_drosteOn ? 1 : 0); putI(m_msPath ? 1 : 0); putI(m_borrowed ? 1 : 0); putF(reliefExagg);
+    }
+    // The walk never reads what is resident -- the GPU does, from the residency map at the draw --
+    // so the residency's generation is no input of it: the records are geometric, and the replayed
+    // wants keep the residency told. (Generation() stays for a reader whose records do depend on it.)
+    const uint64_t resGen = m_res ? m_res->Generation() : 0u;
+    const bool keep = !m_borrowed && m_walkKept && digest == m_walkDigest &&
+                      !(m_msPath ? m_meshlets.empty() : m_nodes.empty());
+    if (keep) {
+        // THE WALK KEPT: the same wants again, from the log; the records stand.
+        ++walksKept;
+        if (m_res) {
+            for (const WantRec& w : m_wantLog) {
+                m_res->Want(w.sampler, w.tenant, w.face, w.mip, w.u0, w.v0, w.u1, w.v1, false, w.nearM);
+            }
+        }
+    } else {
+    if (!m_borrowed) ++walksMade;
+    if (!m_borrowed && m_walkKept && m_walkWhySaid < 6) {   // the instrument: what moved since the last walk
+        ++m_walkWhySaid;
+        if (digest.size() != m_walkDigest.size()) {
+            Log("[globe] walk made: the digest changed size (%zu -> %zu bytes)", m_walkDigest.size(), digest.size());
+        } else {
+            size_t at = 0;
+            while (at < digest.size() && digest[at] == m_walkDigest[at]) ++at;
+            Log("[globe] walk made: the digest differs first at byte %zu of %zu", at, digest.size());
+        }
+    }
+    if (!m_borrowed) {   // another eye's walk borrows the buffers and gives them back: the owner's memo stands
+        m_walkDigest = std::move(digest);
+        m_walkGen = resGen;
+        m_walkKept = true;
+        m_wantLog.clear();
+        m_wantLogging = true;
+    }
     m_nodes.clear();
     m_meshlets.clear();
     m_leafKeys.clear();
@@ -2167,6 +2241,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     }
     if (!m_borrowed) ProbeTransport(probeRows.data(), probeN);
     if (m_msPath) SeamTable();
+    m_wantLogging = false;
+    }   // the walk made
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
     // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.
     if (m_borrowed) {

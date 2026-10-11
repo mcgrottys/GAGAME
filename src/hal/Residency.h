@@ -145,6 +145,10 @@ public:
     // Tiles known but not yet mapped. The warm-cache loop drains this to zero before the camera
     // ever moves. The tiles of the order's first P not held yet, whatever they wait on.
     uint32_t PendingCount() const { return m_orderPending; }
+    // THE GENERATION (2026-10-11): moves when a turn changed what is resident -- a tile mapped,
+    // landed, let go or dropped. A reader whose inputs have not moved either may keep its last
+    // walk (GlobeLayer::SetView) and name the same tiles again.
+    uint64_t Generation() const { return m_gen; }
     // Tiles mapped in the pool, every tenant (a DirectStorage tile counts from its map, before its
     // bytes land). The solver's bed wait reports the tiles it waited for as the growth of this.
     uint32_t MappedCount() const { return static_cast<uint32_t>(m_mapped.size()); }
@@ -464,6 +468,8 @@ public:
     };
     TurnLedger turn;
     uint64_t ringNoBytesTotal = 0, landedUnownedTotal = 0, landedOnlyTurns = 0;
+    uint64_t m_gen = 1;              // Generation(): the turn's changes, counted
+    size_t m_genMapped = 0;
     // Step 5: what the order's turn decided (OrderTurn), printed under the [res-turn] line. A
     // tile LET GO had its load finish after it left the first P: its bytes (letGoRead) or its
     // archive place were dropped in that turn, never mapped (law 4).
