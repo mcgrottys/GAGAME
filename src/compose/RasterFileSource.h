@@ -45,6 +45,7 @@
 //  of the box the file has. The tree's format for it is FloatW; the identity adds the conversion.
 // ================================================================================================
 #pragma once
+#include <atomic>
 
 #include "compose/Compositor.h"
 #include "compose/Projections.h"
@@ -73,6 +74,11 @@ struct RasterEntry {
 };
 
 class RasterFileSource : public ColorSource, public HeightSource {
+public:
+    // THE INSTRUMENT: windows decoded from files (cache misses) and the time in the decoder, every
+    // source summed -- a reader that is slow somewhere cold reads these before and after.
+    static std::atomic<uint64_t> s_decodes, s_decodeUs;
+
 public:
     RasterFileSource();
     // One file through the registry; false, and why, if it is refused.

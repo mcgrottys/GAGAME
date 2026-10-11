@@ -100,6 +100,7 @@
 #include <ctime>
 #include <fstream>
 #include <filesystem>
+#include <sstream>
 #include <string>
 
 using namespace ga;
@@ -2170,6 +2171,30 @@ std::vector<const scene::Gateway*> FrameLoop::GateList() const {
     return out;
 }
 
+// THE WORLDS EACH EYE'S BUILDINGS ARE WALKED IN (scene/BuildingLayer.h WorldEye): its own, then
+// each window world its chain reaches, the eye carried through the window (WindowLink::carry) and
+// the world drawn back by its pull -- the hulls' law (PublishHulls), for the walks.
+void FrameLoop::PublishBuildingWorlds() {
+    BuildingLayer* bl = m_A.buildingLayer;
+    if (!bl) return;
+    auto worldsOf = [](const Camera& cam, const std::vector<scene::WindowLink>& chain) {
+        std::vector<BuildingLayer::WorldEye> out;
+        const DirectX::XMFLOAT3 f3 = cam.Forward();
+        for (size_t k = 0; k < chain.size() && k + 1 < BuildingLayer::kWorlds; ++k) {
+            BuildingLayer::WorldEye w;
+            w.cam[0] = cam.px; w.cam[1] = cam.py; w.cam[2] = cam.pz;
+            w.fwd[0] = f3.x; w.fwd[1] = f3.y; w.fwd[2] = f3.z;
+            chain[k].carry.TransformPoint(w.cam[0], w.cam[1], w.cam[2]);
+            chain[k].carry.TransformDir(w.fwd[0], w.fwd[1], w.fwd[2]);
+            w.pull = chain[k].pull;
+            out.push_back(w);
+        }
+        return out;
+    };
+    bl->SetWorlds(0, worldsOf(m_cam, m_windows));
+    bl->SetWorlds(1, m_minimapDrawn ? worldsOf(m_minimap.Cam(), m_minimapChain) : std::vector<BuildingLayer::WorldEye>{});
+}
+
 void FrameLoop::PublishHulls() {
     VesselLayer* layer = m_A.vesselLayer;
     if (!layer) return;
@@ -4003,6 +4028,7 @@ bool FrameLoop::Frame() {
     // gravity-up and speed clamps, the Droste gauge, the bank's centre, the exposure and GIS
     // probes -- still reads `cam` directly (5d moves them, with the scene wired).
     PublishHulls();   // after the view has decided what it looks through this frame
+    PublishBuildingWorlds();   // ...and the worlds the buildings' walks run in, eye by eye
     MinimapFrame(dt);   // the second eye, walked after the first has settled
     DrawGlass(dt);    // the windshield's readouts, rebuilt for this frame
     scene::ViewSet viewSet =
@@ -4017,9 +4043,9 @@ bool FrameLoop::Frame() {
         scene::ViewContext v1 = renderer.ViewOf(
             mc, static_cast<float>(simUnix - startUnix), 1, uint32_t(r.x), uint32_t(r.y),
             uint32_t(r.w), uint32_t(r.h), m_minimapEyeRadius);
-        // ...and the hulls, from its own eye (VesselLayer: the ones standing in its world).
-        v1.drawMask = renderer.LayerBit("globe") | renderer.LayerBit("vessels") |
-                      (m_minimapSky ? renderer.LayerBit("sky") : 0);
+        // ...and what the scene lists for this eye (hud.minimap.layers; MinimapStep), the sky
+        // only where the eye's law hands it one.
+        v1.drawMask = m_minimapMask & ~(m_minimapSky ? 0ull : renderer.LayerBit("sky"));
         v1.surface = &m_minimapSurface;
         viewSet.views.push_back(v1);
     }
@@ -5505,6 +5531,25 @@ void FrameLoop::MinimapStep(float dt) {
         m_minimap.Configure(m_S.hud.minimap, m_A.planetR, pole);
         m_minimapReady = true;
     }
+    if (!m_minimapMaskSet) {
+        // THE EYE'S LAYERS (hud.minimap.layers): the names the scene lists, or the eye's own list --
+        // the planet, the hulls, the buildings and the sky (the sky by its law, MinimapFrame).
+        m_minimapMaskSet = true;
+        const std::string& list = m_S.hud.minimap.layers;
+        if (list.empty()) {
+            m_minimapMask = m_A.renderer.LayerBit("globe") | m_A.renderer.LayerBit("vessels") |
+                            m_A.renderer.LayerBit("buildings") | m_A.renderer.LayerBit("sky");
+        } else {
+            m_minimapMask = 0;
+            std::istringstream in(list);
+            std::string name;
+            while (in >> name) {
+                const uint64_t bit = m_A.renderer.LayerBit(name.c_str());
+                if (!bit) Log("[minimap] hud.minimap.layers names '%s', which is no layer of this scene: ignored", name.c_str());
+                m_minimapMask |= bit;
+            }
+        }
+    }
     m_minimapHasSubject = false;
     for (const auto& ent : m_entities) {
         if (!ent || !ent->Hull() || ent->Name() != m_S.hud.minimap.follow) continue;
@@ -5557,6 +5602,17 @@ void FrameLoop::MinimapFrame(float dt) {
         Log("[minimap] the eye reaches %d window%s deep", win.n, win.n == 1 ? "" : "s");
     }
     if (m_minimapSky) HandSky(eye, es, &win);
+    // ITS BUILDINGS: the tree walked from this eye (BuildingLayer::SimulateEye), when the scene's
+    // list for this eye names the layer; the result lands with the first eye's next frame.
+    if (BuildingLayer* bl = m_A.buildingLayer; bl && bl->enabled && (m_minimapMask & m_A.renderer.LayerBit("buildings"))) {
+        FrameContext fc;
+        fc.gpu = &m_A.gpu;
+        fc.camera = &mc;
+        fc.width = uint32_t(r.w);
+        fc.height = uint32_t(r.h);
+        fc.viewIndex = 1;
+        bl->SimulateEye(fc);
+    }
     // ITS RINGS (StandRings, the first eye's law): its own ladder when it stands low over the sea
     // and away from the first eye; the first eye's set A where it stands at the first eye's place
     // (they stand there already); none from high up, where no ring is finer than a pixel.

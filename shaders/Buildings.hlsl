@@ -10,13 +10,25 @@
 //  value a source carries (height tagged or assumed, which source won) without this file knowing.
 // ================================================================================================
 #define GA_NO_FIELD_BUFFER
+// THE WORLD BEING DRAWN (Globe.hlsl's law for its levels): the sky and haze helpers read the sun,
+// the zenith and the eye's radius through these names, so a window world's buildings are lit by
+// that world's sun and sky (the view's world table, loaded at the top of PsMain), not the eye's own.
+static float3 sLvlSun = float3(0.0f, 1.0f, 0.0f);
+static float3 sLvlSkyUp = float3(0.0f, 1.0f, 0.0f);
+static float sLvlSkyEyeR = 6371000.0f;
+#define GA_SKY_EYE_R (sLvlSkyEyeR)
+#define GA_SUN_DIR (sLvlSun)
+#define GA_SKY_UP (sLvlSkyUp)
 #include "Common.hlsli"
 
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
     float4 gBdTime;     // x = the layer's now (s), y = a page's fade-in (s), z = a pixel's angle (rad)
-    uint4 gBdMesh;      // a draw of the walk's instances: x the first instance's row (three float4
+    uint4 gBdMesh;      // ...z the depth of the world this draw is in (0 the eye's own: the hulls' rule);
+                        // a draw of the walk's instances: x the first instance's row (three float4
                         // rows each), y how many, w the shape pool's heap slot (compose/BuildingShape.h)
+    float4 gBdWorld;    // THE WORLD'S TURN in the true frame (a rotor, identity for the eye's own): a window
+                        // world's instances are composed with it, their centres turned by it, about gBdOrigin
 };
 
 struct BuildingVertex {
@@ -44,12 +56,17 @@ static const float3 kPalette[6] = {
     float3(0.56, 0.53, 0.47)    // a path's
 };
 
+// A rotor on a vector (q = (xyz, w)), and the rotor applying b then a (the Hamilton product).
+float3 Rotate(float4 q, float3 v) { return v + 2.0f * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+// The rotor applying b then a (the Hamilton product, w last).
+float4 QMul(float4 a, float4 b) { return float4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz)); }
+
 VsOut VsMain(uint vid : SV_VertexID) {
     const BuildingVertex v = gVerts[vid];
     VsOut o;
-    o.rel = gBdOrigin.xyz + v.pos;
+    o.rel = gBdOrigin.xyz + Rotate(gBdWorld, v.pos);
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
-    o.n = v.n;
+    o.n = Rotate(gBdWorld, v.n);
     o.col = kPalette[uint(v.kind) & 3u] * gBdOrigin.w;
     o.alpha = 1.0f;
     return o;
@@ -68,7 +85,6 @@ VsOut VsMain(uint vid : SV_VertexID) {
 StructuredBuffer<uint4> gWalk : register(t0, space0);
 StructuredBuffer<uint4> gShapePool[] : register(t0, space7);   // the heap's buffers (gWorlds' range)
 
-float3 Rotate(float4 q, float3 v) { return v + 2.0f * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
 struct Inst {
     float3 c; float alpha;
     float4 q;
@@ -105,7 +121,9 @@ void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut v
     SetMeshOutputCounts(n * 8u, n * 12u);
     const uint bi = gi >> 3, corner = gi & 7u;
     if (bi >= n) return;
-    const Inst b = ReadInst(gBdMesh.x + (b0 + bi) * 3u);
+    Inst b = ReadInst(gBdMesh.x + (b0 + bi) * 3u);
+    b.c = Rotate(gBdWorld, b.c);
+    b.q = QMul(gBdWorld, b.q);
     const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
     const float3 ext = asfloat(b.x.xyz);
     const float3 sgn = float3((corner & 1u) ? 1.0f : -1.0f, (corner & 2u) ? 1.0f : -1.0f, (corner & 4u) ? 1.0f : -1.0f);
@@ -124,7 +142,9 @@ void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut v
 
 // ...and the same boxes through the vertex stage where there are no mesh shaders (36 vertices a box).
 VsOut VsBox(uint vid : SV_VertexID) {
-    const Inst b = ReadInst(gBdMesh.x + (vid / 36u) * 3u);
+    Inst b = ReadInst(gBdMesh.x + (vid / 36u) * 3u);
+    b.c = Rotate(gBdWorld, b.c);
+    b.q = QMul(gBdWorld, b.q);
     const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
     const float3 ext = asfloat(b.x.xyz);
     const uint f = (vid % 36u) / 6u, t = vid % 6u;   // face, then its two triangles
@@ -179,7 +199,7 @@ void AsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
         const uint addr = gWalk[gBdMesh.x + inst * 3u + 2u].x;
         const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
         const uint nV = w0 & 0xFFFFu, flags = (w1 >> 8) & 0xFFu;
-        edges = (flags & 4u) ? max(nV, 1u) - 1u : nV;   // a ribbon of n points has n - 1 segments
+        edges = (flags & 4u) ? 4u * (max(nV, 1u) - 1u) : nV;   // a ribbon of n points: n - 1 segments, four faces each
         tris = w0 >> 16;
     }
     // Exclusive running counts over the 64, a Hillis-Steele scan in groupshared (two waves or one).
@@ -233,7 +253,9 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
     const uint s = s0 + gi;
     const uint k = InstanceOf(pay, roof, s);
     const uint local = s - (roof ? pay.triStart[k] : pay.edgeStart[k]);
-    const Inst b = ReadInst(gBdMesh.x + (pay.instBase + k) * 3u);
+    Inst b = ReadInst(gBdMesh.x + (pay.instBase + k) * 3u);
+    b.c = Rotate(gBdWorld, b.c);
+    b.q = QMul(gBdWorld, b.q);
     const float3 c = b.c, E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
     const uint addr = b.x.x;
     const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
@@ -245,10 +267,12 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
     const bool ribbon = (flags & 4u) != 0u;   // shape::kRibbon: a road piece, one quad a segment
     VsOut o;
     o.alpha = FadeIn(b.alpha, asfloat(b.x.y));
-    if (ribbon) {   // THE RIBBON: segment e of the polyline as a quad, mitred at both vertices
+    if (ribbon) {   // THE RIBBON IS A SLAB: segment e of the polyline, mitred at both vertices, as four
+        // one-sided faces -- top, underside, right and left -- so a bridge's deck has an underside for
+        // the eye on the water and the cull stays (the owner, 2026-10-11: keep the cull, lose no face).
         const uint zAt = triAt + 6u * nTris;                    // the heights the page's reader filled
         const float w = float(ShapeU16(addr + 6u)) * 0.1f;      // ShapeHead.pad: the width, decimetres
-        const uint e = local;
+        const uint e = local >> 2, face = local & 3u;
         float3 P[4];   // prev, a, b, next (an end repeats itself)
         [unroll] for (uint j = 0u; j < 4u; ++j) {
             const uint v = uint(clamp(int(e) - 1 + int(j), 0, int(nVerts) - 1));
@@ -273,17 +297,38 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
         const float px = length(mid) * gBdTime.z;
         const float hw = 0.5f * max(w, px);
         o.alpha *= saturate(w / max(px, 1e-3f));
-        o.n = U;
         o.col = kPalette[(flags & 8u) ? 5u : 4u] * gBdOrigin.w;
-        const float2 xy[4] = {P[1].xy + m[0] * hw, P[1].xy - m[0] * hw, P[2].xy + m[1] * hw, P[2].xy - m[1] * hw};
-        const float zz[4] = {P[1].z + top, P[1].z + top, P[2].z + top, P[2].z + top};
+        const float2 R1 = P[1].xy + m[0] * hw, L1 = P[1].xy - m[0] * hw, R2 = P[2].xy + m[1] * hw, L2 = P[2].xy - m[1] * hw;
+        const float t1 = P[1].z + top, t2 = P[2].z + top, b1 = P[1].z + bottom, b2 = P[2].z + bottom;
+        float2 xy[4];
+        float zz[4];
+        uint3 ta, tb;
+        if (face == 0u) {          // the top, as it was: seen from above
+            xy[0] = R1; xy[1] = L1; xy[2] = R2; xy[3] = L2;
+            zz[0] = t1; zz[1] = t1; zz[2] = t2; zz[3] = t2;
+            o.n = U;
+            ta = uint3(0u, 2u, 1u); tb = uint3(1u, 2u, 3u);
+        } else if (face == 1u) {   // the underside: the top's quad at the bottom, wound the other way
+            xy[0] = R1; xy[1] = L1; xy[2] = R2; xy[3] = L2;
+            zz[0] = b1; zz[1] = b1; zz[2] = b2; zz[3] = b2;
+            o.n = -U;
+            ta = uint3(0u, 1u, 2u); tb = uint3(1u, 3u, 2u);
+        } else {                   // a side: the wall's own law, its outward the edge's right
+            const bool right = face == 2u;
+            const float2 A = right ? R1 : L2, B = right ? R2 : L1;
+            const float zA0 = right ? b1 : b2, zB0 = right ? b2 : b1, zA1 = right ? t1 : t2, zB1 = right ? t2 : t1;
+            xy[0] = A; xy[1] = B; xy[2] = B; xy[3] = A;
+            zz[0] = zA0; zz[1] = zB0; zz[2] = zB1; zz[3] = zA1;
+            o.n = (right ? sn.x : -sn.x) * E + (right ? sn.y : -sn.y) * N;
+            ta = uint3(0u, 1u, 2u); tb = uint3(0u, 2u, 3u);
+        }
         [unroll] for (uint j = 0u; j < 4u; ++j) {
             o.rel = gBdOrigin.xyz + c + xy[j].x * E + xy[j].y * N + zz[j] * U;
             o.pos = mul(float4(o.rel, 1.0f), gViewProj);
             verts[gi * 4u + j] = o;
         }
-        tris[gi * 2u] = uint3(gi * 4u, gi * 4u + 2u, gi * 4u + 1u);
-        tris[gi * 2u + 1u] = uint3(gi * 4u + 1u, gi * 4u + 2u, gi * 4u + 3u);
+        tris[gi * 2u] = ta + gi * 4u;
+        tris[gi * 2u + 1u] = tb + gi * 4u;
     } else if (!roof) {   // the walls: edge e from its vertex to its ring's next
         const uint e = local;
         uint start = 0u, len = 0u;
@@ -324,8 +369,20 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
 }
 
 float4 PsMain(VsOut i) : SV_Target {
-    // The solids stand in the eye's own world: cut away wherever a window shows another place.
-    if (WindowChainDepth(i.rel, 1u) != 0u) discard;
+    // THE HULLS' RULE (Vessel.hlsl): a pixel belongs to the world whose depth its ray reaches, and
+    // to no other -- the eye's own cut away where a window shows another place, a window world's
+    // kept only where the eye reaches it through every box before it.
+    const uint depth = gBdMesh.z;
+    if (WindowChainDepth(i.rel, depth + 1u) != depth) discard;
+    // THAT WORLD'S LIGHT: its sun, its zenith and its eye's radius from the view's world table
+    // (Globe.hlsl LoadLevel), so the sky's irradiance, the sun through the air and the haze are the
+    // far place's through its window, not the eye's own.
+    {
+        const uint s = min(depth, max(WtLevels(), 1u) - 1u);
+        sLvlSun = (depth > 0u) ? normalize(WtLevelRow(s, 4u).xyz) : gSunDir.xyz;
+        sLvlSkyUp = (depth > 0u) ? normalize(WtLevelRow(s, 5u).xyz) : float3(0.0f, 1.0f, 0.0f);
+        sLvlSkyEyeR = length(WtLevelRow(s, 0u).xyz);
+    }
     // THE LAND'S LIGHT (Globe.hlsl's law, Common.hlsli's terms): the sky's irradiance on the face
     // plus the sun through the air, which the PLANET decides is up at this point -- never the face's
     // own tilt. The point's zenith and height are asked of the sphere (its centre at flat
@@ -333,8 +390,8 @@ float4 PsMain(VsOut i) : SV_Target {
     const float Rb = gSkyLut.y;
     const float3 fromCentre = gEyeRel.xyz + i.rel + float3(0.0f, Rb, 0.0f);
     const float r = length(fromCentre);
-    const float3 up = fromCentre / r;
-    const float h = r - Rb;
+    const float3 up = (depth > 0u) ? sLvlSkyUp : fromCentre / r;
+    const float h = (depth > 0u) ? 0.0f : r - Rb;
     // A box's faces share their corners and carry no normal: the face's own, from the surface's
     // derivatives, turned to face the eye (the box is convex and culled, so the eye sees outsides);
     // its top is a roof by its tilt.

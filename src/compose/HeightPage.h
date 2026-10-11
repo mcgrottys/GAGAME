@@ -30,6 +30,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <vector>
+#include <memory>
+#include <cstring>
 #include <unordered_map>
 
 namespace ga {

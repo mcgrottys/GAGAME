@@ -296,6 +296,7 @@ private:
     // windows shows -- pulled back through the windows, so a boat is seen wherever a window shows
     // its place, its own reflection down the corridor included.
     void PublishHulls();
+    void PublishBuildingWorlds();
     // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
     void DrawGlass(float dt);
     // ---- AN EYE (step 3 of the HUD pass): one view of the frame -- the session's camera (view 0),
@@ -411,6 +412,8 @@ private:
     static constexpr size_t kMaxEyeOwes = 4;
     std::vector<const scene::Gateway*> m_eyeOwes;
     uint32_t m_followCarries = 0;   // the subject's carry count as of the last frame
+    uint64_t m_minimapMask = 0;     // the layers the second eye draws (hud.minimap.layers)
+    bool m_minimapMaskSet = false;
     const scene::Gateway* m_followedGate = nullptr;   // the gate that last carried the subject (StepEntities)
     // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
     // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles

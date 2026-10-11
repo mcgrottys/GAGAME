@@ -183,3 +183,85 @@ the old per-vertex one did. The CPU walk at 1 px fell from 90 ms to 53 ms (its s
 The pages are kept by their worth on screen (`layer.buildings.pageMB`; the law is in
 BuildingLayer::Simulate): a page is worth its width in pixels were the eye to look at it, the
 least worth goes first and never to make room for one worth less, so the coarse levels are the floor.
+
+## 10. A second eye (2026-10-11)
+
+The minimap is a view of its own (ViewContext index 1), and a walk culled to the first eye's
+frustum shows a second eye looking down almost nothing: 7 boxes over the Merrimack's mouth. So the
+walk is keyed by eye (`BuildingLayer::Eye`, `kEyes` = 2): each eye keeps its own cloud origin,
+last inputs, drawn buffer, held pages and wants; `SimulateEye` launches the second eye's walk
+from its own camera and rectangle (FrameLoop::MinimapFrame), its result lands in the next
+Simulate beside the first's, and Render draws the eye `ctx.viewIndex` names. The pages, the
+shape pool and the budget are the layer's, shared: the two streams send the union of the eyes'
+wants (each page once, at the most it is worth to either), and a page any eye's drawn walk reads
+is kept under it.
+
+What an eye draws is the scene's to say: `hud.minimap.layers` lists the layer names
+(`"globe vessels buildings sky"`), empty meaning that list; the sky only where the eye's own law
+hands it one. A gate would take the same key once what a window shows is decided per layer.
+
+Measured on `scenes/demos/haulover_city.json` (the gate scene with the planet's buildings and
+roads): over the harbour at 1.5 km the second eye's last walk drew 844 boxes + 2,164 shapes from
+19 pages beside the first eye's 3,252 + 2,734 from 70; the frame 24.7 ms headless with both.
+
+## 11. After a carry, the buildings are slow to come: measured, not yet fixed (2026-10-11)
+
+Through the Haulover gate the first eye's walk asks for its pages at once, but they land one every
+hundred frames. The instrument (`[buildings] page L.. : read, then standing N buildings on the
+ground; meanwhile M raster windows decoded`) says where the time is: a page job stands EVERY
+building of its page on the composed ground when the page loads, and a page is 32 quads wide --
+88 km at level -1 -- so the job pays for thousands of buildings the view never asks for. At the
+Merrimack that is hidden: its height source is one small raster that lives in memory (2,244
+buildings stood in 9 ms). Haulover's is two 200 MB tiled GeoTIFFs decoded by the window: the page
+over Bal Harbour at level -1 stood 3,466 buildings in 4.7 s, decoding 906 windows (more than the
+256-window cache holds, while the globe paints the same files). The stream sends the coarse level
+one page at a time, so the chain crawls.
+
+Tried and set aside: the ground memoised at the level's grain (`BuildingLayer::Ground` is now a
+field per job, kept: the right grain, but the windows dominate); the ground from the height tree's
+own tiles (a cold tile paints on the spot: seconds a page).
+
+The law that fits the owner's rule -- what is loaded and stood is by proximity and view, nowhere
+by place -- is THE STAND, and it is built: a page lands with nothing on the ground (its nodes at sea
+level, its buildings as the records the tree filed), and the walk, on reaching a node, asks for its
+stand -- the node's own and descendants' folds on the composed ground, and its buildings once the
+largest is a pixel -- at the grain of two pixels of ground at its distance (a metre at least). A
+pool job stands a batch of 64 nodes with one ground field at the batch's finest grain and
+publishes each node's stand whole under an atomic pointer (`Page::stood`), so a walk reads a stand
+or none, never half of one, and a finer stand replaces a coarser without a race; a ribbon's
+profile goes back to the pool's slot as bytes. A node without a stand is tested at the worst of
+elevations (its sphere grown 9 km) and draws nothing until its stand lands -- a few frames, in
+the order of worth on screen. A walk asks for its 4,096 most worth; a landing re-walks the eye at
+most every 15 frames.
+
+Measured: the Haulover carry draws the first eye's buildings within 80 frames (67 boxes + 109
+shapes at frame 209; before, 22 + 8 at frame 345), the stands 1.2 ms each over the cold rasters;
+Newburyport's market still is bit-identical to the one before; Tokyo under a pinned clock makes
+178,740 stands in 400 frames at 0.1 ms each, the frame 16.5 ms (15.3 before), its still within
+4.7 % of pixels of the merged commit, all of them the far field still standing. The instrument
+for a page that is slow to parse stays, and `[buildings] at the end: N stands made` says the rest.
+
+## 12. The worlds a view reaches (2026-10-11)
+
+Through a gate's window the far world showed no buildings: the layer walked only from the eye's
+own position and cut away every pixel a window shows. The owner's law from the portal work -- the
+portal owns the residency of what it shows -- gives the form: an eye's walk is one of several, one
+per world the view reaches. Each window world is walked from the eye carried through that window
+(`WindowLink::carry` on the camera: its position and forward in that world's own frame), by the
+same walker as the eye's own (`BuildingLayer::Eye`, now `kEyes x kWorlds`, the frame loop saying
+each eye's worlds every frame in `PublishBuildingWorlds`), and drawn pulled back through the
+window's motor: the walk's origin through `pull` in doubles, the instances' centres and rotors
+composed with the pull's rotor (`gBdWorld`) on the GPU, and the pixels kept only where the ray
+reaches that world's depth (the hulls' rule, `WindowChainDepth`), lit by that window's sun and
+zenith. Two windows deep (`kWorlds` = 3); beyond that a window is too small to hold a building.
+
+Measured from the Merrimack's mouth looking through the Haulover gate (`out/roads/city_mouth.json`,
+a frozen still): the own world 227 boxes + 65 shapes, the Haulover world through the window 67 +
+171, the Merrimack again through two windows 312 + 99; the still unchanged from frame 400 to 1200.
+
+And lit as that world is lit: the owner saw the far side's buildings carrying the near side's
+sunset. Buildings.hlsl now defines the sun, the zenith and the eye's radius the sky and haze
+helpers read (`GA_SUN_DIR`, `GA_SKY_UP`, `GA_SKY_EYE_R`) as statics loaded at the top of PsMain
+from the view's world table at the pixel's depth -- Globe.hlsl's LoadLevel, for the buildings --
+so a window world's walls take its own sun through its own air and its own sky's irradiance.
+Through the Haulover gate at the Merrimack's sunset, the far towers stand in Florida's noon.

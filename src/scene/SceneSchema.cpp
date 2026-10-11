@@ -432,6 +432,7 @@ const Schema& MinimapSchema() {
             .Bind("size", p.size, Q::Dimensionless, "1", "the square's side as a fraction of the target's height", R)
             .Bind("margin", p.margin, Q::Dimensionless, "px", "the gap to the bottom-right corner", R)
             .Bind("homeAltM", p.homeAltM, Q::Length, "m", "Reset: the eye this far above the followed entity", R)
+            .Bind("layers", p.layers, "the layers this eye draws, by name, space-separated (globe vessels buildings sky); empty: that list", R)
             .Bind("minAltM", p.minAltM, Q::Length, "m", "the zoom's floor above the sea", R);
         return sc;
     }();
