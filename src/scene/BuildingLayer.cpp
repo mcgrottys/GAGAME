@@ -666,15 +666,29 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         ++m_pagesVersion;   // what a walk depends on changed: the next walk draws what stood
         m_lastStandWalk = m_frame;
     }
-    for (Shared::StandDone& sd : stands) {
-        ++m_stands;
-        m_standMs += sd.ms;
-        m_standPending.erase({sd.key, sd.node});
-        for (auto& [off, bytes] : sd.zWrites) {
-            if (!m_pool.Valid() || bytes.empty() || !ctx.gpu) continue;
-            GpuBuffer st = ctx.gpu->CreateUploadBuffer(bytes.size(), L"buildings.stand.z");
-            std::memcpy(st.cpu, bytes.data(), bytes.size());
-            ctx.cmd->Native()->CopyBufferRegion(m_pool.res.Get(), off, st.res.Get(), 0, bytes.size());
+    {
+        // ONE staging buffer for the frame's ribbon heights, however many stands landed: a buffer a
+        // ribbon stalled the frame (hundreds of resource creations a frame over a road tree).
+        size_t total = 0;
+        for (const Shared::StandDone& sd : stands) {
+            for (const auto& [off, bytes] : sd.zWrites) total += (bytes.size() + 15u) & ~size_t(15);
+        }
+        GpuBuffer st;
+        size_t at = 0;
+        if (total && m_pool.Valid() && ctx.gpu) st = ctx.gpu->CreateUploadBuffer(total, L"buildings.stand.z");
+        for (Shared::StandDone& sd : stands) {
+            ++m_stands;
+            m_standMs += sd.ms;
+            m_standPending.erase({sd.key, sd.node});
+            if (!st.Valid()) continue;
+            for (auto& [off, bytes] : sd.zWrites) {
+                if (bytes.empty()) continue;
+                std::memcpy(st.cpu + at, bytes.data(), bytes.size());
+                ctx.cmd->Native()->CopyBufferRegion(m_pool.res.Get(), off, st.res.Get(), at, bytes.size());
+                at += (bytes.size() + 15u) & ~size_t(15);
+            }
+        }
+        if (st.Valid()) {
             m_retired.push_back({std::move(st), m_frame});
             D3D12_RESOURCE_BARRIER br{};
             br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
