@@ -222,7 +222,21 @@ field per job, kept: the right grain, but the windows dominate); the ground from
 own tiles (a cold tile paints on the spot: seconds a page).
 
 The law that fits the owner's rule -- what is loaded and stood is by proximity and view, nowhere
-by place -- is to stand a building when the walk first sees it: the page load stands only its
-nodes (one sample each), the walk stands the buildings its cone, horizon and pixel tests keep,
-at the grain their distance earns, memoised in the page. The cost then follows the view, not the
-page. That is the next step on this branch.
+by place -- is THE STAND, and it is built: a page lands with nothing on the ground (its nodes at sea
+level, its buildings as the records the tree filed), and the walk, on reaching a node, asks for its
+stand -- the node's own and descendants' folds on the composed ground, and its buildings once the
+largest is a pixel -- at the grain of two pixels of ground at its distance (a metre at least). A
+pool job stands a batch of 64 nodes with one ground field at the batch's finest grain and
+publishes each node's stand whole under an atomic pointer (`Page::stood`), so a walk reads a stand
+or none, never half of one, and a finer stand replaces a coarser without a race; a ribbon's
+profile goes back to the pool's slot as bytes. A node without a stand is tested at the worst of
+elevations (its sphere grown 9 km) and draws nothing until its stand lands -- a few frames, in
+the order of worth on screen. A walk asks for its 4,096 most worth; a landing re-walks the eye at
+most every 15 frames.
+
+Measured: the Haulover carry draws the first eye's buildings within 80 frames (67 boxes + 109
+shapes at frame 209; before, 22 + 8 at frame 345), the stands 1.2 ms each over the cold rasters;
+Newburyport's market still is bit-identical to the one before; Tokyo under a pinned clock makes
+178,740 stands in 400 frames at 0.1 ms each, the frame 16.5 ms (15.3 before), its still within
+4.7 % of pixels of the merged commit, all of them the far field still standing. The instrument
+for a page that is slow to parse stays, and `[buildings] at the end: N stands made` says the rest.

@@ -157,6 +157,7 @@ private:
         bool stale = false;             // the eye left its reach before it was built: nothing made
     };
     // THE TREE IN MEMORY: a page's nodes and buildings, their boxes already stood on the ground.
+    using PageKey = std::tuple<int, int, int>;   // (level, px, py)
     struct RtBox {
         double p[3];                    // centre, flat frame
         float u[3], v[3], w[3];         // half-axes
@@ -165,26 +166,53 @@ private:
     struct RtNode {
         int x, y;
         uint32_t own0, ownN;            // its own buildings in the page's list
-        double c[3];                    // the quad's centre on the ground, flat frame
+        double c[3];                    // the quad's centre AT SEA LEVEL, flat frame (the stand has the ground's)
         float rad;                      // a sphere about it holding the quad and its solids
         bool kids;                      // anything stands under it
-        // THE DESCENDANTS' FOLD: the spread of everything under it, drawn at its coverage while the
-        // children's page is on its way -- what stands there is never a hole, only coarser.
-        RtBox desc;
+        // THE FOLDS, as the tree filed them: its own buildings' and its descendants' (the
+        // descendants' is drawn at its coverage while the children's page is on its way -- what
+        // stands there is never a hole, only coarser). Stood on the ground by a stand (below).
+        LodBox own{}, desc{};
         float descCover = 0.0f;
         Key descCell{INT32_MIN, INT32_MIN};   // the detail cell its centroid stands in
     };
+    // A node whose stand has not come is tested at the worst of elevations: its sphere grown by
+    // this, so a town on a plateau is never culled before its ground is known.
+    static constexpr double kUnstoodM = 9000.0;
     struct RtBld {
-        RtBox box;
         Key cell;
         float rho;
         // Its shape: the record's PACKED address -- its slot's ordinal in the page times kSlotBytes,
-        // plus its offset inside that slot (UINT32_MAX: none, the box is drawn) -- its counts, and the
-        // ground frame it stands in (the ground under the centroid).
+        // plus its offset inside that slot (UINT32_MAX: none, the box is drawn) -- and its counts.
         uint32_t shapeOff = UINT32_MAX;
         uint16_t nV = 0, nT = 0;
-        double g[3] = {};
-        float e[3] = {}, n[3] = {}, up[3] = {};
+    };
+    // A STAND (2026-10-11, the owner's rule: what is loaded and stood is by proximity and view,
+    // nowhere by page). A page lands with nothing on the ground: its nodes at sea level, its
+    // buildings as records. The walk, on reaching a node, asks for its stand -- the node's own and
+    // descendants' folds on the composed ground, and its buildings when the walk has come close
+    // enough to draw them -- at the grain the node's distance earns, and a pool job makes it. A
+    // stand is published whole under an atomic pointer, so a walk reads a stand or none, never half
+    // of one, and a finer stand replaces a coarser without a race. The cost then follows the view:
+    // a page 88 km wide over a cold raster stood its 3,466 buildings in 4.7 s before this.
+    struct StoodBld {
+        RtBox box;
+        double g[3] = {};                 // the ground frame under the centroid: its point...
+        float e[3] = {}, n[3] = {}, up[3] = {};   // ...east, north, up
+    };
+    struct Stood {
+        double c[3] = {};                 // the quad's centre on the ground
+        RtBox own, desc;
+        std::vector<StoodBld> blds;       // the node's own buildings, in the page's order (empty: folds only)
+        float grainM = 0.0f;
+        bool withBlds = false;
+    };
+    struct StandAsk {                     // what a walk asks: a node's stand, this fine, with its buildings or not
+        PageKey page;
+        uint32_t node = 0;
+        bool blds = false;
+        double grainM = 1.0;
+        double px = 0.0;                  // its worth on screen: the order the stands are made in
     };
     struct Page {
         int L = 0;
@@ -195,6 +223,8 @@ private:
         // buildings -- so a parent skips them all with one lookup when even that is under a pixel.
         std::unordered_map<uint64_t, float> parentRho;
         std::vector<RtBld> blds;
+        std::vector<LodBuilding> raw;   // the buildings as the tree filed them: a stand reads these
+        mutable std::unique_ptr<std::atomic<std::shared_ptr<const Stood>>[]> stood;   // one a node
         uint64_t bytes = 0;
         GpuBuffer shapeStaging;         // its shape records packed into whole slots, staged on the pool thread
         std::vector<uint32_t> slotUsed; // bytes used in each of its slots (no record crosses a slot)
@@ -202,12 +232,8 @@ private:
         double waitMs = 0.0, readMs = 0.0;   // the instrument: its job's wait in the lane, its read
         std::vector<uint8_t> packed;    // the same bytes on the CPU: what a lost device's report reads back
         uint32_t tooBig = 0;
-        uint32_t baseN = 0;               // the ground base's report: shaped buildings, mean and largest drop (m)
-        double baseDropSum = 0.0;
-        float baseDropMax = 0.0f;            // records larger than a slot: those buildings keep their boxes
         float landed = 0.0f;            // the layer's clock (s) when it joined the tree: its boxes fade in from here
     };
-    using PageKey = std::tuple<int, int, int>;   // (level, px, py)
     struct DrawCpu {                    // a walk's shaped instances, as the GPU got them
         std::vector<Box> inst;
     };
@@ -217,6 +243,7 @@ private:
         uint32_t insts = 0;
         GpuBuffer staging, vb;
         std::vector<std::pair<double, PageKey>> wants;   // pages asked for, by pixels (largest first)
+        std::vector<StandAsk> stands;   // the stands asked for, the largest on screen first
         std::vector<PageKey> used;
         std::vector<std::shared_ptr<const Page>> hold;   // its pages: their pool ranges stay while it is drawn
         std::shared_ptr<const DrawCpu> cpu;
@@ -232,7 +259,17 @@ private:
         std::vector<Built> done;
         std::vector<std::pair<PageKey, std::shared_ptr<Page>>> pagesDone;
         std::vector<Walked> walked;
-        std::atomic<int> inflight{0}, pageInflight{0};
+        // A stand made on the pool: its page (held), and a ribbon's heights for the pool's slots.
+        struct StandDone {
+            std::shared_ptr<const Page> page;
+            PageKey key{INT32_MIN, 0, 0};
+            uint32_t node = 0;
+            std::vector<std::pair<uint64_t, std::vector<uint8_t>>> zWrites;   // (the pool's byte offset, the bytes)
+            double ms = 0.0;
+            uint32_t blds = 0;
+        };
+        std::vector<StandDone> standDone;
+        std::atomic<int> inflight{0}, pageInflight{0}, standInflight{0};
         std::atomic<int> walking[kEyes] = {};   // one walk in flight per eye
         // THE WALK'S BUFFERS, REUSED: a walk takes a retired one at least its size before it makes one.
         std::vector<GpuBuffer> freeStaging, freeBoxes;
@@ -350,7 +387,25 @@ private:
         uint64_t drawnCells = 0;        // the cells version the drawn boxes were walked against
         // The pages the last walk asked for, coarsest level first (the two streams read it each frame).
         std::vector<std::pair<double, PageKey>> wants;
+        std::vector<StandAsk> stands;   // the stands it asked for, the largest on screen first
     } m_eyes[kEyes];
+    // THE STANDS' STREAM: every eye's asks, each node once at the finest grain and with buildings if
+    // any eye wants them, the largest on screen first; a job stands a batch of kStandBatch nodes,
+    // kStandInFlight jobs at a time (a warm stand is 0.1 ms, a cold one 2.5: thousands a frame, or
+    // hundreds). A walk asks for its kStandAskMax most worth on screen; the rest it asks again when
+    // those have landed. A landing re-walks the eye at most every kStandWalkFrames frames: a city's
+    // tree is walked a few times a second while its stands flow, not every frame.
+    static constexpr int kStandInFlight = 8, kStandBatch = 64, kStandWalkFrames = 15;
+    static constexpr size_t kStandAskMax = 4096;
+    std::set<std::pair<PageKey, uint32_t>> m_standPending;
+    uint64_t m_lastStandWalk = 0;
+    void StandBatch(std::vector<std::pair<std::shared_ptr<const Page>, StandAsk>> batch);
+    // A box stood on the composed ground at its centroid, on the prisms' own axes; the shape's own
+    // frame (the ground under the centroid, east, north, up) beside it when asked.
+    static void StandBox(const Place& place, double lat, double lon, double base, double zc, double hz, double a1,
+                         double a2, double hd, RtBox& o, StoodBld* frame);
+    uint64_t m_stands = 0;
+    double m_standMs = 0.0;
     // Every eye's wants as one list, each page once at the most it is worth to any eye.
     std::vector<std::pair<double, PageKey>> Wants() const;
     bool DrawnUses(const PageKey& k) const;
