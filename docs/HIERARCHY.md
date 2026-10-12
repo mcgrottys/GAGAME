@@ -2073,6 +2073,21 @@ run, as a tile that failed four tries is, so the hold can still be exact without
 loader asks for it again and again, and the level above it answers. It is a change in
 the tile tree's composite and in what the loader does with its answer; not built.
 
+**The statement repeated (2026-10-11, the owner's settled mode: "when settled it can wait for
+messages").** A reader whose inputs have not moved says its last statement again with one call
+(`Repeat`) and names no tile. The order's records carry, per reader, the NUMBER of the statement
+the tile was last said in; a reader's number moves when it speaks anew or falls silent (F12), so
+"whose statement stands" is a comparison of numbers, and a still reader costs the order nothing a
+frame. A repeat is refused, and the reader speaks anew, when nothing stands to repeat: it has not
+spoken, it fell silent, or a tile it named was untracked since -- the cut's release, an
+invalidation, a tenant dropped (`RecDrop` breaks the statement). A statement that ends is closed
+in the next pass: its records' last frame becomes the frame it ended, so the glance counts from
+there. The prediction's repeats stand for its lead from the frame last asserted; the exact hold's
+`wanted` is what the standing statements say. The walk, the gates, the prediction, the wave planes,
+the exposure and the bank repeat (docs/ARCHITECTURE.md §9). The seam left above -- a record keeps
+four readers' statements, the oldest replaced by a fifth -- now replaces the oldest whose statement
+does not stand.
+
 ### 4.20 Depth without a bound, and rasters by file
 
 The owner, 2026-09-29: the CPU tosses everything into one cached tile tree on the disk, and

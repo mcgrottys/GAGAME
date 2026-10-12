@@ -296,6 +296,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             if (s.kind == "seastate") continue;   // PHASE C2: a sea state, not a raster (below)
             if (s.kind == "buildings") continue;  // solids, not a raster: the buildings layer's (below)
             if (s.kind == "roads") continue;      // ways, not a raster: the tree's ribbons (--tool building-lod)
+            if (s.kind == "bridges") continue;    // spans, not a raster: the decks' clearances (--tool building-lod)
             entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
                                s.feather, s.unit, s.datum, s.offset, s.hasOffset});
         }
@@ -1625,7 +1626,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     }
                     Log("[buildings] the ranked tree from %s: each building from %.1f px, faded in to twice that; pages by "
                         "level %s", bl->lod.c_str(), bl->lodPixels, per.c_str());
-                    blOwned->ConfigureFar(std::move(lodf), bl->lodPixels, bl->shapePixels, bl->pageMB);
+                    blOwned->ConfigureFar(std::move(lodf), bl->lodPixels, bl->shapePixels, bl->pageMB, bl->marginDeg);
                 } else {
                     Log("[buildings] no far boxes: %s", why.c_str());
                 }

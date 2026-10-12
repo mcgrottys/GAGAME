@@ -119,6 +119,7 @@ void ResidencyManager::ApplyChanged() {
         Tenant& t = m_tenants[k];
         WriteHeldFootprint(t, r, &HeldInSlots, &t);
         t.resDirty = true;
+        ++t.gen;
     }
     m_changed.clear();
 }
@@ -252,40 +253,53 @@ float BitsWeight(uint32_t b) {
 }
 }  // namespace
 
-int ResidencyManager::SlotFor(const OrdRec& r, int sid) {
-    int k = -1, oldest = 0;
+int ResidencyManager::SlotFor(const OrdRec& r, int sid, const uint32_t* stNum) {
+    int k = -1, oldest = -1;
     for (int i = 0; i < OrdRec::kSlots && k < 0; ++i) {
         if (r.ssid[i] == sid) k = i;
     }
     for (int i = 0; i < OrdRec::kSlots && k < 0; ++i) {
         if (r.ssid[i] < 0) k = i;
     }
-    for (int i = 1; i < OrdRec::kSlots && k < 0; ++i) {
+    if (k >= 0) return k;
+    // The oldest slot whose statement does not stand; all standing, the oldest of them.
+    for (int i = 0; i < OrdRec::kSlots; ++i) {
+        const bool stands = r.sstmt[i] == stNum[r.ssid[i]];
+        if (stands) continue;
+        if (oldest < 0 || r.sstamp[i] < r.sstamp[oldest]) oldest = i;
+    }
+    if (oldest >= 0) return oldest;
+    oldest = 0;
+    for (int i = 1; i < OrdRec::kSlots; ++i) {
         if (r.sstamp[i] < r.sstamp[oldest]) oldest = i;
     }
-    return k >= 0 ? k : oldest;
+    return oldest;
 }
 
-void ResidencyManager::SlotApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits) {
-    const int k = SlotFor(r, sid);   // H5: this reader's statement only; the others stand as said
-    if (r.ssid[k] != sid || r.sstamp[k] != stampFrame) {
+void ResidencyManager::SlotApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t stmt, uint32_t wbits,
+                                 const uint32_t* stNum) {
+    const int k = SlotFor(r, sid, stNum);   // H5: this reader's statement only; the others stand as said
+    if (r.ssid[k] != sid || r.sstmt[k] != stmt) {
         r.ssid[k] = static_cast<int8_t>(sid);
         r.sstamp[k] = stampFrame;
+        r.sstmt[k] = stmt;
         r.sweight[k] = wbits;
     } else {
+        r.sstamp[k] = stampFrame;
         r.sweight[k] = (std::min)(r.sweight[k], wbits);
     }
 }
 
 uint32_t ResidencyManager::StandingWeight(const OrdRec& r, uint32_t now, int predSid,
-                                          uint32_t predLead, const uint32_t* sampLast) {
-    // The nearest of the standing statements: a reader's stands until it speaks again, the
-    // prediction's for its lead. None standing: the last frame's statements (the record's stamp).
+                                          uint32_t predLead, const uint32_t* sampLast, const uint32_t* stNum) {
+    // The nearest of the standing statements: a reader's stands while its statement is the one the
+    // slot was said in (Repeat keeps it so without a touch), the prediction's for its lead from
+    // the frame it was last asserted. None standing: the last frame's statements (the record's stamp).
     uint32_t best = UINT32_MAX, last = UINT32_MAX;
     for (int k = 0; k < OrdRec::kSlots; ++k) {
         const int s = r.ssid[k];
         if (s < 0) continue;
-        const bool stands = s == predSid ? r.sstamp[k] + predLead >= now : sampLast[s] == r.sstamp[k];
+        const bool stands = r.sstmt[k] == stNum[s] && (s != predSid || sampLast[s] + predLead >= now);
         if (stands) best = (std::min)(best, r.sweight[k]);
         if (r.sstamp[k] == r.stamp) last = (std::min)(last, r.sweight[k]);
     }
@@ -294,7 +308,7 @@ uint32_t ResidencyManager::StandingWeight(const OrdRec& r, uint32_t now, int pre
 
 void ResidencyManager::RecApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits) const {
     const uint16_t bit = static_cast<uint16_t>(1u << sid);
-    SlotApply(r, sid, stampFrame, wbits);
+    SlotApply(r, sid, stampFrame, m_stNum[sid], wbits, m_stNum);
     if (r.stamp != stampFrame) {   // the first reader of this frame: the frame's own record
         r.stamp = stampFrame;
         r.mask = bit;
@@ -334,9 +348,12 @@ void ResidencyManager::OrderNote(Tenant& t, uint32_t rec, int tenant, int sid, u
     }
     // THE STATEMENT's hash, in call order: did this reader say something else this frame.
     const uint64_t key = MakeKey(tenant, TileRequest{face, m, x, y});
-    if (m_stFrame[sid] != stampFrame) {
+    if (m_stFrame[sid] != stampFrame) {   // the reader speaks anew: a new statement, by number
         m_stFrame[sid] = stampFrame;
         m_stHash[sid] = kStatementBasis;
+        ++m_stNum[sid];
+        m_stEnd[sid] = stampFrame;   // the frame its previous statement ended
+        m_stBroken[sid] = false;
     }
     m_stHash[sid] = (m_stHash[sid] ^ key) * 1099511628211ull;
     if (rec != UINT32_MAX) {
@@ -380,6 +397,13 @@ void ResidencyManager::RecAdd(Tenant& t, int tenant, Tracked* tr) {
 void ResidencyManager::RecDrop(Tracked* tr) {
     const uint32_t i = tr->rec;
     if (i == UINT32_MAX || i >= m_rec.size()) return;
+    {   // THE STATEMENT BROKEN (Repeat): a reader whose standing statement named this tile cannot
+        // repeat it whole; it speaks anew the next time it would have repeated.
+        const OrdRec& r = m_rec[i];
+        for (int k = 0; k < OrdRec::kSlots; ++k) {
+            if (r.ssid[k] >= 0 && r.sstmt[k] == m_stNum[r.ssid[k]]) m_stBroken[r.ssid[k]] = true;
+        }
+    }
     tr->rec = UINT32_MAX;
     {
         Tenant& t = m_tenants[tr->tenant];
@@ -737,14 +761,15 @@ bool ResidencyManager::OrderSelfTest() {
     // the measure. The plant is F's rule: the weight remade each frame from the readers who spoke.
     {
         const int view = 0, pred = 1;
-        uint32_t last[2] = {0, 0};
+        uint32_t last[2] = {0, 0}, num[2] = {0, 0};
         OrdRec r;
-        const auto say = [&](int s, uint32_t f, float dist) {
-            SlotApply(r, s, f, WeightBits(dist));
+        const auto say = [&](int s, uint32_t f, float dist) {   // each say a new statement
+            ++num[s];
+            SlotApply(r, s, f, num[s], WeightBits(dist), num);
             r.stamp = f;
             last[s] = f;
         };
-        const auto at = [&](uint32_t now) { return BitsWeight(StandingWeight(r, now, pred, 24u, last)); };
+        const auto at = [&](uint32_t now) { return BitsWeight(StandingWeight(r, now, pred, 24u, last, num)); };
         const auto fRule = [&]() {
             uint32_t w = UINT32_MAX;
             for (int k = 0; k < OrdRec::kSlots; ++k) {
@@ -763,6 +788,7 @@ bool ResidencyManager::OrderSelfTest() {
         say(view, 36, 100.0f);
         const float w36 = at(36);
         last[view] = 37;         // the view speaks without the tile: its statement falls
+        ++num[view];
         const float w37 = at(37);
         const bool standOk = w10 == 50.0f && w11 == 50.0f && w35 == 100.0f && w36 == 80.0f && w37 == 80.0f;
         Log("[order-test] the weight stands with its statement (H5): the view at 100 m every frame, the "
@@ -902,10 +928,11 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     const uint32_t now = m_frame;
     // F12: WHOSE STATEMENT STANDS. A reader's stands until it speaks again -- and a reader silent
     // in a turn when another spoke has spoken: it said nothing (a window that left the view, a
-    // subject that left the scene). The pins' rule (m_pinSpoke), said of every reader. A turn in
-    // which no reader spoke (a tool's wait) leaves every statement standing.
-    uint32_t live[kMaxSamplers];
-    for (int s = 0; s < kMaxSamplers; ++s) live[s] = m_sampLast[s] == m_lastSpoke ? m_sampLast[s] : 0u;
+    // subject that left the scene). By NUMBER (Repeat): a slot stands while its reader's current
+    // statement is the one it was said in; OrderNote moves the number when a reader speaks anew,
+    // OrderTurn when it falls silent. A turn in which no reader spoke (a tool's wait) leaves every
+    // statement standing. The pins' rule is the same test over the pinned readers. The hold
+    // (settleExact) asks the same question: what the readers' standing statements say.
     for (OrdRec& r : m_rec) {
         const bool countsHeld = (r.flags & (kHeldBit | kUpBit)) != 0;   // H2
         r.flags = static_cast<uint8_t>((r.flags & ~(kInPBit | kForgetBit | kWasInBit | kUpBit)) |
@@ -915,29 +942,31 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
             continue;
         }
         bool stand = false;   // in a reader's standing statement
-        if (settleExact) {
-            stand = r.stamp == now;   // the hold's own definition: what the walks stamped now
-        } else {
-            stand = r.predUntil >= now;
-            for (uint16_t mk = static_cast<uint16_t>(r.mask & ~(m_predSid >= 0 ? (1u << m_predSid) : 0u));
-                 mk && !stand; mk = static_cast<uint16_t>(mk & (mk - 1))) {
-                unsigned s = 0;
-                while (!((mk >> s) & 1u)) ++s;
-                stand = live[s] == r.stamp;   // its reader has not spoken since, nor been silent
+        bool predStands = false;
+        for (int k = 0; k < OrdRec::kSlots; ++k) {
+            const int s = r.ssid[k];
+            if (s < 0) continue;
+            // THE CLOSE: a slot whose statement has just ended was last said, for the glance's
+            // purposes, the frame it ended -- a repeated statement touched no stamp while it stood.
+            if (r.sstmt[k] + 1u == m_stNum[s] && r.sstamp[k] < m_stEnd[s]) {
+                r.sstamp[k] = m_stEnd[s];
+                r.stamp = (std::max)(r.stamp, m_stEnd[s]);
+            }
+            if (Stands(r, k, now)) {
+                stand = true;
+                if (s == m_predSid) predStands = true;
             }
         }
         const uint32_t late = stand ? 0u : (r.stamp != 0u && now - r.stamp <= kGlanceTurns) ? 1u : 2u;
-        const bool pin = (r.flags & kFloorBit) ||
-                         (settleExact ? (r.stamp == now && (r.mask & m_pinMask))
-                                      : (r.pinFrame != 0u && r.pinFrame == m_pinSpoke));
+        const bool pin = (r.flags & kFloorBit) || StandingAny(r, now, m_pinMask);
         if (late == 1) m_nextExpiry = (std::min)(m_nextExpiry, r.stamp + kGlanceTurns + 1u);
-        if (r.predUntil >= now) m_nextExpiry = (std::min)(m_nextExpiry, r.predUntil + 1u);
+        if (predStands) m_nextExpiry = (std::min)(m_nextExpiry, m_sampLast[m_predSid] + m_predLead + 1u);
         if (!(r.flags & kHeldBit) && !pin && late == 2) {
             r.flags |= kForgetBit;   // leaves the order if it is not busy (its state, below)
             r.bucket = kNoBucket;
             continue;
         }
-        r.weight = StandingWeight(r, now, m_predSid, m_predLead, live);   // H5
+        r.weight = StandingWeight(r, now, m_predSid, m_predLead, m_sampLast, m_stNum);   // H5
         const float meas = PassMeasure(r.texel, r.weight, countsHeld, margin);
         memcpy(&r.meas, &meas, sizeof(r.meas));
         r.bucket = static_cast<uint16_t>(((pin ? 0u : 1u) * 3u + late) * kRungs + MeasureBucket(meas));
@@ -1230,7 +1259,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     // ---- THE READERS' STATEMENTS: one that spoke this turn and said something else is an event.
     bool spoke = false;
     for (int s = 0; s < kMaxSamplers; ++s) {
-        if (m_stFrame[s] != m_frame) continue;
+        if (m_stFrame[s] != m_frame) continue;   // (a statement repeated this turn is no event)
         if (m_stHash[s] != m_stHashLatest[s]) {
             spoke = true;
             L.spoke |= 1u << s;   // H1: who said something else
@@ -1238,11 +1267,15 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         m_stHashLatest[s] = m_stHash[s];
     }
     // F12: ...and one that said something last time and is silent while another speaks has said
-    // something else too: nothing. The order is made again without its statement.
+    // something else too: nothing. The order is made again without its statement; its number
+    // moves, so nothing it said stands, and it cannot repeat (it speaks anew).
     if (m_lastSpoke == m_frame) {
         for (int s = 0; s < kMaxSamplers; ++s) {
-            if (s == m_predSid || m_stFrame[s] == m_frame || m_stHashLatest[s] == 0ull) continue;
+            if (s == m_predSid || m_stFrame[s] == m_frame || m_stRepeat[s] == m_frame || m_stHashLatest[s] == 0ull) continue;
             m_stHashLatest[s] = 0ull;
+            ++m_stNum[s];
+            m_stEnd[s] = m_frame;
+            m_stBroken[s] = true;
             spoke = true;
             L.spoke |= 1u << s;
         }
@@ -1250,6 +1283,15 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     const bool dirty = spoke || passTurns == 0 || m_trackEpoch != m_passEpoch ||
                        m_failEvents != m_passFails || m_claimEvents != m_passClaims ||
                        m_frame >= m_nextExpiry || settleExact != m_passHold;
+    if (dirty) {   // why (every reason that held, not the first)
+        for (int s = 0; s < kMaxSamplers; ++s) passWhySpoke[s] += (L.spoke >> s) & 1u;
+        passWhyFirst += passTurns == 0;
+        passWhyEpoch += m_trackEpoch != m_passEpoch;
+        passWhyFail += m_failEvents != m_passFails;
+        passWhyClaim += m_claimEvents != m_passClaims;
+        passWhyExpiry += m_frame >= m_nextExpiry;
+        passWhyHold += settleExact != m_passHold;
+    }
     L.pass = dirty ? 1u : 0u;
     if (dirty) OrderPass(L);
     else ++passSkipped;
@@ -1567,8 +1609,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             uint32_t magnified = 0;
             for (const auto& sp : t.tracked) {
                 const Tracked* tr = sp.get();
-                const size_t idx = StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y);
-                const bool w = (t.stamp[idx] >> 1) == m_frame;
+                const bool w = tr->rec != UINT32_MAX && StandingAny(m_rec[tr->rec], m_frame);
                 const bool held = tr->state == TileState::Mapped && tr->landed;
                 if (w) {
                     ++wanted;

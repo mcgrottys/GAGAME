@@ -172,3 +172,30 @@ test tree's.
 
 Licences travel in the manifests: OSM ODbL 1.0; NBI US public domain; NOAA ENC usable for any
 purpose (15 CFR 995), not redistributed as provided.
+
+## 8. The deck and the ramp (2026-10-11)
+
+A bridge way used to lie on the riverbed: its ribbon rode the ground like any road. Now a ribbon
+rides the ground PLUS ITS OWN PROFILE, and a bridge's profile is its surveyed clearance.
+
+- **The tree writes the profile** (`compose/BuildingLod.cpp DeckProfiles`, a cell at a time with a
+  margin of its neighbours): the scene's sources of kind `"bridges"` (NBI, NOAA ENC; GABRDG01) are
+  read for the cell and matched to its bridge ways by overlap (`MatchBridges`, section 4); a bridge
+  way's deck is the span's navigation clearance (over water), else the clearance under it, plus
+  `deckDepth`; with no span, `bridgeClearance`. From each end of the deck the approaches ramp down
+  at `rampGrade` along the ways that join there -- through a junction of exactly two ways, a road's
+  own continuation, stopping at any other -- until the ramp has reached the ground. The profile is
+  the ribbon's z[] on disk (`shape::kDeck`), its slab `deckDepth` deep (the clearance is to the
+  underside, the road rides on top).
+- **The stand adds the ground** (`BuildingLayer::StandBatch`): a vertex with a profile stands that
+  high above the higher of the ground and the sea -- the surface a deck is measured from -- and a
+  vertex without stands on the ground. One law for a road and a bridge.
+- The keys, `layers.buildings.{rampGrade, deckDepth, bridgeClearance}` (0.06, 1 m, 5 m), are the
+  scene's assumptions, like the lane width. Tunnels are still not drawn.
+
+Measured at Newburyport (`scenes/demos/newburyport_roads.json`, the test tree rebuilt in 0.7 s):
+230 bridge ways in the box, 31 with a surveyed clearance, 249 approach ways ramped. From the river
+downstream of the Gillis Bridge, the road deck and the railway bridge beside it stand over the
+water on their own clearances (10.6 m and 3.9 m from the chart), their undersides showing; from
+the water under the approach the deck's slab rises away at the grade. The planet tree
+(`scenes/demos/earth.json`) lists the surveys now and takes them at its next build.

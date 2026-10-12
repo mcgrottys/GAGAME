@@ -20,11 +20,15 @@
 #include "hal/Gpu.h"
 #include "hal/Shader.h"
 
+#include <vector>
+
 namespace ga {
 
 class FieldSet;
 class Camera;
 class GpuProfiler;
+struct SceneConstants;
+struct ComposedSurfaceCb;
 
 struct FrameContext {
     Gpu* gpu = nullptr;
@@ -46,6 +50,15 @@ struct FrameContext {
     // it, and it is deliberately NOT re-keyed here: set B stays set B until a scene declares a
     // second view, so this step cannot move a pixel through it.
     uint32_t viewIndex = 0;
+    // THE KEPT FRAME (GlobeLayer.h Keep): the view's rectangle in the frame, the frame's size and
+    // its targets, and the constants the view draws with -- what a layer keys its last picture by
+    // and where it comes back to after drawing into its own.
+    uint32_t viewX = 0, viewY = 0, frameW = 0, frameH = 0;
+    D3D12_CPU_DESCRIPTOR_HANDLE colorRtv{}, depthDsv{};
+    GpuTexture* depthTex = nullptr;   // the frame's depth, for a layer that copies it beside its cache
+    const SceneConstants* constants = nullptr;
+    const ComposedSurfaceCb* surface = nullptr;
+    const std::vector<float>* worldPack = nullptr;
 };
 
 class Layer {

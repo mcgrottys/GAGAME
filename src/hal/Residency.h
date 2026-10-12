@@ -88,6 +88,20 @@ public:
     // `pin` (step 5): the reader stands, as a solver's domain does, and what it asks for is the
     // order's first class (HIERARCHY 4.19). Asking once with it marks the sampler for the run.
     int Sampler(const char* name, bool pin = false);
+    // THE STATEMENT REPEATED (2026-10-11, the owner's settled mode: "when settled it can wait for
+    // messages"). A reader whose inputs have not moved says its last statement AGAIN with one call,
+    // and names no tile: its statement stands by its NUMBER. Every record carries, per reader, the
+    // number of the statement it was last said in (OrdRec::sstmt); a reader's current number
+    // (m_stNum) moves when it speaks anew, or when it is silent while another speaks (F12). So the
+    // order's "whose statement stands" is a comparison of numbers, not of frames, and a still
+    // reader costs the order nothing a frame. Returns false when nothing stands to repeat -- the
+    // reader has not spoken, fell silent, or a tile it named was untracked since (the cut's
+    // release, an invalidation, a tenant dropped: RecDrop breaks the statement) -- and the caller
+    // then speaks anew (walks). The prediction's statement is repeated too; it stands for its lead
+    // from the frame it was last asserted.
+    bool Repeat(int sampler);
+    int PredictedSampler() const { return m_predSid; }
+    uint64_t repeatCalls = 0, repeatRefused = 0;
     int Samplers() const { return static_cast<int>(m_samplers.size()); }
     const char* SamplerName(int id) const {
         return (id >= 0 && id < Samplers()) ? m_samplers[id].c_str() : "?";
@@ -145,6 +159,15 @@ public:
     // Tiles known but not yet mapped. The warm-cache loop drains this to zero before the camera
     // ever moves. The tiles of the order's first P not held yet, whatever they wait on.
     uint32_t PendingCount() const { return m_orderPending; }
+    // THE GENERATION (2026-10-11): moves when a turn changed what is resident -- a tile mapped,
+    // landed, let go or dropped. A reader whose inputs have not moved either may keep its last
+    // walk (GlobeLayer::SetView) and name the same tiles again.
+    uint64_t Generation() const { return m_gen; }
+    // ... and one tenant's alone: its map rewritten (ApplyChanged) or a held tile's bytes replaced
+    // (a refill). A reader that keeps a picture of some tenants keys it by theirs, not by the cache's.
+    uint64_t Generation(int tenant) const {
+        return (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) ? m_tenants[tenant].gen : 0ull;
+    }
     // Tiles mapped in the pool, every tenant (a DirectStorage tile counts from its map, before its
     // bytes land). The solver's bed wait reports the tiles it waited for as the growth of this.
     uint32_t MappedCount() const { return static_cast<uint32_t>(m_mapped.size()); }
@@ -461,9 +484,12 @@ public:
         uint32_t landedOnly = 0;    // 1: tiles landed and no batch was mapped this turn
         uint32_t barriered = 0;     // tenants transitioned back to shader reads after the copies
         uint32_t stageFree = 0, stageRetiring = 0, inFlightTiles = 0;   // after the turn
+        uint32_t invalidations = 0, refills = 0, changed = 0, mapsUp = 0;   // the quiet turn's test
     };
     TurnLedger turn;
     uint64_t ringNoBytesTotal = 0, landedUnownedTotal = 0, landedOnlyTurns = 0;
+    uint64_t m_gen = 1;              // Generation(): the turn's changes, counted
+    size_t m_genMapped = 0;
     // Step 5: what the order's turn decided (OrderTurn), printed under the [res-turn] line. A
     // tile LET GO had its load finish after it left the first P: its bytes (letGoRead) or its
     // archive place were dropped in that turn, never mapped (law 4).
@@ -491,6 +517,26 @@ public:
     // Decision 5: the order's pass runs on events only. Its turns, the turns it skipped, the
     // entries it ordered and its time by part: statements, candidates, sort + cut, release + forget.
     uint64_t passTurns = 0, passSkipped = 0, passEntries = 0;
+    // THE QUIET TURN (2026-10-11): a turn in which nothing landed, nothing was mapped or refilled,
+    // no invalidation arrived, no footprint changed and the order's pass did not run -- the turn
+    // a still scene pays for nothing. Its phases, summed over quiet turns alone, are the cost of
+    // the manager's standing; and the pass's reasons, counted, say what wakes it.
+    uint64_t quietTurns = 0;
+    double quietPhaseMs[kPhases] = {};
+    uint64_t passWhySpoke[kMaxSamplers] = {}, passWhyEpoch = 0, passWhyFail = 0, passWhyClaim = 0,
+             passWhyExpiry = 0, passWhyHold = 0, passWhyFirst = 0;
+    // SINCE THE HOLD WAS EXACT: the counters as they stood on the first exact turn, so the exit
+    // line can say what the settled regime alone cost (a run's loading phase varies run to run).
+    struct Since {
+        uint32_t frame = 0;   // 0: never exact
+        uint64_t passTurns = 0, passSkipped = 0, quietTurns = 0, reads = 0, aliases = 0, refills = 0;
+        uint64_t mapped = 0, released = 0, letGo = 0, invalidations = 0;
+        uint64_t whySpoke[kMaxSamplers] = {}, whyEpoch = 0, whyFail = 0, whyClaim = 0, whyExpiry = 0;
+        double turnMsSum = 0.0, quietPhaseMs[kPhases] = {};
+    };
+    Since sinceExact;
+    double turnMsSum = 0.0;
+    uint64_t invalidationsTotal = 0;
     double passMs[4] = {};
     // ...inside passMs[2]: the sort of the first P not held, its length, and where the loader stopped.
     double passSortMs = 0.0;
@@ -698,6 +744,7 @@ private:
         uint32_t resMapSrvCube = UINT32_MAX;   // M9ap
         std::vector<std::vector<uint8_t>> resCpu;   // per face/page
         bool resDirty = false;
+        uint64_t gen = 0;   // Generation(tenant): moved when this tenant's map or held bytes changed
         // THE VERSION BIT (the wave roll): a tenant whose bytes are decoded by a table that
         // changes with its identity says, in the low bit of every map byte, whether the tile the
         // byte names holds the PREVIOUS identity's bytes (stale, its refill on the way). The
@@ -1071,12 +1118,29 @@ private:
         static constexpr int kSlots = 4;
         int8_t ssid[kSlots] = {-1, -1, -1, -1};
         uint32_t sstamp[kSlots] = {}, sweight[kSlots] = {};
+        uint32_t sstmt[kSlots] = {};   // the reader's statement number it was last said in (Repeat)
     };
-    static int SlotFor(const OrdRec& r, int sid);   // H5: the reader's slot, a free one, or the oldest
-    static void SlotApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits);
+    // H5: the reader's slot, a free one, or the oldest whose statement does not stand (stNum: each
+    // reader's current statement number; a standing slot is evicted only when all four stand).
+    static int SlotFor(const OrdRec& r, int sid, const uint32_t* stNum);
+    static void SlotApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t stmt, uint32_t wbits,
+                          const uint32_t* stNum);
     // H5: the distance the pass measures from: the nearest over the standing statements.
     static uint32_t StandingWeight(const OrdRec& r, uint32_t now, int predSid, uint32_t predLead,
-                                   const uint32_t* sampLast);
+                                   const uint32_t* sampLast, const uint32_t* stNum);
+    // THE STANDING TEST (Repeat): slot k of r stands when its reader's current statement is the one
+    // it was said in; the prediction's for its lead from the frame it was last asserted.
+    bool Stands(const OrdRec& r, int k, uint32_t now) const {
+        const int s = r.ssid[k];
+        if (s < 0 || r.sstmt[k] != m_stNum[s]) return false;
+        return s != m_predSid || m_sampLast[s] + m_predLead >= now;
+    }
+    bool StandingAny(const OrdRec& r, uint32_t now, uint16_t readers = 0xFFFFu) const {
+        for (int k = 0; k < OrdRec::kSlots; ++k) {
+            if (r.ssid[k] >= 0 && ((readers >> r.ssid[k]) & 1u) && Stands(r, k, now)) return true;
+        }
+        return false;
+    }
     // H2's closure by events (the law of MarkAboveHeld, walked only from where it can break): the
     // held-state changes since the last pass, and the held tiles whose parent was not held then.
     std::vector<std::pair<int, TileRequest>> m_edgeNotes, m_orphans;
@@ -1117,6 +1181,13 @@ private:
     // A reader silent in a turn when another spoke has said nothing: its statement stands no more.
     uint32_t m_lastSpoke = 0;
     uint32_t m_stFrame[kMaxSamplers] = {};    // a reader's statement: its frame and its hash
+    // THE STATEMENT'S NUMBER (Repeat): moved by a reader speaking anew (OrderNote's first mark of a
+    // frame) or falling silent (OrderTurn, F12); the frame the previous one ended; the frame it was
+    // last repeated; and whether it can still be repeated (false once a tile it named was untracked
+    // or it fell silent -- RecDrop and F12 set it, a new statement clears it).
+    uint32_t m_stNum[kMaxSamplers] = {}, m_stEnd[kMaxSamplers] = {}, m_stRepeat[kMaxSamplers] = {};
+    bool m_stBroken[kMaxSamplers] = {};
+    uint64_t m_repeatsOf[kMaxSamplers] = {};
     uint64_t m_stHash[kMaxSamplers] = {}, m_stHashLatest[kMaxSamplers] = {};
     std::vector<std::pair<int, TileRequest>> m_failedKeys;   // failed or not whole, for the pass
     void OrderNote(Tenant& t, uint32_t rec, int tenant, int sid, uint32_t stampFrame, uint32_t face,

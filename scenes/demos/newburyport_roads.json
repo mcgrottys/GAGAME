@@ -4,7 +4,8 @@
     "roads harvest (harvester/cpp/planet_roads) filed as ribbons beside the building solids in one",
     "folded tree, each riding the composed ground, as wide as its file says or the layer's declared",
     "laneWidth x lanes. Tunnels are not drawn; bridges stand on the ground until the clearance",
-    "surveys give them a deck.",
+    "surveys give them a deck: the sources of kind \"bridges\" (NBI, NOAA ENC) match the bridge ways by",
+    "overlap, the deck stands at the clearance plus its depth, and the approaches ramp down at rampGrade.",
     "",
     "Build the tree first (a box about the town, a minute):",
     "  build/bin/gagame.exe scenes/demos/newburyport_roads.json --tool building-lod:-70.95,42.77,-70.80,42.87",
@@ -17,7 +18,8 @@
   "layers": [
     {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
      "lod": "D:/DataCache/OSM/roads/test-newburyport.tree",
-     "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12}
+     "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12,
+     "rampGrade": 0.06, "deckDepth": 1.0, "bridgeClearance": 5.0}
   ],
   "sources": [
     {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
@@ -27,6 +29,8 @@
     {"name": "overture.unattributed", "kind": "buildings", "over": 2, "manifest": "D:/DataCache/Overture/buildings/massachusetts-unattributed.buildings.json"},
     {"name": "overture.esri", "kind": "buildings", "over": 3, "manifest": "D:/DataCache/Overture/buildings/massachusetts-esri_community_maps.buildings.json"},
     {"name": "overture.lidar", "kind": "buildings", "over": 4, "manifest": "D:/DataCache/Overture/buildings/massachusetts-usgs_lidar.buildings.json"},
-    {"name": "osm.roads.ma", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/ma-roads-loc.roads.json"}
+    {"name": "osm.roads.ma", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/ma-roads-loc.roads.json"},
+    {"name": "nbi.2025", "kind": "bridges", "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"},
+    {"name": "noaa.enc", "kind": "bridges", "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"}
   ]
 }

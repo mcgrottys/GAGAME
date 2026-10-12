@@ -2193,6 +2193,28 @@ void FrameLoop::PublishBuildingWorlds() {
     };
     bl->SetWorlds(0, worldsOf(m_cam, m_windows));
     bl->SetWorlds(1, m_minimapDrawn ? worldsOf(m_minimap.Cam(), m_minimapChain) : std::vector<BuildingLayer::WorldEye>{});
+    // ...and each eye's occluder: the renderer's grid two frames back, with its camera's basis.
+    for (uint32_t v = 0; v < BuildingLayer::kEyes; ++v) {
+        const Renderer::Occluder* ro = m_A.renderer.OccluderOf(v);
+        if (!ro) {
+            bl->SetOccluder(v, nullptr);
+            continue;
+        }
+        auto o = std::make_shared<BuildingLayer::Occluder>();
+        o->w = ro->w;
+        o->h = ro->h;
+        o->dist = ro->dist;
+        o->eye[0] = ro->cam.px; o->eye[1] = ro->cam.py; o->eye[2] = ro->cam.pz;
+        DirectX::XMFLOAT3 f, r, u;
+        ro->cam.ViewBasis(f, r, u);
+        o->fwd[0] = f.x; o->fwd[1] = f.y; o->fwd[2] = f.z;
+        o->right[0] = r.x; o->right[1] = r.y; o->right[2] = r.z;
+        o->up[0] = u.x; o->up[1] = u.y; o->up[2] = u.z;
+        o->tanX = ro->tanX;
+        o->tanY = ro->tanY;
+        o->nearZ = ro->cam.nearZ;
+        bl->SetOccluder(v, std::move(o));
+    }
 }
 
 void FrameLoop::PublishHulls() {
@@ -2250,6 +2272,14 @@ bool FrameLoop::Frame() {
     // reader -- the thing a reserve is written against -- while subjects and a gate's window
     // name their own below.
     const int sampView = resMgr.Sampler("view");
+    // The wave planes' and the exposure's readers are their own: a statement is repeated whole or
+    // made anew whole, and the view's walk, the wave window and the exposure's ground move apart.
+    const int sampWaves = resMgr.Sampler("waves");
+    const int sampExposure = resMgr.Sampler("exposure");
+    const auto putBytes = [](std::vector<uint8_t>& d, const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        d.insert(d.end(), b, b + n);
+    };
     // Step 5 D, law 8's table: this frame opens here; each layer names its reads as it draws.
     resMgr.FrameBegin();
     if (!renderer.beforeLayer) {
@@ -3322,9 +3352,20 @@ bool FrameLoop::Frame() {
                     const float fvW = float((oyF + double(m_waveFrame.ny) -
                                              (cam.pz - double(wtabF.orgZ)) * double(wtabF.invCell)) /
                                             16384.0);
-                    for (uint32_t p = 0; p < nPlanes; ++p) {
-                        resMgr.Want(sampView, waveT, 6u + p, wantMip, u0, v0, u1, v1, false,
-                                    float(altV), fuW, fvW);
+                    std::vector<uint8_t> dg;
+                    putBytes(dg, &u0, sizeof(u0)); putBytes(dg, &v0, sizeof(v0));
+                    putBytes(dg, &u1, sizeof(u1)); putBytes(dg, &v1, sizeof(v1));
+                    putBytes(dg, &nPlanes, sizeof(nPlanes)); putBytes(dg, &wantMip, sizeof(wantMip));
+                    putBytes(dg, &altV, sizeof(altV)); putBytes(dg, &fuW, sizeof(fuW)); putBytes(dg, &fvW, sizeof(fvW));
+                    putBytes(dg, &waveT, sizeof(waveT)); putBytes(dg, &m_windowTold, sizeof(m_windowTold));
+                    if (dg == m_wavesDigest && resMgr.Repeat(sampWaves)) {
+                        ++m_wantsRepeated;
+                    } else {
+                        for (uint32_t p = 0; p < nPlanes; ++p) {
+                            resMgr.Want(sampWaves, waveT, 6u + p, wantMip, u0, v0, u1, v1, false,
+                                        float(altV), fuW, fvW);
+                        }
+                        m_wavesDigest = std::move(dg);
                     }
                     if (!m_focusSaid) {   // say what the wave want's focus is, once
                         m_focusSaid = true;
@@ -3874,13 +3915,19 @@ bool FrameLoop::Frame() {
         if (exposureSrc->Valid()) {
             // PHASE B2: the ground the bank's rings reach (+-20 km) about the camera's eye and the
             // outer level's (set B's), at the exposure's grain (rung 3), on the windows.
-            double E[3];
+            double E[3], E2[3] = {0.0, 0.0, 0.0};
             const double camP[3] = {cam.px, cam.py, cam.pz};
             PlanetOf(m_A.surface, camP, E);
-            WantGround(resMgr, m_A.surface, sampView, exposureT, E, 20000.0, 3);
-            if (drosteOuter) {
-                PlanetOf(m_A.surface, drosteOuterCam, E);
-                WantGround(resMgr, m_A.surface, sampView, exposureT, E, 20000.0, 3);
+            if (drosteOuter) PlanetOf(m_A.surface, drosteOuterCam, E2);
+            std::vector<uint8_t> dg;
+            putBytes(dg, E, sizeof(E)); putBytes(dg, E2, sizeof(E2));
+            putBytes(dg, &exposureT, sizeof(exposureT)); putBytes(dg, &m_windowTold, sizeof(m_windowTold));
+            if (dg == m_exposureDigest && resMgr.Repeat(sampExposure)) {
+                ++m_wantsRepeated;
+            } else {
+                WantGround(resMgr, m_A.surface, sampExposure, exposureT, E, 20000.0, 3);
+                if (drosteOuter) WantGround(resMgr, m_A.surface, sampExposure, exposureT, E2, 20000.0, 3);
+                m_exposureDigest = std::move(dg);
             }
         }
     }
@@ -4159,11 +4206,16 @@ bool FrameLoop::Frame() {
         inMs[kInMeshCopy] = static_cast<float>(globe->meshletCopyMs);
         globe->meshletCopyMs = 0.0;
     }
-    if (profOn) {
-        for (int k = 0; k < kInN; ++k) {
-            profInMs[k] += inMs[k];
-            if (profHelm) profInHelmMs[k] += inMs[k];
-        }
+    for (int k = 0; k < kInN; ++k) {   // every measured run (the still's exit line reads them)
+        profInMs[k] += inMs[k];
+        if (profOn && profHelm) profInHelmMs[k] += inMs[k];
+    }
+    if (!m_sinceTaken && resMgr.sinceExact.frame) {   // the hold's first exact turn: the brackets as they stand
+        m_sinceTaken = true;
+        for (int k = 0; k < kProfN; ++k) m_profSince[k] = profMs[k];
+        for (int k = 0; k < kInN; ++k) m_profInSince[k] = profInMs[k];
+        m_frameMsSince = frameMsSum;
+        m_frameNSince = frameMsN;
     }
 
     if (!S.railDirW.empty() && frame >= 150u && opt.bench) {
@@ -4899,7 +4951,26 @@ int FrameLoop::Finish() {
             s += b;
         }
         Log("[perf] slowest frames: %s", s.c_str());
-        Log("[perf] globe.SetView (the walk) %.2f ms a frame on average", m_profMs[7] / (std::max)(1u, frameMsN));
+        Log("[perf] globe.SetView (the walk) %.2f ms a frame on average; %llu walks made, %llu kept (the eye and the view "
+            "unchanged); statements repeated by number: %llu (%llu refused: a tile untracked or a reader silent), the "
+            "prediction's %llu, the loop's own readers' %llu",
+            m_profMs[7] / (std::max)(1u, frameMsN), static_cast<unsigned long long>(globe ? globe->WalksMade() : 0u),
+            static_cast<unsigned long long>(globe ? globe->WalksKept() : 0u),
+            static_cast<unsigned long long>(resMgr.repeatCalls), static_cast<unsigned long long>(resMgr.repeatRefused),
+            static_cast<unsigned long long>(globe ? globe->PredictRepeats() : 0u),
+            static_cast<unsigned long long>(m_wantsRepeated));
+        if (globe) {
+            Log("[globe] the frame kept: %llu drawn plain (the inputs moved), %llu drawn whole with the cache filled (they stood "
+                "a frame), %llu kept (the land from the cache, the water's meshlets drawn) | the key moved by: the records %llu, "
+                "the globe's rows %llu, the scene's %llu, the surface's %llu, the worlds %llu, the levels %llu, the residency %llu, "
+                "the clouds %llu",
+                static_cast<unsigned long long>(globe->keepPlain), static_cast<unsigned long long>(globe->keepFull),
+                static_cast<unsigned long long>(globe->keepKept),
+                static_cast<unsigned long long>(globe->keepWhy[0]), static_cast<unsigned long long>(globe->keepWhy[1]),
+                static_cast<unsigned long long>(globe->keepWhy[2]), static_cast<unsigned long long>(globe->keepWhy[3]),
+                static_cast<unsigned long long>(globe->keepWhy[4]), static_cast<unsigned long long>(globe->keepWhy[5]),
+                static_cast<unsigned long long>(globe->keepWhy[6]), static_cast<unsigned long long>(globe->keepWhy[7]));
+        }
         {   // F21: THE CPU FRAME'S BRACKETS, a frame's mean, every measured run (the rail printed them alone)
             std::string cpu;
             double sum = 0.0;
@@ -4912,6 +4983,91 @@ int FrameLoop::Finish() {
             }
             Log("[cpu] the frame's brackets, a frame's mean (ms): %s | bracketed %.2f of the %.2f ms frame", cpu.c_str(), sum,
                 frameMsSum / frameMsN);
+            {   // the residency turn by phase, a frame's mean, and the order's passes made and skipped
+                std::string ph;
+                for (int k = 0; k < kInPhases; ++k) {
+                    char b[96];
+                    snprintf(b, sizeof(b), "%s%s %.2f", k ? ", " : "", ResidencyManager::PhaseName(k),
+                             m_profInMs[k] / (std::max)(1u, frameMsN));
+                    ph += b;
+                }
+                Log("[cpu]   the residency turn %.2f ms a frame: %s | the order's pass ran on %llu turns, skipped on %llu "
+                    "(no reader said something else, no landing, no failure, no expiry)",
+                    m_profInMs[kInResTurn] / (std::max)(1u, frameMsN), ph.c_str(),
+                    static_cast<unsigned long long>(resMgr.passTurns), static_cast<unsigned long long>(resMgr.passSkipped));
+                std::string q, why;
+                double qsum = 0.0;
+                const double qn = double((std::max)(resMgr.quietTurns, uint64_t(1)));
+                for (int k = 0; k < kInPhases; ++k) {
+                    char b[96];
+                    const double v = resMgr.quietPhaseMs[k] / qn;
+                    qsum += v;
+                    snprintf(b, sizeof(b), "%s%s %.3f", k ? ", " : "", ResidencyManager::PhaseName(k), v);
+                    q += b;
+                }
+                for (int s = 0; s < ResidencyManager::kMaxSamplers; ++s) {
+                    if (!resMgr.passWhySpoke[s]) continue;
+                    char b[64];
+                    snprintf(b, sizeof(b), " %s %llu;", resMgr.SamplerName(s), static_cast<unsigned long long>(resMgr.passWhySpoke[s]));
+                    why += b;
+                }
+                Log("[cpu]   the quiet turn (nothing landed, mapped, refilled, invalidated or changed, no pass): %llu of the turns, "
+                    "%.3f ms each: %s",
+                    static_cast<unsigned long long>(resMgr.quietTurns), qsum, q.c_str());
+                Log("[cpu]   the pass's reasons (a turn may have several): a reader said something else --%s first %llu, "
+                    "tracked set changed %llu, failures %llu, claims %llu, expiry %llu, hold %llu",
+                    why.empty() ? " none;" : why.c_str(), static_cast<unsigned long long>(resMgr.passWhyFirst),
+                    static_cast<unsigned long long>(resMgr.passWhyEpoch), static_cast<unsigned long long>(resMgr.passWhyFail),
+                    static_cast<unsigned long long>(resMgr.passWhyClaim), static_cast<unsigned long long>(resMgr.passWhyExpiry),
+                    static_cast<unsigned long long>(resMgr.passWhyHold));
+                if (m_sinceTaken && frameMsN > m_frameNSince) {   // THE SETTLED REGIME: since the hold was exact
+                    const ResidencyManager::Since& s = resMgr.sinceExact;
+                    const double nf = double(frameMsN - m_frameNSince);
+                    std::string br, ph2, why2;
+                    double bsum = 0.0;
+                    for (int k = 0; k < kProfN; ++k) {
+                        char b[64];
+                        const double v = (m_profMs[k] - m_profSince[k]) / nf;
+                        bsum += v;
+                        snprintf(b, sizeof(b), "%s%s %.2f", k ? ", " : "", kProfName[k], v);
+                        br += b;
+                    }
+                    for (int k = 0; k < kInPhases; ++k) {
+                        char b[96];
+                        snprintf(b, sizeof(b), "%s%s %.3f", k ? ", " : "", ResidencyManager::PhaseName(k),
+                                 (m_profInMs[k] - m_profInSince[k]) / nf);
+                        ph2 += b;
+                    }
+                    for (int sid = 0; sid < ResidencyManager::kMaxSamplers; ++sid) {
+                        const uint64_t d = resMgr.passWhySpoke[sid] - s.whySpoke[sid];
+                        if (!d) continue;
+                        char b[64];
+                        snprintf(b, sizeof(b), " %s %llu;", resMgr.SamplerName(sid), static_cast<unsigned long long>(d));
+                        why2 += b;
+                    }
+                    Log("[settled] since the hold was exact at f%u: %u frames, %.2f ms a frame | brackets: %s | bracketed %.2f",
+                        s.frame, frameMsN - m_frameNSince, (frameMsSum - m_frameMsSince) / nf, br.c_str(), bsum);
+                    Log("[settled]   the turn %.3f ms a frame: %s", (m_profInMs[kInResTurn] - m_profInSince[kInResTurn]) / nf,
+                        ph2.c_str());
+                    Log("[settled]   turns: quiet %llu, the pass ran %llu, skipped %llu | reasons: a reader said something else --%s "
+                        "tracked set changed %llu, failures %llu, claims %llu, expiry %llu | reads issued %llu, refills %llu, "
+                        "slots to held bytes %llu, mapped %llu, released %llu, let go %llu, invalidations %llu",
+                        static_cast<unsigned long long>(resMgr.quietTurns - s.quietTurns),
+                        static_cast<unsigned long long>(resMgr.passTurns - s.passTurns),
+                        static_cast<unsigned long long>(resMgr.passSkipped - s.passSkipped), why2.empty() ? " none;" : why2.c_str(),
+                        static_cast<unsigned long long>(resMgr.passWhyEpoch - s.whyEpoch),
+                        static_cast<unsigned long long>(resMgr.passWhyFail - s.whyFail),
+                        static_cast<unsigned long long>(resMgr.passWhyClaim - s.whyClaim),
+                        static_cast<unsigned long long>(resMgr.passWhyExpiry - s.whyExpiry),
+                        static_cast<unsigned long long>(resMgr.loader.reads - s.reads),
+                        static_cast<unsigned long long>(resMgr.loader.refills - s.refills),
+                        static_cast<unsigned long long>(resMgr.loader.aliases - s.aliases),
+                        static_cast<unsigned long long>(resMgr.mappedTotal - s.mapped),
+                        static_cast<unsigned long long>(resMgr.releasedTotal - s.released),
+                        static_cast<unsigned long long>(resMgr.letGoTotal - s.letGo),
+                        static_cast<unsigned long long>(resMgr.invalidationsTotal - s.invalidations));
+                }
+            }
             Log("[cpu]   the cascade sea on the CPU: %.0f samples a frame, the rotors built %.1f times a frame (F21)",
                 double(OceanCpu::s_samples.load()) / (std::max)(1u, frameMsN),
                 double(OceanCpu::s_rotorBuilds.load()) / (std::max)(1u, frameMsN));
@@ -5118,6 +5274,9 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
         (void)dome;
         (void)win;     // (the first eye's windows were handed over with SetGates and its table)
         (void)rings;   // (and its rings with SetWaterBank)
+        globe->keepOn = m_S.render.keep;
+        globe->keepSunGrainDeg = static_cast<float>(m_S.render.keepSunGrainDeg);
+        globe->keepTideGrainM = static_cast<float>(m_S.render.keepTideGrainM);
         globe->SetView(*e.cam, aspect, e.viewH, t);
     } else {
         const bool w = win && win->n > 0;
@@ -5336,12 +5495,29 @@ void FrameLoop::StandRings(WaterBankLayer* bank, const double at[3], const Surfa
     const int sampB = resMgr.Sampler("bank");
     double E[3];
     PlanetOf(m_A.surface, at, E);
-    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
-        const double texel = bank->BaseTexelM() * double(1 << mR);
-        const int rung = std::clamp(
-            int(std::ceil(std::log2(m_A.surface.cube.GroundRes(0) / texel))), 0, 15);
-        WantGround(resMgr, m_A.surface, sampB, hgtTenant, E, 0.5 * WaterBankLayer::kRingTexels * texel,
-                   rung);
+    std::vector<uint8_t> dg;
+    {
+        const double bt = bank->BaseTexelM();
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(E);
+        dg.insert(dg.end(), b, b + sizeof(E));
+        b = reinterpret_cast<const uint8_t*>(&bt);
+        dg.insert(dg.end(), b, b + sizeof(bt));
+        b = reinterpret_cast<const uint8_t*>(&hgtTenant);
+        dg.insert(dg.end(), b, b + sizeof(hgtTenant));
+        b = reinterpret_cast<const uint8_t*>(&m_windowTold);
+        dg.insert(dg.end(), b, b + sizeof(m_windowTold));
+    }
+    if (dg == m_bankDigest && resMgr.Repeat(sampB)) {
+        ++m_wantsRepeated;
+    } else {
+        for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
+            const double texel = bank->BaseTexelM() * double(1 << mR);
+            const int rung = std::clamp(
+                int(std::ceil(std::log2(m_A.surface.cube.GroundRes(0) / texel))), 0, 15);
+            WantGround(resMgr, m_A.surface, sampB, hgtTenant, E, 0.5 * WaterBankLayer::kRingTexels * texel,
+                       rung);
+        }
+        m_bankDigest = std::move(dg);
     }
     if (hgtTenant >= 0) {
         // PHASE B3: the height tenant's array; the rings read its windows by the rows above.

@@ -313,6 +313,23 @@ const Schema& WaterSchema() {
     return *s;
 }
 
+const Schema& RenderSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.render;
+        Schema* sc = new Schema("render", &p);
+        sc->Bind("keep", p.keep,
+                 "the globe's picture kept while its inputs stand: a kept frame composites the cached land and "
+                 "draws only the meshlets that had water (GlobeLayer.h keepOn)",
+                 H)
+            .Bind("keepSunGrainDeg", p.keepSunGrainDeg, Q::Angle, "deg",
+                  "the sun's grain for the kept frame: the globe is redrawn when the sun has moved by more", H)
+            .Bind("keepTideGrainM", p.keepTideGrainM, Q::Length, "m",
+                  "the tide's grain for the kept frame: the globe is redrawn when the water level has moved by more", H);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& StreamingSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.streaming;
@@ -677,6 +694,9 @@ const Schema& BuildingsLayerSchema() {
             .Bind("pageMB", kBuildings.pageMB, Q::Dimensionless, "1",
                   "the tree's loaded pages' budget on the CPU; over it, the page worth the fewest pixels on screen "
                   "goes first, and never to make room for one worth fewer (the coarse levels are so the floor)", R)
+            .Bind("marginDeg", kBuildings.marginDeg, Q::Angle, "deg",
+                  "the walk's cone reaches this far past the view's edge, so what a turn brings into view has been "
+                  "asked for and stood already", R)
             .Bind("field", kBuildings.field,
                   "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
                   "seen at an angle; needs `lod`", R)
@@ -687,6 +707,13 @@ const Schema& BuildingsLayerSchema() {
                   "a road with neither width nor lanes tagged: the scene's assumption", R)
             .Bind("pathWidth", kBuildings.pathWidth, Q::Length, "m",
                   "a footway, path, cycleway, track or steps with no width tagged", R)
+            .Bind("rampGrade", kBuildings.rampGrade, Q::Dimensionless, "1",
+                  "the approaches to a bridge fall at this grade (rise over run) from the deck to the ground, along the "
+                  "ways joining its ends through junctions of two", R)
+            .Bind("deckDepth", kBuildings.deckDepth, Q::Length, "m",
+                  "a bridge's deck is this deep: its surveyed clearance is to the underside, the road rides on top", R)
+            .Bind("bridgeClearance", kBuildings.bridgeClearance, Q::Length, "m",
+                  "a bridge no clearance survey (sources of kind \"bridges\") knows stands this high over what it crosses", R)
             .Bind("kerb", kBuildings.kerb, Q::Length, "m",
                   "a road's surface stands this much over the composed ground, and its mass as much under it", R);
         return sc;
@@ -778,6 +805,7 @@ const Schema& SceneFileSchema() {
             .Nest("sea", SeaSchema(), &kDoc.sea, "the sea state and the datum")
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
+            .Nest("render", RenderSchema(), &kDoc.render, "the renderer: the kept frame and its grains")
             .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")

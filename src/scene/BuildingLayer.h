@@ -83,7 +83,7 @@ public:
                    Place place, Locate locate, Ground ground);
     // The folded tree (null = none) and the pixels a building needs to be drawn on its own.
     void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 4.0,
-                      double pageMB = 1024.0);
+                      double pageMB = 1024.0, double marginDeg = 5.0);
 
     const char* Name() const override { return "buildings"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields, hal::RootSignature rootSig) override;
@@ -111,6 +111,22 @@ public:
     };
     static constexpr uint32_t kWorlds = 3;
     void SetWorlds(uint32_t eye, std::vector<WorldEye> worlds) { if (eye < kEyes) m_worlds[eye] = std::move(worlds); }
+    // THE OCCLUDER (Renderer::Occluder; the owner, 2026-10-11): the eye's farthest drawn depth by
+    // cell, two frames back, with the camera it was drawn by. A node whose nearest point lies beyond
+    // every cell its sphere covers is hidden -- by the ground, the sea, a hull or a nearer building,
+    // whatever the frame drew -- and asks for nothing. A window world's node is pulled into the true
+    // frame first. Null: no test.
+    struct Occluder {
+        uint32_t w = 0, h = 0;
+        std::vector<float> dist;
+        double eye[3] = {0.0, 0.0, 0.0}, fwd[3] = {0.0, 0.0, 1.0}, right[3] = {1.0, 0.0, 0.0}, up[3] = {0.0, 1.0, 0.0};
+        double tanX = 1.0, tanY = 1.0, nearZ = 0.25;
+    };
+    void SetOccluder(uint32_t eye, std::shared_ptr<const Occluder> o) { if (eye < kEyes) m_occ[eye] = std::move(o); }
+    // THE CONE'S MARGIN (the owner: widen what is loaded a couple of degrees around the view, so a
+    // turn finds its buildings asked for and stood): the walk's cone is the view's half-diagonal
+    // plus this. layers.buildings.marginDeg.
+    double m_marginDeg = 5.0;
 
     size_t ResidentCells() const { return m_cells.size(); }
 
@@ -261,7 +277,7 @@ private:
         std::vector<PageKey> used;
         std::vector<std::shared_ptr<const Page>> hold;   // its pages: their pool ranges stay while it is drawn
         std::shared_ptr<const DrawCpu> cpu;
-        uint64_t nodes = 0, singles = 0, fading = 0;
+        uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0;   // hidden: nodes the occluder cut
         uint64_t cellsVersion = 0;      // the detail cells it skipped were these
         double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
         uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)
@@ -409,6 +425,9 @@ private:
     } m_eyes[kEyes * kWorlds];          // walker (eye, world) at eye * kWorlds + world
     static uint32_t WalkerOf(uint32_t eye, uint32_t world) { return eye * kWorlds + world; }
     std::vector<WorldEye> m_worlds[kEyes];
+    std::shared_ptr<const Occluder> m_occ[kEyes];
+    // What the occluder hid, the last walk of each walker (the instrument).
+    uint64_t m_hidden[kEyes * kWorlds] = {};
     // THE STANDS' STREAM: every eye's asks, each node once at the finest grain and with buildings if
     // any eye wants them, the largest on screen first; a job stands a batch of kStandBatch nodes,
     // kStandInFlight jobs at a time (a warm stand is 0.1 ms, a cold one 2.5: thousands a frame, or
