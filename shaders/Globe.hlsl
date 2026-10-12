@@ -129,6 +129,10 @@ cbuffer GlobeCb : register(b1) {
     // eye of the level the set stands at, as the level table holds it. Read through BankXZ.
     float4 gBankChart[4];
     float4 gBankBChart[4];
+    // THE KEPT FRAME (GlobeLayer.h Keep) -- appended at the END on both sides (priors 22): x = the
+    // meshlet classes' SRV slot, y = 1 on a kept frame (a meshlet whose pixels were all land is not
+    // drawn: the cache has it).
+    uint4  gKeepU;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -1217,7 +1221,10 @@ float CloudMarch(float3 rel, float2 pix, out float3 scat) {
     return T;
 }
 
-float4 PsMain(VsOut i) : SV_Target {
+// THE SURFACE's shading, one pixel: the colour, and whether the pixel is land whole (`land`, for
+// the kept frame's cache; GlobeLayer.h Keep). PsMain and PsMainKeep below are its two entries.
+float4 PsSurface(VsOut i, out float land) {
+    land = 1.0f;
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
     LoadLevel(i.lvl);
@@ -1309,6 +1316,7 @@ float4 PsMain(VsOut i) : SV_Target {
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
                             : max(ComposedLandness(up, pA CS_WC, hpC, gWavesB.w), saturate(i.dry / 0.4f));
+    land = landness;
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
@@ -1702,6 +1710,29 @@ float4 PsMain(VsOut i) : SV_Target {
                                  : float3(lensNearW, 0.0f, 0.0f);
     }
     return float4(col, 1.0f);
+}
+
+float4 PsMain(VsOut i) : SV_Target {
+    float land;
+    return PsSurface(i, land);
+}
+
+// THE KEPT FRAME's entry (GlobeLayer.h Keep): the frame's colour as PsMain's, and beside it the
+// view's cache -- the colour with the pixel's class in its alpha (1 land whole, 0.5 water has a
+// share) -- and the meshlet that drew the pixel (its record index + 1; GlobeClass.hlsl reads both).
+struct GlobeKeepOut {
+    float4 c : SV_Target0;
+    float4 k : SV_Target1;
+    uint m : SV_Target2;
+};
+GlobeKeepOut PsMainKeep(VsOut i) {
+    float land;
+    const float4 c = PsSurface(i, land);
+    GlobeKeepOut o;
+    o.c = c;
+    o.k = float4(c.rgb, land >= 1.0f ? 1.0f : 0.5f);
+    o.m = i.mid + 1u;
+    return o;
 }
 
 // ------------------------------------------------------------------ the sky, from wherever the eye is

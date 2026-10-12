@@ -365,11 +365,15 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.F64("lodPixels", l.lodPixels);
             r.F64("shapePixels", l.shapePixels);
             r.F64("pageMB", l.pageMB);
+            r.F64("marginDeg", l.marginDeg);
             r.Bool("field", l.field);
             r.F64("laneWidth", l.laneWidth);         // the roads in the tree
             r.F64("defaultLanes", l.defaultLanes);
             r.F64("pathWidth", l.pathWidth);
             r.F64("kerb", l.kerb);
+            r.F64("rampGrade", l.rampGrade);
+            r.F64("deckDepth", l.deckDepth);
+            r.F64("bridgeClearance", l.bridgeClearance);
             if (!ok) return false;
             out.layers.push_back(std::move(l));
         }

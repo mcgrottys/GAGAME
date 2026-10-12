@@ -394,10 +394,12 @@ struct BuildingsLayerProps {
     double lodPixels = 1.0;
     double shapePixels = 4.0;        // a building is its own form from here; its moment box below
     double pageMB = 1024.0;          // the loaded pages' budget (CPU); the shape pool on the GPU is fixed
+    double marginDeg = 5.0;          // the walk's cone past the view's edge: what a turn finds already asked
     bool field = true;               // the buildings under a pixel as scalars (compose/BuildingField.h)
     // THE ROADS IN THE SAME TREE (compose/BuildingLod.h RoadRibbonDefaults): the scene's assumptions
     // where a way's file is silent.
     double laneWidth = 3.5, defaultLanes = 2.0, pathWidth = 2.0, kerb = 0.12;
+    double rampGrade = 0.06, deckDepth = 1.0, bridgeClearance = 5.0;   // the decks and their ramps (docs/ROADS.md)
 };
 struct NodeProps {
     std::string name;
@@ -425,6 +427,14 @@ struct PruneSection {
     std::string confirm;
 };
 
+// THE RENDER section: the kept frame (scene/GlobeLayer.h keepOn) and the grains the picture is
+// redrawn at when the sun or the tide moves by more than them.
+struct RenderSection {
+    bool keep = true;
+    double keepSunGrainDeg = 0.01;
+    double keepTideGrainM = 0.001;
+};
+
 // The whole document as one prototype (the lists carry no fields).
 struct SceneDocument {
     std::string base;                 // the inherited scene file; "" = none
@@ -437,6 +447,7 @@ struct SceneDocument {
     SeaSection sea;
     WaterSection water;
     StreamingSection streaming;
+    RenderSection render;
     CaptureSection capture;
     HudSection hud;
     RailsSection rails;

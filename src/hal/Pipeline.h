@@ -204,6 +204,7 @@ struct MeshPipelineDesc {
     // targets
     uint32_t numRenderTargets = 1;
     DXGI_FORMAT rtvFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    DXGI_FORMAT rtvFormat1 = DXGI_FORMAT_UNKNOWN, rtvFormat2 = DXGI_FORMAT_UNKNOWN;   // the second and third targets, when numRenderTargets says so
     uint32_t sampleCount = 1;
 
     // The stream, filled from the fields above, in ZEROED storage: CreatePipelineState receives
@@ -243,6 +244,8 @@ struct MeshPipelineDesc {
         s.dsv.val = dsvFormat;
         s.rtv.val.NumRenderTargets = numRenderTargets;
         s.rtv.val.RTFormats[0] = rtvFormat;
+        if (numRenderTargets > 1) s.rtv.val.RTFormats[1] = rtvFormat1;
+        if (numRenderTargets > 2) s.rtv.val.RTFormats[2] = rtvFormat2;
         s.sample.val = {sampleCount, 0};
         return s;
     }

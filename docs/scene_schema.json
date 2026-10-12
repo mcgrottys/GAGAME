@@ -42,6 +42,7 @@
       { "key": "sea", "type": "object", "field": "none", "schema": "sea", "reload": "hot", "doc": "the sea state and the datum" },
       { "key": "water", "type": "object", "field": "none", "schema": "water", "reload": "hot", "doc": "the water" },
       { "key": "streaming", "type": "object", "field": "none", "schema": "streaming", "reload": "hot", "doc": "residency: scene state" },
+      { "key": "render", "type": "object", "field": "none", "schema": "render", "reload": "hot", "doc": "the renderer: the kept frame and its grains" },
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": false, "reload": "hot", "doc": "rasters that are sources by being files, in any order" },
       { "key": "stations", "type": "list", "field": "none", "element": "station", "named": false, "reload": "hot", "doc": "where a station of the data stands when its file does not say" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
@@ -208,6 +209,11 @@
       { "key": "exposure", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the swell-exposure page (--no-exposure)" },
       { "key": "holdMargin", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1.41421356, "reload": "restart", "doc": "the order's hold margin: a held tile, and a tile above a held tile, count for this times their measure, so a tile gives its slot up only to one larger on the screen by more (HIERARCHY 4.19); 1 is the order without it" },
       { "key": "treeRoot", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "cache/trees", "reload": "restart", "doc": "the folder the tile trees live in; a scratch folder keeps a tool's paints and packs out of the real cache" }
+    ] },
+    { "type": "render", "keys": [
+      { "key": "keep", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "the globe's picture kept while its inputs stand: a kept frame composites the cached land and draws only the meshlets that had water (GlobeLayer.h keepOn)" },
+      { "key": "keepSunGrainDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0.01, "reload": "hot", "doc": "the sun's grain for the kept frame: the globe is redrawn when the sun has moved by more" },
+      { "key": "keepTideGrainM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.001, "reload": "hot", "doc": "the tide's grain for the kept frame: the globe is redrawn when the water level has moved by more" }
     ] },
     { "type": "source", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a label (\"\" = the file's own name)" },
@@ -382,10 +388,14 @@
       { "key": "lodPixels", "type": "number", "field": "f64", "quantity": "1", "unit": "px", "default": 1, "reload": "restart", "doc": "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's" },
       { "key": "shapePixels", "type": "number", "field": "f64", "quantity": "1", "unit": "px", "default": 4, "reload": "restart", "doc": "a building or road piece is drawn as its own form from this many pixels across, and as its moment box (the same volume, centroid and heading) below; 1 = always its form. Tokyo at 9 km: 16.5 ms of buildings at 1, 2.3 ms at 6, the stills alike" },
       { "key": "pageMB", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1024, "reload": "restart", "doc": "the tree's loaded pages' budget on the CPU; over it, the page worth the fewest pixels on screen goes first, and never to make room for one worth fewer (the coarse levels are so the floor)" },
+      { "key": "marginDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 5, "reload": "restart", "doc": "the walk's cone reaches this far past the view's edge, so what a turn brings into view has been asked for and stood already" },
       { "key": "field", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls seen at an angle; needs `lod`" },
       { "key": "laneWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3.5, "reload": "restart", "doc": "a road in the tree (sources of kind \"roads\", docs/ROADS.md) is as wide as its file says, else its lanes times this" },
       { "key": "defaultLanes", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 2, "reload": "restart", "doc": "a road with neither width nor lanes tagged: the scene's assumption" },
       { "key": "pathWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "restart", "doc": "a footway, path, cycleway, track or steps with no width tagged" },
+      { "key": "rampGrade", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.06, "reload": "restart", "doc": "the approaches to a bridge fall at this grade (rise over run) from the deck to the ground, along the ways joining its ends through junctions of two" },
+      { "key": "deckDepth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 1, "reload": "restart", "doc": "a bridge's deck is this deep: its surveyed clearance is to the underside, the road rides on top" },
+      { "key": "bridgeClearance", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 5, "reload": "restart", "doc": "a bridge no clearance survey (sources of kind \"bridges\") knows stands this high over what it crosses" },
       { "key": "kerb", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.12, "reload": "restart", "doc": "a road's surface stands this much over the composed ground, and its mass as much under it" }
     ] },
     { "type": "layer.plain", "keys": [

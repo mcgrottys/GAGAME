@@ -32,8 +32,8 @@ BuildingLayer::~BuildingLayer() {
     for (uint32_t k = 0; k < kEyes * kWorlds; ++k) {   // the instrument: what each walker's last walk drew
         const Eye& e = m_eyes[k];
         if (e.walks) {
-            Log("[buildings] eye %u world %u at the end: %llu walks, the last %u boxes + %u shapes from %zu pages", k / kWorlds, k % kWorlds,
-                static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, e.drawnUsed.size());
+            Log("[buildings] eye %u world %u at the end: %llu walks, the last %u boxes + %u shapes from %zu pages, %llu nodes hidden by what the frame drew", k / kWorlds, k % kWorlds,
+                static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, e.drawnUsed.size(), static_cast<unsigned long long>(m_hidden[k]));
         }
     }
     m_shared->cancel = true;
@@ -53,7 +53,8 @@ void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<con
 }
 
 void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels,
-                                 double pageMB) {
+                                 double pageMB, double marginDeg) {
+    m_marginDeg = marginDeg;
     m_shapePixels = (std::max)(shapePixels, 0.0);
     m_pageBudget = static_cast<uint64_t>((std::max)(pageMB, 1.0) * 1048576.0);
     m_lod = std::move(lod);
@@ -806,6 +807,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         e.drawn.vb = std::move(w.vb);
         e.drawnCells = w.cellsVersion;
         for (const PageKey& k : w.used) m_pageUsed[k] = m_frame;
+        m_hidden[w.eye < kEyes * kWorlds ? w.eye : 0] = w.hidden;
         // The pages the walk wanted, the largest on screen first; the stands likewise.
         e.wants = std::move(w.wants);
         e.stands = std::move(w.stands);
@@ -813,10 +815,10 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         const bool largest = e.drawn.insts > e.walkInstsMax;
         if (largest) e.walkInstsMax = e.drawn.insts;
         if (e.walks <= 3 || e.walks % 50 == 0 || (largest && e.drawn.insts > 200000u)) {
-            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes in %.1f ms (visit %.1f, "
+            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes, %llu hidden, in %.1f ms (visit %.1f, "
                 "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), w.eye / kWorlds, w.eye % kWorlds,
                 static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, static_cast<unsigned long long>(w.singles),
-                static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), w.ms, w.msVisit, w.msSort,
+                static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), static_cast<unsigned long long>(w.hidden), w.ms, w.msVisit, w.msSort,
                 w.msBuf, m_pages.size(), m_pageBytes / 1048576.0, e.wants.size());
         }
     }
@@ -1058,6 +1060,9 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
     struct In {
         double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB, tauS;
         double org[3];   // the walk's origin (the cloud's, at the eye), flat frame: what the instances are about
+        std::shared_ptr<const Occluder> occ;   // the eye's farthest depth by cell, or none
+        Motor pull;                            // a window world's instances into the true frame (identity for the own)
+        bool pulled = false;
         struct KeyHash {
             size_t operator()(const PageKey& k) const {
                 return std::hash<uint64_t>()((uint64_t(uint32_t(std::get<0>(k) + 64)) << 56) ^
@@ -1097,7 +1102,16 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
     in.h = h;
     in.pixAng = double(ctx.camera->fovY) / double(ctx.height);
     const double aspect = ctx.width ? double(ctx.width) / double(ctx.height) : 16.0 / 9.0;
-    in.halfDiag = std::atan(std::tan(0.5 * double(ctx.camera->fovY)) * std::sqrt(1.0 + aspect * aspect));
+    in.halfDiag = std::atan(std::tan(0.5 * double(ctx.camera->fovY)) * std::sqrt(1.0 + aspect * aspect)) +
+                  m_marginDeg * 3.14159265358979323846 / 180.0;   // the cone's margin: a turn finds its buildings asked
+    in.occ = m_occ[eyeIndex / kWorlds];
+    if (eyeIndex % kWorlds) {
+        const uint32_t k = eyeIndex % kWorlds - 1;
+        if (k < m_worlds[eyeIndex / kWorlds].size()) {
+            in.pull = m_worlds[eyeIndex / kWorlds][k].pull;
+            in.pulled = true;
+        }
+    }
     in.shapes = m_psoShape && m_pool.Valid();
     in.cosHalf = std::cos(in.halfDiag);
     in.sinHalf = std::sin(in.halfDiag);
@@ -1140,7 +1154,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             std::set<PageKey> used;
             std::map<PageKey, double> wants;
             std::map<std::pair<PageKey, uint32_t>, StandAsk> stands;
-            uint64_t nodes = 0, singles = 0, fading = 0;
+            uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0;
             PageKey lastUsed{INT32_MIN, 0, 0};
         };
         struct Frontier {
@@ -1224,6 +1238,39 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 const double ca = (v[0] * in.fwd[0] + v[1] * in.fwd[1] + v[2] * in.fwd[2]) / dist;
                 const double sb = nrad / dist, cb = std::sqrt((std::max)(0.0, 1.0 - sb * sb));
                 if (ca < in.cosHalf * cb - in.sinHalf * sb) return;
+            }
+            // BEHIND WHAT THE FRAME DREW: the node's sphere on the occluder's grid (in the true frame,
+            // by the camera the grid was drawn by); hidden when its nearest point lies beyond the
+            // farthest surface of every cell it covers. A sphere reaching past the grid's edge, or
+            // the near plane, is not judged.
+            if (in.occ && in.occ->w) {
+                const Occluder& oc = *in.occ;
+                double p[3] = {nc[0], nc[1], nc[2]};
+                if (in.pulled) in.pull.TransformPoint(p[0], p[1], p[2]);
+                const double q[3] = {p[0] - oc.eye[0], p[1] - oc.eye[1], p[2] - oc.eye[2]};
+                const double dz = q[0] * oc.fwd[0] + q[1] * oc.fwd[1] + q[2] * oc.fwd[2];
+                if (dz - nrad > oc.nearZ) {
+                    const double sx = (q[0] * oc.right[0] + q[1] * oc.right[1] + q[2] * oc.right[2]) / dz;
+                    const double sy = (q[0] * oc.up[0] + q[1] * oc.up[1] + q[2] * oc.up[2]) / dz;
+                    const double hs = 1.2 * nrad / (dz - nrad);   // the sphere's half-size in tan units, a little over
+                    if (sx - hs > -oc.tanX && sx + hs < oc.tanX && sy - hs > -oc.tanY && sy + hs < oc.tanY) {
+                        const int cx0 = (std::max)(0, int(std::floor((sx - hs) / oc.tanX * 0.5 * oc.w + 0.5 * oc.w)));
+                        const int cx1 = (std::min)(int(oc.w) - 1, int(std::floor((sx + hs) / oc.tanX * 0.5 * oc.w + 0.5 * oc.w)));
+                        const int cy0 = (std::max)(0, int(std::floor((-sy - hs) / oc.tanY * 0.5 * oc.h + 0.5 * oc.h)));
+                        const int cy1 = (std::min)(int(oc.h) - 1, int(std::floor((-sy + hs) / oc.tanY * 0.5 * oc.h + 0.5 * oc.h)));
+                        const double nearest = dz - nrad;
+                        bool hidden = true;
+                        for (int cy = cy0; cy <= cy1 && hidden; ++cy) {
+                            for (int cx = cx0; cx <= cx1; ++cx) {
+                                if (double(oc.dist[size_t(cy) * oc.w + cx]) > nearest) { hidden = false; break; }
+                            }
+                        }
+                        if (hidden) {
+                            ++acc.hidden;
+                            return;
+                        }
+                    }
+                }
             }
             // THE RANK BOUND: a building filed here has radius at most Q/4 (BuildingLod's LevelOf), so
             // nothing here or below is wider than half the quad: under lodPixels, the walk stops.
@@ -1370,6 +1417,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 top.nodes += a.nodes;
                 top.singles += a.singles;
                 top.fading += a.fading;
+                top.hidden += a.hidden;
             }
         }
         std::vector<Box>& out = top.out;
@@ -1378,6 +1426,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         w.nodes = top.nodes;
         w.singles = top.singles;
         w.fading = top.fading;
+        w.hidden = top.hidden;
         const auto tV = std::chrono::steady_clock::now();
         w.msVisit = std::chrono::duration<double, std::milli>(tV - t0).count();
         // Far to near FROM THE EYE (the instances are about the walk's origin, the eye a float3 off
@@ -1527,11 +1576,17 @@ void BuildingLayer::StandBatch(std::vector<std::pair<std::shared_ptr<const Page>
                     if (shaped) {
                         const double mx = std::cos(lat * kDeg) * kR * kDeg, my = kR * kDeg;
                         if (sv.head.flags & shape::kRibbon) {
-                            // A RIBBON RIDES THE GROUND: each vertex's height over the centroid's, for the pool.
+                            // A RIBBON RIDES THE GROUND PLUS ITS OWN PROFILE (compose/BuildingShape.h kDeck): each
+                            // vertex's height over the centroid's ground, for the pool -- a deck's or a ramp's
+                            // profile stands over the higher of the ground and the sea, the surface it is
+                            // measured from; a road's (profile zero) is the ground itself.
                             std::vector<uint8_t> z(size_t(sv.head.nVerts) * 2);
+                            const bool deck = (sv.head.flags & shape::kDeck) != 0 && sv.z;
                             for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
                                 const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
-                                const double dz = gAt(lat + y / my, lon + x / mx) - base;
+                                const double g = gAt(lat + y / my, lon + x / mx);
+                                const double zp = deck ? double(sv.z[v]) * 0.1 : 0.0;
+                                const double dz = (zp > 0.0 ? (std::max)(g, 0.0) + zp : g) - base;
                                 const int16_t q = static_cast<int16_t>(std::clamp(std::lround(dz * 10.0), -32767L, 32767L));
                                 std::memcpy(&z[2 * v], &q, 2);
                             }

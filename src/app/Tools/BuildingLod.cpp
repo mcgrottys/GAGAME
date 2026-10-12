@@ -45,12 +45,21 @@ int RunBuildingLod(const Scene& S, const std::string& args) {
             Log("[lod] roads '%s' refused: %s", s.name.c_str(), why.c_str());
         }
     }
-    const RoadRibbonDefaults rd{bl->laneWidth, bl->defaultLanes, bl->pathWidth, bl->kerb};
+    RoadRibbonDefaults rd{bl->laneWidth, bl->defaultLanes, bl->pathWidth, bl->kerb};
+    rd.rampGrade = bl->rampGrade;
+    rd.deckDepth = bl->deckDepth;
+    rd.bridgeClearance = bl->bridgeClearance;
+    // The clearance surveys (sources of kind "bridges"): the decks' heights (docs/ROADS.md).
+    std::vector<BridgeSourceSpec> bridges;
+    for (const scene::SourceProps& s : S.sources) {
+        if (s.kind == "bridges") bridges.push_back({s.name, s.manifest.empty() ? s.file : s.manifest, s.over});
+    }
+    if (!bridges.empty()) Log("[lod] %zu clearance survey%s for the decks", bridges.size(), bridges.size() == 1 ? "" : "s");
     const int threads = static_cast<int>((std::max)(1u, std::thread::hardware_concurrency()));
     Log("[lod] folding every cell%s into the tree at %s (%d threads)", boxed ? " in the box" : "", bl->lod.c_str(), threads);
     LodBuildStats st;
     log.clear();
-    if (!BuildBuildingLod(stack, roads, rd, bl->lod, boxed ? box : nullptr, threads, &st, &log)) {
+    if (!BuildBuildingLod(stack, roads, rd, bl->lod, boxed ? box : nullptr, threads, &st, &log, bridges)) {
         Log("[lod] refused: %s", log.c_str());
         return 2;
     }
@@ -60,6 +69,9 @@ int RunBuildingLod(const Scene& S, const std::string& args) {
         Log("[lod] roads: %llu ways -> %llu ribbon pieces (%llu tunnels left out); lane %.2f m x %.0f, path %.2f m, kerb %.2f m",
             static_cast<unsigned long long>(st.ways), static_cast<unsigned long long>(st.ribbons),
             static_cast<unsigned long long>(st.tunnels), rd.laneWidth, rd.defaultLanes, rd.pathWidth, rd.kerb);
+        Log("[lod] decks: %llu bridge ways (%llu with a surveyed clearance, the rest at %.1f m), %llu approach ways ramped at %.0f %%, the deck %.1f m deep",
+            static_cast<unsigned long long>(st.decks), static_cast<unsigned long long>(st.surveyed), rd.bridgeClearance,
+            static_cast<unsigned long long>(st.ramps), rd.rampGrade * 100.0, rd.deckDepth);
     }
     for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
         Log("[lod]   level %+d (quads of %.0f m): %llu nodes, %llu buildings of their own", L,

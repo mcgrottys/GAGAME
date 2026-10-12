@@ -752,12 +752,31 @@ void ResidencyManager::LogSamplers() const {
     for (int i = 0; i < Samplers(); ++i) sum += m_sampAlone[i];
     Log("[samplers] frame %u: %d readers on one cache", m_frame, Samplers());
     for (int i = 0; i < Samplers(); ++i) {
-        Log("[samplers]   %-16s wanted %6u tiles, %6u of them alone (%5.1f %% shared)",
+        Log("[samplers]   %-16s wanted %6u tiles, %6u of them alone (%5.1f %% shared)%s",
             m_samplers[i].c_str(), m_sampTiles[i], m_sampAlone[i],
             m_sampTiles[i] ? 100.0 * double(m_sampTiles[i] - m_sampAlone[i]) / double(m_sampTiles[i])
-                           : 0.0);
+                           : 0.0,
+            m_stRepeat[i] == m_frame ? " -- its statement repeated, by number" : "");
     }
     Log("[samplers]   %-16s %6u tiles wanted by exactly one reader", "(alone in all)", sum);
+}
+
+bool ResidencyManager::Repeat(int sampler) {
+    const uint32_t stampFrame = m_frame + 1u;   // Want's frame: the turn that follows the wants
+    const int sid = (sampler >= 0 && sampler < kMaxSamplers) ? sampler : 0;
+    if (m_stFrame[sid] == stampFrame) return true;   // it has spoken anew this frame: that stands
+    if (m_stNum[sid] == 0u || m_stBroken[sid]) {      // nothing stands to repeat: speak anew
+        ++repeatRefused;
+        return false;
+    }
+    m_stRepeat[sid] = stampFrame;
+    m_sampLast[sid] = stampFrame;
+    if (sid != m_predSid) m_lastSpoke = (std::max)(m_lastSpoke, stampFrame);
+    if ((m_pinMask >> sid) & 1u) m_pinSpoke = (std::max)(m_pinSpoke, stampFrame);
+    if (m_markFrame == kMarkFrame) Mark(("repeat: " + std::string(SamplerName(sid))).c_str());
+    ++repeatCalls;
+    ++m_repeatsOf[sid];
+    return true;
 }
 
 void ResidencyManager::Track(Tenant& t, const std::shared_ptr<Tracked>& tr) {
@@ -1145,6 +1164,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             q.swap(m_invQ);
         }
         bool compact = false;
+        turn.invalidations = static_cast<uint32_t>(q.size());
         for (const Inv& inv : q) {
             const int tenant = inv.tenant;
             const TileRequest& r = inv.req;
@@ -1309,6 +1329,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         Threads().Submit(Lane::Io, "residency.load", [this, tile] { RunLoad(tile); });
     }
 
+    turn.refills = static_cast<uint32_t>(refills.size());
     if (!batch.empty() || !refills.empty()) MapAndFill(gpu, cl, batch, refills);   // phases 6..8
     // ---- THE BARRIER THE LANDED COPIES NEVER HAD. The landed loop above moves a tenant to
     // COPY_DEST and records the CopyTiles that swizzle its arrived tiles in; the transition back
@@ -1401,11 +1422,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     // WHAT GOES UP IS THE TRUE MAP. The floor law (Residency.h) would stage FloorMap(resCpu)
     // here instead, and was measured unsound under the colour's anisotropic sampler; it is
     // not staged.
+    turn.changed = static_cast<uint32_t>(m_changed.size());
     ApplyChanged();   // law 1: every footprint that changed, from the held set
     uint64_t mapStage = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536;
     for (auto& t : m_tenants) {
         if (!t.resDirty) continue;
         t.resDirty = false;
+        ++turn.mapsUp;
         const uint32_t rdim = t.resMap.width;
         const uint32_t pitch = (rdim + 255u) & ~255u;
         // Every face's placed footprint starts on D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512): the
@@ -1475,8 +1498,32 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                  f.bytes() / 1048576.0);
         stats += fs;
     }
+    // THE GENERATION: anything the turn mapped, landed, let go, dropped or invalidated moves it.
+    if (turn.landedTiles || turn.batch || turn.refills || turn.mapsUp || turn.evicted || turn.reclaimed ||
+        releaseLedger.invalidated || releaseLedger.cut || m_mapped.size() != m_genMapped) {
+        ++m_gen;
+        m_genMapped = m_mapped.size();
+    }
     KeepPoolAhead(gpu);    // the next chunk, off the turn, before the free list runs dry
     turnMs = std::chrono::duration<double, std::milli>(Clock::now() - turn0).count();
+    if (!turn.landedTiles && !turn.batch && !turn.refills && !turn.invalidations && !turn.changed &&
+        !turn.mapsUp && !turn.evicted && !orderTurn.pass) {   // the quiet turn (Residency.h quietTurns)
+        ++quietTurns;
+        for (int k = 0; k < kPhases; ++k) quietPhaseMs[k] += phaseMs[k];
+    }
+    turnMsSum += turnMs;
+    invalidationsTotal += turn.invalidations;
+    if (settleExact && settleTurn.exact && !sinceExact.frame) {   // the first exact turn: the counters as they stand
+        Since& s = sinceExact;
+        s.frame = m_frame;
+        s.passTurns = passTurns; s.passSkipped = passSkipped; s.quietTurns = quietTurns;
+        s.reads = loader.reads; s.aliases = loader.aliases; s.refills = loader.refills;
+        s.mapped = mappedTotal; s.released = releasedTotal; s.letGo = letGoTotal; s.invalidations = invalidationsTotal;
+        for (int k = 0; k < kMaxSamplers; ++k) s.whySpoke[k] = passWhySpoke[k];
+        s.whyEpoch = passWhyEpoch; s.whyFail = passWhyFail; s.whyClaim = passWhyClaim; s.whyExpiry = passWhyExpiry;
+        s.turnMsSum = turnMsSum;
+        for (int k = 0; k < kPhases; ++k) s.quietPhaseMs[k] = quietPhaseMs[k];
+    }
     // The residency audit (ResidencyAudit.cpp): the turn's bytes against its tiles, outside turnMs.
     if (auditEvery && (m_frame % auditEvery) == 0u) LogAudit();
 }
@@ -1677,6 +1724,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         off += 65536;
         ++m_ringTiles;
         SetStale(held.get(), false);
+        ++t.gen;   // the held bytes replaced in place: the tenant's generation (Generation(tenant))
         ++refreshedTotal;
         job->data.clear();
         job->data.shrink_to_fit();
@@ -1725,13 +1773,13 @@ void ResidencyManager::LogPages() const {
         if (t.tracked.empty()) continue;
         std::vector<Cell> cells(size_t(t.faces) * t.mips);
         for (const auto& tr : t.tracked) {
-            const uint32_t st =
-                t.stamp[StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y)];
             const bool mapped = tr->state == TileState::Mapped;
             Cell& c = cells[size_t(tr->req.face) * t.mips + tr->req.mip];
-            if ((st >> 1) == m_frame) {
+            const uint16_t predBit = m_predSid >= 0 ? static_cast<uint16_t>(1u << m_predSid) : 0u;
+            const bool wanted = tr->rec != UINT32_MAX && StandingAny(m_rec[tr->rec], m_frame);
+            if (wanted) {
                 ++c.wanted;
-                if (st & 1u) ++c.predicted;
+                if (!StandingAny(m_rec[tr->rec], m_frame, static_cast<uint16_t>(~predBit))) ++c.predicted;
                 if (mapped) ++c.mapped;
             } else if (mapped) {
                 ++c.held;
@@ -1839,8 +1887,7 @@ void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
             std::string named;
             uint32_t shown = 0;
             for (const auto& tr : t.tracked) {
-                const size_t idx = StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y);
-                if ((t.stamp[idx] >> 1) != m_frame || tr->state == TileState::Mapped) continue;
+                if (tr->rec == UINT32_MAX || !StandingAny(m_rec[tr->rec], m_frame) || tr->state == TileState::Mapped) continue;
                 ++byState[static_cast<int>(tr->state)];
                 ++byMip[tr->req.mip < 64 ? tr->req.mip : 63];
                 if (tr->dropped) ++dropped;
