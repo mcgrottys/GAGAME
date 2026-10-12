@@ -37,12 +37,7 @@ static class Program
             settings.Save();
         }
 
-        var repo = new Repo(settings.RepoRoot);
-        if (!settings.Installed)
-        {
-            using var install = new InstallForm(repo, settings);
-            if (install.ShowDialog() != DialogResult.OK) return;
-        }
-        Application.Run(new MainForm(repo, settings));
+        // The scene bar is the first thing seen; setup is a dropdown there and a banner for what is missing.
+        Application.Run(new MainForm(new Repo(settings.RepoRoot), settings));
     }
 }

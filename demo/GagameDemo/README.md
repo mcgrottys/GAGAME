@@ -13,8 +13,17 @@ dotnet publish demo\GagameDemo -c Release -r win-x64 --self-contained false
 `GAGAME.sln` at the repo root holds this project and `tools\Scriptorium`; the engine itself stays
 a CMake + Ninja build (`build.bat`), and the demo expects that to have run.
 
-## Install form (first run, and `Setup...` later)
+## What opens
 
+The scene bar, always. A banner under it names what a fresh machine still lacks (the engine not
+built, datasets missing, no Google key) with `Build engine` and `Setup...` beside it; `Dismiss`
+hides it until the list changes. `Setup` is a dropdown: cache and limits, the key, the data
+files (each opens the install form scrolled to that section), build the engine (`build.bat`,
+logged in the window), choose another checkout, open the checkout folder.
+
+## Install form (`Setup` dropdown)
+
+- **Checkout.** The repo and whether `build\bin\gagame.exe` exists; `Build engine` runs `build.bat`.
 - **Cache.** The engine reads `cache\` relative to the checkout. `Link` makes that a directory
   junction (`mklink /J`, no admin) to the folder you pick on a big disk. A `cache\` that is already
   a folder with files in it is refused and said so: moving data is the owner's job. `Measure` sizes

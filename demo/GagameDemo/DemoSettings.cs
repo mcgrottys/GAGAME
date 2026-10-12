@@ -8,7 +8,9 @@ namespace GagameDemo;
 public sealed class DemoSettings
 {
     public string RepoRoot { get; set; } = "";
-    public bool Installed { get; set; }
+
+    /// The banner for missing pieces, dismissed for this list of them (it returns when the list changes).
+    public string DismissedBanner { get; set; } = "";
 
     /// The folder the repo's `cache` junction points at ("" = whatever stands there today).
     public string CacheRoot { get; set; } = "";

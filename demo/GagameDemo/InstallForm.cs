@@ -33,9 +33,15 @@ public sealed class InstallForm : Form
     readonly Label _what = new() { AutoSize = true, MaximumSize = new Size(640, 0), Height = 48 };
 
     readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, Dock = DockStyle.Fill, Font = new Font("Consolas", 9f), WordWrap = false };
-    readonly Button _finish = new() { Text = "Finish and open the scenes", AutoSize = true, DialogResult = DialogResult.OK };
+    readonly Button _finish = new() { Text = "Save and close", AutoSize = true, DialogResult = DialogResult.OK };
+    readonly Dictionary<string, GroupBox> _groups = new();
+    readonly Button _build = new() { Text = "Build engine", AutoSize = true };
+    readonly Label _engine = new() { AutoSize = true, Margin = new Padding(3, 7, 3, 3) };
 
-    public InstallForm(Repo repo, DemoSettings settings)
+    public const string SectionCache = "cache", SectionKey = "key", SectionData = "data", SectionCheckout = "checkout";
+
+    /// `section` names the group to scroll into view when the form opens (the Setup dropdown's items).
+    public InstallForm(Repo repo, DemoSettings settings, string? section = null)
     {
         _repo = repo;
         _settings = settings;
@@ -64,18 +70,23 @@ public sealed class InstallForm : Form
 
         Controls.Add(split);
         Controls.Add(buttons);
-        Load += (_, _) => { RefreshCache(); RefreshKey(); RefreshData(); };
+        Load += (_, _) =>
+        {
+            RefreshCache(); RefreshKey(); RefreshData(); RefreshEngine();
+            if (section is not null && _groups.TryGetValue(section, out var g)) top.ScrollControlIntoView(g);
+        };
         FormClosed += (_, _) => { _gauge?.Cancel(); _runner.Dispose(); };
     }
 
     static NumericUpDown Num(decimal min, decimal max, int decimals = 0) =>
         new() { Minimum = min, Maximum = max, DecimalPlaces = decimals, Width = 110, ThousandsSeparator = true };
 
-    static GroupBox Group(string title, Control body)
+    GroupBox Group(string key, string title, Control body)
     {
         var g = new GroupBox { Text = title, Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(10, 6, 10, 8) };
         body.Dock = DockStyle.Fill;
         g.Controls.Add(body);
+        _groups[key] = g;
         return g;
     }
 
@@ -108,10 +119,20 @@ public sealed class InstallForm : Form
 
     Control CheckoutGroup()
     {
-        var built = _repo.EngineBuilt ? "built" : "NOT BUILT: run build.bat in the checkout first (docs/LAUNCH.md, launch-build)";
-        return Group("Checkout", Grid(
+        _build.Click += (_, _) =>
+        {
+            if (!File.Exists(Path.Combine(_repo.Root, "build.bat"))) { Log("[demo] no build.bat in the checkout"); return; }
+            _runner.Start(_repo.BuildStart(), "build.bat");
+        };
+        return Group(SectionCheckout, "Checkout", Grid(
             ("Repo", new Label { Text = _repo.Root, AutoSize = true, Margin = new Padding(3, 7, 3, 3) }),
-            ("Engine", new Label { Text = $"build\\bin\\gagame.exe: {built}", AutoSize = true, Margin = new Padding(3, 7, 3, 3) })));
+            ("Engine", Flow(_engine, _build, Note("build.bat finds Visual Studio by vswhere and builds with CMake + Ninja (docs/LAUNCH.md, launch-build); a few minutes, logged below")))));
+    }
+
+    void RefreshEngine()
+    {
+        _engine.Text = "build\\bin\\gagame.exe: " + (_repo.EngineBuilt ? "built" : "NOT BUILT");
+        _engine.ForeColor = _repo.EngineBuilt ? Color.DarkGreen : Color.Firebrick;
     }
 
     // ------------------------------------------------------------------ cache
@@ -147,7 +168,7 @@ public sealed class InstallForm : Form
         _zoom.Value = _settings.GoogleZoom;
         _ageDays.Value = (decimal)_settings.PruneAgeDays;
 
-        return Group("Cache: where it lives and how much the imagery may fetch", Grid(
+        return Group(SectionCache, "Cache: where it lives and how much the imagery may fetch", Grid(
             ("", Note("The engine reads cache\\ beside its exe's checkout. Point that at a folder on a big disk: Link makes cache\\ a directory junction to it (nothing is moved; a cache folder with files in it is left alone and said so).")),
             ("Folder", Flow(_cachePath, browse, link, gauge)),
             ("Now", _cacheStatus),
@@ -216,7 +237,7 @@ public sealed class InstallForm : Form
         var get = new LinkLabel { Text = "Get a Map Tiles API key", AutoSize = true, Margin = new Padding(3, 7, 3, 3) };
         get.LinkClicked += (_, _) => Open("https://developers.google.com/maps/documentation/tile/get-api-key");
 
-        return Group("Google Map Tiles key", Grid(
+        return Group(SectionKey, "Google Map Tiles key", Grid(
             ("Status", _keyStatus),
             ("Key", Flow(_keyBox, show, save, clear, get)),
             ("", Note($"The engine reads {Repo.KeyVariable} from the process environment, else from HKCU\\Environment, at boot. Save key writes that user variable (what `setx {Repo.KeyVariable} <key>` does) and nothing in the checkout: secrets\\ is gitignored and the key is never logged (length and prefix only). Without a key the Earth keeps its procedural look; imagery is bound by Google's terms."))));
@@ -262,7 +283,7 @@ public sealed class InstallForm : Form
         panel.Controls.Add(_list);
         panel.Controls.Add(_what);
         panel.Controls.Add(Flow(_download, _insert, _source, _stop, refresh, sources, launch));
-        return Group("Data files", panel);
+        return Group(SectionData, "Data files", panel);
     }
 
     void RefreshData()
@@ -332,7 +353,8 @@ public sealed class InstallForm : Form
     {
         _stop.Enabled = on;
         _finish.Enabled = !on;
-        if (!on) RefreshData(); else Selected();
+        _build.Enabled = !on;
+        if (!on) { RefreshData(); RefreshEngine(); } else Selected();
     }
 
     void Log(string line)
@@ -348,7 +370,6 @@ public sealed class InstallForm : Form
         _settings.DayBytes = (double)_dayGb.Value * 1e9;
         _settings.GoogleZoom = (uint)_zoom.Value;
         _settings.PruneAgeDays = (double)_ageDays.Value;
-        _settings.Installed = true;
         _settings.Save();
     }
 }

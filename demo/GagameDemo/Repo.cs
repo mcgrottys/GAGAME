@@ -103,6 +103,27 @@ public sealed class Repo
         return psi;
     }
 
+    /// build.bat: finds Visual Studio by vswhere, configures CMake + Ninja, writes build\bin\gagame.exe.
+    public ProcessStartInfo BuildStart()
+    {
+        var psi = Hidden("cmd.exe");
+        psi.ArgumentList.Add("/c");
+        psi.ArgumentList.Add(Path.Combine(Root, "build.bat"));
+        return psi;
+    }
+
+    /// What a fresh machine still lacks, for the banner: the engine, the key, the datasets the
+    /// shipped scenes read. Empty when nothing is missing.
+    public List<string> Missing()
+    {
+        var m = new List<string>();
+        if (!EngineBuilt) m.Add("engine not built");
+        var data = Datasets.All.Where(d => d.Script is not null && d.Outputs.Length > 0 && !d.Present(this)).ToList();
+        if (data.Count > 0) m.Add(data.Count == 1 ? $"{data[0].Name} missing" : $"{data.Count} datasets missing");
+        if (string.IsNullOrEmpty(ReadKey())) m.Add("no Google key (the Earth keeps its procedural look)");
+        return m;
+    }
+
     /// The tree-prune LIST (changes nothing): what the cache holds and what is stale at this age.
     public ProcessStartInfo PruneListStart(double ageDays)
     {
