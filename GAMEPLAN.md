@@ -1834,3 +1834,20 @@ owed the window and crossed at ~5.5 s, the portal closed at 12.0 s; stills at fr
 the sphere with Haulover's daylight inside it swallowing the boat. Seen and left for Mark's eye:
 the sphere's cap under the waterline shows the far place's BED through the local translucent water
 (the sea surface was crossed before the window), a brown band at the sphere's foot.
+
+**"It sometimes sends us underground, and vehicles fly when it opens" (2026-10-12, later).** Both
+were the ARRIVAL'S HEIGHT. The exit stood on the sea-level sphere at the clicked point, so a click
+on land put the vehicle under the terrain and the ground law threw it out; and `Entity::Carry` kept a
+body's height over its WATER, so the car -- which in the harness sits on the river bed under 11 m
+of the Merrimack -- arrived 11 m under the sand at Haulover and left at 1100 m/s (2190 kn in the
+log). The law now is the seat's own (Update's set-down): a body rides the top of the water-over-bed
+stack, and the carry keeps its KEEL's height over that top, floored by the bed -- the keel stands
+below the top only as far as there is water there to stand in, `keelOver1 = max(keelOver0,
+-max(depth1, 0))`. One expression: a floating boat keeps its draught, a car on the river bed keeps
+its 11 m under, and either sent to a beach lands with its keel on the sand. The exit's own height
+is the same statement at the planet's grain (the composed ground above the sea, the sphere below),
+carried in the record as `toY` so a peer builds the same exit. Harness (GAGAME_CYCLE_AT=10,20 for
+the car, GAGAME_TRAVEL_AT to 25.8960 N -80.1225 E, a 2.6 m beach): the car arrives upright at
++3.2 m rolling at 1 kn, the boat upright and still at +2.7 m, the boat to the inlet afloat at
+0.26 m draught. Before the fix the boat on the beach capsized (heel -178) and the car went to
+2.4e9 m.

@@ -310,6 +310,9 @@ private:
         double x = 0.0, y = 0.0, z = 0.0;    // its centre in that place's flat frame (m)
         double az = 0.0;                     // its heading (deg): the way out at the far end too
         double toLat = 0.0, toLon = 0.0;     // the place it leads to
+        double toY = 0.0;                    // the far centre's height in that place's flat frame (m):
+                                             // the entry's height over the floor the vehicle rides,
+                                             // stood over the far place's floor (TravelTo)
     };
     // A click's travel: the record from the followed vehicle's pose (the sphere travelAheadM
     // ahead of it, at its heading) and the clicked place, then SpawnTravel.

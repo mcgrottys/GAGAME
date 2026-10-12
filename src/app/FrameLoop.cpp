@@ -2039,6 +2039,20 @@ bool FrameLoop::TravelTo(double toLat, double toLon) {
     rec.toLat = toLat;
     rec.toLon = toLon;
     rec.bornUnix = m_simUnix;
+    // THE FAR CENTRE STANDS OVER THE FAR PLACE'S TOP as the near one stands over this place's:
+    // the composed ground where it is above the sea, the sea-level sphere where it is not (the
+    // top of the water-over-bed stack, the seat's surface, at the planet's grain). The carry
+    // keeps a body's height about the centre, and Entity::Carry then seats the keel by the live
+    // surfaces where they answer. (A click on dry land used to put the vehicle under it.) Part of
+    // the record: a peer rebuilds the same exit.
+    auto topAt = [&](double lat, double lon) {
+        const double d2r = 3.14159265358979323846 / 180.0;
+        const double g = (m_A.hgtCh >= 0)
+                             ? double(m_A.compositor.SampleHeightStack(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
+                             : 0.0;
+        return (std::max)(g, 0.0);
+    };
+    rec.toY = rec.y + topAt(rec.toLat, rec.toLon) - topAt(rec.fromLat, rec.fromLon);
     return SpawnTravel(rec);
 }
 
@@ -2053,7 +2067,7 @@ bool FrameLoop::SpawnTravel(const TravelRecord& rec) {
     // point, both at the record's heading -- so the carry is the turn between the two places'
     // frames and a translation, and a body leaves at the heading it had.
     const Motor entry = from.toSpace * scene::Gateway::BoxPose(rec.x, rec.y, rec.z, rec.az, 0.0);
-    const Motor exit = to.toSpace * scene::Gateway::BoxPose(0.0, rec.y, 0.0, rec.az, 0.0);
+    const Motor exit = to.toSpace * scene::Gateway::BoxPose(0.0, rec.toY, 0.0, rec.az, 0.0);
     auto gate = std::make_unique<scene::Gateway>();
     scene::GateProps& gp = gate->Declared();
     gp.name = "travel";
@@ -2071,10 +2085,10 @@ bool FrameLoop::SpawnTravel(const TravelRecord& rec) {
     m_travelGate = gate.get();
     m_gates.push_back(std::move(gate));
     const auto& tp = m_S.hud.minimap;
-    Log("[travel] a portal opens %.1f m ahead of the vehicle at %.5f N %.5f E, heading %.1f, to "
-        "%.5f N %.5f E: radius %.0f m in %.0f s, gone at %.0f s (clock %.0f)",
-        tp.travelAheadM, rec.fromLat, rec.fromLon, rec.az, rec.toLat, rec.toLon, tp.travelRadiusM,
-        tp.travelGrowSec, tp.travelLifeSec, rec.bornUnix);
+    Log("[travel] a portal opens %.1f m ahead of the vehicle at %.5f N %.5f E (centre %+.2f m up), heading %.1f, to "
+        "%.5f N %.5f E (centre %+.2f m up): radius %.0f m in %.0f s, gone at %.0f s (clock %.0f)",
+        tp.travelAheadM, rec.fromLat, rec.fromLon, rec.y, rec.az, rec.toLat, rec.toLon, rec.toY,
+        tp.travelRadiusM, tp.travelGrowSec, tp.travelLifeSec, rec.bornUnix);
     StepTravel();
     return true;
 }
