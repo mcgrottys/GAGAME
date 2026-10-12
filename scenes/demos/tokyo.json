@@ -13,7 +13,7 @@
   "base": "scenes/merrimack.json",
   "scene": {"name": "tokyo", "mode": "world", "view": "city"},
   "hud": {"fps": true},
-  "streaming": {"gisLand": "D:/DataCache/OSM/coastline/land.galand"},
+  "streaming": {"gisLand": "D:/DataCache/OSM/coastline/land-261011.galand"},
   "layers": [
     {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
      "lod": "D:/DataCache/OSM/buildings/planet-261010.tree"}
