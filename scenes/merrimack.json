@@ -82,7 +82,10 @@
     "directStorage": true,
     "colorTrees": true,
     "gisGate": true,
-    "seafloor": true,
+    "_seafloor": "Off (Mark, 2026-10-11): the seafloor relief paints a made-up sediment ramp, and at a coarse tile it stair-stepped sand over the coast. No fake colours for now.",
+    "seafloor": false,
+    "_gisLand": "THE GLOBAL COAST, every scene that inherits this one: OSM's land polygons of 2026-10-11 (harvester/harvest_land_polygons.py). Without it a place outside New England had no survey and its shore was a coarse height test.",
+    "gisLand": "D:/DataCache/OSM/coastline/land-261011.galand",
     "exposure": true
   },
   "capture": {

@@ -1313,9 +1313,19 @@ float4 PsSurface(VsOut i, out float land) {
     // WATER CANNOT STAND ABOVE ITS OWN SURFACE: a fragment the mesh drew over the waterline is dry
     // whatever the mask says of its map point (i.dry, made by SurfaceVertex). At and below the
     // waterline the classifier decides as before; the shore band's 0.4 m grades the edge.
+    // A FACE OVERRIDES THE SURVEY ONLY AS FAR AS THE EYE CAN SEE IT (Mark, 2026-10-11: the coast
+    // "would not spike like that"). A face `dry` metres tall, seen at elevation e, spans dry cos e
+    // on the view plane, which is dry cos e / footPxW pixels; so the band is the larger of the
+    // shore's 0.4 m and the height one pixel can hold, footPxW / cos e. At Tokyo's quay a pixel is
+    // centimetres and the band is the 0.4 m it was; from orbit the face is edge-on, the band grows
+    // past any drawn height, and the survey decides -- the exaggerated relief of a coast cell
+    // kilometres wide stood its whole cell over the survey's sea, in mesh-cell stair steps.
+    const float sinE = saturate(dot(normalize(-i.rel), upT));
+    const float cosE = sqrt(max(1.0f - sinE * sinE, 1e-6f));
+    const float dryBand = max(0.4f, footPxW / cosE);
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : max(ComposedLandness(up, pA CS_WC, hpC, gWavesB.w), saturate(i.dry / 0.4f));
+                            : max(ComposedLandness(up, pA CS_WC, hpC, gWavesB.w), saturate(i.dry / dryBand));
     land = landness;
     float3 n = upT;
     float3 alb;
@@ -1362,7 +1372,10 @@ float4 PsSurface(VsOut i, out float land) {
     // carries no texture at all), so an open-water pixel must not pay for the fetch.
     if (ComposedColorOn() && gStreamF.z < 0.5f && landness > 0.0f) {
         const float3 img = ComposedColor(up, pA CS_WC);
-        alb = lerp(alb, img, landness);
+        // The photo outright, not mixed by landness: a shore pixel's landness already mixes the
+        // land with the water below, and mixing it here as well put the elevation tint (a
+        // made-up colour) into the half of every coast pixel the water does not own.
+        alb = img;
         // The land is the imagery (the owner's law): the surveyed structures' rock -- a hash per
         // 0.7 m cell addressed through the float32 direction, painted over the photo with facet
         // normals -- is gone; the edit mask still decides landness and the structures' geometry.
@@ -1629,14 +1642,16 @@ float4 PsSurface(VsOut i, out float land) {
             const float3 nM = normalize(upT - east * grF.x - north * grF.y);
             const float water = gWavesB.w;
             float3 matAlb = alb;
-            // The wet band is the SEA's: weighted by the mask's water coverage, so ground the survey
-            // calls land is never wet however low it lies -- Tokyo's polders sit below the one
-            // live waterline and came out sand (Mark, 2026-10-10). Flats inside the survey's water
-            // still wet as the tide uncovers them; no opinion leaves the height band alone.
-            if (hp - water < 0.35f) {
+            // WET ONLY WHERE THE DATA SAYS WATER (Mark, 2026-10-11: "only color what we can confirm
+            // is underwater via the mask or bathymetry"). The classifier's own two witnesses, in its
+            // own order: the survey's water coverage where it has an opinion -- so Tokyo's polders,
+            // below the live waterline but land to the survey, stay dry (2026-10-10) -- and with
+            // no survey the bed below the live waterline. A height band above the water and "no
+            // opinion = wet" were guesses, and painted a sand rim wider than any beach.
+            {
                 const float lmW = ComposedLandMask(up, pA CS_WC);
-                const float sea = (lmW >= 0.0f) ? 1.0f - lmW : 1.0f;
-                matAlb = lerp(alb, float3(0.38f, 0.34f, 0.27f), sea);   // wet sand band
+                const float sea = (lmW >= 0.0f) ? 1.0f - lmW : ((hp < water) ? 1.0f : 0.0f);
+                matAlb = lerp(alb, float3(0.38f, 0.34f, 0.27f), sea);   // wet sand, where confirmed
             }
             const float ndlM = saturate(dot(nM, GA_SUN_DIR)) * sunVis;
             // M10 (a pre-existing bug the Droste night found): the sky's ambient here ignored
@@ -1650,7 +1665,7 @@ float4 PsSurface(VsOut i, out float land) {
             // (Its air is the one in front of every globe pixel: the integral below, after the
             // clouds -- not a haze of its own.)
             // M6n: the material weight rides landness too -- a half-emerged flat takes half
-            // the wet-sand treatment, and the shore band grades instead of popping.
+            // the wet-sand treatment, and the shore's edge grades instead of popping.
             col = lerp(col, colNear,
                        (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness);
             lensNearW = (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness;
