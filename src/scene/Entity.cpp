@@ -816,6 +816,32 @@ void Entity::Update(const FrameInfo& fi) {
     // coarser multiple of it, so the boat is as frame-rate independent as before. The
     // leftover quanta are carried, never dropped, so no owed time is lost.
     constexpr int kPerStep = 4;                     // 240 / 4 = 60 Hz
+    // HELD WHERE IT STANDS WHILE ITS WATER IS ABSENT (fast travel, 2026-10-12). Absence is not
+    // flat water, and it is not air either: a hull whose sample answers nothing -- a place a solver
+    // owns and has not answered yet (a window that spun up under it: Boston's, when the eye
+    // arrived after the carry), or a place no tree covers -- gets no buoyancy and no bed, and
+    // fell through the sea and the planet for as long as the solver took. The set-down already
+    // waits for the water to answer before it places a hull; the step waits the same way: no
+    // time passes for the body until its medium exists, and its owed quanta are dropped, not
+    // banked (a minute of owed steps would be a minute of physics in one frame).
+    {
+        double hp[3] = {0.0, 0.0, 0.0};
+        boat->Body().pose.TransformPoint(hp[0], hp[1], hp[2]);
+        const SurfaceSample here = boatSea.At(hp[0], hp[2], simUnix);
+        if (here.valid != !m_heldNoWater) {
+            m_heldNoWater = !here.valid;
+            Log("[vessel] '%s' %s", m_props.name.c_str(),
+                m_heldNoWater ? "is held where it stands: the water under it answers nothing (a solver "
+                                "owns the place and has not answered, or nothing covers it)"
+                              : "steps again: its water answers");
+        }
+        if (m_heldNoWater) {
+            quantaOwed = 0;
+            m_stepMs = 0.0;
+            StepTelemetry(boatSea, simUnix);
+            return;
+        }
+    }
     quantaOwed += quanta;
     const int steps = quantaOwed / kPerStep;
     quantaOwed -= steps * kPerStep;

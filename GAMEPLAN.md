@@ -1851,3 +1851,21 @@ the car, GAGAME_TRAVEL_AT to 25.8960 N -80.1225 E, a 2.6 m beach): the car arriv
 +3.2 m rolling at 1 kn, the boat upright and still at +2.7 m, the boat to the inlet afloat at
 0.26 m draught. Before the fix the boat on the beach capsized (heel -178) and the car went to
 2.4e9 m.
+
+**"The boat got stuck under water" -- Boston (2026-10-12, later still).** Reproduced headless with
+`GAGAME_TRAVEL_AT=60,42.3550,-71.0400`: the carry answered (11.9 m of water), then the eye arrived,
+the weather manager spun up the dormant BOSTON window, and from that frame the point was a solver's
+-- "a place the solver owns and has not answered reports its level ABSENT" -- so the hull had no
+water and no bed and fell through the sea and the planet at 35 kn and rising. Two laws were missing,
+both the engine's own, stated where they were not:
+- A hull whose water answers nothing is HELD where it stands (Entity::Update): the set-down already
+  waits for the water before placing a hull; the step waits the same way, dropping its owed quanta.
+  Absence is not flat water and not air either.
+- An owned window with a consumer steps ON THE FRAME (WeatherManager::Simulate, hung on
+  SeaLayer::Simulate by the loop): a region is answered only by a step recorded on the frame ring,
+  and an owned window advanced on its own upload submits served nothing -- a hull in Boston asked
+  every frame and was never answered. Now a window someone asked this frame (Demanded) records on
+  the frame's list exactly as the external Merrimack one does; one nobody asked advances as before.
+Gate: Boston -- held from the activation until the window's first frame step answered, then
+"steps again: its water answers", afloat at 0.23 m draught in 12 m of water; the inlet and the
+beaches as before; --selftest PASS.

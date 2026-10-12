@@ -1344,6 +1344,13 @@ std::optional<int> FrameLoop::Session() {
         if (swe.Ready() && sea) {
             waveField->SetSweCurrent(&swe, sea->sweCurrentGain);
         }
+        // The owned windows (Boston) step on the frame's list too, when a hull asks them
+        // (WeatherManager::Simulate), in the sea layer's simulate pass beside the external one.
+        if (sea) {
+            sea->onSimulate = [this](const FrameContext& ctx) {
+                if (ctx.cmd && ctx.gpu) m_weather.Simulate(*ctx.cmd, *ctx.gpu, m_simUnix);
+            };
+        }
         // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
         // makes. Nothing between here and there reads either.
