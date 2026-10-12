@@ -430,6 +430,9 @@ The engine after M12 — `docs/ARCHITECTURE.md` is the map, this is the index.
 - `tools/` — the gate harness (`gate_stills.sh`, `gate_compare.sh`, `stills.sh`, `imgdiff.py`,
   `raildiff.py`), `hal_lint.py`, `algebra_lint.py`, the Scriptorium MCP server.
 - `harvester/` — the polite NOAA fetch + fit tooling (stdlib Python).
+- `demo/GagameDemo/` — the .NET launcher to hand out (`GAGAME.sln` holds it with the Scriptorium):
+  an install form for the cache, its limits, the key and the data harvests, then a toolbar that
+  swaps the engine between scenes (`demo/GagameDemo/README.md`).
 - `data/` — generated engine data; `cache/` — raw provider responses (both regenerable).
 
 ## License
