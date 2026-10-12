@@ -273,9 +273,10 @@ bool RunSceneSelfTest() {
         tr.Register("box.test", MakeTestBox);
         tr.Register("rhib.novurania18", MakeRhib18);
         tr.Register("drone.recovery", MakeRecoveryDrone);
+        tr.Register("car.baja", MakeCarBaja);
         const auto kinds = vr.Kinds();
         g.True(kinds == tr.Names(), "Registry<VesselSpec>::Names() == VesselRegistry::Kinds()");
-        g.True(kinds.size() == 3, "three built-in bodies (the barge, the RHIB, the drone)");
+        g.True(kinds.size() == 4, "four built-in bodies (the barge, the RHIB, the drone, the car)");
         for (const std::string& k : kinds) {
             g.True(vr.Knows(k) && tr.Knows(k), "both registries know the kind");
             const VesselSpec a = vr.Build(k), b = tr.Make(k);

@@ -580,10 +580,124 @@ VesselSpec MakeRecoveryDrone() {
     return s;
 }
 
+// ================================================================================================
+//  car.baja -- a 2003 Subaru Baja, lifted and sprung like the Warthog.
+//
+//  The published figures are the Baja's (KBB / TrueDelta / Autopadre, 2003 model year); the wheel
+//  positions and the tyre radius are MEASURED from the model Mark gave as the reference
+//  (D:\Assets\subaru-baja\source\Subaru Baja.glb: centimetres, y up from the ground, +z the front
+//  -- the tail lights are at z = -2.2 m, the turn signals and badge at the front). The geometry
+//  datum is the model's own: the ground under the car, x on its centreline. What makes it a
+//  Warthog is declared and ASSUMED: a 0.25 m lift, 0.35 m of travel on a 1.2 Hz spring, half-critical
+//  damping, 8 kN of shove over four driven wheels, falling to nothing at 32 m/s.
+// ================================================================================================
+VesselSpec MakeCarBaja() {
+    VesselSpec s;
+    s.kind = "car.baja";
+    s.display = "2003 Subaru Baja, lifted 0.25 m and sprung like a Warthog (AWD, four struts)";
+    s.loa = Num::Of(4.910, "m", "TrueDelta / Autopadre 2003 Baja: length 193.3 in");
+    s.beam = Num::Of(1.781, "m", "KBB 2003 Baja: width 70.1 in");
+    s.massDry = Num::Of(3550.0, "lb", "KBB 2003 Baja: curb weight 3,550 lb (TrueDelta 3,545)");
+    const double M = 3550.0 * 0.45359237 + 100.0;
+    s.massLoaded = Num::Of(M, "kg", "DERIVED: curb weight + 100 kg driver and gear (ASSUMED)");
+    // The CG: a stock Baja's sits about 0.55 m up (ASSUMED: a wagon-bodied car), and the lift
+    // raises the body 0.25 m with it; 55 % of the weight is on the front axle (ASSUMED: a flat
+    // four over the front wheels), which puts it 0.27 m ahead of the model's wheelbase midpoint.
+    s.hullMassCentre[0] = 0.0;
+    s.hullMassCentre[1] = 0.55 + 0.25;
+    s.hullMassCentre[2] = 0.135 + 0.05 * 2.657;
+    const double L = 4.910, B = 1.781, H = 1.56;
+    s.inertiaRoll = Num::Of(M / 12.0 * (B * B + H * H), "kg", "ASSUMED: a solid box the body's size, m/12 (B^2+H^2)");
+    s.inertiaPitch = Num::Of(M / 12.0 * (H * H + L * L), "kg", "ASSUMED: a solid box the body's size, m/12 (H^2+L^2)");
+    s.inertiaYaw = Num::Of(M / 12.0 * (B * B + L * L), "kg", "ASSUMED: a solid box the body's size, m/12 (B^2+L^2)");
+    s.seatHeight = Num::Of(0.0, "m", "the tyres touch at full droop, then it settles into its springs");
+
+    // ---- the four struts -------------------------------------------------------------------------
+    // Measured from the model (tyre clusters): wheel centres at x = +-0.71 m, z = +1.463 (front)
+    // and -1.194 (rear) -- a 2.657 m wheelbase against the published 104.3 in = 2.649 -- the tyre
+    // 0.346 m in radius against P225/60R16's 0.338. The strut top is 0.65 m up (ASSUMED). Lifted
+    // 0.25 m: the wheel's static centre is 0.25 m below the model's, so the droop length is
+    // top - (0.346 - 0.25) + the static compression, which the 1.2 Hz spring sets.
+    const double yTop = 0.65, lift = 0.25, R = 0.338, rModel = 0.346;
+    const double mCorner = M / 4.0;
+    const double w12 = 2.0 * 3.14159265358979323846 * 1.2;
+    const double k = w12 * w12 * mCorner;
+    const double x0 = mCorner * 9.80665 / k;
+    const double droop = yTop - (rModel - lift) + x0;
+    const double c = 2.0 * 0.5 * std::sqrt(k * mCorner);
+    auto wheel = [&](const char* name, double x, double z, bool front) {
+        Element w;
+        w.kind = ElementKind::Wheel;
+        w.name = name;
+        w.medium = MediumKind::Air;
+        w.mount.at = Motor::Translation(x, yTop, z);
+        if (front) {
+            // The kingpin: the vertical line through the strut top. Steered by the helm's A/D
+            // (the first jointed element's limit and rate are the helm's).
+            w.mount.jointed = true;
+            w.mount.axisP[0] = x; w.mount.axisP[1] = yTop; w.mount.axisP[2] = z;
+            w.mount.axisD[0] = 0.0; w.mount.axisD[1] = 1.0; w.mount.axisD[2] = 0.0;
+            w.mount.lo = -0.55; w.mount.hi = 0.55; w.mount.rate = 2.5;
+            // The brake pedal: the helm's tilt channel, 0..1, SHIFT, back to 0 when released
+            // (the first tilted element's numbers are the helm's). Its joint line is not used.
+            w.mount.tilted = true;
+            w.mount.tiltLo = 0.0; w.mount.tiltHi = 1.0; w.mount.tiltRate = 4.0; w.mount.tiltReturn = 4.0;
+        }
+        w.wheelRadius = Num::Of(R, "m", "P225/60R16 (Autopadre): 16 in rim + 0.60 x 225 mm = 338 mm; the model's tyre measures 346");
+        w.suspRest = Num::Of(droop, "m", "DERIVED: strut top to the wheel centre at full droop = top - lifted static centre + static compression");
+        w.suspTravel = Num::Of(0.35, "m", "ASSUMED: a Warthog's travel; the spring's cube is its bump stop");
+        w.suspK = Num::Of(k, "1", "DERIVED: N/m, a 1.2 Hz ride on the corner's share of the mass");
+        w.suspC = Num::Of(c, "1", "DERIVED: N s/m, 0.5 of critical on the corner");
+        w.driveForce = Num::Of(2000.0, "1", "ASSUMED: N per wheel, 8 kN over four = 0.48 g: a Warthog's shove (the Baja's 165 hp would be 5 kN at 25 m/s)");
+        w.driveSpeed = Num::Of(32.0, "m/s", "ASSUMED: the drive falls to nothing at 32 m/s (115 km/h)");
+        w.driven = Num::Of(1.0, "1", "KBB: standard all-wheel drive; each wheel its full share");
+        w.tyreMu = Num::Of(0.9, "1", "ASSUMED: a road tyre on a firm surface");
+        w.tyreCorner = Num::Of(12.0, "1", "ASSUMED: 1/rad per newton of load -- 12 N of side force per newton per radian of slip");
+        w.tyreRelax = Num::Of(0.3, "m", "ASSUMED: a road tyre's relaxation length (0.3-0.6 m): the patch's lateral spring is corner x load over this");
+        w.rollRes = Num::Of(0.015, "1", "ASSUMED: a road tyre's rolling coefficient");
+        w.contactSettle = Num::Of(0.01, "m", "ASSUMED: the tread's grip compliance under its share of the weight when braked");
+        s.elements.push_back(w);
+    };
+    wheel("wheel.fl", -0.71, 1.463, true);
+    wheel("wheel.fr", +0.71, 1.463, true);
+    wheel("wheel.rl", -0.71, -1.194, false);
+    wheel("wheel.rr", +0.71, -1.194, false);
+
+    // ---- windage, and the sea --------------------------------------------------------------------
+    Element air;
+    air.kind = ElementKind::Drag;
+    air.name = "windage";
+    air.medium = MediumKind::Air;
+    air.mount.at = Motor::Translation(0.0, s.hullMassCentre[1], s.hullMassCentre[2]);
+    air.dragArea[0] = Num::Of(5.0, "1", "ASSUMED: side area, 4.9 x 1.0 m above the sills");
+    air.dragArea[1] = Num::Of(8.0, "1", "ASSUMED: plan area");
+    air.dragArea[2] = Num::Of(2.5, "1", "ASSUMED: frontal area, 1.78 x 1.4 m");
+    air.dragCd[0] = Num::Of(1.0, "1", "ASSUMED: bluff side");
+    air.dragCd[1] = Num::Of(1.1, "1", "ASSUMED: bluff plan");
+    air.dragCd[2] = Num::Of(0.45, "1", "ASSUMED: a 2003 crossover's drag coefficient");
+    s.elements.push_back(air);
+    // Driven into the sea it meets the water as a bluff box at axle height; the wheels still find
+    // the bed under the water, and nothing floats it. The drone is the recovery.
+    Element sea;
+    sea.kind = ElementKind::Drag;
+    sea.name = "body in water";
+    sea.medium = MediumKind::Water;
+    sea.mount.at = Motor::Translation(0.0, 0.0, s.hullMassCentre[2]);   // the model's ground line, raised by the lift
+    sea.dragArea[0] = Num::Of(3.0, "1", "ASSUMED: the body's side below the windows");
+    sea.dragArea[1] = Num::Of(6.0, "1", "ASSUMED: the floor");
+    sea.dragArea[2] = Num::Of(2.0, "1", "ASSUMED: the body's front below the bonnet line");
+    sea.dragCd[0] = Num::Of(1.0, "1", "ASSUMED: bluff");
+    sea.dragCd[1] = Num::Of(1.0, "1", "ASSUMED: bluff");
+    sea.dragCd[2] = Num::Of(1.0, "1", "ASSUMED: bluff");
+    s.elements.push_back(sea);
+    return s;
+}
+
 void RegisterBuiltinVessels(VesselRegistry& reg) {
     reg.Register("box.test", MakeTestBox);
     reg.Register("rhib.novurania18", MakeRhib18);
     reg.Register("drone.recovery", MakeRecoveryDrone);
+    reg.Register("car.baja", MakeCarBaja);
 }
 
 }  // namespace ga

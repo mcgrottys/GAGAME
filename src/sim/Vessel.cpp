@@ -458,9 +458,29 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
                 for (int i = 0; i < n; ++i) if (py[i] <= lo + 1e-3) ++keelPts;
             }
         }
-        m_anchor.assign(3 * outlinePts, 0.0);
-        m_anchorOn.assign(outlinePts, 0);
+        // ...and the wheels: one grip anchor each, after the outline points in the table.
+        size_t nWheels = 0;
+        const Element* wheel = nullptr;
+        for (const Element& el : m_spec.elements) {
+            if (el.kind != ElementKind::Wheel) continue;
+            if (!wheel) wheel = &el;
+            ++nWheels;
+        }
+        m_anchor.assign(3 * (outlinePts + nWheels), 0.0);
+        m_anchorOn.assign(outlinePts + nWheels, 0);
+        m_wheels.assign(nWheels, WheelState{});
+        m_kGrip = m_cGrip = 0.0;
+        m_mWheel = (nWheels > 0) ? m_body.mp.mass / double(nWheels) : m_body.mp.mass;
+        if (wheel && nWheels > 0 && wheel->contactSettle.v > 0.0) {
+            const double share = m_mWheel;
+            m_kGrip = share * kG / wheel->contactSettle.v;
+            m_cGrip = 0.8 * std::sqrt(m_kGrip * share);
+            Log("[vessel] %s: %zu wheels, the braked tyre's grip %.3g N/m and %.3g N s/m each (settle %.3f m)",
+                m_spec.kind.c_str(), nWheels, m_kGrip, m_cGrip, wheel->contactSettle.v);
+        }
+        m_groundAsks = nWheels > 0;
         if (by && by->contactSettle.v > 0.0 && keelPts > 0) {
+            m_groundAsks = true;
             m_mContact = m_body.mp.mass / keelPts;
             m_kContact = m_mContact * kG / by->contactSettle.v;
             // 0.4 OF CRITICAL PER POINT, not 1.0. The points act TOGETHER about the roll axis
@@ -476,6 +496,21 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
         }
     }
     return true;
+}
+
+double Vessel::KeelY() const {
+    double keel = 0.0;
+    for (const Element& el : m_spec.elements) {
+        for (const Section& st : el.stations) {
+            for (double y : st.oy) keel = (std::min)(keel, y);
+        }
+        if (el.kind == ElementKind::Wheel) {
+            double top[3];
+            el.mount.Origin(0.0, top);
+            keel = (std::min)(keel, top[1] - el.suspRest.v - el.wheelRadius.v);
+        }
+    }
+    return keel;
 }
 
 void Vessel::Carry(const Motor& K) {
@@ -502,7 +537,7 @@ void Vessel::BedProbePoints(double xz[6]) const {
 
 void Vessel::BedPlane(const WaterSurface& sea, double simUnix) {
     m_bedN[0] = 0.0; m_bedN[1] = 1.0; m_bedN[2] = 0.0;
-    if (!(m_kContact > 0.0)) return;
+    if (!m_groundAsks) return;
     double xz[6];
     BedProbePoints(xz);
     const double h = xz[2] - xz[0];
@@ -911,6 +946,148 @@ Bivector Vessel::Hover(const Element& e, const VesselControls& c) {
     return w;
 }
 
+// ================================================================================================
+//  Wheel - the car's corner: a strut cast onto the bed, and a tyre at its foot.
+//
+//  The raycast vehicle, in this engine's terms (it is what the Warthog is). The strut is a LINE
+//  down the mount's -y; the kingpin is the mount's joint line, so a steered wheel is Attach::Posed
+//  like a steered outboard -- one primitive. The ground is the hull's bed plane (BedPlane: the
+//  secant over the body) with this wheel's own sample for its height, exactly the stations' law.
+//  Where the strut meets it is the contact; the spring, the damper, the drive, the rolling
+//  resistance, the brake's grip and the lateral slip law all act THERE, in the ground's plane,
+//  through one friction cone. Nothing here reads depthM: under water the wheel finds the same bed.
+// ================================================================================================
+Bivector Vessel::Wheel(const Element& e, const WaterSurface& sea, const VesselControls& c, double simUnix) {
+    const size_t wi = m_wheelIdx++;
+    const size_t ai = m_anchorIdx++;
+    if (wi >= m_wheels.size() || ai >= m_anchorOn.size()) return Bivector::Zero();
+    WheelState& ws = m_wheels[wi];
+    uint8_t& on = m_anchorOn[ai];
+    double* anc = &m_anchor[3 * ai];
+    const double R = e.wheelRadius.v;
+    const double droop = e.suspRest.v;
+    // THE HELM'S STEER IS THE OUTBOARD'S ANGLE (Entity::Helm): D commands a negative angle because
+    // the leg kicks the stern the other way. A wheel turns the car the way it points, so D must be
+    // a positive angle about +y here. The same sign the drone's yaw takes.
+    const double q = e.mount.jointed ? -c.steer : 0.0;
+    const Motor posed = e.mount.Posed(q, 0.0);
+    double top[3] = {0.0, 0.0, 0.0}, dB[3] = {0.0, -1.0, 0.0}, fB[3] = {0.0, 0.0, 1.0};
+    posed.TransformPoint(top[0], top[1], top[2]);
+    posed.TransformDir(dB[0], dB[1], dB[2]);
+    posed.TransformDir(fB[0], fB[1], fB[2]);
+    ws.steer = q;
+    ws.load = 0.0;
+    ws.comp = 0.0;
+    for (int k = 0; k < 3; ++k) ws.centre[k] = top[k] + dB[k] * droop;   // full droop until the ground says
+    double topW[3], dW[3] = {dB[0], dB[1], dB[2]}, fW[3] = {fB[0], fB[1], fB[2]};
+    m_body.ToWorld(top, topW);
+    m_body.pose.TransformDir(dW[0], dW[1], dW[2]);
+    m_body.pose.TransformDir(fW[0], fW[1], fW[2]);
+    const SurfaceSample ss = sea.At(topW[0], topW[2], simUnix);
+    if (!ss.valid) {
+        on = 0;
+        m_tel.waterValid = false;
+        return Bivector::Zero();
+    }
+    // The bed under this wheel in the body's frame: the water's plane point less the depth (the
+    // stations' own construction), the normal the body's one bed plane.
+    double sp[3], sn[3];
+    sea.PlaneOf(ss, topW[0], topW[2], sp, sn);
+    const double bedPt[3] = {sp[0], sp[1] - ss.depthM, sp[2]};
+    const double* n = m_bedN;
+    const double dn = dW[0] * n[0] + dW[1] * n[1] + dW[2] * n[2];
+    if (dn >= -1e-6) {   // the strut does not point at the ground (the car is on its side or roof)
+        on = 0;
+        return Bivector::Zero();
+    }
+    const double t = ((bedPt[0] - topW[0]) * n[0] + (bedPt[1] - topW[1]) * n[1] + (bedPt[2] - topW[2]) * n[2]) / dn;
+    const double comp = (std::max)(0.0, droop + R - t);
+    if (comp <= 0.0) {   // the domain: a tyre in the air carries nothing and grips nothing
+        on = 0;
+        return Bivector::Zero();
+    }
+    for (int k = 0; k < 3; ++k) ws.centre[k] = top[k] + dB[k] * (t - R);
+    // THE SPRING IS PROGRESSIVE: k x (1 + (x / travel)^2). The bump stop is the law's own cube, not
+    // a second spring at a threshold. Damped on the strut's rate -- the top's velocity along the
+    // normal over the ray's cosine -- and it pushes, never pulls.
+    double vTop[3];
+    m_body.VelocityAtBody(top, vTop);
+    const double rate = (vTop[0] * n[0] + vTop[1] * n[1] + vTop[2] * n[2]) / dn;
+    const double travel = (e.suspTravel.v > 1e-3) ? e.suspTravel.v : 0.3;
+    const double fn = (std::max)(0.0, e.suspK.v * comp * (1.0 + (comp / travel) * (comp / travel)) + e.suspC.v * rate);
+    // The contact point, and the tyre's frame there: rolling direction in the ground plane, lateral
+    // across it (n x forward).
+    const double pcB[3] = {top[0] + dB[0] * t, top[1] + dB[1] * t, top[2] + dB[2] * t};
+    double pcW[3];
+    m_body.ToWorld(pcB, pcW);
+    const double fdn = fW[0] * n[0] + fW[1] * n[1] + fW[2] * n[2];
+    double fL[3] = {fW[0] - fdn * n[0], fW[1] - fdn * n[1], fW[2] - fdn * n[2]};
+    const double fl = std::sqrt(fL[0] * fL[0] + fL[1] * fL[1] + fL[2] * fL[2]);
+    if (fl < 1e-9) {   // the tyre points straight at the ground: it carries, it cannot roll
+        on = 0;
+        const double fOnly[3] = {n[0] * fn, n[1] * fn, n[2] * fn};
+        return m_body.BodyWrench(fOnly, pcB);
+    }
+    for (int k = 0; k < 3; ++k) fL[k] /= fl;
+    const double lat[3] = {n[1] * fL[2] - n[2] * fL[1], n[2] * fL[0] - n[0] * fL[2], n[0] * fL[1] - n[1] * fL[0]};
+    double vc[3];
+    m_body.VelocityAtBody(pcB, vc);
+    const double vL = vc[0] * fL[0] + vc[1] * fL[1] + vc[2] * fL[2];
+    const double vLat = vc[0] * lat[0] + vc[1] * lat[1] + vc[2] * lat[2];
+    const double v0 = 0.3;   // m/s: the slip angle's and the rolling sign's softening at rest
+    // DRIVE: the one lever (throttle[0]), falling to zero at driveSpeed in the direction it pushes
+    // -- the thruster's shape, the honest first form of a drivetrain's curve.
+    const double thr = c.throttle[0];
+    const double vMax = (e.driveSpeed.v > 0.1) ? e.driveSpeed.v : 30.0;
+    const double along = (thr >= 0.0) ? vL : -vL;
+    const double fDrive = thr * e.driveForce.v * e.driven.v * (std::max)(0.0, 1.0 - (std::max)(along, 0.0) / vMax);
+    const double fRoll = -e.rollRes.v * fn * vL / std::sqrt(vL * vL + v0 * v0);
+    // THE PATCH GRIPS A GROUND POINT (Vessel.h, the anchors) -- in both directions, by two laws
+    // that are one mechanism. Along the rolling direction the BRAKE (the helm's tilt channel,
+    // 0..1) scales the hold, so a braked car stands on a hill instead of creeping down it a step a
+    // frame; released, the anchor follows the contact. Across it the patch is the tyre's carcass:
+    // a spring of tyreCorner x N over the relaxation length sigma, and the anchor relaxes toward
+    // the contact by |vL| dt / sigma as the patch rolls through. At rest that spring holds a
+    // parked car across a camber; rolling, the deflection settles at sigma vLat / |vL| and the
+    // force at -tyreCorner x N x (slip angle): the slip law is this law's limit, not a second one.
+    // (The slip law written as a velocity law chattered at 60 Hz -- its slope at rest was 3.5x the
+    // explicit limit -- saturated the cone at 0.2 and let the brake go: the car crept at 0.37 m/s.)
+    const double b = std::clamp(c.tilt, 0.0, 1.0);
+    if (!on) {
+        for (int k = 0; k < 3; ++k) anc[k] = pcW[k];
+        on = 1;
+    }
+    const double dL = (pcW[0] - anc[0]) * fL[0] + (pcW[1] - anc[1]) * fL[1] + (pcW[2] - anc[2]) * fL[2];
+    const double dLat = (pcW[0] - anc[0]) * lat[0] + (pcW[1] - anc[1]) * lat[1] + (pcW[2] - anc[2]) * lat[2];
+    const double fBrake = -b * (m_kGrip * dL + m_cGrip * vL);
+    const double sigma = (e.tyreRelax.v > 1e-3) ? e.tyreRelax.v : 0.3;
+    const double relax = (std::min)(1.0, std::abs(vL) * m_dt / sigma);
+    const double kLat = e.tyreCorner.v * fn / sigma;
+    // Damped at 0.4 of critical against the wheel's share of the mass while the patch stands, the
+    // damping rolling away with the relaxation (a rolling patch's force is its deflection's).
+    const double cLat = 0.8 * std::sqrt(kLat * m_mWheel) * (1.0 - relax);
+    const double fLat = -(kLat * dLat + cLat * vLat);
+    double ft[3];
+    for (int k = 0; k < 3; ++k) ft[k] = fL[k] * (fDrive + fRoll + fBrake) + lat[k] * fLat;
+    const double ftMag = std::sqrt(ft[0] * ft[0] + ft[1] * ft[1] + ft[2] * ft[2]);
+    const double cone = (std::min)(1.0, e.tyreMu.v * fn / (std::max)(ftMag, 1e-12));
+    for (int k = 0; k < 3; ++k) {
+        ft[k] *= cone;
+        // The anchor rides the cone (along, by the pedal; across, always) and relaxes across.
+        anc[k] = pcW[k] - fL[k] * dL * cone * b - lat[k] * dLat * cone * (1.0 - relax);
+    }
+    const double f[3] = {n[0] * fn + ft[0], n[1] * fn + ft[1], n[2] * fn + ft[2]};
+    if (s_gripTrace) {
+        Log("[grip] wheel %zu comp %.4f rate %+.4f fn %.0f | vL %+.4f vLat %+.4f dL %+.5f dLat %+.5f relax %.3f | drive %+.0f roll %+.0f brake %+.0f lat %+.0f cone %.3f",
+            wi, comp, rate, fn, vL, vLat, dL, dLat, relax, fDrive, fRoll, fBrake, fLat, cone);
+    }
+    m_tel.contactN += fn;
+    ++m_tel.contactPts;
+    ws.load = fn;
+    ws.comp = comp;
+    return m_body.BodyWrench(f, pcB);
+}
+
 Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, double simUnix) {
     Bivector w = Bivector::Zero();
     m_accVol = 0.0;
@@ -923,6 +1100,7 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
     m_tel.contactN = 0.0;
     m_tel.contactPts = 0;
     m_anchorIdx = 0;
+    m_wheelIdx = 0;
     // The bed under the hull, before the stations ask it (beaching): one plane per wrench.
     BedPlane(sea, simUnix);
 
@@ -960,6 +1138,9 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
                 break;
             case ElementKind::Hover:
                 w += Hover(e, c);
+                break;
+            case ElementKind::Wheel:
+                w += Wheel(e, sea, c, simUnix);
                 break;
             case ElementKind::Thruster: {
                 const int i = thrusterIdx++;
@@ -1123,6 +1304,13 @@ void Vessel::WaterPoints(const VesselControls& c, std::vector<double>& xz) const
                 add(atBody);
                 break;
             }
+            case ElementKind::Wheel: {
+                // The strut top's (x, z): the kingpin passes through it, so the steer moves nothing.
+                double atBody[3];
+                e.mount.Origin(e.mount.jointed ? -c.steer : 0.0, atBody);
+                add(atBody);
+                break;
+            }
             default:
                 break;
         }
@@ -1130,7 +1318,7 @@ void Vessel::WaterPoints(const VesselControls& c, std::vector<double>& xz) const
     const double cg[3] = {0.0, 0.0, 0.0};
     add(cg);
     // ...and the bed plane's three probes (beaching), the same doubles BedPlane asks with.
-    if (m_kContact > 0.0) {
+    if (m_groundAsks) {
         double bp[6];
         BedProbePoints(bp);
         for (int i = 0; i < 6; ++i) xz.push_back(bp[i]);
@@ -1235,6 +1423,18 @@ std::vector<std::pair<std::string, const Num*>> VesselSpec::Ledger() const {
         add((p + "hover.speedV").c_str(), e.hoverSpeedV);
         add((p + "hover.yawRate").c_str(), e.hoverYawRate);
         add((p + "hover.tau").c_str(), e.hoverTau);
+        add((p + "wheel.radius").c_str(), e.wheelRadius);
+        add((p + "susp.rest").c_str(), e.suspRest);
+        add((p + "susp.travel").c_str(), e.suspTravel);
+        add((p + "susp.k").c_str(), e.suspK);
+        add((p + "susp.c").c_str(), e.suspC);
+        add((p + "drive.force").c_str(), e.driveForce);
+        add((p + "drive.speed").c_str(), e.driveSpeed);
+        add((p + "drive.share").c_str(), e.driven);
+        add((p + "tyre.mu").c_str(), e.tyreMu);
+        add((p + "tyre.corner").c_str(), e.tyreCorner);
+        add((p + "tyre.relax").c_str(), e.tyreRelax);
+        add((p + "roll.res").c_str(), e.rollRes);
     }
     return v;
 }

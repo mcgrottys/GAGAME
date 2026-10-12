@@ -103,6 +103,17 @@
         "az": 86
       },
       "controller": "helm"
+    },
+    {
+      "name": "car",
+      "vessel": "car.baja",
+      "at": {
+        "x": -436,
+        "alt": 0,
+        "z": -215,
+        "az": 270
+      },
+      "controller": "helm"
     }
   ],
   "interests": [

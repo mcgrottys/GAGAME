@@ -461,13 +461,9 @@ void Entity::Update(const FrameInfo& fi) {
             // sits well above the keel, so placing it at the surface immersed the hull
             // half a metre deeper than it floats and it came up like a cork. The keel
             // depth comes from the spec's own stations, after Build re-referenced them
-            // onto the CG, so it is whatever this hull actually is.
-            double keel = 0.0;
-            for (const Element& el : boat->Spec().elements) {
-                for (const Section& st : el.stations) {
-                    for (double y : st.oy) keel = (std::min)(keel, y);
-                }
-            }
+            // onto the CG, so it is whatever this hull actually is -- and a car's is its tyres
+            // at full droop (Vessel::KeelY), so it lands on them and settles into its springs.
+            const double keel = boat->KeelY();
             const double draft = (boat->Spec().draftStatic.v > 0.0)
                                      ? boat->Spec().draftStatic.v : -keel;
             // The surface in the HULL'S FRAME (WaterSurface::PlaneOf): the sphere under the hull,
@@ -578,7 +574,7 @@ void Entity::StepTelemetry(TreeWater& boatSea, double simUnix) {
             bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
             t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
             t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM, t.contactN, t.contactPts,
-            (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
+            (t.immersedVol < 1e-6 && t.contactPts == 0) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
             t.waterValid ? "" : " NO-WATER",
             vesselLayer ? vesselLayer->PartCount() : 0u);
     }

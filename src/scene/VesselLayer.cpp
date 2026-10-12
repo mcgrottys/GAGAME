@@ -58,10 +58,37 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
         const size_t first = m_cpu.size();
         const Motor hull = frames ? frames[i] * v->Body().pose : v->Body().pose;
         const VesselSpec& spec = v->Spec();
+        size_t wheelIdx = 0;
 
         for (const Element& e : spec.elements) {
             const int pal = static_cast<int>(e.kind);
             switch (e.kind) {
+                case ElementKind::Wheel: {
+                    // THE WHEEL WHERE THE STRUT PUT IT: the live centre and steer from the physics
+                    // (Vessel::Wheels), not the mount at rest -- a tyre is drawn compressed, drooped
+                    // or in the air as it is, and turned as it is. A slab the tyre's radius and
+                    // width, turned about the kingpin by the steer.
+                    const auto& wheels = v->Wheels();
+                    if (wheelIdx >= wheels.size()) break;
+                    const Vessel::WheelState& ws = wheels[wheelIdx];
+                    const double R = (e.wheelRadius.v > 0.0) ? e.wheelRadius.v : 0.3;
+                    const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
+                    const Motor at = Motor::Translation(ws.centre[0], ws.centre[1], ws.centre[2]) *
+                                     Motor::Rotation(o, upY, ws.steer);
+                    Emit(m_cpu, hull, at, 0.0, 0.0, 0.0, 0.33 * R, R, R, pal);
+                    if (wheelIdx == 0) {
+                        // The body over the wheels, until the mesh (a box the spec's length and
+                        // beam, standing on the strut tops): the picture of a car with no art.
+                        double top[3];
+                        e.mount.Origin(0.0, top);
+                        const double L = (spec.loa.v > 0.0) ? spec.loa.v : 4.0;
+                        const double B = (spec.beam.v > 0.0) ? spec.beam.v : 1.8;
+                        Emit(m_cpu, hull, Motor::Identity(), 0.0, top[1] + 0.45, 0.0, 0.5 * B, 0.45,
+                             0.5 * L, static_cast<int>(ElementKind::Buoyancy));
+                    }
+                    ++wheelIdx;
+                    break;
+                }
                 case ElementKind::Buoyancy: {
                     // One box per adjacent station PAIR, sized by that pair's own outline. A
                     // single box round the whole hull would hide exactly what the stations are

@@ -535,11 +535,156 @@ bool RunVesselSelfTest() {
         }
     }
 
+    // ---- 9. THE CAR (Wheel, car.baja). Four closed forms: (a) at rest on flat dry ground every
+    // wheel carries its static share of the weight (the CG's split between the axles) at the
+    // compression that share puts into the progressive spring, and the body stands still; (b) a
+    // 20 deg hill, nose down, brake on: it holds; (c) full throttle from rest on the flat for 5 s
+    // reaches the drive law's own closed form, v = vMax (1 - exp(-F0 t / (m vMax))), less the
+    // rolling and air losses, with every wheel on the ground and no yaw; (d) a step steer while
+    // coasting: the yaw rate over the speed is Ackermann's tan(delta) / L, which a car whose
+    // cornering stiffness is its load's (neutral steer) must meet.
+    {
+        const VesselSpec car = reg.Build("car.baja");
+        if (car.kind.empty()) fail("car: not registered", 0, 1);
+        const double W = (car.massLoaded.v > 0.0 ? car.massLoaded.v : car.massDry.v) * kG;
+        auto wheelRoot = [](const Element& e, double load) {   // k x (1 + (x/T)^2) = load, Newton
+            const double T = e.suspTravel.v, k = e.suspK.v;
+            double x = load / k;
+            for (int i = 0; i < 40; ++i) {
+                const double f = k * x * (1.0 + x * x / (T * T)) - load;
+                x -= f / (k * (1.0 + 3.0 * x * x / (T * T)));
+            }
+            return x;
+        };
+        auto seat = [&](Vessel& v, const WaterSurface& ground, const Motor& pose) {
+            v.Build(car, pose);
+            Settle(v, ground, 4800);
+            VesselControls c;
+            for (int i = 0; i < 180; ++i) v.Step(ground, c, i * dtLive, dtLive);   // 3 s undamped
+        };
+        StillWater dry;
+        dry.levelNavd = 0.0;
+        dry.bedNavd = 1.0;
+        // (a) at rest on the flat.
+        {
+            Vessel v;
+            seat(v, dry, Motor::Translation(0.0, 1.0 + 1.2, 0.0));
+            double zF = 0.0, zR = 0.0;
+            for (const Element& e : v.Spec().elements) {
+                if (e.kind != ElementKind::Wheel) continue;
+                double p[3];
+                e.mount.Origin(0.0, p);
+                (e.mount.jointed ? zF : zR) = p[2];
+            }
+            const double shareF = (0.0 - zR) / (zF - zR);   // the CG is the body origin
+            size_t wi = 0;
+            for (const Element& e : v.Spec().elements) {
+                if (e.kind != ElementKind::Wheel) continue;
+                const Vessel::WheelState& ws = v.Wheels()[wi++];
+                const double want = (e.mount.jointed ? shareF : 1.0 - shareF) * 0.5 * W;
+                const double xWant = wheelRoot(e, want);
+                Log("[vessel] car at rest: %s load %.0f N (static share %.0f), compression %.4f m (the spring's %.4f)",
+                    e.name.c_str(), ws.load, want, ws.comp, xWant);
+                if (std::abs(ws.load - want) > 0.02 * want) fail("car: a wheel's static load (N)", ws.load, want);
+                if (std::abs(ws.comp - xWant) > 0.02 * xWant) fail("car: a wheel's static compression (m)", ws.comp, xWant);
+            }
+            const VesselTelemetry& t = v.Telemetry();
+            Log("[vessel] car at rest: the ground carries %.0f N of %.0f on %d wheels, %.4f m/s, heel %.3f deg, trim %.3f deg",
+                t.contactN, W, t.contactPts, speedOf(v), heelOf(v), t.trimRad * 180.0 / kPi);
+            if (std::abs(t.contactN - W) > 0.01 * W) fail("car: the ground carries the weight (N)", t.contactN, W);
+            if (t.contactPts != 4) fail("car: wheels on the ground", t.contactPts, 4);
+            if (speedOf(v) > 2e-3) fail("car: at rest (m/s)", speedOf(v), 0.0);
+        }
+        // (b) the hill, nose down (+x is downhill on TiltedWater), brake on.
+        {
+            TiltedWater hill;
+            hill.slopeRad = 20.0 * kPi / 180.0;
+            hill.levelNavd = 0.0;
+            hill.bedFollows = true;
+            hill.bedAbove = 0.5;
+            const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
+            Vessel v;
+            v.Build(car, Motor::Translation(0.0, 2.2, 0.0) * Motor::Rotation(o, upY, 0.5 * kPi));
+            VesselControls c;
+            c.tilt = 1.0;   // the pedal
+            double pStart[3];
+            cgOf(v, pStart);
+            for (int i = 0; i < 1200; ++i) {   // 20 s: landed and settled
+                v.Step(hill, c, i * dtLive, dtLive);
+                if (i % 240 == 239) {
+                    double q[3];
+                    cgOf(v, q);
+                    Log("[vessel]   car hill t %2d s: moved %+.4f along x, %+.4f up | %.4f m/s | %d wheels %.0f N",
+                        (i + 1) / 60, q[0] - pStart[0], q[1] - pStart[1], speedOf(v), v.Telemetry().contactPts,
+                        v.Telemetry().contactN);
+                }
+            }
+            double p0[3];
+            cgOf(v, p0);
+            for (int i = 0; i < 600; ++i) v.Step(hill, c, (1200 + i) * dtLive, dtLive);   // 10 s held
+            double p1[3];
+            cgOf(v, p1);
+            const double drift = std::sqrt((p1[0] - p0[0]) * (p1[0] - p0[0]) + (p1[1] - p0[1]) * (p1[1] - p0[1]) +
+                                           (p1[2] - p0[2]) * (p1[2] - p0[2]));
+            Log("[vessel] car on a 20 deg hill, brake on: drift %.4f m in 10 s, %.4f m/s, %d wheels carrying %.0f N",
+                drift, speedOf(v), v.Telemetry().contactPts, v.Telemetry().contactN);
+            if (drift > 0.01) fail("car: a braked car drifts down a hill (m / 10 s)", drift, 0.01);
+            if (v.Telemetry().contactPts != 4) fail("car: wheels on the hill", v.Telemetry().contactPts, 4);
+        }
+        // (c) full throttle for 5 s on the flat, and (d) the step steer, from the same seat.
+        {
+            Vessel v;
+            seat(v, dry, Motor::Translation(0.0, 1.0 + 1.2, 0.0));
+            double F0 = 0.0, vMax = 0.0, L = 0.0, zF = 0.0, zR = 0.0;
+            for (const Element& e : v.Spec().elements) {
+                if (e.kind != ElementKind::Wheel) continue;
+                F0 += e.driveForce.v * e.driven.v;
+                vMax = e.driveSpeed.v;
+                double p[3];
+                e.mount.Origin(0.0, p);
+                (e.mount.jointed ? zF : zR) = p[2];
+            }
+            L = zF - zR;
+            const double m = v.Body().mp.mass;
+            VesselControls c;
+            c.throttle[0] = 1.0;
+            for (int i = 0; i < 300; ++i) v.Step(dry, c, i * dtLive, dtLive);
+            const double vGot = speedOf(v);
+            const double vForm = vMax * (1.0 - std::exp(-F0 * 5.0 / (m * vMax)));
+            const double yaw = std::abs(v.Telemetry().headingRad) * 180.0 / kPi;
+            Log("[vessel] car, full throttle 5 s: %.2f m/s (the drive law alone %.2f, losses below it), yaw %.3f deg, %d wheels down",
+                vGot, vForm, yaw, v.Telemetry().contactPts);
+            if (!(vGot > 0.88 * vForm && vGot < vForm)) fail("car: 5 s of full throttle (m/s)", vGot, vForm);
+            if (yaw > 1.0) fail("car: it pulled under power (deg)", yaw, 0.0);
+            if (v.Telemetry().contactPts != 4) fail("car: a wheel left the ground under power", v.Telemetry().contactPts, 4);
+            // (d) throttle off, a step steer of 0.04 rad (the helm's sign: D is negative), 3 s to
+            // settle into the turn, then one second's mean of yaw rate over speed. 0.04 and not
+            // more: at the 16 m/s the throttle run ends at, 0.08 rad asks 7.6 m/s^2 sideways, and
+            // this lifted car's rollover threshold (g x half-track / CG height) is 8.7 -- it went
+            // over, which is the physics answering, not the gate.
+            c.throttle[0] = 0.0;
+            c.steer = -0.04;
+            const double delta = 0.04;
+            for (int i = 0; i < 180; ++i) v.Step(dry, c, (300 + i) * dtLive, dtLive);
+            double ratio = 0.0;
+            for (int i = 0; i < 60; ++i) {
+                v.Step(dry, c, (480 + i) * dtLive, dtLive);
+                ratio += v.Body().Twist().a[1] / (std::max)(speedOf(v), 1e-6);
+            }
+            ratio /= 60.0;
+            const double ackermann = std::tan(delta) / L;
+            Log("[vessel] car, step steer %.2f rad at %.1f m/s: yaw rate / speed %.4f 1/m (Ackermann tan(delta)/L = %.4f), heel %.2f deg",
+                delta, speedOf(v), ratio, ackermann, heelOf(v));
+            if (std::abs(ratio - ackermann) > 0.10 * ackermann) fail("car: Ackermann yaw rate / speed (1/m)", ratio, ackermann);
+        }
+    }
+
     Log("[vessel] ---- %s: factory refuses unknown kinds, section clip (level/tilted/full/dry), "
         "draught + zero residual wrench, heave period, roll period vs GM, carried by a swell, "
         "absence is not flat water, the ground (dry flat, Coulomb's slope both ways, the beach "
         "stops it and the control sails on, the bed probes in the batch), the drone (5 m/s in "
-        "3 tau, a 60 s hover, level from 30 deg) ----",
+        "3 tau, a 60 s hover, level from 30 deg), the car (static loads and compressions, the "
+        "braked hill, the drive law, Ackermann) ----",
         ok ? "PASS" : "FAIL");
     return ok;
 }

@@ -161,7 +161,10 @@ struct Attach {
 // Hover (2026-10-11) is the recovery drone's one element: a velocity servo at the CG and an
 // attitude servo about it, in no medium at all -- it flies the same over land and sea because it
 // asks the water nothing.
-enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast, Hover };
+// Wheel (2026-10-11) is the car's: a strut cast down onto the SAME bed the hull beaches on, a
+// progressive spring and damper along it, and a tyre at its foot -- drive, rolling resistance, the
+// brake's grip and the slip-angle lateral law through one friction cone. Four of them are a car.
+enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast, Hover, Wheel };
 enum class MediumKind : uint8_t { Water, Air };
 
 // ================================================================================================
@@ -258,6 +261,25 @@ struct Element {
     // wrench is m (g up + (v_cmd - v) / tau) at the CG and a critically damped PD on the
     // attitude (body up -> world up, yaw rate -> commanded) with the same tau.
     Num hoverSpeedH, hoverSpeedV, hoverYawRate, hoverTau;
+
+    // ---- Wheel (the car). The mount is the STRUT TOP; the strut runs down the mount's -y and the
+    // kingpin is the mount's joint line (jointed: it steers by the helm's angle, sign-flipped,
+    // because the helm's steer is the outboard's). `suspRest` is the strut's length at full droop
+    // (top to wheel centre), `wheelRadius` the tyre's; the strut meets the bed plane at t and the
+    // compression is max(0, suspRest + wheelRadius - t). The spring is progressive, suspK x
+    // (1 + (x / suspTravel)^2), damped by suspC on the strut's rate, and never pulls. At the tyre:
+    // drive = throttle[0] x driveForce x driven, falling to zero at driveSpeed (the thruster's
+    // shape); rolling resistance rollRes x N; the brake (the helm's tilt channel, 0..1) scales
+    // the tyre's grip of its ground point along the rolling direction (the hull's anchor law,
+    // `contactSettle` its compliance). LATERAL: the contact patch is a spring across the rolling
+    // direction -- the anchor's lateral deflection times tyreCorner x N / tyreRelax -- and the
+    // anchor relaxes toward the contact as the patch rolls through its relaxation length
+    // tyreRelax. At rest that is a spring that holds a parked car across a camber; rolling, its
+    // steady state is exactly -tyreCorner x N x (slip angle): the slip law, as the limit of the
+    // one law rather than a second one (a velocity law at 60 Hz chattered and let the brake go).
+    // The whole tangential force goes through min(1, tyreMu N / |F|).
+    Num wheelRadius, suspRest, suspTravel, suspK, suspC;
+    Num driveForce, driveSpeed, driven, tyreMu, tyreCorner, tyreRelax, rollRes;
 };
 
 // ================================================================================================
@@ -349,5 +371,11 @@ VesselSpec MakeRhib18();
 // The recovery drone: one Hover element, no water. Switched to when a vehicle flips; flies
 // anywhere; the vehicle switched back to is set down under it.
 VesselSpec MakeRecoveryDrone();
+
+// The car: a 2003 Subaru Baja (its published figures and its model's measured wheels), lifted
+// 0.25 m and sprung long and soft so it drives like the Warthog -- four Wheel elements, windage,
+// and a drag box low down for when it is driven into the sea. No buoyancy: it sinks, and the
+// drone is the recovery.
+VesselSpec MakeCarBaja();
 
 }  // namespace ga

@@ -151,6 +151,7 @@ private:
                   double simUnix);
     Bivector Drag(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Hover(const Element& e, const VesselControls& c);
+    Bivector Wheel(const Element& e, const WaterSurface& sea, const VesselControls& c, double simUnix);
 
     VesselSpec m_spec;
     RigidBody  m_body;
@@ -185,10 +186,33 @@ private:
     std::vector<double> m_anchor;      // 3 per outline point, in Buoyancy/station/outline order
     std::vector<uint8_t> m_anchorOn;   // the point is gripping (its anchor is live)
     size_t m_anchorIdx = 0;            // the running index this wrench
+    bool m_groundAsks = false;         // any ground law at all: the bed plane is built, its probes listed
 
 public:
     // CARRIED BY A MOTOR: the body (RigidBody::Carry) and the ground it grips, together.
     void Carry(const Motor& K);
+
+    // THE WHEELS' LIVE STATE (the car, 2026-10-11): one per Wheel element in spec order, written by
+    // every wrench -- where the strut put the wheel's centre (BODY frame), its steer, its load and
+    // compression -- so the layer draws each wheel where the suspension has it, turned as it is.
+    struct WheelState {
+        double centre[3] = {0.0, 0.0, 0.0};
+        double steer = 0.0;
+        double load = 0.0;
+        double comp = 0.0;
+    };
+    const std::vector<WheelState>& Wheels() const { return m_wheels; }
+    // The lowest point of the body at rest, body frame: the keel of the stations and the tyres at
+    // full droop. The set-down puts THIS on the surface the body rides (Entity::Update).
+    double KeelY() const;
+
+private:
+    std::vector<WheelState> m_wheels;
+    size_t m_wheelIdx = 0;
+    // The braked tyre's grip of its ground point, per wheel (Build: its share of the weight over
+    // the wheel element's contactSettle), 0.4 of critical as the hull's.
+    double m_kGrip = 0.0, m_cGrip = 0.0;
+    double m_mWheel = 1.0;   // kg: one wheel's share of the mass (the lateral spring's damping)
 };
 
 // ---- the section clip, exposed because it has a closed-form gate of its own ------------------
