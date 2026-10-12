@@ -924,7 +924,20 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         float bT;
         float3 bDdx, bDdz;
         if (BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz)) {
-            s2 = max(bP.y, 0.0015f);
+            // ONE SEA, ONE SLOPE VARIANCE (Mark, 2026-10-11: the dark square under the eye). The
+            // far field's s2 above is the WHOLE sea's mean-square slope. The bank models only its
+            // cascades (each band's gain^2 times its unit mss -- the gains are the amplitudes
+            // the fill shed by, (gain1, dry, gain0, gain2)) and the solved field (inside its
+            // shed, bP.y); the rest of the sea -- the short wind waves and capillaries no band
+            // carries -- was simply dropped inside the rings, so from altitude, where the bank
+            // has shed everything, the rings drew a sea smoother than the one around them.
+            // That remainder rides sigma^2 here at every distance: at altitude s2 is the far
+            // field's to the digit and the rings have no edge; near, the bands the pixel
+            // resolves are taken back out below exactly as before.
+            const float mssModel = max(bDet.z * bDet.z * 0.0004f + bDet.x * bDet.x * 0.0018f +
+                                           bDet.w * bDet.w * 0.0060f,
+                                       bP.y);
+            s2 = max(bP.y + max(s2 - mssModel, 0.0f), 0.0015f);
             lvlW = bP.x;
             dispW = bD.y;
             // The wave normal: the tangent bivector's dual, analytic from the reconstruction
