@@ -281,6 +281,46 @@ private:
     // place (scene/Gateway.h Place), so a body carried to a place stands in the very frame a gate
     // there was built in. Heap-held: the gates and the carried hulls point into them.
     std::vector<std::unique_ptr<scene::Place>> m_places;
+    // THE PLACES THE LOOP KNOWS, by their lat/lon: the root's own first, then one row per place a
+    // gate named or a fast travel reached (PlaceAt builds a Place once and answers it again).
+    struct PlaceRef {
+        double lat = 0.0, lon = 0.0;
+        const Space* space = nullptr;
+        const Space::Anchor* chart = nullptr;
+        // THE PLACE'S POSE IN ITS SPACE (scene/Gateway.h Place): a place's space is the cloud's
+        // origin nearest to it, and a box declared "at the place" is posed by this motor there
+        // -- the root's is the scene's anchorToRoot, a built place's its offset.
+        Motor toSpace = Motor::Identity();
+    };
+    std::vector<PlaceRef> m_knownPlaces;
+    bool PlaceAt(bool named, double lat, double lon, const std::string& who, PlaceRef& out);
+    // ---- FAST TRAVEL (2026-10-12): a spherical gate opened by a click on the minimap in its
+    // travel mode (scene/Minimap.h). The portal IS a gate (scene/Gateway.h, radius > 0): one motor
+    // from the vehicle's place to the clicked one, so the vehicle, the eye and any other body that
+    // enters the sphere are carried by the laws the gates already have, and every eye sees it as
+    // a window. THE RECORD is all there is to it: where and when it opened, in which place, and
+    // where it leads -- every number of the sphere after that is a function of the scene clock
+    // (hud.minimap.travel*: the radius grows to its full size over travelGrowSec and the gate is
+    // gone travelLifeSec after it opened). A second player, local or remote, handed the same
+    // record at the same clock rebuilds the same sphere and can drive into it: that is what the
+    // record is for, and nothing else about the portal is session state.
+    struct TravelRecord {
+        double bornUnix = 0.0;               // the scene clock when it opened
+        double fromLat = 0.0, fromLon = 0.0; // the place it stands at (its space: PlaceAt)
+        double x = 0.0, y = 0.0, z = 0.0;    // its centre in that place's flat frame (m)
+        double az = 0.0;                     // its heading (deg): the way out at the far end too
+        double toLat = 0.0, toLon = 0.0;     // the place it leads to
+    };
+    // A click's travel: the record from the followed vehicle's pose (the sphere travelAheadM
+    // ahead of it, at its heading) and the clicked place, then SpawnTravel.
+    bool TravelTo(double toLat, double toLon);
+    bool SpawnTravel(const TravelRecord& rec);
+    // Once a frame, before the gates carry: the sphere's radius at the clock, or its end.
+    void StepTravel();
+    // A gate leaves the scene: every pointer to it is dropped before the chain is rebuilt.
+    void DespawnGate(const scene::Gateway* g);
+    scene::Gateway* m_travelGate = nullptr;   // the standing portal (one at a time), in m_gates
+    TravelRecord m_travel;
     ExitMark m_exitHulls{"frame loop: the places, the gates and the hulls (Entity nodes, each with "
                          "its TreeWater)"};
     // WHAT THE VIEW SEES THROUGH THE GATES this frame (scene/Gateway.h WindowChain): link 0 is the
@@ -410,6 +450,10 @@ private:
     // The gate harness only (GAGAME_CYCLE_AT="f1,f2,..." in the environment): cycle forward at
     // those frames, so a headless run can read the [vehicle] and set-down lines. Not a flag.
     std::vector<uint32_t> m_cycleAt;
+    // The travel harness only (GAGAME_TRAVEL_AT="frame,lat,lon"): open the fast-travel portal to
+    // that place at that frame, so a headless run can read the [travel] and [gate] lines.
+    uint32_t m_travelAt = 0;
+    double m_travelAtLat = 0.0, m_travelAtLon = 0.0;
     // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
     // hull goes through a window, the eye keeps standing on this side and chases the hull's
     // APPARENT pose -- pulled back through that window's motor, which is the map the window's

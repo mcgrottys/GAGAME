@@ -1808,3 +1808,29 @@ the harness taking the car form at frame 600: "set down ... seat +0.00 over the 
 NAVD with 2.4 m of water under the bridge, four wheels carrying 16772 N. Open: the approach ramps
 stop at the first junction of more than two ways (the US 1 rotary), so the south approach has no
 drivable way up; and a vehicle spawned over a bridge before its page streams lands under it.
+
+**Fast travel: the gate grows a second shape (2026-10-12).** Mark's ask: a toggle on the minimap
+that turns a click on the map into a spherical portal "like the Haulover gates", opening a few
+metres ahead of the vehicle, growing to about 25 m over 7 s and gone at 12 s; others must see it
+and go through it too. Built as ONE law extended, not a new object: `Gateway` takes a `radius`
+beside `size` (`gates[].radius`, read live) and the shape enters exactly where the box did -- the
+membership (distance from the centre), the window's slab (`Gateway::Slab`: the quadratic's two
+roots where the box had three axis slabs; `GateSlabFrom` in Common.hlsli is its line-for-line
+twin, the radius riding row 3's w of the packed WindowBox), the cull's bound (the radius thrice),
+the hole a window hides (the tangent cone's inscribed pyramid beyond the centre's plane) and the
+rim (the limb). Everything a gate already had -- the carry, the eye that owes the window and
+crosses when the shape takes it, the residency asked ahead, the corridor, the minimap's view of it
+-- is unchanged and holds for the sphere. THE PORTAL IS A RECORD (`FrameLoop::TravelRecord`): the
+clock it opened at, the place it stands in and its centre and heading there, and the place it
+leads to; its radius is a function of the scene clock (hud.minimap.travel*: ahead 8 m, radius
+25 m, grow 7 s, life 12 s). A second player handed the record at the same clock rebuilds the same
+sphere -- multiplayer is not built, but nothing about the portal is session state. The minimap's
+second button toggles travel; a click picks the sea-level point under the cursor (the grab's own
+law) and the exact chart names the place. Gates: scenetest [gate] grew 17 sphere checks (membership,
+the slab, the walked slab = the window's test, the live radius, the hole); `GAGAME_TRAVEL_AT=
+"frame,lat,lon"` is the headless harness -- at frame 60 of haulover_portal.json the portal
+opened 8 m ahead, the view saw it as a window at 4 px, the vehicle was carried at ~2.7 s, the eye
+owed the window and crossed at ~5.5 s, the portal closed at 12.0 s; stills at frames 100-205 show
+the sphere with Haulover's daylight inside it swallowing the boat. Seen and left for Mark's eye:
+the sphere's cap under the waterline shows the far place's BED through the local translucent water
+(the sea surface was crossed before the window), a brown band at the sphere's foot.

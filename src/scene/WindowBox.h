@@ -6,7 +6,8 @@
 //  eye to the pixel's point passes, in order, is the depth of the world that pixel belongs to. Each
 //  window is its box in the TRUE camera frame -- rows camera -> box, half extents, and its centre
 //  relative to the eye -- packed the one way all three constant buffers carry it: four float4 rows
-//  a window, rows 0..2 the box's axes with the half extent in w, row 3 its centre.
+//  a window, rows 0..2 the box's axes with the half extent in w, row 3 its centre, and in row 3's
+//  w the sphere's radius when the gate is one (2026-10-12; 0 = the box).
 // ================================================================================================
 #pragma once
 
@@ -19,6 +20,7 @@ struct WindowBox {
     float rows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float half[3] = {0.0f, 0.0f, 0.0f};
     float centre[3] = {0.0f, 0.0f, 0.0f};
+    float radius = 0.0f;   // > 0: a sphere of this radius about the centre, and `half` is not read
 
     void Pack(float out[16]) const {
         for (int r = 0; r < 3; ++r) {
@@ -26,7 +28,7 @@ struct WindowBox {
             out[r * 4 + 3] = half[r];
         }
         for (int c = 0; c < 3; ++c) out[12 + c] = centre[c];
-        out[15] = 0.0f;
+        out[15] = radius;   // row 3's w: the shape (0 = the box of the half extents)
     }
 };
 

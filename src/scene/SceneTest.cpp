@@ -2242,6 +2242,82 @@ bool RunSceneSelfTest() {
                 }
                 g.True(same, "[gate] the chain's slab walked from its start is the window's own test, point for point");
             }
+            // ---- THE SPHERE (2026-10-12): the same gate with a radius is the fast-travel portal's
+            // shape. Membership is the distance from the centre; the window's slab is the quadratic;
+            // the chain's walked slab is the window's own test, point for point, as the box's is;
+            // and the shape is read live, so a radius that grows is the same gate.
+            {
+                Gateway ball;
+                ball.Declared().name = "travel";
+                ball.Declared().toLat = 25.8997;
+                ball.Declared().toLon = -80.1239;
+                ball.Declared().toAz = 90.0;
+                ball.Declared().radius = 10.0;
+                g.True(ball.Build(planetG, rootG, R, Gateway::BoxPose(600.0, 0.0, -10.0, 90.0, 0.0)) &&
+                           ball.Valid() && ball.Spherical(),
+                       "[gate] a sphere of radius 10 at the inlet builds its carry to Haulover");
+                g.True(ball.Inside(600.0, 0.0, -10.0) && ball.Inside(609.9, 0.0, -10.0) &&
+                           ball.Inside(600.0, -9.9, -10.0) && !ball.Inside(610.1, 0.0, -10.0) &&
+                           !ball.Inside(607.1, 7.1, -10.0),
+                       "[gate] the sphere ends at its radius in every direction, not at a box's corner");
+                g.Near(ball.BoundRadius(), 10.0, 1e-12, "[gate] its bound is its radius");
+                g.Near(ball.Outside(13.0, 0.0, 0.0), 3.0, 1e-12,
+                       "[gate] ...and a point of its own frame 13 m out stands 3 m outside it");
+                const double eyeS[3] = {500.0, 2.0, -10.0};
+                const double throughS[3] = {900.0, 0.0, -10.0};
+                const double grazeIn[3] = {900.0, 0.0, -10.0 + 9.0 * 4.0};   // the ray passes 9 m off the centre at x = 600
+                const double grazeOut[3] = {900.0, 0.0, -10.0 + 11.0 * 4.0}; // ...and 11 m off
+                const double shortS[3] = {585.0, 1.0, -10.0};
+                g.True(ball.SeenThrough(eyeS, throughS), "[gate] a point beyond the sphere, straight through it, is seen through the window");
+                g.True(ball.SeenThrough(eyeS, grazeIn), "[gate] ...and one whose ray passes inside the radius");
+                g.True(!ball.SeenThrough(eyeS, grazeOut), "[gate] a ray that passes outside the radius is not");
+                g.True(!ball.SeenThrough(eyeS, shortS), "[gate] a point short of the sphere is not");
+                const double eyeInS[3] = {602.0, 1.0, -12.0};
+                g.True(ball.SeenThrough(eyeInS, shortS) && ball.SeenThrough(eyeInS, grazeOut),
+                       "[gate] from inside the sphere every ray starts in the window");
+                const double eyeAboveS[3] = {600.0, 100.0, -10.0};
+                const double belowS[3] = {600.0, -40.0, -10.0};
+                g.True(ball.SeenThrough(eyeAboveS, belowS), "[gate] a sphere has no top: looking down through it works too");
+                bool same = true;
+                for (const double* e : {eyeS, eyeInS, eyeAboveS}) {
+                    for (const double* q : {throughS, grazeIn, grazeOut, shortS, belowS}) {
+                        same = same && ball.SeenThroughFrom(ball.EntryInRoot(), e, q, 0.0, nullptr) ==
+                                           ball.SeenThrough(e, q);
+                    }
+                }
+                g.True(same, "[gate] the sphere's walked slab is its window's own test, point for point");
+                // Grown: the same gate, read live.
+                ball.Declared().radius = 25.0;
+                g.True(ball.Inside(620.0, 0.0, -10.0) && ball.SeenThrough(eyeS, grazeOut),
+                       "[gate] the radius is read live: grown to 25 m the same gate holds what it did not");
+                // The hole a sphere hides (LinkHole): a point behind the centre on the axis is in it,
+                // a point beside the sphere is not, and the eye inside it hides nothing.
+                {
+                    ViewCone vc;
+                    vc.eye[0] = eyeS[0]; vc.eye[1] = eyeS[1]; vc.eye[2] = eyeS[2];
+                    vc.fwd[0] = 1.0; vc.fwd[1] = 0.0; vc.fwd[2] = 0.0;
+                    vc.right[0] = 0.0; vc.right[1] = 0.0; vc.right[2] = -1.0;
+                    vc.up[0] = 0.0; vc.up[1] = 1.0; vc.up[2] = 0.0;
+                    WindowLink L;
+                    L.gate = &ball;
+                    L.boxInRoot = ball.EntryInRoot();
+                    L.visible = true;
+                    double pl[5][4];
+                    g.True(LinkHole(L, vc, pl), "[gate] a visible sphere hides a volume");
+                    auto inHole = [&](double x, double y, double z) {
+                        const double q[3] = {x - vc.eye[0], y - vc.eye[1], z - vc.eye[2]};
+                        for (int i = 0; i < 5; ++i) {
+                            if (pl[i][0] * q[0] + pl[i][1] * q[1] + pl[i][2] * q[2] + pl[i][3] < 0.0) return false;
+                        }
+                        return true;
+                    };
+                    g.True(inHole(700.0, 0.0, -10.0), "[gate] ...a point behind its centre on the axis is hidden");
+                    g.True(!inHole(700.0, 0.0, 80.0), "[gate] ...a point well beside it is not");
+                    g.True(!inHole(560.0, 0.0, -10.0), "[gate] ...nor one in front of its centre");
+                    vc.eye[0] = 602.0;
+                    g.True(!LinkHole(L, vc, pl), "[gate] ...and an eye inside the sphere hides nothing");
+                }
+            }
             // ...and the root-frame window of a gate standing in the root frame is the motor the
             // window was always drawn by.
             {

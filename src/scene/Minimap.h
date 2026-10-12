@@ -19,6 +19,10 @@
 //      Reset   the screw from the pose to the home pose (homeAltM straight above the followed
 //              entity, north up), walked at constant twist (Motor::Slerp) with a smoothstep in
 //              time: rotation and translation arrive together, and the eye follows again.
+//      Travel  a toggle beside Reset (2026-10-12). While it is on, a press on the map does not
+//              grab the planet: it PICKS the sea-level point under the cursor (the grab's own
+//              law, HitSphere) and hands it to the owner of the rectangle (TakeTravel), who opens
+//              the fast-travel sphere to that place. The wheel still zooms.
 //
 //  The rasterizer gets a Camera at the last moment (BuildCamera), with the motor's own up as the
 //  roll reference -- so looking straight down is an ordinary view, neither clamped nor blended
@@ -54,9 +58,20 @@ public:
     void Configure(const MinimapProps& p, double planetR, const double poleFlat[3]);
     bool Enabled() const { return m_p.enabled; }
 
-    // Where it stands on a target of W x H pixels, and its Reset button inside that.
+    // Where it stands on a target of W x H pixels, its Reset button inside that, and the travel
+    // toggle beside it.
     Rect Place(uint32_t W, uint32_t H) const;
     static Rect Button(const Rect& r);
+    static Rect TravelButton(const Rect& r);
+    bool Travel() const { return m_travel; }
+    // The point picked for a fast travel since the last call (root frame, on the sea-level
+    // sphere): true once per press.
+    bool TakeTravel(double out[3]) {
+        if (!m_travelPicked) return false;
+        for (int i = 0; i < 3; ++i) out[i] = m_travelPick[i];
+        m_travelPicked = false;
+        return true;
+    }
 
     // The mouse, first: what lands on the rectangle (or continues a drag that began there) is
     // the minimap's, and is taken out of `in` so the first eye's gestures never see it.
@@ -103,6 +118,9 @@ private:
     double m_followAlt = 0.0;  // the altitude it follows at (set at Configure, moved by the wheel)
     bool m_dragging = false;
     bool m_lmbWas = false;
+    bool m_travel = false;          // the toggle: a press on the map picks a place to travel to
+    bool m_travelPicked = false;
+    double m_travelPick[3] = {};
     double m_grab[3] = {};
     float m_resetT = -1.0f;   // seconds into the walk home; < 0 = not resetting
     Motor m_resetFrom = Motor::Identity();

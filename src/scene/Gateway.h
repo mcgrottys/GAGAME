@@ -109,8 +109,25 @@ public:
     const Motor& EntryInRoot() const { return m_entryInRoot; }
     const Motor& Window() const { return m_window; }
 
-    // A point inside the box: |local| <= half the size on every axis -- in the SOURCE frame, and
-    // the same said for a point of the ROOT frame.
+    // THE SHAPE (2026-10-12). A gate is a cuboid of `size`, or -- with a radius declared -- a SPHERE
+    // of that radius about the same centre: the fast-travel portal, which grows. Both are one
+    // structure posed twice, carried by one motor; only the membership and the window's slab test
+    // read the shape, and they read it LIVE (a sphere that grows is the same gate every frame).
+    bool Spherical() const { return m_props.radius > 0.0; }
+    double Radius() const { return m_props.radius; }
+    // The half extents of the shape's bounding box in its own frame (a sphere: its radius thrice),
+    // and the radius of its bounding sphere -- what the view's cull and the reach test need.
+    double Half(int axis) const { return Spherical() ? m_props.radius : 0.5 * m_props.size[axis]; }
+    double BoundRadius() const;
+    // How far outside the shape a point of its own frame stands (0 inside).
+    double Outside(double lx, double ly, double lz) const;
+    // The segment e + t d, t in [0, 1], against the shape in its own frame: the entry and exit
+    // parameters (tEnter <= tExit when it meets it at all). The one law both slab tests and the
+    // shader's GateSlabFrom walk, box or sphere.
+    void Slab(const double e[3], const double d[3], double& tEnter, double& tExit) const;
+
+    // A point inside the shape -- in the SOURCE frame, and the same said for a point of the ROOT
+    // frame.
     bool Inside(double px, double py, double pz) const;
     bool InsideRoot(double px, double py, double pz) const;
 

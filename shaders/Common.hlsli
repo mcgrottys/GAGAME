@@ -159,22 +159,37 @@ float3 ViewRay(float2 ndc) {
 // pixel belongs to) and the hulls -- and passes that disagreed about an edge would show a seam.
 // With tStart 0 this is the single window's test exactly: tEnter clamped at 0 is <= tExit iff
 // tEnter <= tExit and tExit >= 0.
+// A SPHERE (c.w > 0, its radius): the quadratic |e + t p|^2 = r^2 about the centre, its two roots
+// -- the fast-travel portal's shape (scene/Gateway.cpp Slab); a miss is an empty interval.
 bool GateSlabFrom(float3 p, float4 r0, float4 r1, float4 r2, float4 c, float tStart,
                   out float tIn) {
-    const float3x3 R = float3x3(r0.xyz, r1.xyz, r2.xyz);
-    const float3 h = float3(r0.w, r1.w, r2.w);
-    const float3 e = mul(R, -c.xyz);
-    float3 d = mul(R, p);
-    d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
-    const float3 t1 = (-h - e) / d;
-    const float3 t2 = (h - e) / d;
-    const float3 tn = min(t1, t2);
-    const float3 tf = max(t1, t2);
+    float tn1, tf1;
+    if (c.w > 0.0f) {
+        const float3 e = -c.xyz;   // the eye about the centre (a sphere has no axes to turn into)
+        const float a = max(dot(p, p), 1e-12f);
+        const float b = dot(e, p);
+        const float cc = dot(e, e) - c.w * c.w;
+        const float disc = b * b - a * cc;
+        const float sq = sqrt(max(disc, 0.0f));
+        tn1 = (disc < 0.0f) ? 1e30f : (-b - sq) / a;
+        tf1 = (disc < 0.0f) ? -1e30f : (-b + sq) / a;
+    } else {
+        const float3x3 R = float3x3(r0.xyz, r1.xyz, r2.xyz);
+        const float3 h = float3(r0.w, r1.w, r2.w);
+        const float3 e = mul(R, -c.xyz);
+        float3 d = mul(R, p);
+        d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
+        const float3 t1 = (-h - e) / d;
+        const float3 t2 = (h - e) / d;
+        const float3 tn = min(t1, t2);
+        const float3 tf = max(t1, t2);
+        tn1 = max(max(tn.x, tn.y), tn.z);
+        tf1 = min(min(tf.x, tf.y), tf.z);
+    }
     // The ray is in this window's world only from where it entered the last one.
-    const float tEnter = max(max(max(tn.x, tn.y), tn.z), tStart);
-    const float tExit = min(min(tf.x, tf.y), tf.z);
+    const float tEnter = max(tn1, tStart);
     tIn = tEnter;
-    return tEnter <= tExit && tEnter <= 1.0f;
+    return tEnter <= tf1 && tEnter <= 1.0f;
 }
 
 

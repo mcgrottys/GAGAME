@@ -266,6 +266,7 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Str("name", g.p.name);
             r.Bool("enabled", g.p.enabled);
             r.D3("size", g.p.size);
+            r.F64("radius", g.p.radius);
             r.F64("fromLat", g.p.fromLat);
             r.F64("fromLon", g.p.fromLon);
             r.F64("toLat", g.p.toLat);
