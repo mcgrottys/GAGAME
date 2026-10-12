@@ -138,6 +138,11 @@ public:
     double slopeRad = 0.05;           // surface tilts down toward +x
     double levelNavd = 0.0;           // elevation at x = 0
     double bedNavd = -60.0;
+    // THE TILTED BED (beaching gates): the bed follows the same slope, `bedAbove` metres above
+    // the water -- a dry hillside at a declared angle, so Coulomb's atan(mu) has a closed form
+    // to meet. Off, the bed is the level `bedNavd` above, byte for byte.
+    bool bedFollows = false;
+    double bedAbove = 0.0;
 
     const char* Name() const override { return "tilted plane (declared analytic)"; }
 
@@ -149,8 +154,32 @@ public:
         s.nx = t * inv;                               // normal leans downhill
         s.ny = inv;
         s.nz = 0.0;
-        s.bedNavd = bedNavd;
-        s.depthM = s.heightNavd - bedNavd;
+        s.bedNavd = bedFollows ? s.heightNavd + bedAbove : bedNavd;
+        s.depthM = s.heightNavd - s.bedNavd;
+        s.valid = true;
+        return s;
+    }
+};
+
+// ================================================================================================
+//  RampBedWater - level water over a bed rising linearly along +z: a beach. A hull driven at it
+//  loses buoyancy as its stations climb out and gains the bed's push as they meet it; the gate
+//  for beaching is that it STOPS there, and that the same hull with no ground law sails on.
+// ================================================================================================
+class RampBedWater : public WaterSurface {
+public:
+    double levelNavd = 0.0;
+    double bedAtZ0 = -3.0;            // the bed where z = 0
+    double bedSlope = 0.08;           // rise per metre along +z
+
+    const char* Name() const override { return "ramp bed (declared analytic)"; }
+
+    SurfaceSample At(double, double wz, double) const override {
+        SurfaceSample s;
+        s.heightNavd = levelNavd;
+        s.ny = 1.0;
+        s.bedNavd = bedAtZ0 + bedSlope * wz;
+        s.depthM = s.heightNavd - s.bedNavd;
         s.valid = true;
         return s;
     }

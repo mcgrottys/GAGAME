@@ -193,6 +193,14 @@ struct Element {
 
     // ---- Buoyancy
     std::vector<Section> stations;           // ordered by z
+    // ---- ...and the BED under the same stations (2026-10-11: beaching). The bed is the second
+    // surface every SurfaceSample already carries (`bedNavd`), and a station's outline points
+    // that lie below it are pushed back along the bed's normal: a penalty spring sized so the
+    // hull's own weight compresses it `contactSettle` metres on its keel points, critically
+    // damped per point, with Coulomb friction `contactMu` in the contact plane. Zero settle is
+    // no contact at all (the water-only hull: the gate's control), never a stiffer one.
+    Num contactSettle;                       // m: compression under the hull's weight (ASSUMED)
+    Num contactMu;                           // the bed's friction coefficient
 
     // ---- Collar (one chamber of a tube)
     Num tubeZ0, tubeZ1;                      // longitudinal extent, body z

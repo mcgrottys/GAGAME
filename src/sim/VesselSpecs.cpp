@@ -56,6 +56,12 @@ VesselSpec MakeTestBox() {
         st.oy = {-0.5 * H, -0.5 * H, 0.5 * H, 0.5 * H};
         hull.stations.push_back(st);
     }
+    // The ground under it (beaching): declared, so the ground gates have a hull with a flat
+    // bottom whose six keel points share the weight exactly.
+    hull.contactSettle = Num::Of(0.015, "m", "ASSUMED: a penalty contact that sinks 1.5 cm under "
+                                             "the hull's own weight -- stiff enough to read as "
+                                             "ground, soft enough for a 60 Hz step");
+    hull.contactMu = Num::Of(0.5, "1", "ASSUMED: GRP on wet sand");
     s.elements.push_back(hull);
 
     // Hull drag. MOUNTED LOW, at body y = -0.9: a Drag element only acts while its mount is
@@ -238,6 +244,12 @@ VesselSpec MakeRhib18() {
                                        "projected side area");
     hull.dragCd[1] = Num::Of(1.3, "1", "ASSUMED: bluff in heave, on the immersed section's own "
                                        "projected plan area");
+    // THE BEACH (2026-10-11). The same stations meet the bed: nine keel points carry the boat
+    // when it runs up a beach, the chines join as it heels onto its side.
+    hull.contactSettle = Num::Of(0.015, "m", "ASSUMED: a penalty contact that sinks 1.5 cm under "
+                                             "the hull's own weight on its keel line");
+    hull.contactMu = Num::Of(0.5, "1", "ASSUMED: gelcoat on wet sand, between the 0.3 of a "
+                                       "slipway and the 0.7 of dry sand");
     s.elements.push_back(hull);
 
     // ---- the collar: five independent chambers ------------------------------------------------

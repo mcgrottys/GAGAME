@@ -136,6 +136,72 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
 
         double px[64], py[64];
         const int n = FullSection(st, px, py, 64);
+
+        // ---- THE BED, under the same station (beaching, 2026-10-11) ---------------------------
+        // The second surface. The sample carries the bed as a DATUM height and the water as a
+        // plane in the hull's frame (PlaneOf: the sphere under a flat frame); the bed in that
+        // frame is the water's plane point dropped by the depth, so both surfaces move together
+        // with the frame and nothing differences a planetary number. The normal is the hull's
+        // one bed plane (BedPlane, the secant over the hull); the height is this station's own.
+        // Every outline point below it is pushed back along it: a spring whose rate the hull's
+        // weight sets (Build), damped critically on the way in, and Coulomb friction across it.
+        //
+        // The friction is Coulomb's, as a GRIP (Vessel.h, the anchors): a tangential spring from
+        // the point to the ground point it gripped, the bed's own rate and damping, saturated at
+        // mu N by the friction cone -- and the anchor dragged onto the cone when it saturates, so
+        // a sliding hull feels exactly mu N opposite its motion and a standing one feels what
+        // holds it, to the spring's deflection. A point that lifts lets go of its anchor.
+        //
+        // The water keeps acting as it does: the clip below sees less water as the hull rides
+        // up, buoyancy falls, the bed carries what it dropped, friction holds it. That is a
+        // beaching, and nothing here reads depthM to decide anything.
+        if (m_kContact > 0.0) {
+            const double bedPt[3] = {med.sp[0], med.sp[1] - ss.depthM, med.sp[2]};
+            for (int i = 0; i < n; ++i, ++m_anchorIdx) {
+                const double pBody[3] = {px[i], py[i], st.z};
+                double pw[3];
+                m_body.ToWorld(pBody, pw);
+                const double h = (pw[0] - bedPt[0]) * m_bedN[0] + (pw[1] - bedPt[1]) * m_bedN[1] +
+                                 (pw[2] - bedPt[2]) * m_bedN[2];
+                const double pen = std::max(0.0, -h);
+                double* anc = &m_anchor[3 * m_anchorIdx];
+                uint8_t& on = m_anchorOn[m_anchorIdx];
+                if (pen <= 0.0) { on = 0; continue; }   // the domain: a bed pushes, never pulls
+                if (!on) { anc[0] = pw[0]; anc[1] = pw[1]; anc[2] = pw[2]; on = 1; }
+                double v[3];
+                m_body.VelocityAtBody(pBody, v);
+                const double vn = v[0] * m_bedN[0] + v[1] * m_bedN[1] + v[2] * m_bedN[2];
+                const double fn = m_kContact * pen + m_cContact * std::max(0.0, -vn);
+                // The grip: (point - anchor) and the point's velocity, both in the contact plane.
+                double d[3] = {pw[0] - anc[0], pw[1] - anc[1], pw[2] - anc[2]};
+                const double dn = d[0] * m_bedN[0] + d[1] * m_bedN[1] + d[2] * m_bedN[2];
+                double ft[3];
+                for (int k = 0; k < 3; ++k) {
+                    d[k] -= dn * m_bedN[k];
+                    const double vt = v[k] - vn * m_bedN[k];
+                    ft[k] = -m_kContact * d[k] - m_cContact * vt;
+                }
+                const double ftMag = std::sqrt(ft[0] * ft[0] + ft[1] * ft[1] + ft[2] * ft[2]);
+                const double cone = std::min(1.0, m_muContact * fn / std::max(ftMag, 1e-12));
+                for (int k = 0; k < 3; ++k) {
+                    ft[k] *= cone;
+                    // The anchor rides the cone: the deflection scaled onto it, in the plane.
+                    anc[k] = pw[k] - d[k] * cone;
+                }
+                const double f[3] = {fn * m_bedN[0] + ft[0], fn * m_bedN[1] + ft[1], fn * m_bedN[2] + ft[2]};
+                if (s_gripTrace) {
+                    Log("[grip] pt %zu pen %.5f fn %.0f |d| %.5f |ft| %.0f cone %.3f v (%+.4f %+.4f %+.4f) anc (%+.4f %+.4f %+.4f) pw (%+.4f %+.4f %+.4f)",
+                        m_anchorIdx, pen, fn, std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]), ftMag, cone, v[0], v[1], v[2],
+                        anc[0], anc[1], anc[2], pw[0], pw[1], pw[2]);
+                }
+                w += m_body.BodyWrench(f, pBody);
+                m_tel.contactN += fn;
+                ++m_tel.contactPts;
+            }
+        } else {
+            m_anchorIdx += static_cast<size_t>(n);
+        }
+
         double cx = 0.0, cy = 0.0, ex = 0.0, ey = 0.0;
         const double area = ClipSectionArea(px, py, n, a, b, c, &cx, &cy, &ex, &ey);
         if (area <= 0.0) continue;
@@ -365,7 +431,102 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
     m_body.mp.addedI[2] = spec.addedInertiaRoll.v;
     m_body.SetPose(pose);
     m_tel = VesselTelemetry{};
+
+    // ---- THE BED'S SPRING, from the hull (beaching). A penalty contact needs a rate, and the
+    // only honest one is the hull's own: the stiffness that lets its weight sink `contactSettle`
+    // into the ground on the points that meet flat ground first -- each station's lowest outline
+    // points (the keel of a V, the three bottom corners of a barge section). Spread over those,
+    // flat ground compresses exactly the settle; a heeled hull on its chine finds more points
+    // and a stiffer answer, continuously. Damped against each point's share of the mass, so a
+    // landing thumps and does not ring. The first Buoyancy element's numbers speak
+    // for the hull; a hull declaring no settle has no ground.
+    m_kContact = m_cContact = m_muContact = 0.0;
+    m_mContact = m_body.mp.mass;
+    {
+        int keelPts = 0;
+        size_t outlinePts = 0;
+        const Element* by = nullptr;
+        for (const Element& el : m_spec.elements) {
+            if (el.kind != ElementKind::Buoyancy) continue;
+            if (!by) by = &el;
+            for (const Section& st : el.stations) {
+                double px[64], py[64];
+                const int n = FullSection(st, px, py, 64);
+                outlinePts += static_cast<size_t>(n);
+                double lo = 1e30;
+                for (int i = 0; i < n; ++i) lo = (std::min)(lo, py[i]);
+                for (int i = 0; i < n; ++i) if (py[i] <= lo + 1e-3) ++keelPts;
+            }
+        }
+        m_anchor.assign(3 * outlinePts, 0.0);
+        m_anchorOn.assign(outlinePts, 0);
+        if (by && by->contactSettle.v > 0.0 && keelPts > 0) {
+            m_mContact = m_body.mp.mass / keelPts;
+            m_kContact = m_mContact * kG / by->contactSettle.v;
+            // 0.4 OF CRITICAL PER POINT, not 1.0. The points act TOGETHER about the roll axis
+            // (a lever of the keel's depth under the CG), where their summed damping reached 1.6x
+            // critical at omega dt = 0.67 and the explicit 60 Hz step crossed its limit
+            // (2 zeta omega dt = 2.1 > 2): measured as a period-two rock that saturated the cone on
+            // every fast half-cycle and crept a held hull 0.037 m/s down a 20 deg slope.
+            m_cContact = 0.8 * std::sqrt(m_kContact * m_mContact);
+            m_muContact = (std::max)(0.0, by->contactMu.v);
+            Log("[vessel] %s: ground contact on %d keel points: %.3g N/m and %.3g N s/m each "
+                "(settle %.3f m, mu %.2f)", m_spec.kind.c_str(), keelPts, m_kContact, m_cContact,
+                by->contactSettle.v, m_muContact);
+        }
+    }
     return true;
+}
+
+void Vessel::Carry(const Motor& K) {
+    m_body.Carry(K);
+    for (size_t i = 0; i < m_anchorOn.size(); ++i) {
+        if (!m_anchorOn[i]) continue;
+        double* a = &m_anchor[3 * i];
+        K.TransformPoint(a[0], a[1], a[2]);
+    }
+}
+
+// ================================================================================================
+//  The bed plane (beaching): the secant over the hull, one normal per wrench.
+// ================================================================================================
+void Vessel::BedProbePoints(double xz[6]) const {
+    const double cg[3] = {0.0, 0.0, 0.0};
+    double wc[3];
+    m_body.ToWorld(cg, wc);
+    const double h = (m_spec.loa.v > 0.0) ? 0.5 * m_spec.loa.v : 1.0;
+    xz[0] = wc[0];     xz[1] = wc[2];
+    xz[2] = wc[0] + h; xz[3] = wc[2];
+    xz[4] = wc[0];     xz[5] = wc[2] + h;
+}
+
+void Vessel::BedPlane(const WaterSurface& sea, double simUnix) {
+    m_bedN[0] = 0.0; m_bedN[1] = 1.0; m_bedN[2] = 0.0;
+    if (!(m_kContact > 0.0)) return;
+    double xz[6];
+    BedProbePoints(xz);
+    const double h = xz[2] - xz[0];
+    // The bed's height in the hull's FRAME at each probe: the water's plane point there
+    // (PlaneOf, the sphere under the flat frame) less the depth -- the same construction the
+    // stations use for their own bed point, so the plane and the points agree.
+    double b[3];
+    bool ok[3];
+    for (int i = 0; i < 3; ++i) {
+        const SurfaceSample s = sea.At(xz[2 * i], xz[2 * i + 1], simUnix);
+        ok[i] = s.valid;
+        double sp[3], n[3];
+        sea.PlaneOf(s, xz[2 * i], xz[2 * i + 1], sp, n);
+        b[i] = sp[1] - s.depthM;
+    }
+    if (!ok[0]) return;
+    // A probe no layer covers (the edge of coverage) reads as the CG's height: a level bed in
+    // that direction rather than a slope invented from nothing.
+    const double dx = ok[1] ? (b[1] - b[0]) / h : 0.0;
+    const double dz = ok[2] ? (b[2] - b[0]) / h : 0.0;
+    const double inv = 1.0 / std::sqrt(1.0 + dx * dx + dz * dz);
+    m_bedN[0] = -dx * inv;
+    m_bedN[1] = inv;
+    m_bedN[2] = -dz * inv;
 }
 
 // ================================================================================================
@@ -706,6 +867,11 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
     m_accStations = 0;
     m_tel.waterValid = true;
     m_tel.thrustersWet = 0;
+    m_tel.contactN = 0.0;
+    m_tel.contactPts = 0;
+    m_anchorIdx = 0;
+    // The bed under the hull, before the stations ask it (beaching): one plane per wrench.
+    BedPlane(sea, simUnix);
 
     // TWO PASSES. Resistance and added mass are both properties of the WETTED HULL, and the
     // wetted hull is not known until the buoyancy clip and the collar have run. Letting that
@@ -803,6 +969,7 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
 //  F22: the step's water, asked once.
 // ================================================================================================
 bool Vessel::s_batchWater = true;
+bool Vessel::s_gripTrace = false;
 bool Vessel::s_batchAudit = false;
 std::atomic<uint64_t> Vessel::s_batchSteps{0}, Vessel::s_batchPoints{0}, Vessel::s_batchMisses{0},
     Vessel::s_batchHits{0}, Vessel::s_auditChecks{0}, Vessel::s_auditFails{0};
@@ -906,6 +1073,12 @@ void Vessel::WaterPoints(const VesselControls& c, std::vector<double>& xz) const
     }
     const double cg[3] = {0.0, 0.0, 0.0};
     add(cg);
+    // ...and the bed plane's three probes (beaching), the same doubles BedPlane asks with.
+    if (m_kContact > 0.0) {
+        double bp[6];
+        BedProbePoints(bp);
+        for (int i = 0; i < 6; ++i) xz.push_back(bp[i]);
+    }
 }
 
 void Vessel::Step(const WaterSurface& sea, const VesselControls& c, double simUnix, double dt) {
@@ -999,6 +1172,8 @@ std::vector<std::pair<std::string, const Num*>> VesselSpec::Ledger() const {
         add((p + "prop.radius").c_str(), e.propRadius);
         add((p + "foil.area").c_str(), e.foilArea);
         add((p + "deadrise").c_str(), e.deadriseDeg);
+        add((p + "contact.settle").c_str(), e.contactSettle);
+        add((p + "contact.mu").c_str(), e.contactMu);
     }
     return v;
 }

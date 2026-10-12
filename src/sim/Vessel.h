@@ -71,7 +71,12 @@ struct VesselTelemetry {
     double wettedLambda = 0.0;      // Savitsky's mean wetted-length / beam -- the planing state
     double copZ = 0.0;              // where the planing pressure acts, body z
     double depthM = 0.0;            // water depth under the hull
-    bool   aground = false;
+    bool   aground = false;         // a LABEL (depth under the CG < 0.3 m); the force is below
+    // THE GROUND'S ANSWER (beaching): the bed's normal force summed over the station outline
+    // points it is pushing on, and how many of them. Zero and zero is a hull the bed does not
+    // touch; the weight on the bed is what buoyancy is no longer carrying.
+    double contactN = 0.0;          // N
+    int    contactPts = 0;
     bool   waterValid = false;      // false = no coverage; NOT the same as flat water
     int    thrustersWet = 0;
 };
@@ -94,6 +99,7 @@ public:
     // ...and the audit (the residency audit's flag): every table entry re-asked live, compared bit
     // for bit; a difference is the batch answering other than the point would.
     static bool s_batchAudit;
+    static bool s_gripTrace;   // a test's per-point trace of the ground's grip
     static std::atomic<uint64_t> s_auditChecks, s_auditFails;
 
     const RigidBody& Body() const { return m_body; }
@@ -111,6 +117,13 @@ public:
 
 private:
     void WaterPoints(const VesselControls& c, std::vector<double>& xz) const;   // F22
+    // THE BED PLANE (beaching, 2026-10-11): one plane per hull per wrench, its normal the secant
+    // over the hull -- the bed's height at the CG and at CG + (h, 0) and CG + (0, h), h half the
+    // length overall, through the same WaterSurface::At the stations ask (so the F22 table serves
+    // it). Every contact point then takes its OWN station's bed height and this normal. The
+    // three world points, in the order WaterPoints lists them (the same doubles: a table hit).
+    void BedProbePoints(double xz[6]) const;
+    void BedPlane(const WaterSurface& sea, double simUnix);
     Bivector Buoyancy(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Collar(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Planing(const Element& e, const WaterSurface& sea, double simUnix);
@@ -149,6 +162,32 @@ private:
     double m_wetFrac = 1.0;
     double m_accDraught = 0.0;
     int    m_accStations = 0;
+
+    // ---- the bed (beaching): the plane's normal in the hull's frame, this wrench; the contact
+    // stiffness and damping PER KEEL POINT (Build: the hull's weight over `contactSettle` on the
+    // points at each station's lowest y -- one for a V, three for a flat bottom); the friction.
+    double m_bedN[3] = {0.0, 1.0, 0.0};
+    double m_kContact = 0.0;       // N/m per point
+    double m_cContact = 0.0;       // N s/m per point: critical against the mass share
+    double m_mContact = 1.0;       // kg: the mass share of one point
+    double m_muContact = 0.0;
+    // THE GRIP IS A POSITION, NOT A VELOCITY. Coulomb's static friction holds a hull at REST on a
+    // slope, and no function of velocity can: at 60 Hz a velocity law removes at most what gravity
+    // added that step, so it creeps at ~g sin(theta) dt (measured 2.36 m in 10 s on a 20 deg slope
+    // under the smooth sign with eps 0.5 mm/s in its implicit form; the brief's eps of 0.05 m/s
+    // creeps 0.36 m; an eps small enough to hold is 55x critical and explicit integration chatters).
+    // So each outline point keeps the ground point it GRIPPED: a tangential spring to its anchor
+    // (the bed's own rate and damping) saturated at mu N, the anchor dragged to the cone when it
+    // saturates. Below the cone the hull stands still to the spring's deflection; above it, it
+    // slides at exactly mu N. One expression; the cone is the same min(1, mu N / |F|) a tyre uses.
+    // Anchors live in the hull's FRAME (world points), so a carry moves them with the body (Carry).
+    std::vector<double> m_anchor;      // 3 per outline point, in Buoyancy/station/outline order
+    std::vector<uint8_t> m_anchorOn;   // the point is gripping (its anchor is live)
+    size_t m_anchorIdx = 0;            // the running index this wrench
+
+public:
+    // CARRIED BY A MOTOR: the body (RigidBody::Carry) and the ground it grips, together.
+    void Carry(const Motor& K);
 };
 
 // ---- the section clip, exposed because it has a closed-form gate of its own ------------------

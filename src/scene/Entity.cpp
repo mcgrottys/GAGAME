@@ -241,7 +241,7 @@ void Entity::Recentre(double simUnix) {
     }
     // The pose, carried: the space it stands in into the new one, through the common ancestor.
     const Space& from = m_space ? *m_space : *m_o.rootSpace;
-    b.Carry(from.To(next).ToMotor());
+    m_boat->Carry(from.To(next).ToMotor());   // the body and the ground it grips
     StandOn(next);
     double after[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(after[0], after[1], after[2]);
@@ -289,7 +289,7 @@ bool Entity::Carry(const Space& into, const Motor& m, double simUnix) {
     double sp0[3] = {c0[0], 0.0, c0[2]}, sn0[3];
     m_sea.PlaneOf(s0, c0[0], c0[2], sp0, sn0);
     // ONE PRODUCT: the pose and the momenta, by the motor.
-    b.Carry(m);
+    m_boat->Carry(m);   // the body and the ground it grips
     // It stands on `into`'s point of the cloud now -- and then on its own, by its position.
     if (!StandOn(into)) {
         Log("[vessel] '%s' was carried into '%s', which stands on no cloud point: it keeps its frame",
@@ -520,10 +520,10 @@ void Entity::StepTelemetry(TreeWater& boatSea, double simUnix) {
             std::atan(slope) * 57.2957795, ws.vx, ws.vy, ws.vz);
         Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
             "draught %.3f vol %.2f (hull %.2f collar %.2f) lam %.2f cop %+.2f "
-            "depth %.1f%s%s | parts %u",
+            "depth %.1f ground %.0f N/%d pts%s%s | parts %u",
             bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
             t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
-            t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM,
+            t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM, t.contactN, t.contactPts,
             (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
             t.waterValid ? "" : " NO-WATER",
             vesselLayer ? vesselLayer->PartCount() : 0u);
