@@ -8,8 +8,8 @@
     "so the town is there when it resets.",
     "",
     "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
-    "T / Y  cycle the helm through the scene's vehicles (boat, drone, ...); the drone is the recovery:",
-    "       flip the boat, T to the drone, fly, T back and the boat is set down under it",
+    "T / Y  take the vehicle's next / previous FORM: boat, drone, car -- one body (parts plus forms); the drone is the",
+    "       recovery: flip, T to the drone, fly, T back and the boat or car is set down where the drone is",
     "F      free the camera from the vehicle (it keeps its controls); F again returns",
     "MINIMAP  drag to turn the planet, wheel to zoom, the button to reset over the boat"
   ],
@@ -48,62 +48,42 @@
   },
   "hud": {
     "fps": true,
-    "minimap": {"enabled": true, "follow": "boat", "homeAltM": 2500, "layers": "globe vessels buildings sky"}
+    "minimap": {"enabled": true, "follow": "vehicle", "homeAltM": 2500, "layers": "globe vessels buildings sky"}
   },
   "views": [
     {
       "name": "sea",
       "follow": {
-        "target": "boat"
+        "target": "vehicle"
       },
       "interests": [
         {
-          "name": "boat"
+          "name": "vehicle"
         }
       ]
     }
   ],
   "entities": [
     {
-      "name": "boat",
-      "vessel": "rhib.novurania18",
+      "name": "vehicle",
+      "forms": [
+        {"vessel": "rhib.novurania18"},
+        {"vessel": "drone.recovery"},
+        {"vessel": "car.baja", "mesh": "D:/Assets/subaru-baja/source/Subaru Baja.glb", "meshScale": 0.01}
+      ],
       "at": {
         "x": 120,
         "alt": 0,
         "z": -10,
         "az": 86
-      },
-      "controller": "helm"
-    },
-    {
-      "name": "drone",
-      "vessel": "drone.recovery",
-      "at": {
-        "x": 120,
-        "alt": 6,
-        "z": -10,
-        "az": 86
-      },
-      "controller": "helm"
-    },
-    {
-      "name": "car",
-      "vessel": "car.baja",
-      "mesh": "D:/Assets/subaru-baja/source/Subaru Baja.glb",
-      "meshScale": 0.01,
-      "at": {
-        "x": -560,
-        "alt": 0,
-        "z": -215,
-        "az": 270
       },
       "controller": "helm"
     }
   ],
   "interests": [
     {
-      "name": "boat",
-      "target": "boat",
+      "name": "vehicle",
+      "target": "vehicle",
       "radius": 200
     }
   ],

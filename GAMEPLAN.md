@@ -1759,3 +1759,16 @@ element kinds (`Hover`, `Wheel`) and one law on an old one (the bed under every 
 Prior art, named: the raycast vehicle (Halo's Warthog, Unity's WheelCollider), Pacejka's relaxation
 length for the lateral lag, the "sticky" anchor of game friction solvers; what is this engine's own
 is that every one of them is the same anchor + cone on the same bed the water reads.
+
+**Parts plus forms (the same night).** Mark wanted the three vehicles to be one entity, a body that
+could one day transform. The algebra already said how: a part's mount is a motor and its force a
+wrench at the mount, so a form is a table of mounts and engagements and a transformation is a
+screw per part (`Motor::Log/Exp`, the product of exponentials; ALGEBRA pga). Built: `Form` on the
+spec (engagement per part + the body's numbers), `CombineForms` (several specs' parts in one body,
+one form each), `Vessel::SetForm` (the origin moves to the form's CG, the pose carried, the grips
+let go, the momenta rested), every part's wrench and water ask weighted by its engagement, each
+part's anchor and wheel slots its own; the scene's `entities[].forms` (a hull kind and its model
+per form), one entity `vehicle` in both Haulover scenes, T / Y take the next form, the recovery
+law gone (the seat does it). Gate: the barge form of a barge+car body draws what the barge alone
+draws to the micrometre and stands on the same six keel points; SetForm(1) moves the origin to the
+car's CG and the car form carries its weight on four wheels. Open: the continuous transformation.

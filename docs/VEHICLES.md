@@ -24,13 +24,24 @@ trim pump, which stays put; a pedal or a lever comes back). D is starboard on ev
 sign the physics needs (an outboard kicks the stern the other way, a wheel points where it goes)
 is the element's business, not the helmsman's.
 
+## One body, three forms (parts plus forms)
+
+The scenes declare ONE entity, `vehicle`, with three `forms`: the boat, the drone, the car. A spec
+is a list of parts; a form is how much of each part is engaged and the body's own numbers in that
+form (`sim/VesselSpec.h` Form). The three vehicles have no parts in common, so their engagements
+are 0 or 1; a transformer later is the same table with parts in common and mounts moving between
+forms along their screws (docs/ALGEBRA.md, pga). **T / Y take the next / previous form.** Taking a
+form moves the body's origin to that form's CG and carries the pose by the same shift, so every
+part stands where it stood; the momenta are rested and the seat law (below) puts the new form where
+it belongs. The parts a form does not engage weigh nothing, ask the water nothing and are not drawn.
+
 ## The recovery drone
 
-The drone is the recovery mode. Flip the boat or roll the car: press **T** until the helm is on
-the drone and it appears six metres over the vehicle you left, upright, at its heading. Fly it
+The drone is the recovery form. Flip the boat or roll the car: press **T** to take the drone form
+and it appears six metres over where you were, upright, at your heading. Fly it
 (W/S/Q/E, SHIFT/CTRL up and down, A/D turn) to wherever you want the vehicle to be, then **T** (or
-**Y**) back to the vehicle: it is placed under the drone, upright, facing the drone's way, and
-set down on whatever is there -- the boat at its draught in the water, the car on its tyres on the
+**Y**) back to the boat or the car: it takes that form where the drone is, upright, facing the
+drone's way, and is set down on whatever is there -- the boat at its draught in the water, the car on its tyres on the
 ground, by the one seat law below. Between two ordinary vehicles T/Y only moves the helm; nothing
 is moved.
 
@@ -87,5 +98,6 @@ full throttle for 5 s reaches 15.9 m/s against the drive law's own 16.6 (rolling
 it), no yaw, four wheels down; a step steer while coasting meets Ackermann's `tan(delta)/L`
 (neutral steer by construction: the cornering stiffness is the load's).
 
-The scenes (`haulover_portal.json`, `haulover_city.json`) spawn the car on the south-bank beach
-west of the entrance; the boat is the first subject, the drone second, the car third.
+The scenes (`haulover_portal.json`, `haulover_city.json`) spawn the one vehicle as the boat at the
+entrance; T takes the drone form, T again the car. To drive the car, fly the drone over land
+first (the south-bank beach is 500 m west), then T: the car is set down on the sand.

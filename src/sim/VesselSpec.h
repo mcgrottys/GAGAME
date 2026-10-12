@@ -285,6 +285,33 @@ struct Element {
 // ================================================================================================
 //  The spec. Pure data. Everything here is either a Num (with provenance) or geometry.
 // ================================================================================================
+// ================================================================================================
+//  Form - PARTS PLUS FORMS (2026-10-12). A spec is a list of PARTS; a form is how much of each
+//  part is engaged (0..1, a weight on its wrench) and the body's own numbers in that form. Three
+//  vehicles with no parts in common are three forms of one body whose engagements are 0 or 1; a
+//  transformer is the same table with parts in common and mounts that move between forms along
+//  their screws (Motor::Log/Exp per part -- Brockett's product of exponentials -- the follow-on).
+//  Every part's law already knows absence as zero (a wheel in the air carries nothing, a station
+//  out of the water displaces nothing, a rotor at zero throttle lifts nothing), so a form is a
+//  weighting and never a branch: the boat with its wheels folded IS the car with its wheels in
+//  the air. The body's origin is the form's CG (RigidBody.h), so taking a form moves the origin
+//  and carries the pose by the same shift; every part stands where it stood.
+// ================================================================================================
+struct Form {
+    std::string name;                    // "boat", "drone", "car"
+    std::string kind;                    // the source spec's kind: the ledger's and the logs'
+    std::string display;
+    std::vector<double> engage;          // one weight per element of the spec, 0..1
+    Num loa, beam, draftStatic;
+    Num massDry, massLoaded;
+    double hullMassCentre[3] = {0, 0, 0};
+    Num inertiaRoll, inertiaPitch, inertiaYaw;
+    Num addedMassSurge, addedMassSway, addedMassHeave;
+    Num addedInertiaRoll, addedInertiaPitch, addedInertiaYaw;
+    Num seatHeight;
+    bool recovery = false;
+};
+
 struct VesselSpec {
     std::string kind;                        // "rhib.novurania18"
     std::string display;                     // "1998 Novurania 18' RHIB, twin Yamaha F50"
@@ -311,6 +338,9 @@ struct VesselSpec {
     bool recovery = false;
 
     std::vector<Element> elements;
+    // THE FORMS. Empty: one implicit form engaging every part with the numbers above (every
+    // hull that ever was). Build refuses a form whose engagement table is not the parts'.
+    std::vector<Form> forms;
 
     // Every Num in the spec, for the report. Built by the factory; the registry prints it.
     std::vector<std::pair<std::string, const Num*>> Ledger() const;
@@ -377,5 +407,11 @@ VesselSpec MakeRecoveryDrone();
 // and a drag box low down for when it is driven into the sea. No buoyancy: it sinks, and the
 // drone is the recovery.
 VesselSpec MakeCarBaja();
+
+// ONE BODY FROM SEVERAL SPECS: their parts concatenated (each part's name prefixed by its form's),
+// one form per spec engaging only its own parts and carrying its spec's own numbers; `kind` the
+// kinds joined by '+', the top-level numbers the first form's (the ledger before Build). Empty
+// when any input is empty.
+VesselSpec CombineForms(const std::vector<std::pair<std::string, VesselSpec>>& named);
 
 }  // namespace ga

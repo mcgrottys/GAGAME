@@ -65,6 +65,20 @@ endpoints reproduce the keys.
 Code: `src/core/Pga.h` (the multivector layout + products), `main.cpp` railPose.
 Gates: `pga` (motor self-test). AST: camera edges are implicit (world frame both sides).
 
+**Parts plus forms (M14, 2026-10-12).** A vessel is a list of parts, each mounted by a motor
+`A_i` in the body frame and each returning a wrench at that mount. A *form* is a table of mounts
+and engagements `(A_i^F, g_i^F)`, and a transformation between forms is a screw per part,
+`A_i(t) = exp(t · log(A_i^B · ~A_i^A)) · A_i^A` — the same `Motor::Log/Exp` as the camera's slerp,
+Brockett's product of exponentials written in Cl(3,0,1). Every force is a wrench at a mount and
+transports by the same sandwich, so moving the mounts moves the physics with no new law: a wheel
+folded into the air carries nothing, a station lifted out of the water displaces nothing. The
+body's origin is its CG (the momentum equations decouple there), so taking a form re-references
+the parts onto the new CG and carries the pose by that shift; `RigidBody` keeps momentum, not
+velocity, so a body that folds its parts in mid-air spins up by conservation and not by a rule.
+Built (sim/VesselSpec.h `Form`, `Vessel::SetForm`): the discrete switch with engagements 0/1 and
+the momenta rested; open: the continuous transformation (mounts along their screws, the mass
+properties re-summed per step, the momenta transported).
+
 ## cga — The conformal model Cl(4,1): the sun as a place, and the space as a versor
 
 `pga` carries rigid motion but cannot carry a **sphere**, and in a degenerate projective

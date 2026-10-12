@@ -34,6 +34,7 @@
 // ================================================================================================
 #pragma once
 
+#include <array>
 #include <atomic>
 #include "core/Common.h"
 #include "sim/Medium.h"
@@ -109,6 +110,19 @@ public:
 
     // Gravity is applied inside Step, but exposed so a gate can hold a hull in a vice.
     bool applyGravity = true;
+
+    // ---- FORMS (VesselSpec.h Form: parts plus forms) --------------------------------------------
+    size_t FormCount() const { return m_spec.forms.size(); }
+    size_t FormIndex() const { return m_form; }
+    const Form& CurrentForm() const { return m_spec.forms[m_form]; }
+    // The weight the current form puts on part i.
+    double Engage(size_t i) const { return (i < m_spec.forms[m_form].engage.size()) ? m_spec.forms[m_form].engage[i] : 0.0; }
+    // TAKE A FORM: the body's origin moves to that form's CG (the geometry re-referenced onto it,
+    // the pose carried by the same shift, so every part stands where it stood in the world), the
+    // body's numbers become the form's (Spec() reads them), the ground grips are let go and the
+    // momenta rested -- the discrete switch; the continuous transformer transports them along the
+    // parts' screws (the follow-on). False for an index the spec has no form for.
+    bool SetForm(size_t f);
 
     // The total body-frame wrench at the current state, without stepping. This is what the
     // gates read: a floating body at equilibrium has a wrench of zero, and that is checkable
@@ -213,6 +227,16 @@ private:
     // the wheel element's contactSettle), 0.4 of critical as the hull's.
     double m_kGrip = 0.0, m_cGrip = 0.0;
     double m_mWheel = 1.0;   // kg: one wheel's share of the mass (the lateral spring's damping)
+
+    // ---- forms: the current one, every form's CG in the datum (Build's solve, once per form),
+    // the datum point the body origin stands on now, and each part's first anchor and wheel slot
+    // (so a form that skips parts keeps every other part's grips where they were).
+    size_t m_form = 0;
+    std::vector<std::array<double, 3>> m_formCg;
+    double m_cgNow[3] = {0.0, 0.0, 0.0};
+    std::vector<size_t> m_anchorBase, m_wheelBase;
+    void ShiftGeometry(const double d[3]);        // every body coordinate minus d
+    void ApplyFormNumbers(const Form& f);         // Spec()'s top level, the mass props, the contacts
 };
 
 // ---- the section clip, exposed because it has a closed-form gate of its own ------------------

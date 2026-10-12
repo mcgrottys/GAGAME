@@ -679,12 +679,66 @@ bool RunVesselSelfTest() {
         }
     }
 
+    // ---- 10. PARTS PLUS FORMS. One body built from the barge and the car: in its first form it
+    // is the barge (the same weight on the same six keel points on dry ground as the barge alone,
+    // its draught afloat the barge's to the micrometre), and after SetForm it is the car (the same
+    // four wheel loads as the car alone), the origin having moved to the car's CG. A form is the
+    // parts' own laws, unchanged by sharing a body; the parts the form does not engage weigh
+    // nothing, ask nothing and draw nothing.
+    {
+        const VesselSpec both = CombineForms({{"barge", spec}, {"car", reg.Build("car.baja")}});
+        if (both.forms.size() != 2) fail("forms: CombineForms made", double(both.forms.size()), 2.0);
+        // Afloat, as the barge.
+        {
+            Vessel one, two;
+            one.Build(spec, Motor::Translation(0.0, 0.3, 0.0));
+            two.Build(both, Motor::Translation(0.0, 0.3, 0.0));
+            Settle(one, still, 4800);
+            Settle(two, still, 4800);
+            const double d1 = one.Telemetry().draughtM, d2 = two.Telemetry().draughtM;
+            Log("[vessel] forms: afloat, the barge alone draws %.6f m and the barge form of the body %.6f m", d1, d2);
+            if (std::abs(d1 - d2) > 1e-6) fail("forms: the barge form's draught is the barge's (m)", d2, d1);
+        }
+        // On dry ground: the barge form, then the car form.
+        {
+            StillWater dry;
+            dry.levelNavd = 0.0;
+            dry.bedNavd = 1.0;
+            const double Wb = (spec.massLoaded.v > 0.0 ? spec.massLoaded.v : spec.massDry.v) * kG;
+            const double Wc = (both.forms[1].massLoaded.v > 0.0 ? both.forms[1].massLoaded.v : both.forms[1].massDry.v) * kG;
+            Vessel v;
+            v.Build(both, Motor::Translation(0.0, 1.0 + 1.5, 0.0));
+            Settle(v, dry, 4800);
+            VesselControls c;
+            for (int i = 0; i < 180; ++i) v.Step(dry, c, i * dtLive, dtLive);
+            Log("[vessel] forms: the barge form stands on %d points carrying %.0f N of %.0f, %zu wheels drawn as %zu slots",
+                v.Telemetry().contactPts, v.Telemetry().contactN, Wb, size_t(0), v.Wheels().size());
+            if (v.Telemetry().contactPts != 6) fail("forms: the barge form's keel points", v.Telemetry().contactPts, 6);
+            if (std::abs(v.Telemetry().contactN - Wb) > 0.01 * Wb) fail("forms: the barge form's weight on the ground (N)", v.Telemetry().contactN, Wb);
+            double before[3];
+            cgOf(v, before);
+            if (!v.SetForm(1)) fail("forms: SetForm(1)", 0, 1);
+            double after[3];
+            cgOf(v, after);
+            v.Body().SetPose(Motor::Translation(after[0], 1.0 + 1.5, after[2]));   // the car dropped onto the ground
+            Settle(v, dry, 4800);
+            for (int i = 0; i < 180; ++i) v.Step(dry, c, i * dtLive, dtLive);
+            Log("[vessel] forms: SetForm moved the origin by (%+.3f, %+.3f, %+.3f) m; the car form stands on %d wheels carrying %.0f N of %.0f",
+                after[0] - before[0], after[1] - before[1], after[2] - before[2], v.Telemetry().contactPts,
+                v.Telemetry().contactN, Wc);
+            if (v.Telemetry().contactPts != 4) fail("forms: the car form's wheels", v.Telemetry().contactPts, 4);
+            if (std::abs(v.Telemetry().contactN - Wc) > 0.01 * Wc) fail("forms: the car form's weight on the ground (N)", v.Telemetry().contactN, Wc);
+            if (v.Spec().kind != "car.baja") fail("forms: Spec() reads as the form", 0, 1);
+        }
+    }
+
     Log("[vessel] ---- %s: factory refuses unknown kinds, section clip (level/tilted/full/dry), "
         "draught + zero residual wrench, heave period, roll period vs GM, carried by a swell, "
         "absence is not flat water, the ground (dry flat, Coulomb's slope both ways, the beach "
         "stops it and the control sails on, the bed probes in the batch), the drone (5 m/s in "
         "3 tau, a 60 s hover, level from 30 deg), the car (static loads and compressions, the "
-        "braked hill, the drive law, Ackermann) ----",
+        "braked hill, the drive law, Ackermann), parts plus forms (the barge form is the barge, "
+        "the car form is the car, the origin moves to the form's CG) ----",
         ok ? "PASS" : "FAIL");
     return ok;
 }

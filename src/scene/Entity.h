@@ -145,6 +145,17 @@ public:
     // then puts it at its own seatHeight over the surface there (a drone six metres up, a boat
     // on the water, a car on the ground, by the one law).
     void PlaceOver(const Entity& other);
+    // ---- FORMS (parts plus forms, 2026-10-12): an entity declared with `forms` is one body whose
+    // T / Y take the next form (Vessel::SetForm: the origin moves to the form's CG, the pose is
+    // carried, the momenta rested) and whose seat then puts that form where it belongs -- the
+    // drone six metres up, the boat at its draught, the car on its tyres -- by the one seat law.
+    // False when the entity has one form (the loop then cycles entities).
+    bool CycleForm(int dir);
+    size_t FormCount() const;
+    // The reference model of the CURRENT form (empty: none), for the layer every publish.
+    const std::string& MeshFile() const;
+    double MeshScale() const;
+    double MeshYaw() const;
     // The CG and horizontal heading said in `s` (null: the root), through the common ancestor.
     bool FrameIn(const Space* s, double cg[3], double fwd[3]) const;
     // The hull's origin and horizontal heading, for the chase camera; keeps helmYawRef.

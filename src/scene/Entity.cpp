@@ -63,7 +63,26 @@ void Entity::SetSpawn(double x, double y, double z, double headingDeg) {
 bool Entity::Spawn(const VesselRegistry& vesselReg) {
     auto& boat = m_boat;
     auto& helming = m_helming;
-    const VesselSpec spec = vesselReg.Build(m_props.vessel);
+    // ONE BODY, ITS FORMS: the scene's `forms` are several specs' parts in one body (CombineForms),
+    // each form engaging its own; without `forms`, the one kind as it always was.
+    VesselSpec spec;
+    if (!m_props.forms.empty()) {
+        std::vector<std::pair<std::string, VesselSpec>> named;
+        for (const FormProps& f : m_props.forms) {
+            VesselSpec one = vesselReg.Build(f.vessel);
+            if (one.kind.empty()) {
+                Log("[vessel] '%s': form '%s' is not a registered kind; known:", m_props.name.c_str(), f.vessel.c_str());
+                for (const std::string& k : vesselReg.Kinds()) Log("[vessel]   %s", k.c_str());
+                return false;
+            }
+            // The form's name: the kind's first word ("rhib", "drone", "car").
+            const size_t dot = f.vessel.find('.');
+            named.emplace_back(f.vessel.substr(0, dot), std::move(one));
+        }
+        spec = CombineForms(named);
+    } else {
+        spec = vesselReg.Build(m_props.vessel);
+    }
     if (spec.kind.empty()) {
         Log("[vessel] '%s' is not a registered kind; known:", m_props.vessel.c_str());
         for (const std::string& k : vesselReg.Kinds()) Log("[vessel]   %s", k.c_str());
@@ -196,6 +215,42 @@ void Entity::PlaceAt(const Motor& pose) {
     m_ctl = VesselControls{};
     m_placed = false;               // seated on its surface by the next Update...
     m_reseatKeepsYaw = true;        // ...facing the way the pose faces
+}
+
+bool Entity::CycleForm(int dir) {
+    if (!m_boat || m_boat->FormCount() < 2) return false;
+    const size_t n = m_boat->FormCount();
+    const size_t f = (m_boat->FormIndex() + n + (dir < 0 ? n - 1 : 1)) % n;
+    if (!m_boat->SetForm(f)) return false;
+    // At rest in the new form, seated by the next Update at the form's own seat height over the
+    // surface there, facing the way it faced -- the whole of the recovery law.
+    m_ctl = VesselControls{};
+    m_placed = false;
+    m_reseatKeepsYaw = true;
+    Log("[vehicle] '%s' takes form '%s' (%s)%s", m_props.name.c_str(), m_boat->CurrentForm().name.c_str(),
+        m_boat->Spec().kind.c_str(), m_boat->Spec().recovery ? ": the recovery form, seated over where it stood" : "");
+    return true;
+}
+
+size_t Entity::FormCount() const { return m_boat ? m_boat->FormCount() : 0; }
+
+const std::string& Entity::MeshFile() const {
+    if (m_boat && !m_props.forms.empty() && m_boat->FormIndex() < m_props.forms.size()) {
+        return m_props.forms[m_boat->FormIndex()].mesh;
+    }
+    return m_props.mesh;
+}
+double Entity::MeshScale() const {
+    if (m_boat && !m_props.forms.empty() && m_boat->FormIndex() < m_props.forms.size()) {
+        return m_props.forms[m_boat->FormIndex()].meshScale;
+    }
+    return m_props.meshScale;
+}
+double Entity::MeshYaw() const {
+    if (m_boat && !m_props.forms.empty() && m_boat->FormIndex() < m_props.forms.size()) {
+        return m_props.forms[m_boat->FormIndex()].meshYaw;
+    }
+    return m_props.meshYaw;
 }
 
 void Entity::ResetAtRest() {

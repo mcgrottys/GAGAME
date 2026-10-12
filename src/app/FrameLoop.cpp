@@ -1962,6 +1962,9 @@ void FrameLoop::ApplyWater() {
 // chase camera is the start view's Follow of the followed hull, placed after the steps as the
 // hand code placed it after the telemetry (and, as there, only once the hull is set down).
 void FrameLoop::CycleVehicle(int dir) {
+    // ONE BODY, ITS FORMS FIRST: a subject declared with `forms` takes its next form (the seat
+    // law puts it where it belongs); the entity cycle below is for scenes with several bodies.
+    if (m_followed && m_followed->CycleForm(dir)) return;
     std::vector<scene::Entity*> active;
     for (auto& e : m_entities) if (e->Active()) active.push_back(e.get());
     if (active.size() < 2 || !m_followed) return;
@@ -2280,9 +2283,7 @@ void FrameLoop::PublishHulls() {
         // THE REFERENCE MODEL is scene data (`mesh` on the entity): declared to the layer with the
         // hull (idempotent; the layer says so once), here because the layer stands by the time the
         // hulls are published and not necessarily when they are spawned.
-        if (!e->Declared().mesh.empty()) {
-            layer->DeclareMesh(hull, e->Declared().mesh, e->Declared().meshScale, e->Declared().meshYaw);
-        }
+        layer->DeclareMesh(hull, e->MeshFile(), e->MeshScale(), e->MeshYaw());   // the form's; empty = boxes
         const Motor base = e->DrawFrame();
         hulls.push_back(hull);
         frames.push_back(base);

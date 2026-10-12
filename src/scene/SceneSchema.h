@@ -363,9 +363,18 @@ struct InterestProps {
 struct InterestRef {
     std::string name;
 };
+// ONE FORM OF AN ENTITY (parts plus forms, 2026-10-12): a hull kind and, if the scene has one,
+// the reference model drawn over it. An entity with `forms` is ONE body (sim/VesselSpec.h Form)
+// whose T / Y cycle takes the next form; `vessel` is then the first form's.
+struct FormProps {
+    std::string vessel;
+    std::string mesh;
+    double meshScale = 1.0, meshYaw = 0.0;
+};
 struct EntityProps {
     std::string name;
     std::string vessel;
+    std::vector<FormProps> forms;
     Placement at;                     // the spawn (required)
     int controller = 0;               // helm | fixed
     double throttle = 0.0, steer = 0.0;

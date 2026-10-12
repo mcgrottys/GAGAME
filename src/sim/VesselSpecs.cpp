@@ -693,6 +693,57 @@ VesselSpec MakeCarBaja() {
     return s;
 }
 
+// ================================================================================================
+//  CombineForms -- one body, several forms (VesselSpec.h Form).
+// ================================================================================================
+VesselSpec CombineForms(const std::vector<std::pair<std::string, VesselSpec>>& named) {
+    VesselSpec s;
+    size_t total = 0;
+    for (const auto& nv : named) {
+        if (nv.second.kind.empty()) return VesselSpec{};
+        total += nv.second.elements.size();
+    }
+    for (const auto& nv : named) {
+        const std::string& name = nv.first;
+        const VesselSpec& src = nv.second;
+        Form f;
+        f.name = name;
+        f.kind = src.kind;
+        f.display = src.display;
+        f.engage.assign(total, 0.0);
+        f.loa = src.loa; f.beam = src.beam; f.draftStatic = src.draftStatic;
+        f.massDry = src.massDry; f.massLoaded = src.massLoaded;
+        for (int i = 0; i < 3; ++i) f.hullMassCentre[i] = src.hullMassCentre[i];
+        f.inertiaRoll = src.inertiaRoll; f.inertiaPitch = src.inertiaPitch; f.inertiaYaw = src.inertiaYaw;
+        f.addedMassSurge = src.addedMassSurge; f.addedMassSway = src.addedMassSway; f.addedMassHeave = src.addedMassHeave;
+        f.addedInertiaRoll = src.addedInertiaRoll; f.addedInertiaPitch = src.addedInertiaPitch; f.addedInertiaYaw = src.addedInertiaYaw;
+        f.seatHeight = src.seatHeight;
+        f.recovery = src.recovery;
+        for (const Element& e0 : src.elements) {
+            Element e = e0;
+            e.name = name + "." + e.name;
+            f.engage[s.elements.size()] = 1.0;
+            s.elements.push_back(e);
+        }
+        s.forms.push_back(f);
+        s.kind += (s.kind.empty() ? "" : "+") + src.kind;
+    }
+    if (s.forms.empty()) return VesselSpec{};
+    s.display = "one body, " + std::to_string(s.forms.size()) + " forms";
+    for (const Form& f : s.forms) s.display += (&f == &s.forms.front() ? ": " : ", ") + f.name;
+    // The top level reads as the first form until Build (its ledger is printed before).
+    const Form& f0 = s.forms.front();
+    s.loa = f0.loa; s.beam = f0.beam; s.draftStatic = f0.draftStatic;
+    s.massDry = f0.massDry; s.massLoaded = f0.massLoaded;
+    for (int i = 0; i < 3; ++i) s.hullMassCentre[i] = f0.hullMassCentre[i];
+    s.inertiaRoll = f0.inertiaRoll; s.inertiaPitch = f0.inertiaPitch; s.inertiaYaw = f0.inertiaYaw;
+    s.addedMassSurge = f0.addedMassSurge; s.addedMassSway = f0.addedMassSway; s.addedMassHeave = f0.addedMassHeave;
+    s.addedInertiaRoll = f0.addedInertiaRoll; s.addedInertiaPitch = f0.addedInertiaPitch; s.addedInertiaYaw = f0.addedInertiaYaw;
+    s.seatHeight = f0.seatHeight;
+    s.recovery = f0.recovery;
+    return s;
+}
+
 void RegisterBuiltinVessels(VesselRegistry& reg) {
     reg.Register("box.test", MakeTestBox);
     reg.Register("rhib.novurania18", MakeRhib18);

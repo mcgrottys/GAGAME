@@ -623,11 +623,25 @@ const Schema& InterestSchema_() {
     return *s;
 }
 
+static scene::FormProps kForm;
+const Schema& FormSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("entity.form", &kForm);
+        sc->Bind("vessel", kForm.vessel, "this form's hull kind (VesselRegistry)", R)
+            .Bind("mesh", kForm.mesh, "a glTF binary (.glb) drawn over this form's physics; empty: the spec's boxes", R)
+            .Bind("meshScale", kForm.meshScale, Q::Dimensionless, "1", "the mesh file's units to metres", R)
+            .Bind("meshYaw", kForm.meshYaw, Q::Angle, "deg", "the turn about +y that puts the model's front on +z", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& EntitySchema_() {
     static const Schema* s = [] {
         Schema* sc = new Schema("entity", &kEntity);
         sc->Bind("name", kEntity.name, "the entity's name", R)
-            .Bind("vessel", kEntity.vessel, "the hull kind (VesselRegistry; --boat)", R)
+            .Bind("vessel", kEntity.vessel, "the hull kind (VesselRegistry; --boat); with `forms`, the first form's", R)
+            .List("forms", &FormSchema(), "ONE body with several forms (sim/VesselSpec.h Form): T / Y take the next; each a hull kind and its model", false)
             .Bind("at", kEntity.at, "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)", R)
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)

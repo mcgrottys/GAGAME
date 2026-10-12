@@ -37,7 +37,11 @@ bool VesselLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
 }
 
 void VesselLayer::DeclareMesh(const Vessel* v, const std::string& file, double scale, double yawDeg) {
-    if (!v || file.empty()) return;
+    if (!v) return;
+    if (file.empty()) {   // the form has no model: the spec's boxes
+        m_meshDecl.erase(v);
+        return;
+    }
     auto it = m_meshDecl.find(v);
     if (it != m_meshDecl.end() && it->second.file == file && it->second.scale == scale && it->second.yawDeg == yawDeg) {
         return;   // declared every publish; nothing changed
@@ -121,7 +125,13 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
             m_meshDraws.push_back(d);
         }
 
-        for (const Element& e : spec.elements) {
+        for (size_t ei = 0; ei < spec.elements.size(); ++ei) {
+            const Element& e = spec.elements[ei];
+            // A part its form does not engage is not drawn (its wheel slot still counts).
+            if (!(v->Engage(ei) > 0.0)) {
+                if (e.kind == ElementKind::Wheel) ++wheelIdx;
+                continue;
+            }
             const int pal = static_cast<int>(e.kind);
             switch (e.kind) {
                 case ElementKind::Wheel: {
