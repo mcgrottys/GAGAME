@@ -53,6 +53,7 @@
 #include <vector>
 
 namespace ga {
+class BuildingLayer;
 class BuildingStack;
 class Gpu;
 class SeaLayer;
@@ -99,6 +100,8 @@ public:
         // THE SOLIDS (2026-10-12): the buildings stack, composed about the hull on the pool and
         // read by its ground law as prisms in its own frame (sim/Solids.h). Null: the bed alone.
         const BuildingStack* buildings = nullptr;
+        // ...and the layer whose resident pages hold the bridge decks and ramps (DecksNear).
+        const BuildingLayer* buildingLayer = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------

@@ -1782,6 +1782,7 @@ std::optional<int> FrameLoop::Session() {
         eo.planet = &m_planetSpace;         // ... and the two spaces a hull re-centres between
         eo.rootSpace = &m_tangentSpace;
         eo.buildings = m_A.buildingStack.get();
+        eo.buildingLayer = m_A.buildingLayer;
         e->Configure(eo);
     }
 

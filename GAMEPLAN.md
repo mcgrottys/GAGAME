@@ -1782,3 +1782,14 @@ the pool; the contact plane is the deepest surface (the bed's or a face's), a st
 nearer of the bed and a top. Gates: roof and side at rest on 15 points; a wall at 8.5 m/s held at
 the face (0.45 m of shell give); a 0.4 m step climbed to 0.400 m. Open: bridge decks as solids,
 the solids for the boat (a hull against a quay), the per-point grip across two surfaces at once.
+
+**Decks, and the flip tamed (2026-10-12).** Mark's second log: on its roof at 20 kn the shell took
+135 kN on 10 points and the car flew 7 m. Hunt-Crossley damping on the station contact (c x
+pen / settle x closing speed: zero at a touch, the old damping at rest, ten times it ten settles
+deep) -- the roof landing now lifts 7 cm after it lands; the CG lowered to 0.62 m and the tyres to
+mu 0.75 so the stability factor (1.15) stands above the grip and the car slides before it rolls.
+The decks: `BuildingLayer::DecksNear` reads the kDeck ribbons from the resident pages (the same
+records the renderer stands), the entity makes each segment a prism whose top PLANE runs through
+the deck's profile at its ends (`SolidPrism` gained gradients), and the strut's ray and the
+deepest-surface law take sloped planes as they took level ones. Gates: a 10 % ramp followed to
+0.009 m with four wheels down, the deck beyond stood at 2.000 m; the wall and the step as before.

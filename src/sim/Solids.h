@@ -17,8 +17,14 @@ namespace ga {
 
 struct SolidPrism {
     std::vector<double> xz;              // x0, z0, x1, z1, ... (any winding; closed implicitly)
-    double yBottom = 0.0, yTop = 0.0;    // frame heights
+    // The top and bottom are PLANES through (cx, cz): y = yTop + gx (x - cx) + gz (z - cz), and the
+    // bottom parallel below. A building's are level (gx = gz = 0); a bridge deck's or a ramp's
+    // segment slopes along its run, so a car climbs an approach by the same ray and the same face.
+    double yBottom = 0.0, yTop = 0.0;    // frame heights at (cx, cz)
+    double gx = 0.0, gz = 0.0;           // the planes' gradients
     double cx = 0.0, cz = 0.0, radius = 0.0;
+    double TopAt(double x, double z) const { return yTop + gx * (x - cx) + gz * (z - cz); }
+    double BottomAt(double x, double z) const { return yBottom + gx * (x - cx) + gz * (z - cz); }
 };
 
 // Even-odd point in polygon over (x, z) pairs.

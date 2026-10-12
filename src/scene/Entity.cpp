@@ -4,6 +4,7 @@
 #include "scene/Pose.h"
 
 #include "compose/BuildingSolids.h"
+#include "scene/BuildingLayer.h"
 #include "core/Common.h"
 #include "core/SceneConfig.h"
 #include "core/ThreadManager.h"
@@ -422,8 +423,52 @@ void Entity::SolidsStep(double simUnix) {
         pz.yTop = ground - drop + b.top;
         m_prisms.push_back(std::move(pz));
     }
-    Log("[solids] '%s': %zu solids within %.0f m -> %zu prisms in the hull's frame (compose %u took %.1f ms on the pool)",
-        m_props.name.c_str(), raw->size(), kSolidsReachM, m_prisms.size(), composes, composeMs);
+    const size_t buildingsN = m_prisms.size();
+    // THE DECKS AND RAMPS (BuildingLayer::DecksNear): each ribbon segment a prism whose top plane
+    // runs through the deck's height at its two ends -- the surveyed clearance over the higher of
+    // the ground and the sea at each vertex -- a metre deep (the LOD's deck depth), the segment's
+    // width across. The same solid a building is, with a slope.
+    if (m_o.buildingLayer) {
+        std::vector<BuildingLayer::DeckStrip> strips;
+        m_o.buildingLayer->DecksNear(lat, lon, kSolidsReachM, strips);
+        for (const BuildingLayer::DeckStrip& st : strips) {
+            const double half = (std::max)(st.widthM, 2.0) * 0.5;
+            std::vector<double> vx(st.lat.size()), vz(st.lat.size()), vy(st.lat.size());
+            bool ok = true;
+            for (size_t i = 0; i < st.lat.size() && ok; ++i) {
+                ok = chart.FlatOf(st.lat[i], st.lon[i], vx[i], vz[i]);
+                double ground = 0.0;
+                if (!(m_o.bed && m_o.bed->Read(st.lat[i], st.lon[i], ground))) {
+                    const SurfaceSample ss = m_sea.At(vx[i], vz[i], simUnix);
+                    ground = ss.valid ? ss.bedNavd : 0.0;
+                }
+                const double drop = (vx[i] * vx[i] + vz[i] * vz[i]) / (2.0 * R);
+                vy[i] = (std::max)(ground, 0.0) + st.over[i] - drop;
+            }
+            if (!ok) continue;
+            for (size_t i = 0; i + 1 < vx.size(); ++i) {
+                const double ex = vx[i + 1] - vx[i], ez = vz[i + 1] - vz[i];
+                const double len = std::sqrt(ex * ex + ez * ez);
+                if (len < 0.05) continue;
+                const double ux = ex / len, uz = ez / len;
+                const double px = -uz * half, pz = ux * half;   // across the run
+                SolidPrism pr;
+                pr.xz = {vx[i] + px, vz[i] + pz, vx[i + 1] + px, vz[i + 1] + pz,
+                         vx[i + 1] - px, vz[i + 1] - pz, vx[i] - px, vz[i] - pz};
+                pr.cx = 0.5 * (vx[i] + vx[i + 1]);
+                pr.cz = 0.5 * (vz[i] + vz[i + 1]);
+                pr.yTop = 0.5 * (vy[i] + vy[i + 1]);
+                pr.yBottom = pr.yTop - 1.0;
+                const double grade = (vy[i + 1] - vy[i]) / len;
+                pr.gx = grade * ux;
+                pr.gz = grade * uz;
+                pr.radius = 0.5 * len + half + 0.5;
+                m_prisms.push_back(std::move(pr));
+            }
+        }
+    }
+    Log("[solids] '%s': %zu solids within %.0f m -> %zu prisms in the hull's frame, %zu of them deck segments (compose %u took %.1f ms on the pool)",
+        m_props.name.c_str(), raw->size(), kSolidsReachM, m_prisms.size(), m_prisms.size() - buildingsN, composes, composeMs);
 }
 
 void Entity::Recentre(double simUnix) {

@@ -198,6 +198,7 @@ private:
     double m_kContact = 0.0;       // N/m per point
     double m_cContact = 0.0;       // N s/m per point: critical against the mass share
     double m_mContact = 1.0;       // kg: the mass share of one point
+    double m_settleContact = 0.015; // m: the declared settle, the Hunt-Crossley damping's scale
     double m_muContact = 0.0;
     // THE GRIP IS A POSITION, NOT A VELOCITY. Coulomb's static friction holds a hull at REST on a
     // slope, and no function of velocity can: at 60 Hz a velocity law removes at most what gravity

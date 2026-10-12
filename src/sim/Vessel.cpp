@@ -269,14 +269,16 @@ void Vessel::DeepestSurface(const double pw[3], double bedPen, const double bedN
     for (const SolidPrism& sp : *m_solids) {
         const double dx = pw[0] - sp.cx, dz = pw[2] - sp.cz;
         if (dx * dx + dz * dz > sp.radius * sp.radius) continue;
-        if (pw[1] < sp.yBottom || pw[1] > sp.yTop) continue;
+        const double top = sp.TopAt(pw[0], pw[2]);
+        if (pw[1] < sp.BottomAt(pw[0], pw[2]) || pw[1] > top) continue;
         if (!PrismHolds(sp.xz, pw[0], pw[2])) continue;
-        // Inside: the way out is the nearest face -- the top, or a side.
-        const double dTop = sp.yTop - pw[1];
+        // Inside: the way out is the nearest face -- the top plane, or a side.
+        const double ny = 1.0 / std::sqrt(1.0 + sp.gx * sp.gx + sp.gz * sp.gz);
+        const double dTop = (top - pw[1]) * ny;
         double dSide, ns[2];
         PrismNearestSide(sp.xz, pw[0], pw[2], dSide, ns);
         if (dTop <= dSide) {
-            if (dTop > pen) { pen = dTop; n[0] = 0.0; n[1] = 1.0; n[2] = 0.0; }
+            if (dTop > pen) { pen = dTop; n[0] = -sp.gx * ny; n[1] = ny; n[2] = -sp.gz * ny; }
         } else {
             if (dSide > pen) { pen = dSide; n[0] = ns[0]; n[1] = 0.0; n[2] = ns[1]; }
         }
@@ -325,7 +327,13 @@ Bivector Vessel::GroundAtStation(const Section& st, const double* px, const doub
             double v[3];
             m_body.VelocityAtBody(pBody, v);
             const double vn = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
-            const double fn = m_kContact * pen + m_cContact * std::max(0.0, -vn);
+            // HUNT-CROSSLEY (2026-10-12): the damping grows with the penetration, c (pen / settle)
+            // (-vn) -- the resting contact at pen = settle keeps the damping it had, a crash ten
+            // settles deep dissipates ten times as hard, and a touch starts from zero (no impulse
+            // at first contact, no pull at the exit). Measured before it: a car on its roof at
+            // 20 kn took 135 kN on 10 points and left the ground with its CG 7 m up.
+            const double fn = (std::max)(0.0, m_kContact * pen +
+                                              m_cContact * (pen / m_settleContact) * (std::max)(0.0, -vn));
             // The grip: (point - anchor) and the point's velocity, both in the contact plane.
             double d[3] = {pw[0] - anc[0], pw[1] - anc[1], pw[2] - anc[2]};
             const double dn = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
@@ -644,6 +652,7 @@ void Vessel::ApplyFormNumbers(const Form& f) {
         }
         if (keelPts > 0) {
             m_mContact = m_body.mp.mass / keelPts;
+            m_settleContact = by->contactSettle.v;
             m_kContact = m_mContact * kG / by->contactSettle.v;
             // 0.4 OF CRITICAL PER POINT, not 1.0. The points act TOGETHER about the roll axis
             // (a lever of the keel's depth under the CG), where their summed damping reached 1.6x
@@ -1204,16 +1213,20 @@ Bivector Vessel::Wheel(const Element& e, const WaterSurface& sea, const VesselCo
     // top is above it and the hit lies in its footprint -- the car drives onto it.
     if (m_solids && dW[1] < -1e-6) {
         for (const SolidPrism& sp : *m_solids) {
-            if (topW[1] <= sp.yTop) continue;
-            const double tp = (topW[1] - sp.yTop) / (-dW[1]);
+            // The ray against the top PLANE: f(t) = y(t) - top(x(t), z(t)) = 0.
+            const double f0 = topW[1] - sp.TopAt(topW[0], topW[2]);
+            const double df = dW[1] - sp.gx * dW[0] - sp.gz * dW[2];
+            if (f0 <= 0.0 || df >= -1e-9) continue;   // the strut top is under the plane, or runs along it
+            const double tp = f0 / (-df);
             if (tp >= t) continue;
             const double hx = topW[0] + dW[0] * tp, hz = topW[2] + dW[2] * tp;
             const double ddx = hx - sp.cx, ddz = hz - sp.cz;
             if (ddx * ddx + ddz * ddz > sp.radius * sp.radius) continue;
             if (!PrismHolds(sp.xz, hx, hz)) continue;
             t = tp;
-            nn[0] = 0.0; nn[1] = 1.0; nn[2] = 0.0;
-            dn = dW[1];
+            const double ny = 1.0 / std::sqrt(1.0 + sp.gx * sp.gx + sp.gz * sp.gz);
+            nn[0] = -sp.gx * ny; nn[1] = ny; nn[2] = -sp.gz * ny;
+            dn = dW[0] * nn[0] + dW[1] * nn[1] + dW[2] * nn[2];
         }
     }
     // Bounded by the strut itself: the wheel cannot pass its top. A strut grazing the ground plane

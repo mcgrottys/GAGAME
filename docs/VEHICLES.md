@@ -82,12 +82,16 @@ the nearer of the bed and a top. So the car stops at a wall, climbs a kerb and d
 or a roof by the one expression it already had; nothing in the physics knows a building. The
 entity produces the list: the buildings stack is composed about the hull on the pool (80 m reach,
 asked again when the hull has moved a third of that), each footprint put into the hull's chart
-with its ground from the bed page. Roads stand on the composed ground the bed already is; a bridge
-deck is a solid when its span is in the stack (open: the surveyed decks are drawn, not yet listed).
+with its ground from the bed page. Roads stand on the composed ground the bed already is. Bridge decks and their ramps are solids
+too: every deck ribbon in the pages resident about the eye becomes a run of prisms whose top
+planes follow the deck's surveyed profile, so the car drives up the approach and across the span.
 
 The car's body is a SHELL: station outlines with the hull's bed contact and no water clip, so a
 rolled car rests on its roof or side (and does not float) until the drone takes it. A strut's
-compression is bounded by the strut.
+compression is bounded by the strut. The shell's contact is Hunt-Crossley: the damping grows with
+the penetration, so a crash dissipates and the body does not bounce back into the air. And the car
+slides before it rolls on flat ground: its half-track over its CG height (0.71 / 0.62 = 1.15) is
+above its tyres' grip (0.75); a kerb can still trip it.
 
 ## The car: `car.baja`
 

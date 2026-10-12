@@ -600,11 +600,15 @@ VesselSpec MakeCarBaja() {
     s.massDry = Num::Of(3550.0, "lb", "KBB 2003 Baja: curb weight 3,550 lb (TrueDelta 3,545)");
     const double M = 3550.0 * 0.45359237 + 100.0;
     s.massLoaded = Num::Of(M, "kg", "DERIVED: curb weight + 100 kg driver and gear (ASSUMED)");
-    // The CG: a stock Baja's sits about 0.55 m up (ASSUMED: a wagon-bodied car), and the lift
-    // raises the body 0.25 m with it; 55 % of the weight is on the front axle (ASSUMED: a flat
-    // four over the front wheels), which puts it 0.27 m ahead of the model's wheelbase midpoint.
+    // The CG: a stock Baja's sits about 0.55 m up (ASSUMED: a wagon-bodied car); the lift raises
+    // the body but the engine, box and driveline stay where they were, so 0.62 m (ASSUMED). The
+    // law that keeps it on its wheels is the static stability factor against the tyres' grip:
+    // half-track / CG height = 0.71 / 0.62 = 1.15 > mu 0.75, so on flat ground it SLIDES before it
+    // rolls (at 0.80 m and mu 0.9 it was 0.89 < 0.9: it rolled -- Mark's log). A kerb can still
+    // trip it. 55 % of the weight is on the front axle (ASSUMED: a flat four over the front
+    // wheels), which puts the CG 0.27 m ahead of the model's wheelbase midpoint.
     s.hullMassCentre[0] = 0.0;
-    s.hullMassCentre[1] = 0.55 + 0.25;
+    s.hullMassCentre[1] = 0.62;
     s.hullMassCentre[2] = 0.135 + 0.05 * 2.657;
     const double L = 4.910, B = 1.781, H = 1.56;
     s.inertiaRoll = Num::Of(M / 12.0 * (B * B + H * H), "kg", "ASSUMED: a solid box the body's size, m/12 (B^2+H^2)");
@@ -651,7 +655,7 @@ VesselSpec MakeCarBaja() {
         w.driveForce = Num::Of(2000.0, "1", "ASSUMED: N per wheel, 8 kN over four = 0.48 g: a Warthog's shove (the Baja's 165 hp would be 5 kN at 25 m/s)");
         w.driveSpeed = Num::Of(32.0, "m/s", "ASSUMED: the drive falls to nothing at 32 m/s (115 km/h)");
         w.driven = Num::Of(1.0, "1", "KBB: standard all-wheel drive; each wheel its full share");
-        w.tyreMu = Num::Of(0.9, "1", "ASSUMED: a road tyre on a firm surface");
+        w.tyreMu = Num::Of(0.75, "1", "ASSUMED: a road tyre on sand and old tarmac -- below the stability factor 1.15, so it slides before it rolls");
         w.tyreCorner = Num::Of(12.0, "1", "ASSUMED: 1/rad per newton of load -- 12 N of side force per newton per radian of slip");
         w.tyreRelax = Num::Of(0.3, "m", "ASSUMED: a road tyre's relaxation length (0.3-0.6 m): the patch's lateral spring is corner x load over this");
         w.rollRes = Num::Of(0.015, "1", "ASSUMED: a road tyre's rolling coefficient");

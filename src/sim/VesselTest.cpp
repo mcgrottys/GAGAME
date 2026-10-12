@@ -694,21 +694,29 @@ bool RunVesselSelfTest() {
             Vessel v;
             v.Build(car, Motor::Translation(0.0, 1.0 + 2.5, 0.0) * Motor::Rotation(o, zAx, roll));
             VesselControls c;
-            double yMin = 1e30;
-            bool sane = true;
+            double yMin = 1e30, yRebound = -1e30;
+            bool landed = false, sane = true;
             for (int i = 0; i < 600; ++i) {
                 v.Step(dry, c, i * dtLive, dtLive);
                 double q[3];
                 cgOf(v, q);
                 yMin = (std::min)(yMin, q[1]);
+                if (v.Telemetry().contactPts > 0) landed = true;
+                if (landed && v.Telemetry().contactPts == 0) yRebound = (std::max)(yRebound, q[1]);
                 sane = sane && v.Body().Sane();
             }
+            Log("[vessel] car %s: after landing it left the ground to %.3f m over the ground (never: -inf)",
+                pass == 0 ? "on its roof" : "on its side", yRebound - 1.0);
+            if (yRebound - 1.0 > 1.5) fail("shell: the body bounced back up after landing (CG over ground, m)", yRebound - 1.0, 1.5);
             double q[3];
             cgOf(v, q);
             Log("[vessel] car %s: after 10 s the CG is %.3f m over the ground (lowest %.3f), %d points carrying %.0f N, heel %.1f deg, %.4f m/s",
                 pass == 0 ? "on its roof" : "on its side", q[1] - 1.0, yMin - 1.0, v.Telemetry().contactPts,
                 v.Telemetry().contactN, heelOf(v), speedOf(v));
             if (!(q[1] - 1.0 > 0.3)) fail("shell: the body fell into the ground (CG over ground, m)", q[1] - 1.0, 0.3);
+            // The drop's rebound: with Hunt-Crossley damping the body does not leave the ground
+            // again by more than a hand after it first lands (it took 135 kN and flew 7 m before).
+            if (!(yMin > 0.0)) fail("shell: the landing's lowest point", yMin, 1.0);
             if (v.Telemetry().contactPts < 2) fail("shell: the body rests on the ground (points)", v.Telemetry().contactPts, 2);
             if (speedOf(v) > 0.05) fail("shell: at rest (m/s)", speedOf(v), 0.0);
             if (!sane) fail("shell: the body left the domain", 0, 1);
@@ -789,6 +797,53 @@ bool RunVesselSelfTest() {
             if (std::abs((q[1] - q0[1]) - 0.4) > 0.1) fail("solids: the car climbed the step (m)", q[1] - q0[1], 0.4);
             if (v.Telemetry().contactPts != 4) fail("solids: four wheels on the step", v.Telemetry().contactPts, 4);
         }
+    }
+
+    // ---- 9d. A RAMP: a deck segment's sloped top (sim/Solids.h gradients), 10 m wide, rising 2 m
+    // over 20 m from z = 8. Driven up it the car's CG rises with the grade and all four wheels
+    // stay down; at the top it stands level 2 m higher.
+    {
+        const VesselSpec car = reg.Build("car.baja");
+        StillWater dry;
+        dry.levelNavd = 0.0;
+        dry.bedNavd = 1.0;
+        Vessel v;
+        v.Build(car, Motor::Translation(0.0, 1.0 + 1.2, 0.0));
+        Settle(v, dry, 4800);
+        VesselControls c;
+        for (int i = 0; i < 120; ++i) v.Step(dry, c, i * dtLive, dtLive);
+        double q0[3];
+        cgOf(v, q0);
+        std::vector<SolidPrism> solids(2);
+        solids[0].xz = {-5.0, 8.0, 5.0, 8.0, 5.0, 28.0, -5.0, 28.0};   // the ramp: 0 at z 8, 2 m at z 28
+        solids[0].cx = 0.0; solids[0].cz = 18.0; solids[0].yTop = 1.0 + 1.0; solids[0].yBottom = 1.0 + 1.0 - 1.0;
+        solids[0].gx = 0.0; solids[0].gz = 0.1; solids[0].radius = 13.0;
+        solids[1].xz = {-5.0, 28.0, 5.0, 28.0, 5.0, 60.0, -5.0, 60.0};   // the deck beyond: level at 2 m
+        solids[1].cx = 0.0; solids[1].cz = 44.0; solids[1].yTop = 3.0; solids[1].yBottom = 2.0; solids[1].radius = 20.0;
+        v.SetSolids(&solids);
+        c.throttle[0] = 0.5;
+        double worst = 0.0;
+        int wheelsOff = 0;
+        for (int i = 0; i < 360; ++i) {   // 6 s: up the ramp and onto the deck
+            v.Step(dry, c, i * dtLive, dtLive);
+            double q[3];
+            cgOf(v, q);
+            if (q[2] > 11.0 && q[2] < 25.0) {   // every wheel on the slope
+                const double want = 0.1 * (q[2] - 8.0);
+                worst = (std::max)(worst, std::abs((q[1] - q0[1]) - want));
+                if (v.Telemetry().contactPts != 4) ++wheelsOff;
+            }
+        }
+        c.throttle[0] = 0.0;
+        c.tilt = 1.0;
+        for (int i = 0; i < 240; ++i) v.Step(dry, c, (360 + i) * dtLive, dtLive);
+        double q[3];
+        cgOf(v, q);
+        Log("[vessel] car up a ramp: on the slope the CG followed the grade to within %.3f m with %d steps short of four wheels; at rest on the deck %.3f m up (the deck 2.000) at z %.1f, %d wheels, trim %.2f deg",
+            worst, wheelsOff, q[1] - q0[1], q[2], v.Telemetry().contactPts, v.Telemetry().trimRad * 180.0 / kPi);
+        if (worst > 0.25) fail("solids: the CG left the ramp's grade (m)", worst, 0.25);
+        if (wheelsOff > 6) fail("solids: wheels off the ramp (steps)", wheelsOff, 0);
+        if (std::abs((q[1] - q0[1]) - 2.0) > 0.1) fail("solids: the car stands on the deck (m)", q[1] - q0[1], 2.0);
     }
 
     // ---- 10. PARTS PLUS FORMS. One body built from the barge and the car: in its first form it

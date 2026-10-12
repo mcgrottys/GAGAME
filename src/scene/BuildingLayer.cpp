@@ -1618,6 +1618,40 @@ void BuildingLayer::StandBatch(std::vector<std::pair<std::shared_ptr<const Page>
     });
 }
 
+void BuildingLayer::DecksNear(double latDeg, double lonDeg, double rM, std::vector<DeckStrip>& out) const {
+    out.clear();
+    constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+    const double my = kR * kDeg, mx = std::cos(latDeg * kDeg) * kR * kDeg;
+    const double r2 = rM * rM;
+    for (const auto& [key, page] : m_pages) {
+        if (!page || page->packed.empty()) continue;
+        for (size_t k = 0; k < page->blds.size() && k < page->raw.size(); ++k) {
+            const RtBld& b = page->blds[k];
+            if (b.shapeOff == UINT32_MAX || b.shapeOff >= page->packed.size()) continue;
+            ShapeView sv;
+            if (!ReadShape(page->packed.data() + b.shapeOff, page->packed.data() + page->packed.size(), sv)) continue;
+            if (!(sv.head.flags & shape::kRibbon) || !(sv.head.flags & shape::kDeck) || !sv.z || sv.head.nVerts < 2) continue;
+            double lat, lon, zc, hz, a1, a2, hd;
+            int cx, cy;
+            LodUnpack(page->raw[k], lat, lon, zc, hz, a1, a2, hd, cx, cy);
+            // Within reach: any vertex within rM of the place.
+            bool within = false;
+            DeckStrip strip;
+            strip.widthM = sv.head.pad * 0.1;
+            for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
+                const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
+                const double vla = lat + y / my, vlo = lon + x / mx;
+                const double dx = (vlo - lonDeg) * mx, dz = (vla - latDeg) * my;
+                if (dx * dx + dz * dz <= r2) within = true;
+                strip.lat.push_back(vla);
+                strip.lon.push_back(vlo);
+                strip.over.push_back(double(sv.z[v]) * 0.1);
+            }
+            if (within) out.push_back(std::move(strip));
+        }
+    }
+}
+
 void BuildingLayer::Simulate(const FrameContext& ctx) {
     ++m_frame;
     // Buffers no frame in flight can still read.
