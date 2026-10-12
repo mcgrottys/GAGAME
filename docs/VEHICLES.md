@@ -91,9 +91,10 @@ the bridge you drive. The seat reads the solids as well: a vehicle set down over
 the bridge. To put the car on a span: take the drone (T), fly over the deck, T back.
 
 The trees must hold decks to have them: `test-newburyport.tree` (the `newburyport_roads` scene)
-was rebuilt with the clearance surveys and has 230 bridge ways; the planet tree the Haulover
-scenes use predates the deck law and has none, so there the car finds a road on the river bed
-where the bridge should be, until the planet tree is rebuilt with the bridges sources.
+has 230 bridge ways, and the planet tree the Haulover and Earth scenes use
+(`planet-261012-decks.tree`, rebuilt 2026-10-12 in 2.5 hours) has 6,681,603 bridge ways with
+decks, 108,418 of them on a surveyed clearance, the rest at 5 m, with 10.9 million approach ways
+ramped at 6 %.
 
 The car's body is a SHELL: station outlines with the hull's bed contact and no water clip, so a
 rolled car rests on its roof or side (and does not float) until the drone takes it. A strut's
