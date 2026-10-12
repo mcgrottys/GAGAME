@@ -427,6 +427,14 @@ struct PruneSection {
     std::string confirm;
 };
 
+// THE RENDER section: the kept frame (scene/GlobeLayer.h keepOn) and the grains the picture is
+// redrawn at when the sun or the tide moves by more than them.
+struct RenderSection {
+    bool keep = true;
+    double keepSunGrainDeg = 0.01;
+    double keepTideGrainM = 0.001;
+};
+
 // The whole document as one prototype (the lists carry no fields).
 struct SceneDocument {
     std::string base;                 // the inherited scene file; "" = none
@@ -439,6 +447,7 @@ struct SceneDocument {
     SeaSection sea;
     WaterSection water;
     StreamingSection streaming;
+    RenderSection render;
     CaptureSection capture;
     HudSection hud;
     RailsSection rails;

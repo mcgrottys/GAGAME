@@ -1,4 +1,6 @@
 #include "scene/GlobeLayer.h"
+#include "render/Renderer.h"
+#include "compose/Compositor.h"
 #include "scene/Air.h"
 #include "core/ThreadManager.h"
 
@@ -441,6 +443,7 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
         gpu.ResetConstantArenaAfterIdle();
     }
     m_cloudReady = true;
+    ++m_cloudGen;   // the kept frame's key: the volume's content moved
 }
 
 // M6d: the sparse Mv2 wind bank. (The NE 15s relief window that used to load here is a LAYER
@@ -662,6 +665,39 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         }
     }
 
+    // THE KEPT FRAME's composite (GlobeKeep.hlsl): the cache's colour and depth into the frame,
+    // depth-tested and written as the surface would have been.
+    {
+        ShaderBlob vk = sc.Compile(m_shaderDir + L"/GlobeKeep.hlsl", L"VsKeep", L"vs_6_0");
+        ShaderBlob pk = sc.Compile(m_shaderDir + L"/GlobeKeep.hlsl", L"PsKeep", L"ps_6_0");
+        if (!vk.Valid() || !pk.Valid()) return false;
+        hal::GraphicsPipelineDesc keep;
+        keep.rootSig = m_rootSig;
+        keep.vs = vk;
+        keep.ps = pk;
+        keep.depthClip = TRUE;
+        keep.depthTest = true;
+        keep.depthWrite = true;   // reversed-Z GREATER, the default comparison
+        if (!hal::Reload(m_keepPso, [&] { return hal::BuildGraphics(gpu, keep, "globe.keep"); }, "globe.keep")) {
+            return false;
+        }
+        // The classes from the pixels (GlobeClass.hlsl): its own root -- these words, the heap as
+        // Texture2D<uint> and Texture2D, the heap as RWStructuredBuffer<uint>.
+        if (!m_classRs) {
+            m_classRs = hal::RootLayout{}
+                            .Cbv(0)
+                            .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 2)})
+                            .Table({hal::UavRange(0, hal::kUnbounded, 3)})
+                            .Build(gpu, "globe.classify");
+        }
+        if (m_classRs) {
+            hal::Reload(m_classPso, [&] {
+                return hal::BuildCompute(gpu, m_classRs.Get(), sc.Compile(m_shaderDir + L"/GlobeClass.hlsl", L"CsClassify", L"cs_6_0"),
+                                         "globe.classify");
+            }, "globe.classify");
+        }
+    }
+
     hal::GraphicsPipelineDesc surf;
     surf.rootSig = m_rootSig;
     surf.vs = vs;
@@ -736,6 +772,15 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
         return false;
     }
     m_msPso = pso;
+    {   // THE KEPT FRAME's twin (Keep): the same mesh stage, PsMainKeep writing the cache beside the frame.
+        hal::MeshPipelineDesc k = d;
+        k.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMainKeep", L"ps_6_5");
+        k.numRenderTargets = 3;
+        k.rtvFormat1 = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        k.rtvFormat2 = DXGI_FORMAT_R32_UINT;
+        if (k.ps.Valid()) m_msPsoKeep = hal::BuildMesh(gpu, k, "globe.mesh.keep");
+        if (!m_msPsoKeep) Log("[globe] the kept frame's mesh pipeline failed to build: frames are drawn whole");
+    }
     // M9b: the same pipeline in WIREFRAME. Identical shaders and identical displacement --
     // only the raster fill differs -- so what the lines show is exactly the geometry the
     // solid pass rasterizes, meshlet seams and all. A failure here is not fatal: the solid
@@ -1678,6 +1723,30 @@ void GlobeLayer::DumpMeshlets(const std::wstring& path) const {
 }
 
 // M6e screw-prefetch, step 5: the same walk under the PREDICTED pose, posted to the worker.
+// THE WALK'S PARAMETERS, AS BYTES (GlobeLayer.h m_walkDigest): every field a walk reads.
+void GlobeLayer::DigestWalk(std::vector<uint8_t>& d, const WalkParams& wp) {
+    auto put = [&](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        d.insert(d.end(), b, b + n);
+    };
+    auto putD = [&](double v) { put(&v, sizeof(v)); };
+    auto putF = [&](float v) { put(&v, sizeof(v)); };
+    auto putI = [&](int v) { put(&v, sizeof(v)); };
+    putD(wp.R);
+    put(wp.frameE, sizeof(wp.frameE)); put(wp.frameU, sizeof(wp.frameU)); put(wp.frameN, sizeof(wp.frameN));
+    put(wp.camPos, sizeof(wp.camPos)); put(wp.camPlanet, sizeof(wp.camPlanet));
+    putI(wp.camFace); put(wp.frustum, sizeof(wp.frustum)); putI(wp.planeCount);
+    putF(wp.reliefExagg); putI(wp.maxDepth); putF(wp.waveGrainM); putI(wp.waveMaxDepth);
+    putF(wp.pixAng); putI(wp.wants ? 1 : 0);
+    putI(wp.surfT); putI(wp.normT); putI(wp.colorT); putI(wp.hgtT); putI(wp.maskT); putI(wp.bldT);
+    putI(wp.bldFloorRungs); putI(wp.hgtWindows ? 1 : 0); put(&wp.walkSlot, sizeof(wp.walkSlot));
+    putI(static_cast<int>(wp.wnSetOf.size()));
+    if (!wp.wnSetOf.empty()) put(wp.wnSetOf.data(), wp.wnSetOf.size() * sizeof(uint32_t));
+    put(wp.wnK, sizeof(wp.wnK)); put(wp.wnFace, sizeof(wp.wnFace)); put(wp.wnRung, sizeof(wp.wnRung));
+    put(wp.wnAx, sizeof(wp.wnAx)); put(wp.wnAy, sizeof(wp.wnAy)); put(wp.wnSlice, sizeof(wp.wnSlice));
+    putI(wp.probeCullFar ? 1 : 0); put(wp.occ, sizeof(wp.occ));
+}
+
 void GlobeLayer::StartPredictWalk(const Camera& cam, const Camera& pred, float viewportH) {
     WalkParams wp = CaptureWalk(cam, viewportH);
     if (!wp.wants) return;   // PredictWants's own gate: no manager, no cube tenant, no walk
@@ -1685,6 +1754,17 @@ void GlobeLayer::StartPredictWalk(const Camera& cam, const Camera& pred, float v
     wp.camPos[1] = pred.py;
     wp.camPos[2] = pred.pz;
     // planeCount stays 0: no frustum cull, the predicted view is approximate by nature.
+    // THE PREDICTION REPEATED: the same inputs as the last walk replayed, and the prediction's
+    // statement is repeated by number at the replay; no walk is posted.
+    std::vector<uint8_t> digest;
+    DigestWalk(digest, wp);
+    {
+        const double eye[3] = {cam.px, cam.py, cam.pz};
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(eye);
+        digest.insert(digest.end(), b, b + sizeof(eye));
+    }
+    const bool repeat = m_predReplayed && digest == m_predDigest;
+    m_predDigest = std::move(digest);
     {
         std::lock_guard<std::mutex> lk(m_predict.mx);
         if (m_predict.outstanding) {
@@ -1692,9 +1772,11 @@ void GlobeLayer::StartPredictWalk(const Camera& cam, const Camera& pred, float v
             // frame's stamp; main never does it, so a caller that does is a bug, said loudly.
             throw std::runtime_error("globe: prefetch walk posted over an unreplayed one");
         }
+        m_predict.repeat = repeat;
+        m_predict.outstanding = true;
+        if (repeat) return;
         m_predict.params = wp;
         m_predict.busy = true;
-        m_predict.outstanding = true;
     }
     // SUBMITTED OUTSIDE THE LOCK. Under --jobs-inline the walk runs on this very thread, and it
     // takes m_predict.mx at both ends -- a self-deadlock if the post still held it.
@@ -1749,6 +1831,13 @@ void GlobeLayer::PredictWalk() {
 void GlobeLayer::ReplayPredictWants() {
     std::unique_lock<std::mutex> lk(m_predict.mx);
     if (!m_predict.outstanding) return;
+    if (m_predict.repeat) {   // the prediction's statement again, by number (refused: a walk next frame)
+        m_predict.outstanding = false;
+        m_predict.repeat = false;
+        m_predReplayed = m_res && m_res->Repeat(m_res->PredictedSampler());
+        if (m_predReplayed) ++predictRepeats;
+        return;
+    }
     const auto w0 = std::chrono::steady_clock::now();
     m_predict.cv.wait(lk, [&] { return !m_predict.busy; });
     const auto w1 = std::chrono::steady_clock::now();
@@ -1768,6 +1857,7 @@ void GlobeLayer::ReplayPredictWants() {
         uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(w2 - w1).count());
     m_predict.rects.clear();
     m_predict.outstanding = false;
+    m_predReplayed = true;
 }
 
 GlobeLayer::~GlobeLayer() {
@@ -1790,7 +1880,7 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
         auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
                         float v1r, float nearW) {
             m_res->Want(sampler, tenant, f, mip, u0r, v0r, u1r, v1r, false, nearW);
-            if (m_wantLogging) m_wantLog.push_back({sampler, tenant, f, mip, u0r, v0r, u1r, v1r, nearW});
+            if (!m_borrowed && sampler >= 0 && sampler < 16) m_walkSamplers |= static_cast<uint16_t>(1u << sampler);
         };
         LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit, &leafStats);
         const auto wt1 = std::chrono::steady_clock::now();
@@ -2002,17 +2092,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         cam.ViewBasis(bf, br, bu);
         put(&bf, sizeof(bf)); put(&br, sizeof(br)); put(&bu, sizeof(bu));
         putF(cam.fovY); putF(cam.nearZ); putF(aspect); putF(viewportH);
-        putD(m_wp.R);
-        put(m_wp.frameE, sizeof(m_wp.frameE)); put(m_wp.frameU, sizeof(m_wp.frameU)); put(m_wp.frameN, sizeof(m_wp.frameN));
-        put(m_wp.camPos, sizeof(m_wp.camPos)); put(m_wp.camPlanet, sizeof(m_wp.camPlanet));
-        putI(m_wp.camFace); putF(m_wp.reliefExagg); putI(m_wp.maxDepth); putF(m_wp.waveGrainM); putI(m_wp.waveMaxDepth);
-        putF(m_wp.pixAng); putI(m_wp.wants ? 1 : 0);
-        putI(m_wp.surfT); putI(m_wp.normT); putI(m_wp.colorT); putI(m_wp.hgtT); putI(m_wp.maskT); putI(m_wp.bldT);
-        putI(m_wp.bldFloorRungs); putI(m_wp.hgtWindows ? 1 : 0); put(&m_wp.walkSlot, sizeof(m_wp.walkSlot));
-        if (!m_wp.wnSetOf.empty()) put(m_wp.wnSetOf.data(), m_wp.wnSetOf.size() * sizeof(uint32_t));
-        put(m_wp.wnK, sizeof(m_wp.wnK)); put(m_wp.wnFace, sizeof(m_wp.wnFace)); put(m_wp.wnRung, sizeof(m_wp.wnRung));
-        put(m_wp.wnAx, sizeof(m_wp.wnAx)); put(m_wp.wnAy, sizeof(m_wp.wnAy)); put(m_wp.wnSlice, sizeof(m_wp.wnSlice));
-        putI(m_wp.probeCullFar ? 1 : 0); put(m_wp.occ, sizeof(m_wp.occ));
+        DigestWalk(digest, m_wp);
         putI(static_cast<int>(m_levels.size()));
         for (const DrosteLevel& L : m_levels) {
             putI(L.rel); put(L.cam, sizeof(L.cam)); putD(L.sigma); put(L.Q, sizeof(L.Q)); putF(L.reliefExagg); putI(L.bankSet);
@@ -2026,21 +2106,22 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         putI(m_drosteOn ? 1 : 0); putI(m_msPath ? 1 : 0); putI(m_borrowed ? 1 : 0); putF(reliefExagg);
     }
     // The walk never reads what is resident -- the GPU does, from the residency map at the draw --
-    // so the residency's generation is no input of it: the records are geometric, and the replayed
-    // wants keep the residency told. (Generation() stays for a reader whose records do depend on it.)
-    const uint64_t resGen = m_res ? m_res->Generation() : 0u;
-    const bool keep = !m_borrowed && m_walkKept && digest == m_walkDigest &&
-                      !(m_msPath ? m_meshlets.empty() : m_nodes.empty());
-    if (keep) {
-        // THE WALK KEPT: the same wants again, from the log; the records stand.
-        ++walksKept;
-        if (m_res) {
-            for (const WantRec& w : m_wantLog) {
-                m_res->Want(w.sampler, w.tenant, w.face, w.mip, w.u0, w.v0, w.u1, w.v1, false, w.nearM);
-            }
+    // so the residency's generation is no input of it: the records are geometric, and the repeated
+    // statements keep the residency told. (Generation() stays for a reader whose records do depend on it.)
+    bool keep = !m_borrowed && m_walkKept && digest == m_walkDigest &&
+                !(m_msPath ? m_meshlets.empty() : m_nodes.empty());
+    if (keep && m_res) {
+        // THE WALK KEPT: each reader it spoke for repeats its statement by number; one refused
+        // (a tile of it untracked since) and the walk is made.
+        for (int s = 0; s < 16 && keep; ++s) {
+            if ((m_walkSamplers >> s) & 1u) keep = m_res->Repeat(s);
         }
+    }
+    if (keep) {
+        ++walksKept;
     } else {
     if (!m_borrowed) ++walksMade;
+    if (!m_borrowed) ++m_meshletGen;   // the first eye's records change with its walk (Keep's key)
     if (!m_borrowed && m_walkKept && m_walkWhySaid < 6) {   // the instrument: what moved since the last walk
         ++m_walkWhySaid;
         if (digest.size() != m_walkDigest.size()) {
@@ -2053,10 +2134,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     }
     if (!m_borrowed) {   // another eye's walk borrows the buffers and gives them back: the owner's memo stands
         m_walkDigest = std::move(digest);
-        m_walkGen = resGen;
         m_walkKept = true;
-        m_wantLog.clear();
-        m_wantLogging = true;
+        m_walkSamplers = 0;
     }
     m_nodes.clear();
     m_meshlets.clear();
@@ -2241,7 +2320,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     }
     if (!m_borrowed) ProbeTransport(probeRows.data(), probeN);
     if (m_msPath) SeamTable();
-    m_wantLogging = false;
     }   // the walk made
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
     // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.
@@ -2629,20 +2707,21 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 void GlobeLayer::Render(const FrameContext& ctx) {
     if (ctx.viewIndex == 0) {
         RenderEye(ctx, m_cb, m_skyCb, m_meshlets, m_nodes, m_limbSlots.data(), m_limbCount,
-                  m_recBuf[ctx.gpu->FrameIndex()], skyPassEnabled, skyPassWeight);
+                  m_recBuf[ctx.gpu->FrameIndex()], skyPassEnabled, skyPassWeight, m_levelRows);
         return;
     }
     const uint32_t k = ctx.viewIndex - 1;
     if (k >= kMaxOtherEyes || !m_other[k].valid) return;
     OtherEye& o = m_other[k];
     RenderEye(ctx, o.cb, o.skyCb, o.meshlets, o.nodes, o.limbSlots.data(), o.limbCount,
-              o.recBuf[ctx.gpu->FrameIndex()], o.skyPass, o.skyWeight);
+              o.recBuf[ctx.gpu->FrameIndex()], o.skyPass, o.skyWeight, o.levelRows);
 }
 
 void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                            const SkyCbData& skyCbData, const std::vector<MeshletRec>& meshlets,
                            const std::vector<NodeData>& nodes, const uint32_t* limbSlots,
-                           int limbCount, GpuBuffer& rec, bool skyPass, float skyWeight) {
+                           int limbCount, GpuBuffer& rec, bool skyPass, float skyWeight,
+                           const std::vector<float>& levelRows) {
     if (!m_pso || (nodes.empty() && meshlets.empty())) return;
     PixScope scope(ctx.cmd->Native(),
                    "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
@@ -2743,7 +2822,110 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                                  m_odCap * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
             ctx.cmd->GraphicsConstantsAt(1, cbVa);
         } else {
-            ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+            // THE KEPT FRAME (GlobeLayer.h keepOn). Keepable: the keep on, no lens or probe (they draw
+            // other pictures), a view the renderer handed its inputs and targets, and a cache the
+            // record count fits.
+            const bool keepable = keepOn && surfaceDebug == 0 && !ResidencyLensOn() && !overdrawProbe &&
+                                  m_msPsoKeep.Get() && m_keepPso.Get() && m_classPso.Get() && ctx.viewIndex <= kMaxOtherEyes &&
+                                  ctx.constants && ctx.colorRtv.ptr && ctx.depthTex && ctx.frameW && ctx.frameH &&
+                                  n <= kClassMax;
+            if (!keepable) {
+                ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+            } else {
+                Keep& K = m_keep[ctx.viewIndex];
+                EnsureKeep(*ctx.gpu, K, ctx.frameW, ctx.frameH);
+                EnsureClass(*ctx.gpu);
+                const uint64_t key = KeepKey(ctx, cbData, meshlets, levelRows, K);
+                const bool kept = K.valid && key == K.key;
+                // THE CACHE IS FILLED ONCE THE INPUTS HAVE STOOD A FRAME: a moving eye draws as it
+                // ever did and pays nothing for the keep; the frame after the eye stops fills the
+                // cache beside the frame, and the one after that is kept.
+                const bool fill = !kept && key == K.lastKey;
+                K.lastKey = key;
+                if (!kept && !fill) {
+                    ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                    ++keepPlain;
+                } else {
+                GlobeCbData q = cbData;
+                q.keepU[0] = m_classSrv;
+                q.keepU[1] = kept ? 1u : 0u;
+                q.keepU[2] = q.keepU[3] = 0u;
+                ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
+                const D3D12_RECT r{LONG(ctx.viewX), LONG(ctx.viewY), LONG(ctx.viewX + ctx.width),
+                                   LONG(ctx.viewY + ctx.height)};
+                const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                const auto cacheRtv = ctx.gpu->RtvHeap().Cpu(K.rtv);
+                const auto idRtv = ctx.gpu->RtvHeap().Cpu(K.idRtv);
+                if (kept) {
+                    // THE COMPOSITE: the cached land into the frame at the globe's place (GlobeKeep.hlsl).
+                    GpuScope kscope(ctx.prof, cl, "globe.keep");
+                    PixMarker(cl, "globe.keep (the cached land into the frame)");
+                    ctx.cmd->Barrier(K.color, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    ctx.cmd->Barrier(K.depth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    ctx.cmd->Pipeline(m_keepPso.Get());
+                    struct { uint32_t v[4]; } kc{{K.colorSrv, K.depthSrv, 0u, 0u}};
+                    ctx.cmd->GraphicsConstants(1, kc);
+                    ctx.cmd->DrawFullscreen();
+                }
+                // THE DRAW: into the frame as ever, and beside it the cache's colour (the class in its
+                // alpha) and the meshlet that drew each pixel. A full frame draws every meshlet and
+                // the cache starts cleared; a kept frame draws the meshlets that had water over the
+                // composited land (their land pixels fail the depth they already have), and the cache
+                // keeps its water pixels current.
+                ctx.cmd->Barrier(K.color, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                ctx.cmd->Barrier(K.id, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                if (!kept) {
+                    ctx.cmd->ClearColor(cacheRtv, none, r);
+                    ctx.cmd->ClearColor(idRtv, none, r);
+                }
+                {
+                    const D3D12_CPU_DESCRIPTOR_HANDLE rts[3] = {ctx.colorRtv, cacheRtv, idRtv};
+                    cl->OMSetRenderTargets(3, rts, FALSE, &ctx.depthDsv);
+                }
+                ctx.cmd->Pipeline(m_msPsoKeep.Get());
+                ctx.cmd->GraphicsConstantsAt(1, ctx.gpu->PushConstants(&q, sizeof(q)));
+                if (kept) {
+                    GpuScope wscope(ctx.prof, cl, "globe.water");
+                    PixMarker(cl, "globe.water (the meshlets that had water, over the kept land)");
+                    ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                    ++keepKept;
+                } else {
+                    PixMarker(cl, "globe.mesh (the full draw; the cache filled beside the frame)");
+                    ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                }
+                ctx.cmd->Targets(ctx.colorRtv, &ctx.depthDsv);
+                if (!kept) {
+                    // THE CLASSES from the pixels (GlobeClass.hlsl), and the frame's depth beside the cache.
+                    GpuScope cscope(ctx.prof, cl, "globe.classify");
+                    PixMarker(cl, "globe.classify (each meshlet: land whole, or water)");
+                    ctx.cmd->Barrier(K.color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    ctx.cmd->Barrier(K.id, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    ctx.cmd->Barrier(m_classBuf.Get(), m_classState, D3D12_RESOURCE_STATE_COPY_DEST);
+                    cl->CopyBufferRegion(m_classBuf.Get(), 0, m_classZero.res.Get(), 0, uint64_t(n) * 4u);
+                    ctx.cmd->Barrier(m_classBuf.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    struct { uint32_t a[4]; uint32_t b[4]; } cc{{K.idSrv, K.colorSrv, m_classUav, 0u},
+                                                               {ctx.viewX, ctx.viewY, ctx.width, ctx.height}};
+                    ctx.cmd->ComputeRoot(m_classRs.Get());
+                    ctx.cmd->ComputeConstants(0, cc);
+                    ctx.cmd->ComputeBindless(1);
+                    ctx.cmd->ComputeBindless(2);
+                    ctx.cmd->Pipeline(m_classPso.Get());
+                    ctx.cmd->Dispatch((ctx.width + 7u) / 8u, (ctx.height + 7u) / 8u, 1);
+                    ctx.cmd->Barrier(m_classBuf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    m_classState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    if (ctx.depthTex) {
+                        ctx.cmd->Barrier(*ctx.depthTex, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                        ctx.cmd->Barrier(K.depth, D3D12_RESOURCE_STATE_COPY_DEST);
+                        cl->CopyResource(K.depth.res.Get(), ctx.depthTex->res.Get());
+                        ctx.cmd->Barrier(*ctx.depthTex, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                    }
+                    K.key = key;
+                    K.valid = ctx.depthTex != nullptr;
+                    ++keepFull;
+                }
+                ctx.cmd->GraphicsConstantsAt(1, cbVa);   // the limbs read the rows as they were
+                }
+            }
         }
 
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
@@ -2778,6 +2960,163 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
     ctx.cmd->Draw(32 * 32 * 6, static_cast<UINT>(nodes.size()), 0, 0);
 }
 
+
+// THE KEPT FRAME (GlobeLayer.h keepOn): a view's cache targets, made at the frame's size.
+void GlobeLayer::EnsureKeep(Gpu& gpu, Keep& K, uint32_t w, uint32_t h) {
+    if (K.color.Valid() && K.w == w && K.h == h) return;
+    D3D12_CLEAR_VALUE ccv{};
+    ccv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    K.color = gpu.CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                  D3D12_RESOURCE_STATE_RENDER_TARGET, L"globe keep colour", &ccv);
+    D3D12_CLEAR_VALUE dcv{};
+    dcv.Format = DXGI_FORMAT_D32_FLOAT;
+    dcv.DepthStencil.Depth = 0.0f;   // reversed-Z: far is 0
+    K.depth = gpu.CreateTexture2D(w, h, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                                  D3D12_RESOURCE_STATE_COPY_DEST, L"globe keep depth", &dcv);
+    D3D12_CLEAR_VALUE icv{};
+    icv.Format = DXGI_FORMAT_R32_UINT;
+    K.id = gpu.CreateTexture2D(w, h, DXGI_FORMAT_R32_UINT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                               D3D12_RESOURCE_STATE_RENDER_TARGET, L"globe keep meshlet", &icv);
+    K.rtv = hal::Rtv(gpu, K.color.res.Get(), K.rtv);
+    K.idRtv = hal::Rtv(gpu, K.id.res.Get(), K.idRtv);
+    K.colorSrv = gpu.CreateSrv(K.color.res.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+    K.depthSrv = gpu.CreateSrv(K.depth.res.Get(), DXGI_FORMAT_R32_FLOAT);
+    K.idSrv = gpu.CreateSrv(K.id.res.Get(), DXGI_FORMAT_R32_UINT);
+    K.w = w;
+    K.h = h;
+    K.valid = false;
+}
+
+// The meshlet classes: a uint a record, written by the pixels (Globe.hlsl PsMain), read by the
+// mesh stage on a kept frame (GlobeMesh.hlsl MsMain); zeroed from a buffer of zeros at a full draw.
+void GlobeLayer::EnsureClass(Gpu& gpu) {
+    if (m_classBuf) return;
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = uint64_t(kClassMax) * 4u;
+    rd.Height = 1;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                                   IID_PPV_ARGS(&m_classBuf)));
+    m_classBuf->SetName(L"globe keep classes");
+    m_classState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    m_classSrv = gpu.CreateStructuredBufferSrv(m_classBuf.Get(), kClassMax, 4);
+    std::vector<uint32_t> zeros(kClassMax, 0u);
+    m_classZero = gpu.CreateDefaultBuffer(zeros.data(), uint64_t(kClassMax) * 4u, L"globe keep zeros");
+    m_classUav = gpu.SrvHeap().Alloc();
+    D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
+    u.Format = DXGI_FORMAT_UNKNOWN;
+    u.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    u.Buffer.NumElements = kClassMax;
+    u.Buffer.StructureByteStride = 4;
+    gpu.Device()->CreateUnorderedAccessView(m_classBuf.Get(), nullptr, &u, gpu.SrvHeap().Cpu(m_classUav));
+}
+
+// THE KEY (GlobeLayer.h keepOn): every input of the surface's draw, as bytes; the sun and the tide
+// at their grains. The parts are kept so a moved key can say which part moved (keepWhy).
+uint64_t GlobeLayer::KeepKey(const FrameContext& ctx, const GlobeCbData& cb, const std::vector<MeshletRec>& meshlets,
+                             const std::vector<float>& levelRows, Keep& K) {
+    constexpr uint64_t kBasis = 14695981039346656037ull;
+    const auto fnv = [](const void* p, size_t n, uint64_t h) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) {
+            h ^= b[i];
+            h *= 1099511628211ull;
+        }
+        return h;
+    };
+    const auto grain = [](float v, double g) {
+        return g > 0.0 ? static_cast<float>(std::floor(double(v) / g + 0.5) * g) : v;
+    };
+    uint64_t part[8] = {};
+    part[0] = ctx.viewIndex == 0 ? fnv(&m_meshletGen, sizeof(m_meshletGen), kBasis)
+                                 : fnv(meshlets.data(), meshlets.size() * sizeof(MeshletRec), kBasis);
+    {
+        GlobeCbData q = cb;
+        q.wavesB[3] = grain(q.wavesB[3], keepTideGrainM);   // the live waterline, at its grain
+        q.glo[3] = 0.0f;   // the clock rides the first row's fourth word; no shader reads it
+        q.keepU[0] = q.keepU[1] = q.keepU[2] = q.keepU[3] = 0u;
+        // THE WATER's inputs are no part of the key: the water is drawn anew on a kept frame, and
+        // the bank's views rotate with the frame in flight. Its rows stay the water's.
+        q.bankU[0] = q.bankU[1] = 0u;
+        q.bankU2[0] = q.bankU2[1] = q.bankU2[2] = q.bankU2[3] = 0u;
+        q.bankBU[0] = q.bankBU[1] = q.bankBU[2] = 0u;
+        q.lensU[0] = q.lensU[1] = 0u;
+        part[1] = fnv(&q, sizeof(q), kBasis);
+        if (K.valid && m_keepWhySaid < 4 && K.rowsPrev.size() == sizeof(q) && memcmp(K.rowsPrev.data(), &q, sizeof(q)) != 0) {
+            ++m_keepWhySaid;   // the instrument: the first byte of the rows that moved
+            size_t at = 0;
+            while (at < sizeof(q) && K.rowsPrev[at] == reinterpret_cast<const uint8_t*>(&q)[at]) ++at;
+            Log("[globe] keep: the globe's rows moved first at byte %zu of %zu (float4 row %zu)", at, sizeof(q), at / 16);
+        }
+        K.rowsPrev.assign(reinterpret_cast<const uint8_t*>(&q), reinterpret_cast<const uint8_t*>(&q) + sizeof(q));
+    }
+    if (ctx.constants) {
+        SceneConstants s = *ctx.constants;
+        s.params0[0] = 0.0f;   // the clock: the surface reads no time
+        const double g = double(keepSunGrainDeg) * 3.14159265358979323846 / 180.0;
+        for (int c = 0; c < 3; ++c) s.sunDir[c] = grain(s.sunDir[c], g);
+        s.misc[0] = grain(s.misc[0], keepTideGrainM);
+        part[2] = fnv(&s, sizeof(s), kBasis);
+    }
+    if (ctx.surface) {
+        ComposedSurfaceCb s = *ctx.surface;
+        memset(&s.eyeT[3], 0, sizeof(float));   // the world table's slot rotates with the frame; its bytes are part 4
+        part[3] = fnv(&s, sizeof(s), kBasis);
+    }
+    // THE WORLDS' SUNS AT THE SUN'S GRAIN: a level's rows carry its sun (floats 16..18 of its 24;
+    // Globe.hlsl LoadLevel r4) and its sky's daylight (23), a window's light rows the sun seen
+    // through it (floats 4..6 of its 8; WorldTable). The ephemeris moves them every frame.
+    const double sunG = double(keepSunGrainDeg) * 3.14159265358979323846 / 180.0;
+    if (ctx.worldPack && ctx.worldPack->size() >= 8) {
+        std::vector<float> w = *ctx.worldPack;
+        uint32_t head[8];
+        memcpy(head, w.data(), sizeof(head));   // levels, windows, a, b, c, d (rows), winLevels
+        const size_t levels = head[0], windows = head[1], a = head[2], c = head[4];
+        for (size_t L = 0; L < levels; ++L) {
+            const size_t o = a * 4 + L * 24;
+            if (o + 24 > w.size()) break;
+            for (int k = 0; k < 3; ++k) w[o + 16 + k] = grain(w[o + 16 + k], sunG);
+            w[o + 23] = grain(w[o + 23], 1.0 / 1024.0);
+        }
+        for (size_t k = 0; k < windows; ++k) {
+            const size_t o = c * 4 + k * 8;
+            if (o + 8 > w.size()) break;
+            for (int j = 0; j < 3; ++j) w[o + 4 + j] = grain(w[o + 4 + j], sunG);
+        }
+        part[4] = fnv(w.data(), w.size() * sizeof(float), kBasis);
+    }
+    if (!levelRows.empty()) {
+        std::vector<float> r = levelRows;
+        for (size_t o = 0; o + 24 <= r.size(); o += 24) {
+            for (int k = 0; k < 3; ++k) r[o + 16 + k] = grain(r[o + 16 + k], sunG);
+            r[o + 23] = grain(r[o + 23], 1.0 / 1024.0);
+        }
+        part[5] = fnv(r.data(), r.size() * sizeof(float), kBasis);
+    }
+    if (m_res) {   // the residency of THE TENANTS THE SURFACE READS, each its own generation
+        const int tenants[6] = {m_wp.surfT, m_wp.normT, m_wp.colorT, m_wp.hgtT, m_wp.maskT, m_wp.bldT};
+        uint64_t g[6];
+        for (int k = 0; k < 6; ++k) g[k] = m_res->Generation(tenants[k]);
+        part[6] = fnv(g, sizeof(g), kBasis);
+    }
+    part[7] = fnv(&m_cloudGen, sizeof(m_cloudGen), kBasis);
+    uint64_t key = kBasis;
+    for (int k = 0; k < 8; ++k) key = fnv(&part[k], sizeof(part[k]), key);
+    if (K.partsSeen) {   // the instrument: which parts moved since the last frame, kept or not
+        for (int k = 0; k < 8; ++k) keepWhy[k] += part[k] != K.part[k] ? 1u : 0u;
+    }
+    K.partsSeen = true;
+    memcpy(K.part, part, sizeof(part));
+    return key;
+}
 
 // ANOTHER EYE (GlobeLayer.h SetOtherView). The layer's working set is the first eye's: every
 // member SetView writes is set aside, the walk runs from the other camera with no Droste levels

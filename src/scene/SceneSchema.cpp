@@ -313,6 +313,23 @@ const Schema& WaterSchema() {
     return *s;
 }
 
+const Schema& RenderSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.render;
+        Schema* sc = new Schema("render", &p);
+        sc->Bind("keep", p.keep,
+                 "the globe's picture kept while its inputs stand: a kept frame composites the cached land and "
+                 "draws only the meshlets that had water (GlobeLayer.h keepOn)",
+                 H)
+            .Bind("keepSunGrainDeg", p.keepSunGrainDeg, Q::Angle, "deg",
+                  "the sun's grain for the kept frame: the globe is redrawn when the sun has moved by more", H)
+            .Bind("keepTideGrainM", p.keepTideGrainM, Q::Length, "m",
+                  "the tide's grain for the kept frame: the globe is redrawn when the water level has moved by more", H);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& StreamingSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.streaming;
@@ -788,6 +805,7 @@ const Schema& SceneFileSchema() {
             .Nest("sea", SeaSchema(), &kDoc.sea, "the sea state and the datum")
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
+            .Nest("render", RenderSchema(), &kDoc.render, "the renderer: the kept frame and its grains")
             .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")

@@ -2272,6 +2272,14 @@ bool FrameLoop::Frame() {
     // reader -- the thing a reserve is written against -- while subjects and a gate's window
     // name their own below.
     const int sampView = resMgr.Sampler("view");
+    // The wave planes' and the exposure's readers are their own: a statement is repeated whole or
+    // made anew whole, and the view's walk, the wave window and the exposure's ground move apart.
+    const int sampWaves = resMgr.Sampler("waves");
+    const int sampExposure = resMgr.Sampler("exposure");
+    const auto putBytes = [](std::vector<uint8_t>& d, const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        d.insert(d.end(), b, b + n);
+    };
     // Step 5 D, law 8's table: this frame opens here; each layer names its reads as it draws.
     resMgr.FrameBegin();
     if (!renderer.beforeLayer) {
@@ -3344,9 +3352,20 @@ bool FrameLoop::Frame() {
                     const float fvW = float((oyF + double(m_waveFrame.ny) -
                                              (cam.pz - double(wtabF.orgZ)) * double(wtabF.invCell)) /
                                             16384.0);
-                    for (uint32_t p = 0; p < nPlanes; ++p) {
-                        resMgr.Want(sampView, waveT, 6u + p, wantMip, u0, v0, u1, v1, false,
-                                    float(altV), fuW, fvW);
+                    std::vector<uint8_t> dg;
+                    putBytes(dg, &u0, sizeof(u0)); putBytes(dg, &v0, sizeof(v0));
+                    putBytes(dg, &u1, sizeof(u1)); putBytes(dg, &v1, sizeof(v1));
+                    putBytes(dg, &nPlanes, sizeof(nPlanes)); putBytes(dg, &wantMip, sizeof(wantMip));
+                    putBytes(dg, &altV, sizeof(altV)); putBytes(dg, &fuW, sizeof(fuW)); putBytes(dg, &fvW, sizeof(fvW));
+                    putBytes(dg, &waveT, sizeof(waveT)); putBytes(dg, &m_windowTold, sizeof(m_windowTold));
+                    if (dg == m_wavesDigest && resMgr.Repeat(sampWaves)) {
+                        ++m_wantsRepeated;
+                    } else {
+                        for (uint32_t p = 0; p < nPlanes; ++p) {
+                            resMgr.Want(sampWaves, waveT, 6u + p, wantMip, u0, v0, u1, v1, false,
+                                        float(altV), fuW, fvW);
+                        }
+                        m_wavesDigest = std::move(dg);
                     }
                     if (!m_focusSaid) {   // say what the wave want's focus is, once
                         m_focusSaid = true;
@@ -3896,13 +3915,19 @@ bool FrameLoop::Frame() {
         if (exposureSrc->Valid()) {
             // PHASE B2: the ground the bank's rings reach (+-20 km) about the camera's eye and the
             // outer level's (set B's), at the exposure's grain (rung 3), on the windows.
-            double E[3];
+            double E[3], E2[3] = {0.0, 0.0, 0.0};
             const double camP[3] = {cam.px, cam.py, cam.pz};
             PlanetOf(m_A.surface, camP, E);
-            WantGround(resMgr, m_A.surface, sampView, exposureT, E, 20000.0, 3);
-            if (drosteOuter) {
-                PlanetOf(m_A.surface, drosteOuterCam, E);
-                WantGround(resMgr, m_A.surface, sampView, exposureT, E, 20000.0, 3);
+            if (drosteOuter) PlanetOf(m_A.surface, drosteOuterCam, E2);
+            std::vector<uint8_t> dg;
+            putBytes(dg, E, sizeof(E)); putBytes(dg, E2, sizeof(E2));
+            putBytes(dg, &exposureT, sizeof(exposureT)); putBytes(dg, &m_windowTold, sizeof(m_windowTold));
+            if (dg == m_exposureDigest && resMgr.Repeat(sampExposure)) {
+                ++m_wantsRepeated;
+            } else {
+                WantGround(resMgr, m_A.surface, sampExposure, exposureT, E, 20000.0, 3);
+                if (drosteOuter) WantGround(resMgr, m_A.surface, sampExposure, exposureT, E2, 20000.0, 3);
+                m_exposureDigest = std::move(dg);
             }
         }
     }
@@ -4926,9 +4951,26 @@ int FrameLoop::Finish() {
             s += b;
         }
         Log("[perf] slowest frames: %s", s.c_str());
-        Log("[perf] globe.SetView (the walk) %.2f ms a frame on average; %llu walks made, %llu kept (the eye, the view and the residency unchanged)",
+        Log("[perf] globe.SetView (the walk) %.2f ms a frame on average; %llu walks made, %llu kept (the eye and the view "
+            "unchanged); statements repeated by number: %llu (%llu refused: a tile untracked or a reader silent), the "
+            "prediction's %llu, the loop's own readers' %llu",
             m_profMs[7] / (std::max)(1u, frameMsN), static_cast<unsigned long long>(globe ? globe->WalksMade() : 0u),
-            static_cast<unsigned long long>(globe ? globe->WalksKept() : 0u));
+            static_cast<unsigned long long>(globe ? globe->WalksKept() : 0u),
+            static_cast<unsigned long long>(resMgr.repeatCalls), static_cast<unsigned long long>(resMgr.repeatRefused),
+            static_cast<unsigned long long>(globe ? globe->PredictRepeats() : 0u),
+            static_cast<unsigned long long>(m_wantsRepeated));
+        if (globe) {
+            Log("[globe] the frame kept: %llu drawn plain (the inputs moved), %llu drawn whole with the cache filled (they stood "
+                "a frame), %llu kept (the land from the cache, the water's meshlets drawn) | the key moved by: the records %llu, "
+                "the globe's rows %llu, the scene's %llu, the surface's %llu, the worlds %llu, the levels %llu, the residency %llu, "
+                "the clouds %llu",
+                static_cast<unsigned long long>(globe->keepPlain), static_cast<unsigned long long>(globe->keepFull),
+                static_cast<unsigned long long>(globe->keepKept),
+                static_cast<unsigned long long>(globe->keepWhy[0]), static_cast<unsigned long long>(globe->keepWhy[1]),
+                static_cast<unsigned long long>(globe->keepWhy[2]), static_cast<unsigned long long>(globe->keepWhy[3]),
+                static_cast<unsigned long long>(globe->keepWhy[4]), static_cast<unsigned long long>(globe->keepWhy[5]),
+                static_cast<unsigned long long>(globe->keepWhy[6]), static_cast<unsigned long long>(globe->keepWhy[7]));
+        }
         {   // F21: THE CPU FRAME'S BRACKETS, a frame's mean, every measured run (the rail printed them alone)
             std::string cpu;
             double sum = 0.0;
@@ -5232,6 +5274,9 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
         (void)dome;
         (void)win;     // (the first eye's windows were handed over with SetGates and its table)
         (void)rings;   // (and its rings with SetWaterBank)
+        globe->keepOn = m_S.render.keep;
+        globe->keepSunGrainDeg = static_cast<float>(m_S.render.keepSunGrainDeg);
+        globe->keepTideGrainM = static_cast<float>(m_S.render.keepTideGrainM);
         globe->SetView(*e.cam, aspect, e.viewH, t);
     } else {
         const bool w = win && win->n > 0;
@@ -5450,12 +5495,29 @@ void FrameLoop::StandRings(WaterBankLayer* bank, const double at[3], const Surfa
     const int sampB = resMgr.Sampler("bank");
     double E[3];
     PlanetOf(m_A.surface, at, E);
-    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
-        const double texel = bank->BaseTexelM() * double(1 << mR);
-        const int rung = std::clamp(
-            int(std::ceil(std::log2(m_A.surface.cube.GroundRes(0) / texel))), 0, 15);
-        WantGround(resMgr, m_A.surface, sampB, hgtTenant, E, 0.5 * WaterBankLayer::kRingTexels * texel,
-                   rung);
+    std::vector<uint8_t> dg;
+    {
+        const double bt = bank->BaseTexelM();
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(E);
+        dg.insert(dg.end(), b, b + sizeof(E));
+        b = reinterpret_cast<const uint8_t*>(&bt);
+        dg.insert(dg.end(), b, b + sizeof(bt));
+        b = reinterpret_cast<const uint8_t*>(&hgtTenant);
+        dg.insert(dg.end(), b, b + sizeof(hgtTenant));
+        b = reinterpret_cast<const uint8_t*>(&m_windowTold);
+        dg.insert(dg.end(), b, b + sizeof(m_windowTold));
+    }
+    if (dg == m_bankDigest && resMgr.Repeat(sampB)) {
+        ++m_wantsRepeated;
+    } else {
+        for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
+            const double texel = bank->BaseTexelM() * double(1 << mR);
+            const int rung = std::clamp(
+                int(std::ceil(std::log2(m_A.surface.cube.GroundRes(0) / texel))), 0, 15);
+            WantGround(resMgr, m_A.surface, sampB, hgtTenant, E, 0.5 * WaterBankLayer::kRingTexels * texel,
+                       rung);
+        }
+        m_bankDigest = std::move(dg);
     }
     if (hgtTenant >= 0) {
         // PHASE B3: the height tenant's array; the rings read its windows by the rows above.

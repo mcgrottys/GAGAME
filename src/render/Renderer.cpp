@@ -66,7 +66,10 @@ hal::RootLayout Renderer::SharedGraphicsLayout() {
                 hal::SrvRange(0, hal::kUnbounded, 3), hal::SrvRange(0, hal::kUnbounded, 4),
                 hal::SrvRange(0, hal::kUnbounded, 5), hal::SrvRange(0, hal::kUnbounded, 6),
                 // t0, space7: the heap as StructuredBuffer<float4> -- the views' world tables
-                hal::SrvRange(0, hal::kUnbounded, 7)})
+                hal::SrvRange(0, hal::kUnbounded, 7),
+                // t0, space8: the heap as StructuredBuffer<uint> -- the globe's per-meshlet
+                // classes, read by its mesh stage on a kept frame (GlobeLayer.h Keep)
+                hal::SrvRange(0, hal::kUnbounded, 8)})
         // b2: THE SURFACE constants (Common.hlsli's SurfaceCb, ga::ComposedSurfaceCb) --
         // vqview's mechanism for letting later layers evaluate one surface, finally bound
         // (M12 step 4g): the frame loop fills the rows once through SurfaceFrame::Fill,
@@ -481,12 +484,25 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
 
         cmd.GraphicsRoot(m_rootSig.Get());
         cmd.GraphicsConstantsAt(0, sceneCbs[i]);
-        {   // b2 (4g): the view's surface rows, carrying where its world table is (gCsEyeT.w)
-            ComposedSurfaceCb s = v.surface ? *v.surface : surfaceCb;
+        // b2 (4g): the view's surface rows, carrying where its world table is (gCsEyeT.w)
+        ComposedSurfaceCb s = v.surface ? *v.surface : surfaceCb;
+        {
             const uint32_t worlds = UploadWorlds(v.worlds, i);
             memcpy(&s.eyeT[3], &worlds, sizeof(worlds));
             cmd.GraphicsConstantsAt(4, cmd.Push(s));
         }
+        // THE KEPT FRAME'S INPUTS (scene/Layer.h FrameContext): what a layer that keeps its last
+        // picture keys it by, the view's rectangle, and the frame's targets to come back to.
+        v.legacy.constants = &v.constants;
+        v.legacy.surface = &s;
+        v.legacy.worldPack = &m_worldPack;
+        v.legacy.viewX = vx;
+        v.legacy.viewY = vy;
+        v.legacy.frameW = m_width;
+        v.legacy.frameH = m_height;
+        v.legacy.colorRtv = colorRtv;
+        v.legacy.depthDsv = depthDsv;
+        v.legacy.depthTex = &m_sceneDepth;
         if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
         cmd.GraphicsBindless(3);
 

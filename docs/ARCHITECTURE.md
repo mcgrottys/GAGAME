@@ -632,3 +632,58 @@ Each was found or scoped during the steps and left out on purpose; the step that
 - **A non-draining versioned `Exchange::Publish`** (plan): per-frame plugin data keeps using the
   constants ring until then.
 - **The DLL loader** (plan): §6.
+
+## 9. The still frame — statements repeated, the picture kept (2026-10-11)
+
+The owner's question, with the city scene standing at the Merrimack's mouth at 46 fps: "optimizations
+when the camera is still or not moving far ... things the math gives us for free ... redundant passes".
+Measured first (the instruments are on every run's exit line: `[cpu] the residency turn` by phase, `the
+quiet turn`, `the pass's reasons`, `[settled] since the hold was exact`): a still frame was the
+globe's walk re-made and 175k tiles re-said to the residency every frame on the CPU, and on the GPU the
+whole globe re-drawn. The residency manager itself was already quiet once nothing landed (0.015 ms a
+turn): its order runs a pass only on an event. Three laws, all of them "the same inputs, the same
+answer", and none of them changes a moving frame.
+
+**The walk kept** (`GlobeLayer::SetView`, `m_walkDigest`). The walk is a pure function of the eye, the
+view, the walk's parameters, the levels and gates and the windows' table — never of what is resident:
+the GPU reads the residency map at the draw. Its inputs are digested into bytes; when they equal the
+last walk's, the nodes, meshlets, leaf keys and level records stand. Another eye's borrowed walk leaves
+the memo alone.
+
+**The statement repeated** (`ResidencyManager::Repeat`; HIERARCHY 4.19). A reader whose inputs stood
+says its last statement again with one call and names no tile. Every record carries, per reader, the
+NUMBER of the statement it was last said in (`OrdRec::sstmt`); a reader's current number moves when it
+speaks anew (OrderNote's first mark of a frame) or when it is silent while another speaks (F12); the
+order's "whose statement stands" compares numbers, not frames. A repeat is refused — the reader walks
+anew — when nothing stands: the reader has not spoken, fell silent, or a tile it named was untracked
+since (the cut's release, an invalidation, a tenant dropped: `RecDrop` breaks the statement). When a
+statement ends, its records are closed lazily in the pass (the glance counts from the frame it ended).
+The prediction repeats too, for its lead from the frame it was last asserted. The readers that repeat:
+the view's walk and the gates' (the kept walk), the prediction, the wave planes (their own reader,
+"waves"), the exposure's ground ("exposure") and the bank's rings — each digests its inputs. The exact
+hold's `wanted` is what the standing statements say.
+
+**The picture kept** (`GlobeLayer.h Keep`; `shaders/GlobeKeep.hlsl`, `GlobeClass.hlsl`). The globe's
+surface is a pure function of its inputs; while they stand its picture stands. The frame after the
+inputs have stood a frame draws into the frame as ever and, beside it, into the view's cache: the colour
+with the pixel's class in its alpha (1 land whole, 0.5 water has a share) and the meshlet that drew each
+pixel; the frame's depth is copied beside them, and a compute pass marks every meshlet a water pixel
+belongs to. A kept frame composites the cached LAND into the frame at the globe's place in the layer
+order (depth-tested and written as the surface would have been) and draws only the meshlets that had
+water, whose land pixels the depth they already have rejects before the pixel stage; the water is
+always drawn anew, so nothing of it is ever stale. A moving eye draws exactly as before and pays
+nothing. The key: the records (the first eye's walk generation; another eye's bytes), the globe's rows
+with the water's views masked and the tide at its grain, the scene's rows with the sun at its grain and
+the clock masked, the surface rows, the worlds, the level rows, the generations of the tenants the
+surface reads (`Generation(tenant)`), the clouds'. The grains are scene keys (`render.keepSunGrainDeg`
+0.01°, `render.keepTideGrainM` 1 mm): the globe is redrawn when the sun or the tide has moved by more.
+`render.keep` turns it off. Not kept: the sky shell and the limbs (blends, cheap), every other layer.
+
+**Measured, frozen stills (`--scale 0 --settle-exact`, 1600 x 900, `--gpu-time`):** the walk's replay
+3.4 -> 0.2 ms at the mouth (CPU bracketed 6.3 -> 1.0 ms); the globe on a kept frame: Tokyo 9.6 -> 1.9
+ms (the bay's meshlets), the bridge 9.1 -> 5.9, the mouth corridor 13.2 -> 5.9 (most of its pixels are
+water). The mouth and bridge stills are bit-identical to the full draw's outside the HUD's counter;
+Tokyo differs within the stands' own run-to-run floor. The storm rail (a moving eye) is unchanged within
+its run-to-run noise. The pixel-shader UAV write was tried for the classes and dropped: a pixel shader
+with a UAV loses early depth rejection (+0.6 ms on every moving frame); the classes come from a compute
+pass over the cache instead.

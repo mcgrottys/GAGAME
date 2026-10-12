@@ -104,6 +104,9 @@ Texture2D gTex[] : register(t0, space1);      // unbounded; needs resource bindi
 // return a normalized fraction instead of the level. Same heap, same slots, different
 // interpretation; only the maps are ever read through this one.
 Texture2D<uint> gTexU[] : register(t0, space4);
+// THE KEPT FRAME (GlobeLayer.h Keep): the heap as StructuredBuffer<uint> -- the globe's
+// per-meshlet classes (GlobeClass.hlsl), read by its mesh stage on a kept frame.
+StructuredBuffer<uint> gBufU[] : register(t0, space8);
 // M9j: the heap a FIFTH time, as Texture2DArray. A paged GA bank is one reserved array whose
 // SLICES are pages of the shared (level, x, y) space, so a consumer samples page and level from
 // ONE view -- which is what lets two pages composite without a second SRV or a branch on which

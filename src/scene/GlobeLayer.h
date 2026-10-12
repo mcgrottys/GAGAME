@@ -82,6 +82,7 @@ public:
     // The walks SetView made and kept (the header's note on m_walkDigest): the frame loop's exit line.
     uint64_t WalksMade() const { return walksMade; }
     uint64_t WalksKept() const { return walksKept; }
+    uint64_t PredictRepeats() const { return predictRepeats; }
 
     // M6e: streamed planet surface. surf/norm are ResidencyManager tenant ids (-1 = none);
     // isMars switches the whole shading path (no relief, no live-Earth fields, BC5 normals).
@@ -502,6 +503,21 @@ public:
     // drew it, and where the CDLOD rings hand over -- readable at altitudes where
     // every-triangle wireframe collapses into moire). PSO-selected; PsMain untouched.
     int surfaceDebug = 0;
+    // THE GLOBE KEPT (2026-10-11; the owner: "reuse seems ideal for this engine"). The surface is a
+    // pure function of its inputs; while they stand its picture stands. The full draw goes into the
+    // view's own colour + depth (Keep), the pixel's class in the alpha and the meshlet's in a buffer
+    // its pixels write; a kept frame composites the cached land into the frame (GlobeKeep.hlsl) and
+    // draws only the meshlets that had water, whose land pixels the depth they already have rejects
+    // before the pixel stage. The key: the records (the walk's generation for the first eye, the
+    // bytes for another), the globe's rows, the scene's rows with the sun and the tide at their
+    // grains (scene render.keepSunGrainDeg, render.keepTideGrainM: the picture is redrawn when they
+    // move by more than that), the surface rows, the worlds, the level rows, the residency's
+    // generation and the clouds'. Measured at a frozen eye (--gpu-time): Tokyo's globe.mesh 9.4 ->
+    // the kept frame's composite + water; the mouth's 13.2 likewise -- the numbers in the PR.
+    bool keepOn = true;
+    float keepSunGrainDeg = 0.01f, keepTideGrainM = 0.001f;
+    uint64_t keepFull = 0, keepKept = 0, keepPlain = 0, keepWhy[8] = {};
+    int m_keepWhySaid = 0;
     // M9d: --mesh-stats. The storm wireframe LOOKED like the near field carried coarser
     // triangles than the mid field, which would be the LOD running backwards. Squinting at
     // rasterized lines is exactly the guessing priors 8 warns about, so count the records
@@ -630,6 +646,7 @@ private:
         // eye of the level the set stands at, cast from that level's own row.
         float bankChart[16];
         float bankBChart[16];
+        uint32_t keepU[4];    // THE KEPT FRAME (Keep): classes' UAV slot, kept frame, keep on, spare
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -905,26 +922,48 @@ private:
     bool ResidencyLensOn() const { return (debugLens >= 9 && debugLens <= 11) || debugLens >= 14; }
     std::vector<MeshletRec> m_meshlets;
     // THE WALK KEPT (2026-10-11, the owner: "the math gives us things for free"). The walk is a
-    // pure function of the eye, the view, the levels and gates, the windows' table and what is
-    // resident. Its inputs are digested into bytes each SetView; when the bytes and the residency's
-    // generation are the last walk's, the nodes, meshlets, leaf keys and level records stand as
-    // they are, and the wants the walk made are replayed to the residency from the log the walk
-    // wrote -- the same calls, so every residency law sees what a walk would have said. Measured:
-    // a still eye at the Merrimack's mouth walked 5,566 nodes a frame for 13.5 ms; kept, the
-    // replay costs the wants alone.
+    // pure function of the eye, the view, the levels and gates and the windows' table (never of
+    // what is resident: the GPU reads the residency map at the draw). Its inputs are digested into
+    // bytes each SetView; when the bytes are the last walk's, the nodes, meshlets, leaf keys and
+    // level records stand as they are, and each reader the walk spoke for REPEATS its statement to
+    // the residency by number (ResidencyManager::Repeat) -- no tile is named again. A repeat the
+    // residency refuses (a tile of the statement untracked since) makes the walk anew. Measured:
+    // a still eye at the Merrimack's mouth walked 5,566 nodes a frame for 13.5 ms and re-said
+    // 175k tiles for 3.4 ms more; kept and repeated, neither.
     std::vector<uint8_t> m_walkDigest;
-    uint64_t m_walkGen = 0;
     bool m_walkKept = false;
-    struct WantRec {
-        int sampler, tenant;
-        uint32_t face, mip;
-        float u0, v0, u1, v1, nearM;
-    };
-    std::vector<WantRec> m_wantLog;   // the last walk's wants, in order
-    bool m_wantLogging = false;
-    mutable uint64_t walksKept = 0, walksMade = 0;
+    uint16_t m_walkSamplers = 0;   // the readers the last walk spoke for (the view's, the gates')
+    static void DigestWalk(std::vector<uint8_t>& d, const WalkParams& wp);
+    std::vector<uint8_t> m_predDigest;   // the prediction's inputs; equal -> its statement repeated
+    bool m_predReplayed = false;
+    mutable uint64_t walksKept = 0, walksMade = 0, predictRepeats = 0;
     int m_walkWhySaid = 0;
     GpuBuffer m_recBuf[Gpu::kFrameCount];
+    // THE KEPT FRAME (keepOn above): a view's cache, its targets and views, its key and the key's parts.
+    struct Keep {
+        GpuTexture color, depth, id;   // the colour (its alpha the class), the frame's depth copied, the meshlet that drew the pixel
+        uint32_t rtv = UINT32_MAX, dsv = UINT32_MAX, colorSrv = UINT32_MAX, depthSrv = UINT32_MAX;
+        uint32_t idRtv = UINT32_MAX, idSrv = UINT32_MAX;
+        uint64_t key = 0, lastKey = 0, part[8] = {};   // lastKey: the frame before's (the cache is filled once the inputs stood a frame)
+        bool valid = false, partsSeen = false;
+        uint32_t w = 0, h = 0;
+        std::vector<uint8_t> rowsPrev;   // the instrument: which byte of the globe's rows moved
+    };
+    Keep m_keep[1 + kMaxOtherEyes];
+    hal::Pso m_keepPso;     // GlobeKeep.hlsl: the composite, depth-tested and written
+    hal::Pso m_msPsoKeep;   // the mesh pipeline with the cache's two targets beside the frame's (PsMainKeep)
+    hal::RootSignatureRef m_classRs;   // GlobeClass.hlsl: the classes from the pixels, its own root
+    hal::Pso m_classPso;
+    Com<ID3D12Resource> m_classBuf;   // a uint a meshlet: 1 where a pixel of it had water
+    GpuBuffer m_classZero;
+    uint32_t m_classUav = UINT32_MAX, m_classSrv = UINT32_MAX;
+    D3D12_RESOURCE_STATES m_classState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    static constexpr uint32_t kClassMax = 1u << 18;
+    uint64_t m_meshletGen = 1, m_cloudGen = 0;   // the first eye's records' generation; the cloud volume's
+    void EnsureKeep(Gpu& gpu, Keep& K, uint32_t w, uint32_t h);
+    void EnsureClass(Gpu& gpu);
+    uint64_t KeepKey(const FrameContext& ctx, const GlobeCbData& cb, const std::vector<MeshletRec>& meshlets,
+                     const std::vector<float>& levelRows, Keep& K);
     GlobeCbData m_cb{};
     SkyCbData m_skyCb{};
     float m_viewportH = 900.0f;
@@ -964,13 +1003,14 @@ private:
     void RenderEye(const FrameContext& ctx, const GlobeCbData& cbData, const SkyCbData& skyCbData,
                    const std::vector<MeshletRec>& meshlets, const std::vector<NodeData>& nodes,
                    const uint32_t* limbSlots, int limbCount, GpuBuffer& rec, bool skyPass,
-                   float skyWeight);
+                   float skyWeight, const std::vector<float>& levelRows);
     struct PredictJob {
         std::mutex mx;
         std::condition_variable cv;
         bool busy = false;
         bool outstanding = false;
         WalkParams params{};
+        bool repeat = false;           // no walk posted: the last one's statement is repeated
         std::vector<WantRect> rects;   // the worker's answer; ReplayPredictWants empties it
         uint64_t nodes = 0, leaves = 0, walkNs = 0;
     } m_predict;
