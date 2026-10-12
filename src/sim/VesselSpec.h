@@ -116,6 +116,11 @@ struct Attach {
     double tiltP[3] = {0, 0, 0};
     double tiltD[3] = {1, 0, 0};
     double tiltLo = 0.0, tiltHi = 0.0, tiltRate = 0.35;
+    // The tilt channel's RETURN when no key holds it: 0 is a trim pump (it stays where it was
+    // left), a brake pedal or a drone's climb lever comes back at this rate. The steer channel
+    // always returns at `rate` (the wheel centres). The helm reads these joints: the first
+    // jointed element's limits and rate are the steer's, the first tilted element's the tilt's.
+    double tiltReturn = 0.0;
 
     // The joint at angle `q`, composed onto the mount. ONE PGA primitive for every articulation
     // on every hull; the offset axis costs nothing extra.
@@ -153,7 +158,10 @@ struct Attach {
 // boat carries its weight is a real design fact -- tanks forward instead of aft is worth degrees
 // of running trim -- and because the alternative is a single hand-tuned "the CG is here" number
 // that stops being true the moment anything is added.
-enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast };
+// Hover (2026-10-11) is the recovery drone's one element: a velocity servo at the CG and an
+// attitude servo about it, in no medium at all -- it flies the same over land and sea because it
+// asks the water nothing.
+enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast, Hover };
 enum class MediumKind : uint8_t { Water, Air };
 
 // ================================================================================================
@@ -243,6 +251,13 @@ struct Element {
     // ---- Drag (hull resistance, windage)
     Num dragArea[3];                         // reference area per BODY axis (x, y, z)
     Num dragCd[3];
+
+    // ---- Hover (the drone). The commanded velocity is the helm's: W/S along the heading and
+    // Q/E across it at hoverSpeedH, SHIFT/CTRL up and down at hoverSpeedV (the mount's tilt
+    // channel, -1..1), A/D a yaw RATE of hoverYawRate (the mount's steer channel, -1..1). The
+    // wrench is m (g up + (v_cmd - v) / tau) at the CG and a critically damped PD on the
+    // attitude (body up -> world up, yaw rate -> commanded) with the same tau.
+    Num hoverSpeedH, hoverSpeedV, hoverYawRate, hoverTau;
 };
 
 // ================================================================================================
@@ -263,6 +278,15 @@ struct VesselSpec {
     Num inertiaRoll, inertiaPitch, inertiaYaw;   // about the CG, body axes
     Num addedMassSurge, addedMassSway, addedMassHeave;
     Num addedInertiaRoll, addedInertiaPitch, addedInertiaYaw;
+
+    // THE SEAT (2026-10-11): where the set-down puts the keel (the lowest station point) ABOVE
+    // the surface the body rides -- the top of the water-over-bed stack. A boat's is minus its
+    // draught (so it floats where it floats; undeclared, that is what it was), a car's is zero
+    // (the tyres touch and settle into their springs), a drone's is its hover height.
+    Num seatHeight;
+    // The recovery body: switched TO, it is placed over the vehicle it was switched from;
+    // switched FROM, the next vehicle is placed under it and seats itself (FrameLoop::CycleVehicle).
+    bool recovery = false;
 
     std::vector<Element> elements;
 
@@ -321,5 +345,9 @@ VesselSpec MakeTestBox();
 // rather than gated. Deep-V stations, five collar chambers, two steered outboards, a
 // skeg, hull resistance and windage. Most of its numbers are ASSUMED and say so.
 VesselSpec MakeRhib18();
+
+// The recovery drone: one Hover element, no water. Switched to when a vehicle flips; flies
+// anywhere; the vehicle switched back to is set down under it.
+VesselSpec MakeRecoveryDrone();
 
 }  // namespace ga

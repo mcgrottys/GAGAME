@@ -141,6 +141,9 @@ VesselSpec MakeRhib18() {
                                "(2.2-2.4 m); no 1998 spec sheet found");
     s.draftStatic = Num::Of(0.30, "m", "ASSUMED: hull only, drives nothing -- the clip computes "
                                        "the real draught");
+    // The seat: the keel set down at its draught below the surface, the number the set-down
+    // always used (minus draftStatic), declared so the law reads it like every other hull's.
+    s.seatHeight = Num::Of(-0.30, "m", "DERIVED: minus draft.static, the set-down's own number");
 
     // ---- masses ------------------------------------------------------------------------------
     const double M_HULL = 430.0, M_ENG = 220.0, M_LOAD = 250.0;
@@ -535,9 +538,52 @@ VesselSpec MakeRhib18() {
     return s;
 }
 
+// ================================================================================================
+//  drone.recovery -- the recovery vehicle. A velocity servo with four rotors drawn on it.
+//
+//  It exists so a flipped boat or car is not the end of the drive: T to the drone, fly, T back,
+//  and the vehicle is set down under it. Its numbers are a small quadcopter's and every one is
+//  ASSUMED; it reads no water, so it flies the same over the sea and the town.
+// ================================================================================================
+VesselSpec MakeRecoveryDrone() {
+    VesselSpec s;
+    s.kind = "drone.recovery";
+    s.display = "recovery drone (a velocity servo with four rotors)";
+    s.recovery = true;
+    const double L = 0.60, B = 0.60, H = 0.12, M = 6.0;
+    s.loa = Num::Of(L, "m", "ASSUMED: a 600 mm quadcopter frame");
+    s.beam = Num::Of(B, "m", "ASSUMED: square frame");
+    s.massDry = Num::Of(M, "kg", "ASSUMED: a 6 kg lifting quadcopter");
+    s.massLoaded = s.massDry;
+    s.inertiaRoll = Num::Of(M / 12.0 * (B * B + H * H), "kg", "DERIVED: solid box, m/12 (B^2+H^2)");
+    s.inertiaPitch = Num::Of(M / 12.0 * (H * H + L * L), "kg", "DERIVED: solid box, m/12 (H^2+L^2)");
+    s.inertiaYaw = Num::Of(M / 12.0 * (B * B + L * L), "kg", "DERIVED: solid box, m/12 (B^2+L^2)");
+    s.seatHeight = Num::Of(6.0, "m", "ASSUMED: it appears six metres over the vehicle it recovers");
+
+    Element h;
+    h.kind = ElementKind::Hover;
+    h.name = "rotors";
+    h.medium = MediumKind::Air;
+    // THE CONTROL CHANNELS ARE THE MOUNT'S JOINTS: the helm reads the first jointed element's
+    // limits as the steer's and the first tilted element's as the tilt's (Entity::Helm). Here both
+    // are unit fractions -- yaw-rate demand and climb demand -- that slew in a third of a second
+    // and the climb comes back to zero when the key is released (a drone's lever, not a trim pump).
+    h.mount.jointed = true;
+    h.mount.lo = -1.0; h.mount.hi = 1.0; h.mount.rate = 3.0;
+    h.mount.tilted = true;
+    h.mount.tiltLo = -1.0; h.mount.tiltHi = 1.0; h.mount.tiltRate = 3.0; h.mount.tiltReturn = 3.0;
+    h.hoverSpeedH = Num::Of(12.0, "m/s", "ASSUMED: a brisk survey speed");
+    h.hoverSpeedV = Num::Of(5.0, "m/s", "ASSUMED: climb and descent");
+    h.hoverYawRate = Num::Of(1.2, "1", "ASSUMED: rad/s -- a full turn in five seconds");
+    h.hoverTau = Num::Of(0.35, "s", "ASSUMED: the one time constant, velocity and attitude; critically damped a 30 deg tilt is under 1 deg at 5.3 tau, so 0.35 s levels it in 1.9");
+    s.elements.push_back(h);
+    return s;
+}
+
 void RegisterBuiltinVessels(VesselRegistry& reg) {
     reg.Register("box.test", MakeTestBox);
     reg.Register("rhib.novurania18", MakeRhib18);
+    reg.Register("drone.recovery", MakeRecoveryDrone);
 }
 
 }  // namespace ga

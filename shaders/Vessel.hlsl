@@ -69,14 +69,16 @@ static const float3 kFaceN[12] = {
 };
 // One colour per element KIND, so the picture reads as the physics: hull, tube, planing surface,
 // thruster, foil, windage. Reading a screenshot tells you which laws are acting.
-static const float3 kPalette[7] = {
+static const float3 kPalette[9] = {
     float3(0.82, 0.82, 0.86),   // Buoyancy  -- hull, light grey
     float3(0.15, 0.16, 0.19),   // Collar    -- tube, near-black like real hypalon
     float3(0.45, 0.55, 0.70),   // Planing   -- the running surface
     float3(0.90, 0.90, 0.92),   // Thruster  -- outboard cowling
     float3(0.75, 0.35, 0.20),   // Foil      -- rudder / skeg / sail
     float3(0.35, 0.65, 0.45),   // Drag      -- windage box
-    float3(0.85, 0.65, 0.10)    // Ballast   -- fuel, crew, gear: where the weight actually is
+    float3(0.85, 0.65, 0.10),   // Ballast   -- fuel, crew, gear: where the weight actually is
+    float3(0.95, 0.30, 0.25),   // Hover     -- the recovery drone, a rescue red
+    float3(0.10, 0.10, 0.11)    // Wheel     -- a tyre
 };
 
 VsOut VsMain(uint vid : SV_VertexID) {
@@ -87,7 +89,7 @@ VsOut VsMain(uint vid : SV_VertexID) {
     const float3 world = MotorPoint(p.re, p.du, local);   // the sandwich, on the GPU
     VsOut o;
     o.n = MotorDir(p.re, kFaceN[tri]);
-    o.col = kPalette[uint(p.half.w) % 7u] * gVsParams.y;
+    o.col = kPalette[uint(p.half.w) % 9u] * gVsParams.y;
     // `world` is already RELATIVE TO THE EYE: VesselLayer::Render composes the eye's reverse
     // translation onto each box's motor in doubles before the float cast, so a hull 2000 km from
     // the origin is as exact here as one at the Merrimack.

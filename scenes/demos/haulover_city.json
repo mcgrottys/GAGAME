@@ -8,7 +8,9 @@
     "so the town is there when it resets.",
     "",
     "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
-    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "T / Y  cycle the helm through the scene's vehicles (boat, drone, ...); the drone is the recovery:",
+    "       flip the boat, T to the drone, fly, T back and the boat is set down under it",
+    "F      free the camera from the vehicle (it keeps its controls); F again returns",
     "MINIMAP  drag to turn the planet, wheel to zoom, the button to reset over the boat"
   ],
   "base": "scenes/merrimack.json",
@@ -68,6 +70,17 @@
       "at": {
         "x": 120,
         "alt": 0,
+        "z": -10,
+        "az": 86
+      },
+      "controller": "helm"
+    },
+    {
+      "name": "drone",
+      "vessel": "drone.recovery",
+      "at": {
+        "x": 120,
+        "alt": 6,
         "z": -10,
         "az": 86
       },

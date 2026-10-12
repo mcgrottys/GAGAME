@@ -119,6 +119,20 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
                     Emit(m_cpu, hull, e.mount.at, 0.0, 0.0, 0.0, h, h, h, pal);
                     break;
                 }
+                case ElementKind::Hover: {
+                    // The drone: a body box and four rotor discs on the frame's corners, sized
+                    // from the spec's length and beam. No art, like everything else here.
+                    const double L = (spec.loa.v > 0.0) ? spec.loa.v : 0.6;
+                    const double B = (spec.beam.v > 0.0) ? spec.beam.v : 0.6;
+                    Emit(m_cpu, hull, e.mount.at, 0.0, 0.0, 0.0, 0.18 * B, 0.05, 0.18 * L, pal);
+                    for (int sx = -1; sx <= 1; sx += 2) {
+                        for (int sz = -1; sz <= 1; sz += 2) {
+                            Emit(m_cpu, hull, e.mount.at, sx * 0.4 * B, 0.04, sz * 0.4 * L,
+                                 0.17 * B, 0.008, 0.17 * L, pal);
+                        }
+                    }
+                    break;
+                }
                 // Planing and Drag are LAWS over surfaces the other elements already draw --
                 // a running surface and a windage area are not solids, and boxing them would
                 // double-draw the hull.

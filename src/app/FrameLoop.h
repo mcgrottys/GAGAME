@@ -401,6 +401,15 @@ private:
     float m_glassAge = 0.0f;   // seconds since the readout was last reprinted
     std::string m_glassText;
     scene::Entity* m_followed = nullptr;
+    // THE VEHICLE CYCLE (2026-10-11): T forward, Y back through the scene's active entities in
+    // scene order; the previous subject leaves the helm, the new one takes it and the eye jumps to
+    // it. The recovery law is the spec's `recovery` flag: a recovery body switched TO is placed
+    // over the subject it replaces; switching FROM one places the next body under it, and each
+    // seats itself (Entity::PlaceOver). Two ordinary vehicles switch without moving.
+    void CycleVehicle(int dir);
+    // The gate harness only (GAGAME_CYCLE_AT="f1,f2,..." in the environment): cycle forward at
+    // those frames, so a headless run can read the [vehicle] and set-down lines. Not a flag.
+    std::vector<uint32_t> m_cycleAt;
     // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
     // hull goes through a window, the eye keeps standing on this side and chases the hull's
     // APPARENT pose -- pulled back through that window's motor, which is the map the window's

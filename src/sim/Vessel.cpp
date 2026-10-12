@@ -858,6 +858,59 @@ Bivector Vessel::Foil(const Element& e, const WaterSurface& sea, const VesselCon
     return m_body.BodyWrench(fWorld, atBody);
 }
 
+// ================================================================================================
+//  Hover - the recovery drone. Two servos and no fluid.
+//
+//  The force is m (g up + (v_cmd - v) / tau) at the CG: the weight carried, and the velocity
+//  relaxed to the command with one time constant. The torque is a PD on the attitude bivector:
+//  the axis that turns body-up onto world-up (their cross product, |e| = sin of the tilt) with
+//  gain 1/tau^2, and the rate error against the commanded yaw rate about world up with gain
+//  2/tau -- critically damped, each axis scaled by its own inertia so the three settle alike.
+//  Written in the body frame, which is the wrench's frame, so no planetary number appears.
+// ================================================================================================
+Bivector Vessel::Hover(const Element& e, const VesselControls& c) {
+    const double tau = (e.hoverTau.v > 1e-3) ? e.hoverTau.v : 0.4;
+    // The helm's channels, as the drone reads them: W/S = both levers (demand), Q/E = their split.
+    const double demand = 0.5 * (c.throttle[0] + c.throttle[1]);
+    const double split = 0.5 * (c.throttle[1] - c.throttle[0]);
+    const double sHi = (e.mount.hi > 0.0) ? e.mount.hi : 1.0;
+    const double tHi = (e.mount.tiltHi > 0.0) ? e.mount.tiltHi : 1.0;
+    // THE HELM'S STEER IS THE OUTBOARD'S ANGLE: D commands a NEGATIVE angle (Entity::Helm, the
+    // linkage kicks the stern the other way). A drone has no stern: D must turn it RIGHT, which is
+    // a positive rate about +y (Motor::Rotation takes +z toward +x). Hence the sign here.
+    const double yawCmd = -std::clamp(c.steer / sHi, -1.0, 1.0) * e.hoverYawRate.v;
+    const double climb = std::clamp(c.tilt / tHi, -1.0, 1.0) * e.hoverSpeedV.v;
+
+    // The heading in the world, horizontal; its right-hand neighbour; world up.
+    double fwd[3] = {0.0, 0.0, 1.0};
+    m_body.pose.TransformDir(fwd[0], fwd[1], fwd[2]);
+    const double fl = std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2]);
+    const double fx = (fl > 1e-9) ? fwd[0] / fl : 0.0, fz = (fl > 1e-9) ? fwd[2] / fl : 1.0;
+    const double rx = fz, rz = -fx;   // right = up x forward, in (x east, y up, z north)
+    const double vCmd[3] = {(fx * demand + rx * split) * e.hoverSpeedH.v, climb,
+                            (fz * demand + rz * split) * e.hoverSpeedH.v};
+    const double cg[3] = {0.0, 0.0, 0.0};
+    double v[3];
+    m_body.VelocityAtBody(cg, v);
+    const double m = m_body.mp.mass;
+    const double f[3] = {m * (vCmd[0] - v[0]) / tau, m * (kG + (vCmd[1] - v[1]) / tau),
+                         m * (vCmd[2] - v[2]) / tau};
+    Bivector w = m_body.BodyWrench(f, cg);
+
+    // Attitude: world up in the body frame; the error axis e = y_body x up; the commanded rate.
+    double u[3] = {0.0, 1.0, 0.0};
+    m_body.pose.Inverse().TransformDir(u[0], u[1], u[2]);
+    const double err[3] = {u[2], 0.0, -u[0]};
+    const Bivector& t = m_body.Twist();
+    double tauB[3];
+    for (int i = 0; i < 3; ++i) {
+        const double wCmd = yawCmd * u[i];
+        tauB[i] = m_body.mp.I[i][i] * (err[i] / (tau * tau) + 2.0 * (wCmd - t.a[i]) / tau);
+    }
+    w += Bivector::Couple(tauB);
+    return w;
+}
+
 Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, double simUnix) {
     Bivector w = Bivector::Zero();
     m_accVol = 0.0;
@@ -904,6 +957,9 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
                 break;
             case ElementKind::Foil:
                 w += Foil(e, sea, c, simUnix);
+                break;
+            case ElementKind::Hover:
+                w += Hover(e, c);
                 break;
             case ElementKind::Thruster: {
                 const int i = thrusterIdx++;
@@ -1164,6 +1220,7 @@ std::vector<std::pair<std::string, const Num*>> VesselSpec::Ledger() const {
     add("added.roll", addedInertiaRoll);
     add("added.pitch", addedInertiaPitch);
     add("added.yaw", addedInertiaYaw);
+    add("seat.height", seatHeight);
     for (const Element& e : elements) {
         const std::string p = e.name + ".";
         add((p + "tube.z0").c_str(), e.tubeZ0);
@@ -1174,6 +1231,10 @@ std::vector<std::pair<std::string, const Num*>> VesselSpec::Ledger() const {
         add((p + "deadrise").c_str(), e.deadriseDeg);
         add((p + "contact.settle").c_str(), e.contactSettle);
         add((p + "contact.mu").c_str(), e.contactMu);
+        add((p + "hover.speedH").c_str(), e.hoverSpeedH);
+        add((p + "hover.speedV").c_str(), e.hoverSpeedV);
+        add((p + "hover.yawRate").c_str(), e.hoverYawRate);
+        add((p + "hover.tau").c_str(), e.hoverTau);
     }
     return v;
 }

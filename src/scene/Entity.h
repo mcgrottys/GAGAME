@@ -138,6 +138,15 @@ public:
     void Helm(const InputState& in, float dt);
     // THE CLOCK POLICY: a deliberate time jump resets the hull to rest at its last pose.
     void ResetAtRest();
+    // PLACED (2026-10-11): at a pose, at rest, controls cleared, seated on its surface by the next
+    // Update facing that way -- ResetAtRest at a pose. The vehicle cycle's one verb.
+    void PlaceAt(const Motor& pose);
+    // ...over another entity: its CG and heading said in this hull's space, upright; the seat
+    // then puts it at its own seatHeight over the surface there (a drone six metres up, a boat
+    // on the water, a car on the ground, by the one law).
+    void PlaceOver(const Entity& other);
+    // The CG and horizontal heading said in `s` (null: the root), through the common ancestor.
+    bool FrameIn(const Space* s, double cg[3], double fwd[3]) const;
     // The hull's origin and horizontal heading, for the chase camera; keeps helmYawRef.
     // In the hull's OWN space (the root's, until a gate carries it).
     void ChaseFrame(double p[3], double f[3]);

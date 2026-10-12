@@ -481,10 +481,65 @@ bool RunVesselSelfTest() {
         if (Vessel::s_auditFails != fails0) fail("batch: a table answer differs from the live one", double(Vessel::s_auditFails - fails0), 0.0);
     }
 
+    // ---- 8. THE DRONE (Hover). A velocity servo and an attitude servo with one time constant:
+    // a commanded 5 m/s is reached within 3 tau, a 60 s hover with no command drifts less than a
+    // centimetre, and a 30 deg tilt is level again inside 2 s. It asks the water nothing, so the
+    // surface under it is whatever is to hand.
+    {
+        const VesselSpec drone = reg.Build("drone.recovery");
+        if (drone.kind.empty() || !drone.recovery) fail("drone: not registered as the recovery body", 0, 1);
+        const double tau = 0.35;
+        // (a) 5 m/s forward commanded: both levers at 5/12 of the 12 m/s horizontal speed.
+        {
+            Vessel v;
+            v.Build(drone, Motor::Translation(0.0, 10.0, 0.0));
+            VesselControls c;
+            c.throttle[0] = c.throttle[1] = 5.0 / 12.0;
+            double reached = -1.0;
+            for (int i = 0; i < 600; ++i) {
+                v.Step(still, c, i * dtLive, dtLive);
+                if (reached < 0.0 && speedOf(v) >= 0.95 * 5.0) reached = (i + 1) * dtLive;
+            }
+            double p[3];
+            cgOf(v, p);
+            Log("[vessel] drone: 5 m/s commanded, 95%% reached at %.2f s (3 tau = %.2f), after 10 s %.3f m/s "
+                "at y %+.3f (started +10.000), heel %.2f deg", reached, 3.0 * tau, speedOf(v), p[1], heelOf(v));
+            if (!(reached > 0.0 && reached <= 3.0 * tau)) fail("drone: 5 m/s not reached within 3 tau (s)", reached, 3.0 * tau);
+            if (std::abs(p[1] - 10.0) > 0.05) fail("drone: it did not hold its height under way (m)", p[1], 10.0);
+        }
+        // (b) 60 s hover, no command.
+        {
+            Vessel v;
+            v.Build(drone, Motor::Translation(3.0, 10.0, -7.0));
+            VesselControls c;
+            for (int i = 0; i < 3600; ++i) v.Step(still, c, i * dtLive, dtLive);
+            double p[3];
+            cgOf(v, p);
+            const double drift = std::sqrt((p[0] - 3.0) * (p[0] - 3.0) + (p[1] - 10.0) * (p[1] - 10.0) + (p[2] + 7.0) * (p[2] + 7.0));
+            Log("[vessel] drone: 60 s hover drifts %.5f m", drift);
+            if (drift > 0.01) fail("drone: hover drift in 60 s (m)", drift, 0.01);
+        }
+        // (c) level from 30 deg of roll.
+        {
+            Vessel v;
+            const double o[3] = {0.0, 10.0, 0.0}, ax[3] = {0.0, 0.0, 1.0};
+            v.Build(drone, Motor::Rotation(o, ax, 30.0 * kPi / 180.0) * Motor::Translation(0.0, 10.0, 0.0));
+            VesselControls c;
+            double t1 = -1.0;
+            for (int i = 0; i < 180; ++i) {
+                v.Step(still, c, i * dtLive, dtLive);
+                if (t1 < 0.0 && heelOf(v) < 1.0) t1 = (i + 1) * dtLive;
+            }
+            Log("[vessel] drone: 30 deg roll is under 1 deg at %.2f s, %.3f deg at 3 s", t1, heelOf(v));
+            if (!(t1 > 0.0 && t1 < 2.0)) fail("drone: level recovery (s)", t1, 2.0);
+        }
+    }
+
     Log("[vessel] ---- %s: factory refuses unknown kinds, section clip (level/tilted/full/dry), "
         "draught + zero residual wrench, heave period, roll period vs GM, carried by a swell, "
         "absence is not flat water, the ground (dry flat, Coulomb's slope both ways, the beach "
-        "stops it and the control sails on, the bed probes in the batch) ----",
+        "stops it and the control sails on, the bed probes in the batch), the drone (5 m/s in "
+        "3 tau, a 60 s hover, level from 30 deg) ----",
         ok ? "PASS" : "FAIL");
     return ok;
 }

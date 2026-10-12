@@ -1142,6 +1142,25 @@ std::optional<int> FrameLoop::Session() {
             m_followed = e.get();
         }
     }
+    // ONE HELM: the subject's. Every other vehicle keeps its controls and reads no keys.
+    for (auto& e : m_entities) e->SetHelming(e.get() == m_followed);
+    {
+        int active = 0;
+        for (auto& e : m_entities) active += e->Active() ? 1 : 0;
+        if (active > 0) {
+            Log("[vehicle] helm -> '%s' (%s); keys: T / Y cycle the helm through the scene's %d "
+                "vehicle%s, F frees the camera (the vehicle keeps its controls)",
+                m_followed ? m_followed->Name() : "-",
+                m_followed && m_followed->Hull() ? m_followed->Hull()->Spec().kind.c_str() : "-", active,
+                active == 1 ? "" : "s");
+        }
+        if (const char* at = std::getenv("GAGAME_CYCLE_AT")) {   // the gate harness, not a flag
+            std::istringstream in(at);
+            std::string tok;
+            while (std::getline(in, tok, ',')) if (!tok.empty()) m_cycleAt.push_back(uint32_t(std::stoul(tok)));
+            std::sort(m_cycleAt.begin(), m_cycleAt.end());
+        }
+    }
     startUnix = simUnix;
 
     // M5c boundary clocks. Ocean = the station at the river's km 0 (the open-water level; the
@@ -1941,7 +1960,38 @@ void FrameLoop::ApplyWater() {
 // the hull steps' wall time lands in the profiler's slot 11 as stepBoat's bracket did; and the
 // chase camera is the start view's Follow of the followed hull, placed after the steps as the
 // hand code placed it after the telemetry (and, as there, only once the hull is set down).
+void FrameLoop::CycleVehicle(int dir) {
+    std::vector<scene::Entity*> active;
+    for (auto& e : m_entities) if (e->Active()) active.push_back(e.get());
+    if (active.size() < 2 || !m_followed) return;
+    size_t i = 0;
+    while (i < active.size() && active[i] != m_followed) ++i;
+    if (i == active.size()) return;
+    scene::Entity* prev = m_followed;
+    scene::Entity* next = active[(i + active.size() + (dir < 0 ? active.size() - 1 : 1)) % active.size()];
+    if (next == prev) return;
+    // THE RECOVERY LAW, as data: whichever side of the switch is a recovery body, the other one is
+    // where the placing happens -- the drone appears over the vehicle, the vehicle is set down
+    // under the drone. Between two vehicles nothing moves.
+    const bool toRecovery = next->Hull()->Spec().recovery;
+    const bool fromRecovery = prev->Hull()->Spec().recovery;
+    if (toRecovery || fromRecovery) next->PlaceOver(*prev);
+    prev->SetHelming(false);
+    next->SetHelming(true);
+    m_followed = next;
+    m_followedGate = nullptr;      // the eye owes this subject no window
+    m_eyeOwes.clear();             // ...and jumps to it
+    m_followCarries = next->Carries();
+    Log("[vehicle] helm -> '%s' (%s)%s", next->Name(), next->Hull()->Spec().kind.c_str(),
+        toRecovery ? ", placed over the vehicle it recovers"
+                   : (fromRecovery ? ", set down under the drone" : ""));
+}
+
 void FrameLoop::StepEntities(int quanta, float dt) {
+    if (!m_cycleAt.empty() && m_frame >= m_cycleAt.front()) {   // the gate harness (GAGAME_CYCLE_AT)
+        m_cycleAt.erase(m_cycleAt.begin());
+        CycleVehicle(+1);
+    }
     scene::FrameInfo fi;
     fi.simUnix = m_simUnix;
     fi.dt = dt;
@@ -2644,6 +2694,14 @@ bool FrameLoop::Frame() {
             // M12 step 5e: THE ENTITIES -- the helm controller reads the keys (Entity::Helm,
             // the keyboard block verbatim), the step is Entity::Update (stepBoat), and the
             // chase camera is the start view's Follow of the followed hull (StepEntities).
+            // T / Y cycle the helm through the vehicles; F frees the camera from the subject
+            // (the vehicle keeps its controls) and takes it back.
+            if (in.keyPressed['T']) CycleVehicle(+1);
+            if (in.keyPressed['Y']) CycleVehicle(-1);
+            if (in.keyPressed['F'] && m_followed) {
+                m_followed->SetHelming(!m_followed->Helming());
+                Log("[vehicle] %s", m_followed->Helming() ? "helm" : "camera freed (the vehicle keeps its controls)");
+            }
             for (auto& e : m_entities) {
                 if (e->Active()) e->Helm(in, dt);
             }
@@ -5727,8 +5785,10 @@ void FrameLoop::MinimapStep(float dt) {
         }
     }
     m_minimapHasSubject = false;
+    // The minimap's subject is the loop's: whatever the helm is on now (the named entity until
+    // T/Y moves it; a scene that never cycles sees the one it named).
     for (const auto& ent : m_entities) {
-        if (!ent || !ent->Hull() || ent->Name() != m_S.hud.minimap.follow) continue;
+        if (!ent || !ent->Hull() || m_S.hud.minimap.follow.empty() || ent.get() != m_followed) continue;
         double p[3] = {0.0, 0.0, 0.0};
         ent->Hull()->Body().pose.TransformPoint(p[0], p[1], p[2]);
         ent->DrawFrame().TransformPoint(p[0], p[1], p[2]);

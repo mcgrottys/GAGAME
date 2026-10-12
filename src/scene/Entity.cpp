@@ -84,7 +84,7 @@ bool Entity::Spawn(const VesselRegistry& vesselReg) {
         boat.reset();
         return false;
     }
-    helming = true;
+    helming = false;   // the loop seats ONE helm: the subject it follows (FrameLoop)
     // (The hand code printed the CAMERA's x and z here; --campos set both, so the numbers
     // were the spawn's. The spawn is what is printed now, in every case.)
     Log("[vessel] '%s' spawned at (%.1f, %.1f): %s", spec.kind.c_str(), sx, sz,
@@ -121,10 +121,24 @@ void Entity::Helm(const InputState& in, float dt) {
     auto& helming = m_helming;
     auto& boatCtl = m_ctl;
     if (!boat) return;
-    if (in.keyPressed['T']) {
-        helming = !helming;
-        Log("[vessel] %s", helming ? "helm" : "camera detached (the boat "
-                                             "keeps sailing)");
+    // (T used to detach the camera here. T/Y now cycle the helm between the scene's vehicles and
+    // F frees the camera: FrameLoop, where the subject is chosen.)
+    // THE HELM MOVES THE JOINTS AT THEIR OWN RATES WITHIN THEIR OWN LIMITS: the first jointed
+    // element's are the steer's, the first tilted element's the tilt's -- the RHIB's outboard
+    // (0.60 rad at 1.2 rad/s; -5..+15 deg at 0.20 rad/s, a trim pump that stays put), which are
+    // the numbers this block held as literals, so the boat is byte for byte what it was; a car's
+    // kingpin and brake pedal and a drone's levers declare theirs. A hull with no joint keeps
+    // the outboard's numbers.
+    double sMax = 0.6, sRate = 1.2, tLo = -0.0873, tHi = 0.2618, tRate = 0.20, tReturn = 0.0;
+    {
+        const Attach* j = nullptr;
+        const Attach* t = nullptr;
+        for (const Element& el : boat->Spec().elements) {
+            if (!j && el.mount.jointed) j = &el.mount;
+            if (!t && el.mount.tilted) t = &el.mount;
+        }
+        if (j) { sMax = j->hi; sRate = j->rate; }
+        if (t) { tLo = t->tiltLo; tHi = t->tiltHi; tRate = t->tiltRate; tReturn = t->tiltReturn; }
     }
     if (helming) {
         // Keyboard for now; the analog triggers are the twin-lever binnacle
@@ -157,39 +171,70 @@ void Entity::Helm(const InputState& in, float dt) {
         if (in.keyDown['A']) sd += 1.0;
         // A mechanical steering RATE limit, not a snap: the outboards swing
         // at a finite speed and that lag is a real part of how a boat feels.
-        const double sMax = 0.6;
         boatCtl.steer += std::clamp(sd * sMax - boatCtl.steer,
-                                    -dt * 1.2, dt * 1.2);
+                                    -dt * sRate, dt * sRate);
         boatCtl.steer = std::clamp(boatCtl.steer, -sMax, sMax);
 
         // TRIM. Shift trims OUT (bow up), Ctrl trims IN (bow down). It is
         // slow on purpose -- a trim pump takes seconds to sweep its range --
         // and it is the helmsman's only direct hold on running attitude.
+        // (A pedal or a lever declares a return rate and comes back to zero
+        // when released; the pump's is 0 and it stays where it was left.)
         double td = 0.0;
         if (in.keyDown[VK_SHIFT]) td += 1.0;
         if (in.keyDown[VK_CONTROL]) td -= 1.0;
-        boatCtl.tilt = std::clamp(boatCtl.tilt + td * dt * 0.20,
-                                  -0.0873, 0.2618);
+        const double tWant = (td > 0.0) ? tHi : ((td < 0.0) ? tLo : 0.0);
+        const double tStep = dt * ((td != 0.0) ? tRate : tReturn);
+        boatCtl.tilt += std::clamp(tWant - boatCtl.tilt, -tStep, tStep);
+        boatCtl.tilt = std::clamp(boatCtl.tilt, tLo, tHi);
     }
 }
 
+void Entity::PlaceAt(const Motor& pose) {
+    if (!m_boat) return;
+    m_boat->Body().SetPose(pose);   // at rest there
+    m_ctl = VesselControls{};
+    m_placed = false;               // seated on its surface by the next Update...
+    m_reseatKeepsYaw = true;        // ...facing the way the pose faces
+}
+
 void Entity::ResetAtRest() {
-    auto& boat = m_boat;
-    auto& boatCtl = m_ctl;
-    auto& boatPlaced = m_placed;
     // THE CLOCK POLICY, which a stateful body needs and nothing else in this
     // engine does. Everything else here is f(simUnix) and simply re-evaluates;
     // a hull carries momentum, so jumping an hour teleports the sea out from
     // under it while it keeps the velocity it had. It came back as the boat
     // being flung. A deliberate jump resets it to rest at its last pose.
-    if (boat) {
-        boat->Body().Rest();
-        boatCtl = VesselControls{};
-        boatPlaced = false;   // re-seat it on the new instant's surface
-        m_reseatKeepsYaw = true;   // ...facing the way it was
+    if (m_boat) {
+        PlaceAt(m_boat->Body().pose);
         Log("[vessel] time jumped -- hull reset to rest (a boat cannot be "
             "integrated across a scrub)");
     }
+}
+
+bool Entity::FrameIn(const Space* s, double cg[3], double fwd[3]) const {
+    if (!m_boat) return false;
+    const RigidBody& b = m_boat->Body();
+    double c[3] = {0.0, 0.0, 0.0}, f[3] = {0.0, 0.0, 1.0};
+    b.pose.TransformPoint(c[0], c[1], c[2]);
+    b.pose.TransformDir(f[0], f[1], f[2]);
+    const Space* here = m_space ? m_space : m_o.rootSpace;
+    if (!here || !s || here == s) {
+        for (int i = 0; i < 3; ++i) { cg[i] = c[i]; fwd[i] = f[i]; }
+        return true;
+    }
+    const Placement P = here->To(*s);
+    P.Apply(c, cg);
+    P.ApplyDir(f, fwd);
+    return true;
+}
+
+void Entity::PlaceOver(const Entity& other) {
+    if (!m_boat) return;
+    double cg[3], f[3];
+    if (!other.FrameIn(m_space ? m_space : m_o.rootSpace, cg, f)) return;
+    // Upright, at its heading: the seat keeps the yaw and sets the height.
+    const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
+    PlaceAt(Motor::Translation(cg[0], cg[1], cg[2]) * Motor::Rotation(o, upY, std::atan2(f[0], f[2])));
 }
 
 // THE HULL'S OWN SPACE IS A POINT OF THE CLOUD (M13 step 2, restated on the cloud 2026-10-11).
@@ -429,7 +474,15 @@ void Entity::Update(const FrameInfo& fi) {
             // not the datum height on a flat plane -- a metre apart 3.6 km from the frame's origin.
             double sp[3], sn[3];
             boatSea.PlaneOf(ss, bp0[0], bp0[2], sp, sn);
-            const double y0 = sp[1] - keel - draft;
+            // THE SURFACE THE BODY RIDES IS THE TOP OF THE STACK (2026-10-11): the water where
+            // there is water, the bed where it stands proud -- max(height, bed), which is what
+            // `depthM <= 0 is dry` already said, written as the water plane raised by the dry
+            // part. The keel is set `seatHeight` above it: a boat's minus its draught (the
+            // undeclared default, the number this line always used), a car's zero, a drone's
+            // its hover height. On water the raise is +0.0 and the boat seats as it did.
+            const double top = sp[1] + (std::max)(0.0, -ss.depthM);
+            const double seatH = boat->Spec().seatHeight.src.empty() ? -draft : boat->Spec().seatHeight.v;
+            const double y0 = top - keel + seatH;
             // THE SEAT KEEPS THE HEADING (the Haulover portal demo, 2026-09-14). The set-down
             // levels the hull at its draught; it never meant to turn it -- but a bare translation
             // turned every hull to north, which nothing noticed while no spawn declared a heading
@@ -452,7 +505,8 @@ void Entity::Update(const FrameInfo& fi) {
             boat->Body().SetPose(seat);
             boatPlaced = true;
             Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
-                "-> CG at %+.3f m NAVD", ss.heightNavd, -keel, draft, y0);
+                "-> CG at %+.3f m NAVD (seat %+.2f over the %s)", ss.heightNavd, -keel, draft, y0,
+                seatH, (ss.depthM > 0.0) ? "water" : "ground");
             // The snapshot the hull reads, and its age: what answered, and the instant the
             // solver's answers are coherent at (the frame's asOf, declared before this step).
             char asOf[48];

@@ -150,6 +150,7 @@ private:
     Bivector Foil(const Element& e, const WaterSurface& sea, const VesselControls& c,
                   double simUnix);
     Bivector Drag(const Element& e, const WaterSurface& sea, double simUnix);
+    Bivector Hover(const Element& e, const VesselControls& c);
 
     VesselSpec m_spec;
     RigidBody  m_body;
