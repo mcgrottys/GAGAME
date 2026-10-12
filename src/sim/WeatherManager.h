@@ -96,6 +96,14 @@ public:
     // Nothing here reads the GPU back: the CPU mirrors refresh on demand (RefreshMirrorsTo).
     void Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir, double simUnix,
                 double camLatDeg, double camLonDeg, double camAltM);
+    // AN OWNED WINDOW WITH A CONSUMER STEPS ON THE FRAME (fast travel, 2026-10-12). A region
+    // request is answered only by a step recorded on the frame ring (SweSolver::Record: the
+    // readback rides the frame's fences); an owned window advanced on its own upload submits
+    // serves nothing, so a hull carried into Boston asked every frame and was never answered --
+    // it had no water for as long as it stayed. So: an owned window someone asked this frame
+    // (Demanded) is stepped HERE, on the frame's list, exactly as the external window is in
+    // SeaLayer::Simulate, and Update leaves it to this; one nobody asked advances as before.
+    void Simulate(hal::CommandContext& cmd, Gpu& gpu, double simUnix);
     // M9ay: THE SOLVER DOMAINS STAY RESIDENT AT MIP 0 -- every ACTIVE window's lattice, on
     // the page it reads, every frame. The pin used to live in main for the Merrimack alone
     // (AUDIT_WATER item 6): an active Boston solver read slice 6 at whatever mip the camera
@@ -197,6 +205,7 @@ private:
         SweConfig cfg;
         double spinupHours = 0.5;
         bool active = false;
+        bool servedLogged = false;   // said once: the window stepped on the frame for a consumer
         // CPU mirrors
         std::vector<float> eta, uv4;
         uint32_t etaW = 0, etaH = 0, uvW = 0, uvH = 0;

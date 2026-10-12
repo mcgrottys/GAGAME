@@ -50,7 +50,7 @@
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
       { "key": "rails", "type": "object", "field": "none", "schema": "rails", "reload": "hot", "doc": "the camera rails" },
       { "key": "portals", "type": "list", "field": "none", "element": "portal", "named": true, "reload": "hot", "doc": "the Droste links, by name" },
-      { "key": "gates", "type": "list", "field": "none", "element": "gate", "named": true, "reload": "hot", "doc": "the cuboid gates to other places, by name" },
+      { "key": "gates", "type": "list", "field": "none", "element": "gate", "named": true, "reload": "hot", "doc": "the gates to other places, by name: a cuboid of `size`, or a sphere by `radius`" },
       { "key": "entities", "type": "list", "field": "none", "element": "entity", "named": true, "reload": "hot", "doc": "the vessels, by name" },
       { "key": "interests", "type": "list", "field": "none", "element": "interest", "named": true, "reload": "hot", "doc": "the subjects and places whose water stays resident for the views that name them, by name" },
       { "key": "effects", "type": "list", "field": "none", "element": "effect", "named": true, "registry": "effect", "typeKey": "type", "reload": "hot", "doc": "the paper visuals, by name, typed" },
@@ -263,7 +263,11 @@
       { "key": "margin", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 16, "reload": "restart", "doc": "the gap to the bottom-right corner" },
       { "key": "homeAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6000000, "reload": "restart", "doc": "Reset: the eye this far above the followed entity" },
       { "key": "layers", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the layers this eye draws, by name, space-separated (globe vessels buildings sky); empty: that list" },
-      { "key": "minAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 8, "reload": "restart", "doc": "the zoom's floor above the sea" }
+      { "key": "minAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 8, "reload": "restart", "doc": "the zoom's floor above the sea" },
+      { "key": "travelAheadM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 8, "reload": "restart", "doc": "fast travel: the sphere opens this far ahead of the vehicle" },
+      { "key": "travelRadiusM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 25, "reload": "restart", "doc": "fast travel: the sphere's full radius" },
+      { "key": "travelGrowSec", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 7, "reload": "restart", "doc": "fast travel: the sphere reaches its full radius in this long" },
+      { "key": "travelLifeSec", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 12, "reload": "restart", "doc": "fast travel: the sphere is gone this long after it opened" }
     ] },
     { "type": "view", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the view's name" },
@@ -326,6 +330,7 @@
       { "key": "fromLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the longitude of that place" },
       { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "the box's centre and heading in its place's flat frame: {x, alt, z, az}" },
       { "key": "size", "type": "vec3", "field": "double3", "quantity": "length", "unit": "m", "default": [60, 30, 8], "reload": "restart", "doc": "the box: across, up, and along its heading" },
+      { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": null, "optional": true, "reload": "restart", "doc": "a sphere of this radius about the centre instead of the box (0: the box)" },
       { "key": "toLat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the destination's latitude (with toLon; absent: the scene's own frame)" },
       { "key": "toLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the destination's longitude" },
       { "key": "toAt", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "where the box's centre comes out, in the destination's flat frame: {x, alt, z}" },

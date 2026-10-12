@@ -1808,3 +1808,64 @@ the harness taking the car form at frame 600: "set down ... seat +0.00 over the 
 NAVD with 2.4 m of water under the bridge, four wheels carrying 16772 N. Open: the approach ramps
 stop at the first junction of more than two ways (the US 1 rotary), so the south approach has no
 drivable way up; and a vehicle spawned over a bridge before its page streams lands under it.
+
+**Fast travel: the gate grows a second shape (2026-10-12).** Mark's ask: a toggle on the minimap
+that turns a click on the map into a spherical portal "like the Haulover gates", opening a few
+metres ahead of the vehicle, growing to about 25 m over 7 s and gone at 12 s; others must see it
+and go through it too. Built as ONE law extended, not a new object: `Gateway` takes a `radius`
+beside `size` (`gates[].radius`, read live) and the shape enters exactly where the box did -- the
+membership (distance from the centre), the window's slab (`Gateway::Slab`: the quadratic's two
+roots where the box had three axis slabs; `GateSlabFrom` in Common.hlsli is its line-for-line
+twin, the radius riding row 3's w of the packed WindowBox), the cull's bound (the radius thrice),
+the hole a window hides (the tangent cone's inscribed pyramid beyond the centre's plane) and the
+rim (the limb). Everything a gate already had -- the carry, the eye that owes the window and
+crosses when the shape takes it, the residency asked ahead, the corridor, the minimap's view of it
+-- is unchanged and holds for the sphere. THE PORTAL IS A RECORD (`FrameLoop::TravelRecord`): the
+clock it opened at, the place it stands in and its centre and heading there, and the place it
+leads to; its radius is a function of the scene clock (hud.minimap.travel*: ahead 8 m, radius
+25 m, grow 7 s, life 12 s). A second player handed the record at the same clock rebuilds the same
+sphere -- multiplayer is not built, but nothing about the portal is session state. The minimap's
+second button toggles travel; a click picks the sea-level point under the cursor (the grab's own
+law) and the exact chart names the place. Gates: scenetest [gate] grew 17 sphere checks (membership,
+the slab, the walked slab = the window's test, the live radius, the hole); `GAGAME_TRAVEL_AT=
+"frame,lat,lon"` is the headless harness -- at frame 60 of haulover_portal.json the portal
+opened 8 m ahead, the view saw it as a window at 4 px, the vehicle was carried at ~2.7 s, the eye
+owed the window and crossed at ~5.5 s, the portal closed at 12.0 s; stills at frames 100-205 show
+the sphere with Haulover's daylight inside it swallowing the boat. Seen and left for Mark's eye:
+the sphere's cap under the waterline shows the far place's BED through the local translucent water
+(the sea surface was crossed before the window), a brown band at the sphere's foot.
+
+**"It sometimes sends us underground, and vehicles fly when it opens" (2026-10-12, later).** Both
+were the ARRIVAL'S HEIGHT. The exit stood on the sea-level sphere at the clicked point, so a click
+on land put the vehicle under the terrain and the ground law threw it out; and `Entity::Carry` kept a
+body's height over its WATER, so the car -- which in the harness sits on the river bed under 11 m
+of the Merrimack -- arrived 11 m under the sand at Haulover and left at 1100 m/s (2190 kn in the
+log). The law now is the seat's own (Update's set-down): a body rides the top of the water-over-bed
+stack, and the carry keeps its KEEL's height over that top, floored by the bed -- the keel stands
+below the top only as far as there is water there to stand in, `keelOver1 = max(keelOver0,
+-max(depth1, 0))`. One expression: a floating boat keeps its draught, a car on the river bed keeps
+its 11 m under, and either sent to a beach lands with its keel on the sand. The exit's own height
+is the same statement at the planet's grain (the composed ground above the sea, the sphere below),
+carried in the record as `toY` so a peer builds the same exit. Harness (GAGAME_CYCLE_AT=10,20 for
+the car, GAGAME_TRAVEL_AT to 25.8960 N -80.1225 E, a 2.6 m beach): the car arrives upright at
++3.2 m rolling at 1 kn, the boat upright and still at +2.7 m, the boat to the inlet afloat at
+0.26 m draught. Before the fix the boat on the beach capsized (heel -178) and the car went to
+2.4e9 m.
+
+**"The boat got stuck under water" -- Boston (2026-10-12, later still).** Reproduced headless with
+`GAGAME_TRAVEL_AT=60,42.3550,-71.0400`: the carry answered (11.9 m of water), then the eye arrived,
+the weather manager spun up the dormant BOSTON window, and from that frame the point was a solver's
+-- "a place the solver owns and has not answered reports its level ABSENT" -- so the hull had no
+water and no bed and fell through the sea and the planet at 35 kn and rising. Two laws were missing,
+both the engine's own, stated where they were not:
+- A hull whose water answers nothing is HELD where it stands (Entity::Update): the set-down already
+  waits for the water before placing a hull; the step waits the same way, dropping its owed quanta.
+  Absence is not flat water and not air either.
+- An owned window with a consumer steps ON THE FRAME (WeatherManager::Simulate, hung on
+  SeaLayer::Simulate by the loop): a region is answered only by a step recorded on the frame ring,
+  and an owned window advanced on its own upload submits served nothing -- a hull in Boston asked
+  every frame and was never answered. Now a window someone asked this frame (Demanded) records on
+  the frame's list exactly as the external Merrimack one does; one nobody asked advances as before.
+Gate: Boston -- held from the activation until the window's first frame step answered, then
+"steps again: its water answers", afloat at 0.23 m draught in 12 m of water; the inlet and the
+beaches as before; --selftest PASS.

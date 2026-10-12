@@ -849,46 +849,10 @@ std::optional<int> FrameLoop::Session() {
     // gate that names it -- so a body carried to a place stands in the very frame a gate standing
     // there was built in, and a way back is simply another gate.
     {
-        const Space::Anchor& rootChart = m_A.surface.flat;
-        struct PlaceRef {
-            double lat = 0.0, lon = 0.0;
-            const Space* space = nullptr;
-            const Space::Anchor* chart = nullptr;
-            // THE PLACE'S POSE IN ITS SPACE (scene/Gateway.h Place): a place's space is the cloud's
-            // origin nearest to it, and a box declared "at the place" is posed by this motor there
-            // -- the root's is the scene's anchorToRoot, a built place's its offset.
-            Motor toSpace = Motor::Identity();
-        };
-        std::vector<PlaceRef> known;
-        known.push_back({m_A.surface.anchorChart.latDeg, m_A.surface.anchorChart.lonDeg, &m_tangentSpace, &rootChart, m_A.surface.anchorToRoot});
-        auto placeAt = [&](bool named, double lat, double lon, const std::string& gate,
-                           PlaceRef& out) {
-            if (!named) {
-                out = known.front();
-                return true;
-            }
-            for (const PlaceRef& k : known) {
-                if (k.lat == lat && k.lon == lon) {
-                    out = k;
-                    return true;
-                }
-            }
-            auto pl = std::make_unique<scene::Place>();
-            char nm[96];
-            snprintf(nm, sizeof(nm), "place.%.5f,%.5f", lat, lon);
-            std::string why;
-            if (!pl->Build(m_planetSpace, planetR, lat, lon, nm, &why)) {
-                Log("[gate] '%s': %.5f N %.5f E is not a place (%s) -- not built", gate.c_str(),
-                    lat, lon, why.c_str());
-                return false;
-            }
-            out = PlaceRef{lat, lon, &pl->space, &pl->chart, Motor::Translation(pl->offset[0], pl->offset[1], pl->offset[2])};
-            Log("[gate] the place %.5f N %.5f E stands at (%.1f, %.1f, %.1f) m in its space, the cloud's origin %lld",
-                lat, lon, pl->offset[0], pl->offset[1], pl->offset[2], static_cast<long long>(pl->origin));
-            known.push_back(out);
-            m_places.push_back(std::move(pl));
-            return true;
-        };
+        // The root's own frame is the first known place (PlaceAt); every other is built on demand.
+        m_knownPlaces.clear();
+        m_knownPlaces.push_back({m_A.surface.anchorChart.latDeg, m_A.surface.anchorChart.lonDeg,
+                                 &m_tangentSpace, &m_A.surface.flat, m_A.surface.anchorToRoot});
         // A GATE'S BOX, AT EITHER END, IS ONE STRUCTURE POSED TWICE (scene/Gateway.h BoxPose): the
         // placement sugar, read the same way for the entry and for the exit. The compass spelling
         // puts it and turns it -- `az` to the heading, `pitch` to the lean, absent meaning no lean,
@@ -931,8 +895,8 @@ std::optional<int> FrameLoop::Session() {
                 continue;
             }
             PlaceRef from, to;
-            if (!placeAt(gd.hasFrom, gd.p.fromLat, gd.p.fromLon, gd.p.name, from) ||
-                !placeAt(gd.hasTo, gd.p.toLat, gd.p.toLon, gd.p.name, to)) {
+            if (!PlaceAt(gd.hasFrom, gd.p.fromLat, gd.p.fromLon, gd.p.name, from) ||
+                !PlaceAt(gd.hasTo, gd.p.toLat, gd.p.toLon, gd.p.name, to)) {
                 continue;
             }
             // The sugar says where a box stands FROM ITS PLACE; the place stands at its offset in
@@ -1161,6 +1125,17 @@ std::optional<int> FrameLoop::Session() {
             while (std::getline(in, tok, ',')) if (!tok.empty()) m_cycleAt.push_back(uint32_t(std::stoul(tok)));
             std::sort(m_cycleAt.begin(), m_cycleAt.end());
         }
+        if (const char* at = std::getenv("GAGAME_TRAVEL_AT")) {   // the travel harness: "frame,lat,lon"
+            std::istringstream in(at);
+            std::string tok;
+            std::vector<double> v;
+            while (std::getline(in, tok, ',')) if (!tok.empty()) v.push_back(std::stod(tok));
+            if (v.size() == 3) {
+                m_travelAt = uint32_t(v[0]);
+                m_travelAtLat = v[1];
+                m_travelAtLon = v[2];
+            }
+        }
     }
     startUnix = simUnix;
 
@@ -1368,6 +1343,13 @@ std::optional<int> FrameLoop::Session() {
         // resident (the bent jet, the tip shear); the ACT proxy is the fallback.
         if (swe.Ready() && sea) {
             waveField->SetSweCurrent(&swe, sea->sweCurrentGain);
+        }
+        // The owned windows (Boston) step on the frame's list too, when a hull asks them
+        // (WeatherManager::Simulate), in the sea layer's simulate pass beside the external one.
+        if (sea) {
+            sea->onSimulate = [this](const FrameContext& ctx) {
+                if (ctx.cmd && ctx.gpu) m_weather.Simulate(*ctx.cmd, *ctx.gpu, m_simUnix);
+            };
         }
         // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
@@ -1993,10 +1975,181 @@ void FrameLoop::CycleVehicle(int dir) {
                    : (fromRecovery ? ", set down under the drone" : ""));
 }
 
+bool FrameLoop::PlaceAt(bool named, double lat, double lon, const std::string& who, PlaceRef& out) {
+    if (m_knownPlaces.empty()) return false;   // before the session built the root's place
+    if (!named) {
+        out = m_knownPlaces.front();
+        return true;
+    }
+    for (const PlaceRef& k : m_knownPlaces) {
+        if (k.lat == lat && k.lon == lon) {
+            out = k;
+            return true;
+        }
+    }
+    auto pl = std::make_unique<scene::Place>();
+    char nm[96];
+    snprintf(nm, sizeof(nm), "place.%.5f,%.5f", lat, lon);
+    std::string why;
+    if (!pl->Build(m_planetSpace, m_A.planetR, lat, lon, nm, &why)) {
+        Log("[gate] '%s': %.5f N %.5f E is not a place (%s) -- not built", who.c_str(), lat, lon,
+            why.c_str());
+        return false;
+    }
+    out = PlaceRef{lat, lon, &pl->space, &pl->chart,
+                   Motor::Translation(pl->offset[0], pl->offset[1], pl->offset[2])};
+    Log("[gate] the place %.5f N %.5f E stands at (%.1f, %.1f, %.1f) m in its space, the cloud's origin %lld",
+        lat, lon, pl->offset[0], pl->offset[1], pl->offset[2], static_cast<long long>(pl->origin));
+    m_knownPlaces.push_back(out);
+    m_places.push_back(std::move(pl));
+    return true;
+}
+
+// ---- FAST TRAVEL (FrameLoop.h TravelRecord) --------------------------------------------------------
+bool FrameLoop::TravelTo(double toLat, double toLon) {
+    if (m_travelGate) {
+        Log("[travel] a portal already stands (%.1f s old): the click is not taken",
+            m_simUnix - m_travel.bornUnix);
+        return false;
+    }
+    scene::Entity* e = m_followed;
+    if (!e || !e->Hull() || !e->Placed()) {
+        Log("[travel] no vehicle to open a portal ahead of");
+        return false;
+    }
+    // Where the vehicle is, as a place: its CG in the root's frame, read by the exact chart.
+    double c[3];
+    if (!e->CgIn(m_tangentSpace, c)) return false;
+    TravelRecord rec;
+    m_A.surface.flat.PlaceOf(c[0], c[1], c[2], rec.fromLat, rec.fromLon);
+    PlaceRef from;
+    if (!PlaceAt(true, rec.fromLat, rec.fromLon, "travel", from)) return false;
+    // The sphere's centre: travelAheadM ahead of the CG along its horizontal heading, at the CG's
+    // height, said in the place's own flat frame (the sugar every gate's box is posed by).
+    double cg[3], fwd[3];
+    if (!e->FrameIn(from.space, cg, fwd)) return false;
+    const double fl = std::sqrt(fwd[0] * fwd[0] + fwd[2] * fwd[2]);
+    if (fl > 1e-9) {
+        fwd[0] /= fl;
+        fwd[2] /= fl;
+    } else {
+        fwd[0] = 0.0;
+        fwd[2] = 1.0;
+    }
+    const double ahead = m_S.hud.minimap.travelAheadM;
+    double p[3] = {cg[0] + fwd[0] * ahead, cg[1], cg[2] + fwd[2] * ahead};
+    from.toSpace.Inverse().TransformPoint(p[0], p[1], p[2]);
+    rec.x = p[0];
+    rec.y = p[1];
+    rec.z = p[2];
+    rec.az = std::atan2(fwd[0], fwd[2]) * 180.0 / 3.14159265358979323846;
+    rec.toLat = toLat;
+    rec.toLon = toLon;
+    rec.bornUnix = m_simUnix;
+    // THE FAR CENTRE STANDS OVER THE FAR PLACE'S TOP as the near one stands over this place's:
+    // the composed ground where it is above the sea, the sea-level sphere where it is not (the
+    // top of the water-over-bed stack, the seat's surface, at the planet's grain). The carry
+    // keeps a body's height about the centre, and Entity::Carry then seats the keel by the live
+    // surfaces where they answer. (A click on dry land used to put the vehicle under it.) Part of
+    // the record: a peer rebuilds the same exit.
+    auto topAt = [&](double lat, double lon) {
+        const double d2r = 3.14159265358979323846 / 180.0;
+        const double g = (m_A.hgtCh >= 0)
+                             ? double(m_A.compositor.SampleHeightStack(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
+                             : 0.0;
+        return (std::max)(g, 0.0);
+    };
+    rec.toY = rec.y + topAt(rec.toLat, rec.toLon) - topAt(rec.fromLat, rec.fromLon);
+    return SpawnTravel(rec);
+}
+
+bool FrameLoop::SpawnTravel(const TravelRecord& rec) {
+    if (m_travelGate) return false;
+    PlaceRef from, to;
+    if (!PlaceAt(true, rec.fromLat, rec.fromLon, "travel", from) ||
+        !PlaceAt(true, rec.toLat, rec.toLon, "travel", to)) {
+        return false;
+    }
+    // ONE SPHERE, POSED TWICE: at its centre in the place it opened, and at the far place's own
+    // point, both at the record's heading -- so the carry is the turn between the two places'
+    // frames and a translation, and a body leaves at the heading it had.
+    const Motor entry = from.toSpace * scene::Gateway::BoxPose(rec.x, rec.y, rec.z, rec.az, 0.0);
+    const Motor exit = to.toSpace * scene::Gateway::BoxPose(0.0, rec.toY, 0.0, rec.az, 0.0);
+    auto gate = std::make_unique<scene::Gateway>();
+    scene::GateProps& gp = gate->Declared();
+    gp.name = "travel";
+    gp.fromLat = rec.fromLat;
+    gp.fromLon = rec.fromLon;
+    gp.toLat = rec.toLat;
+    gp.toLon = rec.toLon;
+    gp.toAz = rec.az;
+    gp.radius = 0.05;   // born a point; StepTravel grows it from the clock before the gates carry
+    if (!gate->Build(*from.space, *to.space, *to.chart, m_tangentSpace, entry, exit)) {
+        Log("[travel] the portal to %.5f N %.5f E could not be built", rec.toLat, rec.toLon);
+        return false;
+    }
+    m_travel = rec;
+    m_travelGate = gate.get();
+    m_gates.push_back(std::move(gate));
+    const auto& tp = m_S.hud.minimap;
+    Log("[travel] a portal opens %.1f m ahead of the vehicle at %.5f N %.5f E (centre %+.2f m up), heading %.1f, to "
+        "%.5f N %.5f E (centre %+.2f m up): radius %.0f m in %.0f s, gone at %.0f s (clock %.0f)",
+        tp.travelAheadM, rec.fromLat, rec.fromLon, rec.y, rec.az, rec.toLat, rec.toLon, rec.toY,
+        tp.travelRadiusM, tp.travelGrowSec, tp.travelLifeSec, rec.bornUnix);
+    StepTravel();
+    return true;
+}
+
+void FrameLoop::StepTravel() {
+    if (!m_travelGate) return;
+    const auto& tp = m_S.hud.minimap;
+    const double age = m_simUnix - m_travel.bornUnix;
+    if (age < 0.0 || age >= tp.travelLifeSec) {
+        Log("[travel] the portal closes (%.1f s)", age);
+        DespawnGate(m_travelGate);
+        return;
+    }
+    // THE RADIUS IS THE CLOCK'S: smoothstep in time to the full radius, then it stands. Never
+    // zero -- a radius of zero would read as the box (GateProps::radius) -- so a newborn portal is
+    // a 5 cm bead a frame before it is anything.
+    const double u = std::clamp(age / (std::max)(tp.travelGrowSec, 1e-3), 0.0, 1.0);
+    const double r = (std::max)(tp.travelRadiusM * u * u * (3.0 - 2.0 * u), 0.05);
+    m_travelGate->Declared().radius = r;
+}
+
+void FrameLoop::DespawnGate(const scene::Gateway* g) {
+    if (!g) return;
+    if (m_travelGate == g) m_travelGate = nullptr;
+    if (m_followedGate == g) m_followedGate = nullptr;
+    // An eye still owing this window crosses now: owing nothing, it stands with its subject.
+    for (size_t i = 0; i < m_eyeOwes.size();) {
+        if (m_eyeOwes[i] == g) {
+            m_eyeOwes.erase(m_eyeOwes.begin() + static_cast<std::ptrdiff_t>(i));
+            Log("[gate] '%s' closed with the eye still on its near side: the eye crosses to its subject",
+                g->Declared().name.c_str());
+        } else {
+            ++i;
+        }
+    }
+    m_windows.clear();        // the chains are rebuilt from the gates every frame; none may hold it
+    m_minimapChain.clear();
+    m_gateSampler.erase(g);
+    for (size_t i = 0; i < m_gates.size(); ++i) {
+        if (m_gates[i].get() == g) {
+            m_gates.erase(m_gates.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
+    }
+}
+
 void FrameLoop::StepEntities(int quanta, float dt) {
     if (!m_cycleAt.empty() && m_frame >= m_cycleAt.front()) {   // the gate harness (GAGAME_CYCLE_AT)
         m_cycleAt.erase(m_cycleAt.begin());
         CycleVehicle(+1);
+    }
+    if (m_travelAt != 0u && m_frame >= m_travelAt) {   // the travel harness (GAGAME_TRAVEL_AT)
+        m_travelAt = 0u;
+        TravelTo(m_travelAtLat, m_travelAtLon);
     }
     scene::FrameInfo fi;
     fi.simUnix = m_simUnix;
@@ -2014,6 +2167,7 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     // was not asked for, and an unanswered one would drop the hull onto it.
     const double frameS = double((std::max)(quanta, 1)) * SimClock::kDt;
     const double leadS = double(Gpu::kFrameCount + 1u) * frameS;
+    StepTravel();   // the fast-travel sphere at this clock: grown, or gone
     for (auto& e : m_entities) {
         if (!e->Active()) continue;
         e->Update(fi);
@@ -2035,8 +2189,7 @@ void FrameLoop::StepEntities(int quanta, float dt) {
             }
             double l[3] = {c[0], c[1], c[2]};
             g->Entry().Inverse().TransformPoint(l[0], l[1], l[2]);
-            const double* sz = g->Declared().size;
-            const double half = 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
+            const double half = g->BoundRadius();   // the shape's bounding sphere, box or sphere
             if (std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]) > half + reach + speed) continue;
             g->Carry().TransformPoint(c[0], c[1], c[2]);   // where it would stand, there
             double laX = 0.0, loX = 0.0;
@@ -2496,6 +2649,16 @@ bool FrameLoop::Frame() {
         // The minimap's rectangle takes its own mouse first: a press, a drag or a wheel that
         // begins over it never reaches the first eye's gestures.
         if (m_minimapReady) m_minimap.Input(in, window.Width(), window.Height());
+        {
+            // A fast travel the minimap picked (its travel toggle): the sea-level point under the
+            // cursor, in the root frame, is a place by the exact chart -- the portal opens to it.
+            double pt[3];
+            if (m_minimapReady && m_minimap.TakeTravel(pt)) {
+                double la = 0.0, lo = 0.0;
+                m_A.surface.flat.PlaceOf(pt[0], pt[1], pt[2], la, lo);
+                TravelTo(la, lo);
+            }
+        }
 
         if (mode != 2) {   // the gulf map keeps its plain controls
             if (in.lmb && !lmbWas) {
@@ -5509,12 +5672,7 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
         {
             double pb[3] = {C[0], C[1], C[2]};
             W.boxInRoot.Inverse().TransformPoint(pb[0], pb[1], pb[2]);
-            double d2 = 0.0;
-            for (int r = 0; r < 3; ++r) {
-                const double out = std::abs(pb[r]) - 0.5 * W.gate->Declared().size[r];
-                if (out > 0.0) d2 += out * out;
-            }
-            o.nearM[k] = std::sqrt(d2);
+            o.nearM[k] = W.gate->Outside(pb[0], pb[1], pb[2]);
         }
         // THE WINDOW WHERE THE TRUE EYE SEES IT: the chain's pull on its box.
         WindowBox& B = boxes[k];
@@ -5525,8 +5683,9 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
             double a[3] = {r == 0 ? 1.0 : 0.0, r == 1 ? 1.0 : 0.0, r == 2 ? 1.0 : 0.0};
             W.boxInRoot.TransformDir(a[0], a[1], a[2]);   // the box's axis r
             for (int c = 0; c < 3; ++c) B.rows[r * 3 + c] = static_cast<float>(a[c]);
-            B.half[r] = static_cast<float>(0.5 * W.gate->Declared().size[r]);
+            B.half[r] = static_cast<float>(W.gate->Half(r));
         }
+        B.radius = static_cast<float>(W.gate->Spherical() ? W.gate->Radius() : 0.0);
         // THE RAY, CARRIED. Everything a window shows is where its rays land: the place's
         // zenith and the one sun as seen from there, turned into this frame by the
         // rotation this world's geometry is drawn with (Q = rot(Gm), TrueRel), and the
@@ -5755,6 +5914,25 @@ void FrameLoop::DrawGlass(float dt) {
         hud->Rect(b.x + c - rr, b.y + c - rr, 2.0f * rr, 2.0f * rr, HudLayer::Ring,
                   {1.0f, 1.0f, 1.0f, 0.95f}, 2.0f);
         hud->Rect(b.x + c - 2.0f, b.y + c - 2.0f, 4.0f, 4.0f, HudLayer::Fill, {1.0f, 1.0f, 1.0f, 0.95f});
+        // THE TRAVEL TOGGLE: a sphere glyph (a ring, filled when the toggle is on). While a portal
+        // stands, its glyph is the portal itself: the ring swells with the sphere's radius.
+        const scene::Minimap::Rect t = scene::Minimap::TravelButton(r);
+        const bool on = m_minimap.Travel();
+        hud->Rect(t.x, t.y, t.w, t.h, HudLayer::Fill,
+                  on ? HudLayer::Rgba{0.1f, 0.35f, 0.6f, 0.85f} : HudLayer::Rgba{0.05f, 0.07f, 0.1f, 0.65f});
+        hud->Rect(t.x, t.y, t.w, t.h, HudLayer::Frame, {0.85f, 0.9f, 1.0f, 0.9f}, 1.5f);
+        float share = 1.0f;
+        if (m_travelGate) {
+            share = static_cast<float>(
+                std::clamp(m_travelGate->Radius() / (std::max)(m_S.hud.minimap.travelRadiusM, 1e-3), 0.0, 1.0));
+        }
+        const float tc = t.w * 0.5f, tr = (std::max)(2.0f, t.w * 0.32f * share);
+        hud->Rect(t.x + tc - tr, t.y + tc - tr, 2.0f * tr, 2.0f * tr, HudLayer::Ring,
+                  {1.0f, 1.0f, 1.0f, 0.95f}, on ? 3.0f : 2.0f);
+        if (on) {
+            hud->Text(t.x - HudLayer::TextWidth("TRAVEL", 2.0f) - 8.0f, t.y + 5.0f, 2.0f, "TRAVEL",
+                      {1.0f, 1.0f, 1.0f, 0.9f});
+        }
     }
 }
 

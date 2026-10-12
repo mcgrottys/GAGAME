@@ -643,6 +643,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
 }
 
 void SeaLayer::Simulate(const FrameContext& ctx) {
+    if (onSimulate) onSimulate(ctx);   // the owned windows with consumers (WeatherManager::Simulate)
     if (!m_haveData) return;
     if (!m_swe || !m_swe->Ready()) return;
     // THE SOLVER STEPS FOR ITS CONSUMERS, NOT FOR THE CAMERA (the water match, step 3). It stepped

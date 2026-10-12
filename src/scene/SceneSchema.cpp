@@ -450,7 +450,12 @@ const Schema& MinimapSchema() {
             .Bind("margin", p.margin, Q::Dimensionless, "px", "the gap to the bottom-right corner", R)
             .Bind("homeAltM", p.homeAltM, Q::Length, "m", "Reset: the eye this far above the followed entity", R)
             .Bind("layers", p.layers, "the layers this eye draws, by name, space-separated (globe vessels buildings sky); empty: that list", R)
-            .Bind("minAltM", p.minAltM, Q::Length, "m", "the zoom's floor above the sea", R);
+            .Bind("minAltM", p.minAltM, Q::Length, "m", "the zoom's floor above the sea", R)
+            .Bind("travelAheadM", p.travelAheadM, Q::Length, "m",
+                  "fast travel: the sphere opens this far ahead of the vehicle", R)
+            .Bind("travelRadiusM", p.travelRadiusM, Q::Length, "m", "fast travel: the sphere's full radius", R)
+            .Bind("travelGrowSec", p.travelGrowSec, Q::Time, "s", "fast travel: the sphere reaches its full radius in this long", R)
+            .Bind("travelLifeSec", p.travelLifeSec, Q::Time, "s", "fast travel: the sphere is gone this long after it opened", R);
         return sc;
     }();
     return *s;
@@ -595,6 +600,9 @@ const Schema& GateSchema_() {
             .Bind("at", kGate.at, "the box's centre and heading in its place's flat frame: {x, alt, z, az}", R)
             .Optional()
             .Bind("size", kGate.size, Q::Length, "m", "the box: across, up, and along its heading", R)
+            .Bind("radius", kGate.radius, Q::Length, "m",
+                  "a sphere of this radius about the centre instead of the box (0: the box)", R)
+            .Optional()
             .Bind("toLat", kGate.toLat, Q::Angle, "deg",
                   "the destination's latitude (with toLon; absent: the scene's own frame)", R)
             .Optional()
@@ -830,7 +838,7 @@ const Schema& SceneFileSchema() {
             .List("views", &ViewSchema_(), "the cameras, by name")
             .Nest("rails", RailsSchema(), &kDoc.rails, "the camera rails")
             .List("portals", &PortalSchema_(), "the Droste links, by name")
-            .List("gates", &GateSchema_(), "the cuboid gates to other places, by name")
+            .List("gates", &GateSchema_(), "the gates to other places, by name: a cuboid of `size`, or a sphere by `radius`")
             .List("entities", &EntitySchema_(), "the vessels, by name")
             .List("interests", &InterestSchema_(), "the subjects and places whose water stays resident for the views that name them, by name")
             .List("effects", &EffectSchema(), "the paper visuals, by name, typed", true, "effect", "type")

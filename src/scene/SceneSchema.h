@@ -261,6 +261,16 @@ struct MinimapProps {
     double homeAltM = 6.0e6;       // Reset: this far above the followed entity, looking down
     std::string layers;            // the layers this eye draws, by name, space-separated; empty = its own list
     double minAltM = 8.0;          // the zoom's floor above the sea (over a hull's console)
+    // FAST TRAVEL (2026-10-12): with the minimap's travel toggle on, a click on the map opens a
+    // spherical gate (scene/Gateway.h, radius > 0) `travelAheadM` ahead of the followed vehicle,
+    // leading to the clicked place at the vehicle's heading. Its radius grows from nothing to
+    // `travelRadiusM` over `travelGrowSec` (smoothstep in time) and the gate stands until
+    // `travelLifeSec` after it opened, then is gone -- every number read off the scene clock, so a
+    // second player given the same record (FrameLoop::TravelRecord) sees the same sphere.
+    double travelAheadM = 8.0;
+    double travelRadiusM = 25.0;
+    double travelGrowSec = 7.0;
+    double travelLifeSec = 12.0;
 };
 struct HudSection {
     bool fps = false;              // the frame rate, top left
@@ -343,6 +353,10 @@ struct GateProps {
     // carries any orientation. No `pitch` is no lean, which is the only reason a box is y-up.
     Placement at;                          // where it stands, and how it faces, at `from`
     double size[3] = {60.0, 30.0, 8.0};    // across, up, along the heading -- metres
+    // THE SHAPE (2026-10-12): a radius > 0 makes the gate a SPHERE of that radius about the box's
+    // centre, and `size` is not read; 0 is the cuboid of `size`. A sphere is the fast-travel
+    // portal's shape (FrameLoop::SpawnTravel grows it), read live every frame as `size` is.
+    double radius = 0.0;
     double toLat = 0.0, toLon = 0.0;       // the destination (absent: the scene's frame)
     Placement toAt;                        // the same box, posed again at the destination
     double toAz = 0.0;                     // its heading there when `toAt` names none

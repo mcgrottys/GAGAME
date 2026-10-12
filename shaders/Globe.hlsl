@@ -211,9 +211,21 @@ uint GateDepth(float3 p, uint upTo) { return WindowChainDepth(p, min(upTo, (uint
 // shows it -- and down a corridor of windows every frame has its own.
 float GateRim(float3 p, uint k) {
     const float4 b0 = WtBoxRow(k, 0u), b1 = WtBoxRow(k, 1u), b2 = WtBoxRow(k, 2u);
+    const float4 b3 = WtBoxRow(k, 3u);
+    if (b3.w > 0.0f) {
+        // A SPHERE'S RIM is its limb: the entry point's normal across the ray, 1 where the ray
+        // grazes it falling to 0 where it enters head on -- the same band of the sphere from every
+        // side, which is what a round window between two seas needs to be found by.
+        float tIn;
+        if (!GateSlabFrom(p, b0, b1, b2, b3, 0.0f, tIn)) return 0.0f;
+        const float3 q = tIn * p - b3.xyz;              // the entry point about the centre
+        const float3 n = q / max(length(q), 1e-6f);
+        const float3 d = p / max(length(p), 1e-6f);
+        return 1.0f - saturate(abs(dot(n, d)) / 0.35f);
+    }
     const float3x3 R = float3x3(b0.xyz, b1.xyz, b2.xyz);
     const float3 h = float3(b0.w, b1.w, b2.w);
-    const float3 e = mul(R, -WtBoxRow(k, 3u).xyz);
+    const float3 e = mul(R, -b3.xyz);
     float3 d = mul(R, p);
     d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
     const float3 t1 = (-h - e) / d;

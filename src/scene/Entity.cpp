@@ -608,15 +608,29 @@ bool Entity::Carry(const Space& into, const Motor& m, double simUnix) {
     if (s0.valid && s1.valid) {
         double sp1[3], sn1[3];
         m_sea.PlaneOf(s1, c1[0], c1[2], sp1, sn1);
-        lift = (c0[1] - sp0[1]) - (c1[1] - sp1[1]);   // the height it had above its water, restored
+        // THE KEEL OVER THE TOP OF THE STACK (fast travel, 2026-10-12), the seat's own law
+        // (Update's set-down: the surface a body rides is the top of the water-over-bed stack,
+        // max(water, bed), and the keel sits a seat height above it). The carry keeps the keel's
+        // height over that top -- a floating boat keeps its draught, a car on the river bed keeps
+        // its 11 m under the water -- FLOORED BY THE BED: the keel may stand below the top only as
+        // far as there is water there to stand in, so a boat sent to a beach lands with its keel
+        // on the sand and a car from the river bed too. One expression; before it a body kept its
+        // height over a water plane that stood metres under the sand, and the ground law threw it
+        // out (the car at 1100 m/s).
+        const double keelY = m_boat->KeelY();
+        const double top0 = sp0[1] + (std::max)(0.0, -s0.depthM);
+        const double top1 = sp1[1] + (std::max)(0.0, -s1.depthM);
+        const double keelOver0 = c0[1] + keelY - top0;
+        const double keelOver1 = (std::max)(keelOver0, -(std::max)(s1.depthM, 0.0));
+        lift = (top1 + keelOver1 - keelY) - c1[1];
         b.pose = Motor::Translation(0.0, lift, 0.0) * b.pose;
     }
     double la1 = 0.0, lo1 = 0.0;
     m_sea.PlaceOf(c1[0], c1[2], la1, lo1);
-    Log("[vessel] '%s' carried from %.5f N %.5f E to %.5f N %.5f E (into %s): surface %+.3f -> %+.3f m, "
-        "lifted %+.3f m%s",
+    Log("[vessel] '%s' carried from %.5f N %.5f E to %.5f N %.5f E (into %s): surface %+.3f -> %+.3f m "
+        "(depth %+.2f -> %+.2f m), lifted %+.3f m%s",
         m_props.name.c_str(), la0, lo0, la1, lo1, into.name.c_str(), s0.valid ? s0.heightNavd : 0.0,
-        s1.valid ? s1.heightNavd : 0.0, lift,
+        s1.valid ? s1.heightNavd : 0.0, s0.valid ? s0.depthM : 0.0, s1.valid ? s1.depthM : 0.0, lift,
         (s0.valid && s1.valid) ? "" : " (a surface did not answer: no lift applied)");
     return true;
 }
@@ -802,6 +816,32 @@ void Entity::Update(const FrameInfo& fi) {
     // coarser multiple of it, so the boat is as frame-rate independent as before. The
     // leftover quanta are carried, never dropped, so no owed time is lost.
     constexpr int kPerStep = 4;                     // 240 / 4 = 60 Hz
+    // HELD WHERE IT STANDS WHILE ITS WATER IS ABSENT (fast travel, 2026-10-12). Absence is not
+    // flat water, and it is not air either: a hull whose sample answers nothing -- a place a solver
+    // owns and has not answered yet (a window that spun up under it: Boston's, when the eye
+    // arrived after the carry), or a place no tree covers -- gets no buoyancy and no bed, and
+    // fell through the sea and the planet for as long as the solver took. The set-down already
+    // waits for the water to answer before it places a hull; the step waits the same way: no
+    // time passes for the body until its medium exists, and its owed quanta are dropped, not
+    // banked (a minute of owed steps would be a minute of physics in one frame).
+    {
+        double hp[3] = {0.0, 0.0, 0.0};
+        boat->Body().pose.TransformPoint(hp[0], hp[1], hp[2]);
+        const SurfaceSample here = boatSea.At(hp[0], hp[2], simUnix);
+        if (here.valid != !m_heldNoWater) {
+            m_heldNoWater = !here.valid;
+            Log("[vessel] '%s' %s", m_props.name.c_str(),
+                m_heldNoWater ? "is held where it stands: the water under it answers nothing (a solver "
+                                "owns the place and has not answered, or nothing covers it)"
+                              : "steps again: its water answers");
+        }
+        if (m_heldNoWater) {
+            quantaOwed = 0;
+            m_stepMs = 0.0;
+            StepTelemetry(boatSea, simUnix);
+            return;
+        }
+    }
     quantaOwed += quanta;
     const int steps = quantaOwed / kPerStep;
     quantaOwed -= steps * kPerStep;

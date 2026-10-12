@@ -1,4 +1,4 @@
-// Gateway - the cuboid gate: one motor between two places on one planet (see Gateway.h).
+// Gateway - the cuboid (or spherical) gate: one motor between two places on one planet (see Gateway.h).
 #include "scene/Gateway.h"
 
 #include "core/Common.h"
@@ -62,7 +62,7 @@ bool Gateway::Build(const Space& source, const Space& dest, const Space::Anchor&
     m_source = &source;
     m_dest = &dest;
     m_chart = &destChart;
-    if (!(m_props.size[0] > 0.0 && m_props.size[1] > 0.0 && m_props.size[2] > 0.0)) {
+    if (!Spherical() && !(m_props.size[0] > 0.0 && m_props.size[1] > 0.0 && m_props.size[2] > 0.0)) {
         Log("[gate] '%s' refused: the box needs a size", m_props.name.c_str());
         return false;
     }
@@ -105,9 +105,12 @@ bool Gateway::Build(const Space& source, const Space& dest, const Space::Anchor&
     m_destInRoot.TransformPoint(rx, ry, rz);
     double sx = bx, sy = by, sz = bz;
     (source.To(root).ToMotor()).TransformPoint(sx, sy, sz);
-    Log("[gate] '%s': a %.0f x %.0f x %.0f m box at (%.1f, %.1f, %.1f) in %s facing %.1f / %+.1f "
+    char shape[64];
+    if (Spherical()) snprintf(shape, sizeof(shape), "a sphere of radius %.1f m", m_props.radius);
+    else snprintf(shape, sizeof(shape), "a %.0f x %.0f x %.0f m box", m_props.size[0], m_props.size[1], m_props.size[2]);
+    Log("[gate] '%s': %s at (%.1f, %.1f, %.1f) in %s facing %.1f / %+.1f "
         "carries into the cloud's origin at %.5f N %.5f E, standing at (%.1f, %.1f, %.1f) in %s, facing %.1f / %+.1f -- %.0f km away",
-        m_props.name.c_str(), m_props.size[0], m_props.size[1], m_props.size[2], bx, by, bz,
+        m_props.name.c_str(), shape, bx, by, bz,
         source.name.c_str(), azOf(bf), elOf(bf), destChart.latDeg, destChart.lonDeg, ex, ey, ez,
         dest.name.c_str(), azOf(ef), elOf(ef),
         std::sqrt((rx - sx) * (rx - sx) + (ry - sy) * (ry - sy) + (rz - sz) * (rz - sz)) / 1000.0);
@@ -130,16 +133,35 @@ bool Gateway::Build(const Space& planet, const Space& source, double planetR, co
                  BoxPose(m_ownDest.offset[0], m_ownDest.offset[1], m_ownDest.offset[2], m_props.toAz, 0.0));
 }
 
-bool Gateway::SeenThrough(const double eye[3], const double p[3]) const {
-    if (!m_valid) return false;
-    // Both ends in the box's own frame, the segment e + t (f - e), t in [0, 1].
-    double ex = eye[0], ey = eye[1], ez = eye[2];
-    double fx = p[0], fy = p[1], fz = p[2];
-    m_entryInv.TransformPoint(ex, ey, ez);
-    m_entryInv.TransformPoint(fx, fy, fz);
-    const double e[3] = {ex, ey, ez};
-    const double d[3] = {fx - ex, fy - ey, fz - ez};
-    double tEnter = -1e300, tExit = 1e300;
+// THE SHAPE'S ONE SLAB LAW, in the shape's own frame (shaders/Common.hlsli GateSlabFrom, line for
+// line). A box: the three axis slabs intersected. A sphere: the quadratic |e + t d|^2 = r^2, its two
+// roots -- and a miss is an empty interval (tEnter > tExit), as a box missed is.
+void Gateway::Slab(const double e[3], const double d[3], double& tEnter, double& tExit) const {
+    if (Spherical()) {
+        const double r = m_props.radius;
+        const double a = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        const double b = e[0] * d[0] + e[1] * d[1] + e[2] * d[2];
+        const double c = e[0] * e[0] + e[1] * e[1] + e[2] * e[2] - r * r;
+        const double disc = b * b - a * c;
+        if (!(a > 0.0) || disc < 0.0) {
+            // No direction, or a line that misses: the empty interval -- unless the point itself
+            // (a = 0) stands inside, which is the whole segment.
+            if (!(a > 0.0) && c <= 0.0) {
+                tEnter = -1e300;
+                tExit = 1e300;
+            } else {
+                tEnter = 1e300;
+                tExit = -1e300;
+            }
+            return;
+        }
+        const double sq = std::sqrt(disc);
+        tEnter = (-b - sq) / a;
+        tExit = (-b + sq) / a;
+        return;
+    }
+    tEnter = -1e300;
+    tExit = 1e300;
     for (int a = 0; a < 3; ++a) {
         const double h = 0.5 * m_props.size[a];
         const double da = (std::fabs(d[a]) < 1e-12) ? 1e-12 : d[a];
@@ -147,6 +169,38 @@ bool Gateway::SeenThrough(const double eye[3], const double p[3]) const {
         tEnter = (std::max)(tEnter, (std::min)(t1, t2));
         tExit = (std::min)(tExit, (std::max)(t1, t2));
     }
+}
+
+double Gateway::BoundRadius() const {
+    if (Spherical()) return m_props.radius;
+    const double* sz = m_props.size;
+    return 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
+}
+
+double Gateway::Outside(double lx, double ly, double lz) const {
+    if (Spherical()) {
+        return (std::max)(std::sqrt(lx * lx + ly * ly + lz * lz) - m_props.radius, 0.0);
+    }
+    const double l[3] = {lx, ly, lz};
+    double d2 = 0.0;
+    for (int r = 0; r < 3; ++r) {
+        const double out = std::fabs(l[r]) - 0.5 * m_props.size[r];
+        if (out > 0.0) d2 += out * out;
+    }
+    return std::sqrt(d2);
+}
+
+bool Gateway::SeenThrough(const double eye[3], const double p[3]) const {
+    if (!m_valid) return false;
+    // Both ends in the shape's own frame, the segment e + t (f - e), t in [0, 1].
+    double ex = eye[0], ey = eye[1], ez = eye[2];
+    double fx = p[0], fy = p[1], fz = p[2];
+    m_entryInv.TransformPoint(ex, ey, ez);
+    m_entryInv.TransformPoint(fx, fy, fz);
+    const double e[3] = {ex, ey, ez};
+    const double d[3] = {fx - ex, fy - ey, fz - ez};
+    double tEnter, tExit;
+    Slab(e, d, tEnter, tExit);
     return tEnter <= tExit && tExit >= 0.0 && tEnter <= 1.0;
 }
 
@@ -160,14 +214,8 @@ bool Gateway::SeenThroughFrom(const Motor& boxInRoot, const double eye[3], const
     inv.TransformPoint(fx, fy, fz);
     const double e[3] = {ex, ey, ez};
     const double d[3] = {fx - ex, fy - ey, fz - ez};
-    double tEnter = -1e300, tExit = 1e300;
-    for (int a = 0; a < 3; ++a) {
-        const double h = 0.5 * m_props.size[a];
-        const double da = (std::fabs(d[a]) < 1e-12) ? 1e-12 : d[a];
-        const double t1 = (-h - e[a]) / da, t2 = (h - e[a]) / da;
-        tEnter = (std::max)(tEnter, (std::min)(t1, t2));
-        tExit = (std::min)(tExit, (std::max)(t1, t2));
-    }
+    double tEnter, tExit;
+    Slab(e, d, tEnter, tExit);
     // The ray is in this window's world only from where it entered the last one.
     tEnter = (std::max)(tEnter, tStart);
     if (tIn) *tIn = tEnter;
@@ -177,15 +225,13 @@ bool Gateway::SeenThroughFrom(const Motor& boxInRoot, const double eye[3], const
 bool Gateway::Inside(double px, double py, double pz) const {
     if (!m_valid) return false;
     m_entryInv.TransformPoint(px, py, pz);
-    return std::fabs(px) <= 0.5 * m_props.size[0] && std::fabs(py) <= 0.5 * m_props.size[1] &&
-           std::fabs(pz) <= 0.5 * m_props.size[2];
+    return Outside(px, py, pz) <= 0.0;
 }
 
 bool Gateway::InsideRoot(double px, double py, double pz) const {
     if (!m_valid) return false;
     m_entryInRootInv.TransformPoint(px, py, pz);
-    return std::fabs(px) <= 0.5 * m_props.size[0] && std::fabs(py) <= 0.5 * m_props.size[1] &&
-           std::fabs(pz) <= 0.5 * m_props.size[2];
+    return Outside(px, py, pz) <= 0.0;
 }
 
 // ---- THE VIEW THROUGH THE GATES ------------------------------------------------------------------
@@ -215,7 +261,9 @@ Candidate Evaluate(const Gateway& g, const Motor& pull, const ViewCone& v, const
     c.boxInRoot.TransformPoint(cc[0], cc[1], cc[2]);
     const double dc[3] = {cc[0] - v.eye[0], cc[1] - v.eye[1], cc[2] - v.eye[2]};
     c.dist = std::sqrt(Dot(dc, dc));
-    const double* sz = g.Declared().size;
+    // The shape's bounding box (a sphere's is the cube of its radius): a conservative bound on the
+    // rays that reach it, which is all a cull needs.
+    const double sz[3] = {2.0 * g.Half(0), 2.0 * g.Half(1), 2.0 * g.Half(2)};
     double zMin = kInf, zMax = -kInf, x0 = kInf, x1 = -kInf, y0 = kInf, y1 = -kInf;
     // F12: THE WINDOW IS THE BOX'S PART IN FRONT OF THE EYE'S PLANE. The rays that reach a box
     // are bounded by the corners of what stands in front: its own corners there, and where its
@@ -359,6 +407,53 @@ void LinkPlanes(const WindowLink& L, const ViewCone& v, double planes[5][4]) {
 
 bool LinkHole(const WindowLink& L, const ViewCone& v, double planes[5][4]) {
     if (!L.gate || !L.visible) return false;
+    if (L.gate->Spherical()) {
+        // THE SPHERE'S HOLE: every ray inside the cone tangent to the sphere enters it, and enters
+        // it no deeper along the axis than the sphere's centre -- so the cone's inscribed square
+        // pyramid, beyond the centre's plane, is wholly a deeper world. (The pyramid, not the
+        // cone: the cull is planes, and an inscribed one is conservative.)
+        double C[3] = {0.0, 0.0, 0.0};
+        L.boxInRoot.TransformPoint(C[0], C[1], C[2]);
+        double u[3];
+        for (int j = 0; j < 3; ++j) u[j] = C[j] - v.eye[j];
+        const double D = std::sqrt(Dot(u, u));
+        const double r = L.gate->Radius();
+        if (!(D > r) || !(r > 0.0)) return false;   // the eye is in it: every ray starts inside
+        for (double& x : u) x /= D;
+        // Two axes across the axis of the cone, from whichever world axis is least along it.
+        int least = 0;
+        for (int j = 1; j < 3; ++j) if (std::fabs(u[j]) < std::fabs(u[least])) least = j;
+        double a[3] = {0.0, 0.0, 0.0};
+        a[least] = 1.0;
+        const double au = Dot(a, u);
+        for (int j = 0; j < 3; ++j) a[j] -= au * u[j];
+        const double al = std::sqrt(Dot(a, a));
+        for (double& x : a) x /= al;
+        const double b[3] = {u[1] * a[2] - u[2] * a[1], u[2] * a[0] - u[0] * a[2], u[0] * a[1] - u[1] * a[0]};
+        // The tangent cone's half-angle alpha (sin = r / D); the inscribed square's per-axis
+        // half-angle has tan = tan(alpha) / sqrt 2.
+        const double tanA = r / std::sqrt(D * D - r * r);
+        const double tb = tanA / std::sqrt(2.0);
+        auto put = [&](int i, const double n[3], double d) {
+            const double len = std::sqrt(Dot(n, n));
+            if (!(len > 0.0)) return false;
+            for (int j = 0; j < 3; ++j) planes[i][j] = n[j] / len;
+            planes[i][3] = d / len;
+            return true;
+        };
+        // Inside: |x . a| <= tb (x . u) and the same across b -- four planes through the eye.
+        double n[3];
+        for (int j = 0; j < 3; ++j) n[j] = tb * u[j] - a[j];
+        if (!put(0, n, 0.0)) return false;
+        for (int j = 0; j < 3; ++j) n[j] = tb * u[j] + a[j];
+        if (!put(1, n, 0.0)) return false;
+        for (int j = 0; j < 3; ++j) n[j] = tb * u[j] - b[j];
+        if (!put(2, n, 0.0)) return false;
+        for (int j = 0; j < 3; ++j) n[j] = tb * u[j] + b[j];
+        if (!put(3, n, 0.0)) return false;
+        // ...and beyond the centre's plane, facing away from the eye.
+        return put(4, u, -D);
+    }
     // The eye in the box's own frame, and the face it sees best: outside that face's slab, the
     // largest area x distance / range^3 (the solid angle, to first order).
     double e[3] = {v.eye[0], v.eye[1], v.eye[2]};

@@ -341,9 +341,10 @@ void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
             // the demand signal, exactly as a CDLOD node entering the frustum demands tiles.
             if (w.InBox(camLatDeg, camLonDeg)) Activate(gpu, sc, shaderDir, w.name.c_str(), simUnix);
         }
-        if (w.active && w.owned) {
+        if (w.active && w.owned && !w.solver->Demanded()) {
             // Owned windows advance on their own submits; at real time this is one 64-substep
-            // batch every ~13 sim-seconds -- background noise.
+            // batch every ~13 sim-seconds -- background noise. (One with a consumer this frame
+            // steps on the frame's list instead: Simulate.)
             auto zero = [](double) { return 0.0; };
             w.solver->AdvanceTo(gpu, simUnix, w.oceanAt, zero, zero, zero);
         }
@@ -355,6 +356,18 @@ void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
     char s[96];
     snprintf(s, sizeof(s), "wx %d/%d windows", active, static_cast<int>(m_windows.size()));
     stats = s;
+}
+
+void WeatherManager::Simulate(hal::CommandContext& cmd, Gpu& gpu, double simUnix) {
+    for (Window& w : m_windows) {
+        if (!w.active || !w.owned || !w.solver->Ready() || !w.solver->Demanded()) continue;
+        if (!w.servedLogged) {
+            w.servedLogged = true;
+            Log("[weather] the %s window has a consumer: it steps on the frame and answers its regions",
+                w.name.c_str());
+        }
+        w.solver->Record(cmd, gpu, simUnix, static_cast<float>(w.oceanAt(simUnix)));
+    }
 }
 
 int WeatherManager::ActiveWindows() const {

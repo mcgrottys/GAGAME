@@ -238,6 +238,7 @@ private:
     double m_helmYawRef = 0.0;   // the look-steer's heading reference -- see the note in
                                  // ChaseFrame for why it is NOT read off the live camera
     int m_quantaOwed = 0;        // the 240 Hz quanta owed to the 60 Hz hull step
+    bool m_heldNoWater = false;  // the step is held: the water under the hull is absent (Update)
     int m_telTick = 0;           // one telemetry line a second
     double m_stepMs = 0.0;
     const Space* m_space = nullptr;   // null until the first step: the root's, where it was spawned
