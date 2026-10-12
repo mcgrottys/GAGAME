@@ -160,6 +160,9 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
                     ++wheelIdx;
                     break;
                 }
+                case ElementKind::Shell:
+                    if (hasMesh) break;   // the model is the body
+                    [[fallthrough]];
                 case ElementKind::Buoyancy: {
                     // One box per adjacent station PAIR, sized by that pair's own outline. A
                     // single box round the whole hull would hide exactly what the stations are

@@ -663,6 +663,27 @@ VesselSpec MakeCarBaja() {
     wheel("wheel.rl", -0.71, -1.194, false);
     wheel("wheel.rr", +0.71, -1.194, false);
 
+    // ---- the shell: the body on the ground when it is not on its wheels ------------------------
+    // Five rectangular stations the model's body: 1.78 m across, from the lifted floor pan (the
+    // model's sills at 0.15 m, plus the lift) to the roof rack at 1.74 m. No water clip (Shell): it
+    // carries a rolled car on its roof or side, and does not float it.
+    {
+        Element shell;
+        shell.kind = ElementKind::Shell;
+        shell.name = "body";
+        const double half = 0.89, yLo = 0.15 + lift, yHi = 1.74;
+        for (double z : {-2.43, -1.2, 0.0, 1.2, 2.43}) {
+            Section st;
+            st.z = z;
+            st.ox = {0.0, half, half, 0.0};
+            st.oy = {yLo, yLo, yHi, yHi};
+            shell.stations.push_back(st);
+        }
+        shell.contactSettle = Num::Of(0.02, "m", "ASSUMED: sheet metal and plastic on sand, softer than a keel");
+        shell.contactMu = Num::Of(0.6, "1", "ASSUMED: a car body dragged over sand");
+        s.elements.push_back(shell);
+    }
+
     // ---- windage, and the sea --------------------------------------------------------------------
     Element air;
     air.kind = ElementKind::Drag;

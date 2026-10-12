@@ -139,6 +139,12 @@ private:
     void BedProbePoints(double xz[6]) const;
     void BedPlane(const WaterSurface& sea, double simUnix);
     Bivector Buoyancy(const Element& e, const WaterSurface& sea, double simUnix);
+    // THE GROUND AT ONE STATION (beaching): the outline points below the bed plane, pushed back
+    // along it with the grip. Shared by Buoyancy (with the water clip) and Shell (without).
+    // Advances m_anchorIdx by n whether or not the bed is touched.
+    Bivector GroundAtStation(const Section& st, const double* px, const double* py, int n,
+                             const Medium& med, const SurfaceSample& ss);
+    Bivector Shell(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Collar(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Planing(const Element& e, const WaterSurface& sea, double simUnix);
     // One half of the running surface, offset across the beam. Roll stiffness and roll damping

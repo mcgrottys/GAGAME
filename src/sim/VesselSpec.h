@@ -164,7 +164,10 @@ struct Attach {
 // Wheel (2026-10-11) is the car's: a strut cast down onto the SAME bed the hull beaches on, a
 // progressive spring and damper along it, and a tyre at its foot -- drive, rolling resistance, the
 // brake's grip and the slip-angle lateral law through one friction cone. Four of them are a car.
-enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast, Hover, Wheel };
+// Shell (2026-10-12) is a body's own skin on the ground: station outlines with the hull's bed
+// contact (the grip anchors, the cone) and NO water clip -- so a rolled car rests on its roof or
+// its side instead of falling through the beach, and still does not float.
+enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast, Hover, Wheel, Shell };
 enum class MediumKind : uint8_t { Water, Air };
 
 // ================================================================================================

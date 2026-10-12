@@ -679,6 +679,42 @@ bool RunVesselSelfTest() {
         }
     }
 
+    // ---- 9b. THE SHELL. A car on its roof and a car on its side on dry ground rest on their
+    // shell -- they do not fall through the beach (the live failure: a rolled car had no ground law
+    // but its tyres), their struts grazing the ground carry nothing enormous, and the body stays
+    // sane. The roof is at a declared height: the CG stands above the ground by it.
+    {
+        const VesselSpec car = reg.Build("car.baja");
+        StillWater dry;
+        dry.levelNavd = 0.0;
+        dry.bedNavd = 1.0;
+        const double o[3] = {0.0, 0.0, 0.0}, zAx[3] = {0.0, 0.0, 1.0};
+        for (int pass = 0; pass < 2; ++pass) {
+            const double roll = (pass == 0) ? kPi : 0.5 * kPi;
+            Vessel v;
+            v.Build(car, Motor::Translation(0.0, 1.0 + 2.5, 0.0) * Motor::Rotation(o, zAx, roll));
+            VesselControls c;
+            double yMin = 1e30;
+            bool sane = true;
+            for (int i = 0; i < 600; ++i) {
+                v.Step(dry, c, i * dtLive, dtLive);
+                double q[3];
+                cgOf(v, q);
+                yMin = (std::min)(yMin, q[1]);
+                sane = sane && v.Body().Sane();
+            }
+            double q[3];
+            cgOf(v, q);
+            Log("[vessel] car %s: after 10 s the CG is %.3f m over the ground (lowest %.3f), %d points carrying %.0f N, heel %.1f deg, %.4f m/s",
+                pass == 0 ? "on its roof" : "on its side", q[1] - 1.0, yMin - 1.0, v.Telemetry().contactPts,
+                v.Telemetry().contactN, heelOf(v), speedOf(v));
+            if (!(q[1] - 1.0 > 0.3)) fail("shell: the body fell into the ground (CG over ground, m)", q[1] - 1.0, 0.3);
+            if (v.Telemetry().contactPts < 2) fail("shell: the body rests on the ground (points)", v.Telemetry().contactPts, 2);
+            if (speedOf(v) > 0.05) fail("shell: at rest (m/s)", speedOf(v), 0.0);
+            if (!sane) fail("shell: the body left the domain", 0, 1);
+        }
+    }
+
     // ---- 10. PARTS PLUS FORMS. One body built from the barge and the car: in its first form it
     // is the barge (the same weight on the same six keel points on dry ground as the barge alone,
     // its draught afloat the barge's to the micrometre), and after SetForm it is the car (the same

@@ -115,8 +115,14 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
         const double bodyC[3] = {0.0, 0.0, st.z};
         double wc[3];
         m_body.ToWorld(bodyC, wc);
+        double px[64], py[64];
+        const int n = FullSection(st, px, py, 64);
         const SurfaceSample ss = sea.At(wc[0], wc[2], simUnix);
-        if (!ss.valid) { m_tel.waterValid = false; continue; }
+        if (!ss.valid) {   // no water answered: no force, and this station's anchors stand
+            m_tel.waterValid = false;
+            m_anchorIdx += static_cast<size_t>(n);
+            continue;
+        }
         // ONE evaluation, not two. Both of these used to call At() -- WaterAt does so
         // internally -- so every station and every tube slice summed the whole retained
         // spectrum twice for the same point.
@@ -134,73 +140,8 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
         const double a = nb[0], b = nb[1];
         const double c = -(nb[0] * pb[0] + nb[1] * pb[1]) + nb[2] * (st.z - pb[2]);
 
-        double px[64], py[64];
-        const int n = FullSection(st, px, py, 64);
-
-        // ---- THE BED, under the same station (beaching, 2026-10-11) ---------------------------
-        // The second surface. The sample carries the bed as a DATUM height and the water as a
-        // plane in the hull's frame (PlaneOf: the sphere under a flat frame); the bed in that
-        // frame is the water's plane point dropped by the depth, so both surfaces move together
-        // with the frame and nothing differences a planetary number. The normal is the hull's
-        // one bed plane (BedPlane, the secant over the hull); the height is this station's own.
-        // Every outline point below it is pushed back along it: a spring whose rate the hull's
-        // weight sets (Build), damped critically on the way in, and Coulomb friction across it.
-        //
-        // The friction is Coulomb's, as a GRIP (Vessel.h, the anchors): a tangential spring from
-        // the point to the ground point it gripped, the bed's own rate and damping, saturated at
-        // mu N by the friction cone -- and the anchor dragged onto the cone when it saturates, so
-        // a sliding hull feels exactly mu N opposite its motion and a standing one feels what
-        // holds it, to the spring's deflection. A point that lifts lets go of its anchor.
-        //
-        // The water keeps acting as it does: the clip below sees less water as the hull rides
-        // up, buoyancy falls, the bed carries what it dropped, friction holds it. That is a
-        // beaching, and nothing here reads depthM to decide anything.
-        if (m_kContact > 0.0) {
-            const double bedPt[3] = {med.sp[0], med.sp[1] - ss.depthM, med.sp[2]};
-            for (int i = 0; i < n; ++i, ++m_anchorIdx) {
-                const double pBody[3] = {px[i], py[i], st.z};
-                double pw[3];
-                m_body.ToWorld(pBody, pw);
-                const double h = (pw[0] - bedPt[0]) * m_bedN[0] + (pw[1] - bedPt[1]) * m_bedN[1] +
-                                 (pw[2] - bedPt[2]) * m_bedN[2];
-                const double pen = std::max(0.0, -h);
-                double* anc = &m_anchor[3 * m_anchorIdx];
-                uint8_t& on = m_anchorOn[m_anchorIdx];
-                if (pen <= 0.0) { on = 0; continue; }   // the domain: a bed pushes, never pulls
-                if (!on) { anc[0] = pw[0]; anc[1] = pw[1]; anc[2] = pw[2]; on = 1; }
-                double v[3];
-                m_body.VelocityAtBody(pBody, v);
-                const double vn = v[0] * m_bedN[0] + v[1] * m_bedN[1] + v[2] * m_bedN[2];
-                const double fn = m_kContact * pen + m_cContact * std::max(0.0, -vn);
-                // The grip: (point - anchor) and the point's velocity, both in the contact plane.
-                double d[3] = {pw[0] - anc[0], pw[1] - anc[1], pw[2] - anc[2]};
-                const double dn = d[0] * m_bedN[0] + d[1] * m_bedN[1] + d[2] * m_bedN[2];
-                double ft[3];
-                for (int k = 0; k < 3; ++k) {
-                    d[k] -= dn * m_bedN[k];
-                    const double vt = v[k] - vn * m_bedN[k];
-                    ft[k] = -m_kContact * d[k] - m_cContact * vt;
-                }
-                const double ftMag = std::sqrt(ft[0] * ft[0] + ft[1] * ft[1] + ft[2] * ft[2]);
-                const double cone = std::min(1.0, m_muContact * fn / std::max(ftMag, 1e-12));
-                for (int k = 0; k < 3; ++k) {
-                    ft[k] *= cone;
-                    // The anchor rides the cone: the deflection scaled onto it, in the plane.
-                    anc[k] = pw[k] - d[k] * cone;
-                }
-                const double f[3] = {fn * m_bedN[0] + ft[0], fn * m_bedN[1] + ft[1], fn * m_bedN[2] + ft[2]};
-                if (s_gripTrace) {
-                    Log("[grip] pt %zu pen %.5f fn %.0f |d| %.5f |ft| %.0f cone %.3f v (%+.4f %+.4f %+.4f) anc (%+.4f %+.4f %+.4f) pw (%+.4f %+.4f %+.4f)",
-                        m_anchorIdx, pen, fn, std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]), ftMag, cone, v[0], v[1], v[2],
-                        anc[0], anc[1], anc[2], pw[0], pw[1], pw[2]);
-                }
-                w += m_body.BodyWrench(f, pBody);
-                m_tel.contactN += fn;
-                ++m_tel.contactPts;
-            }
-        } else {
-            m_anchorIdx += static_cast<size_t>(n);
-        }
+        // The bed under the same station (beaching): GroundAtStation, the law Shell shares.
+        w += GroundAtStation(st, px, py, n, med, ss);
 
         double cx = 0.0, cy = 0.0, ex = 0.0, ey = 0.0;
         const double area = ClipSectionArea(px, py, n, a, b, c, &cx, &cy, &ex, &ey);
@@ -278,6 +219,105 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
 // ================================================================================================
 //  Drag -- and windage, which is the same law in the other fluid.
 // ================================================================================================
+Bivector Vessel::GroundAtStation(const Section& st, const double* px, const double* py, int n,
+                                 const Medium& med, const SurfaceSample& ss) {
+    Bivector w = Bivector::Zero();
+    {
+    // ---- THE BED, under the same station (beaching, 2026-10-11) -------------------------------
+    // The second surface. The sample carries the bed as a DATUM height and the water as a
+    // plane in the hull's frame (PlaneOf: the sphere under a flat frame); the bed in that
+    // frame is the water's plane point dropped by the depth, so both surfaces move together
+    // with the frame and nothing differences a planetary number. The normal is the hull's
+    // one bed plane (BedPlane, the secant over the hull); the height is this station's own.
+    // Every outline point below it is pushed back along it: a spring whose rate the hull's
+    // weight sets (Build), damped critically on the way in, and Coulomb friction across it.
+    //
+    // The friction is Coulomb's, as a GRIP (Vessel.h, the anchors): a tangential spring from
+    // the point to the ground point it gripped, the bed's own rate and damping, saturated at
+    // mu N by the friction cone -- and the anchor dragged onto the cone when it saturates, so
+    // a sliding hull feels exactly mu N opposite its motion and a standing one feels what
+    // holds it, to the spring's deflection. A point that lifts lets go of its anchor.
+    //
+    // The water keeps acting as it does: the clip below sees less water as the hull rides
+    // up, buoyancy falls, the bed carries what it dropped, friction holds it. That is a
+    // beaching, and nothing here reads depthM to decide anything.
+    if (m_kContact > 0.0) {
+        const double bedPt[3] = {med.sp[0], med.sp[1] - ss.depthM, med.sp[2]};
+        for (int i = 0; i < n; ++i, ++m_anchorIdx) {
+            const double pBody[3] = {px[i], py[i], st.z};
+            double pw[3];
+            m_body.ToWorld(pBody, pw);
+            const double h = (pw[0] - bedPt[0]) * m_bedN[0] + (pw[1] - bedPt[1]) * m_bedN[1] +
+                             (pw[2] - bedPt[2]) * m_bedN[2];
+            const double pen = std::max(0.0, -h);
+            double* anc = &m_anchor[3 * m_anchorIdx];
+            uint8_t& on = m_anchorOn[m_anchorIdx];
+            if (pen <= 0.0) { on = 0; continue; }   // the domain: a bed pushes, never pulls
+            if (!on) { anc[0] = pw[0]; anc[1] = pw[1]; anc[2] = pw[2]; on = 1; }
+            double v[3];
+            m_body.VelocityAtBody(pBody, v);
+            const double vn = v[0] * m_bedN[0] + v[1] * m_bedN[1] + v[2] * m_bedN[2];
+            const double fn = m_kContact * pen + m_cContact * std::max(0.0, -vn);
+            // The grip: (point - anchor) and the point's velocity, both in the contact plane.
+            double d[3] = {pw[0] - anc[0], pw[1] - anc[1], pw[2] - anc[2]};
+            const double dn = d[0] * m_bedN[0] + d[1] * m_bedN[1] + d[2] * m_bedN[2];
+            double ft[3];
+            for (int k = 0; k < 3; ++k) {
+                d[k] -= dn * m_bedN[k];
+                const double vt = v[k] - vn * m_bedN[k];
+                ft[k] = -m_kContact * d[k] - m_cContact * vt;
+            }
+            const double ftMag = std::sqrt(ft[0] * ft[0] + ft[1] * ft[1] + ft[2] * ft[2]);
+            const double cone = std::min(1.0, m_muContact * fn / std::max(ftMag, 1e-12));
+            for (int k = 0; k < 3; ++k) {
+                ft[k] *= cone;
+                // The anchor rides the cone: the deflection scaled onto it, in the plane.
+                anc[k] = pw[k] - d[k] * cone;
+            }
+            const double f[3] = {fn * m_bedN[0] + ft[0], fn * m_bedN[1] + ft[1], fn * m_bedN[2] + ft[2]};
+            if (s_gripTrace) {
+                Log("[grip] pt %zu pen %.5f fn %.0f |d| %.5f |ft| %.0f cone %.3f v (%+.4f %+.4f %+.4f) anc (%+.4f %+.4f %+.4f) pw (%+.4f %+.4f %+.4f)",
+                    m_anchorIdx, pen, fn, std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]), ftMag, cone, v[0], v[1], v[2],
+                    anc[0], anc[1], anc[2], pw[0], pw[1], pw[2]);
+            }
+            w += m_body.BodyWrench(f, pBody);
+            m_tel.contactN += fn;
+            ++m_tel.contactPts;
+        }
+    } else {
+        m_anchorIdx += static_cast<size_t>(n);
+    }
+
+    }
+    return w;
+}
+
+// ================================================================================================
+//  Shell -- a body's skin on the ground: the stations' outline points against the bed, with the
+//  grip, and no water clip. A rolled car lies on its roof; a boat's would be its deck. The same
+//  GroundAtStation as Buoyancy's, so the two cannot disagree about the ground.
+// ================================================================================================
+Bivector Vessel::Shell(const Element& e, const WaterSurface& sea, double simUnix) {
+    Bivector w = Bivector::Zero();
+    for (size_t i = 0; i < e.stations.size(); ++i) {
+        const Section& st = e.stations[i];
+        double px[64], py[64];
+        const int n = FullSection(st, px, py, 64);
+        const double bodyC[3] = {0.0, 0.0, st.z};
+        double wc[3];
+        m_body.ToWorld(bodyC, wc);
+        const SurfaceSample ss = sea.At(wc[0], wc[2], simUnix);
+        if (!ss.valid) {
+            m_tel.waterValid = false;
+            m_anchorIdx += static_cast<size_t>(n);
+            continue;
+        }
+        const Medium med = sea.WaterFrom(ss, wc[0], wc[2]);
+        w += GroundAtStation(st, px, py, n, med, ss);
+    }
+    return w;
+}
+
 Bivector Vessel::Drag(const Element& e, const WaterSurface& sea, double simUnix) {
     double atBody[3];
     e.mount.Origin(0.0, atBody);
@@ -424,7 +464,7 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
             const Element& el = m_spec.elements[i];
             m_anchorBase[i] = anchors;
             m_wheelBase[i] = wheels;
-            if (el.kind == ElementKind::Buoyancy) {
+            if (el.kind == ElementKind::Buoyancy || el.kind == ElementKind::Shell) {
                 for (const Section& st : el.stations) {
                     double px[64], py[64];
                     anchors += static_cast<size_t>(FullSection(st, px, py, 64));
@@ -519,7 +559,7 @@ void Vessel::ApplyFormNumbers(const Form& f) {
     for (size_t i = 0; i < m_spec.elements.size(); ++i) {
         const Element& el = m_spec.elements[i];
         if (!(f.engage[i] > 0.0)) continue;
-        if (el.kind == ElementKind::Buoyancy && !by) by = &el;
+        if ((el.kind == ElementKind::Buoyancy || el.kind == ElementKind::Shell) && !by) by = &el;
         if (el.kind == ElementKind::Wheel) {
             if (!wheel) wheel = &el;
             ++nWheels;
@@ -1091,7 +1131,10 @@ Bivector Vessel::Wheel(const Element& e, const WaterSurface& sea, const VesselCo
         return Bivector::Zero();
     }
     const double t = ((bedPt[0] - topW[0]) * n[0] + (bedPt[1] - topW[1]) * n[1] + (bedPt[2] - topW[2]) * n[2]) / dn;
-    const double comp = (std::max)(0.0, droop + R - t);
+    // Bounded by the strut itself: the wheel cannot pass its top. A strut grazing the ground plane
+    // (dn -> 0: the car on its side) made t enormous and the cubic spring 10^12 N; the shell
+    // carries a rolled car, the strut only what a strut can.
+    const double comp = std::clamp(droop + R - t, 0.0, droop);
     if (comp <= 0.0) {   // the domain: a tyre in the air carries nothing and grips nothing
         on = 0;
         return Bivector::Zero();
@@ -1208,6 +1251,9 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
         switch (e.kind) {
             case ElementKind::Buoyancy:
                 w += Buoyancy(e, sea, simUnix) * g;
+                break;
+            case ElementKind::Shell:
+                w += Shell(e, sea, simUnix) * g;
                 break;
             case ElementKind::Collar:
                 w += Collar(e, sea, simUnix) * g;
@@ -1365,6 +1411,7 @@ void Vessel::WaterPoints(const VesselControls& c, std::vector<double>& xz) const
         if (!(Engage(ei) > 0.0)) continue;   // a part at weight zero asks no water
         switch (e.kind) {
             case ElementKind::Buoyancy:
+            case ElementKind::Shell:
                 for (const Section& st : e.stations) {
                     const double bodyC[3] = {0.0, 0.0, st.z};
                     add(bodyC);
