@@ -39,6 +39,7 @@
 #include "core/Common.h"
 #include "sim/Medium.h"
 #include "sim/RigidBody.h"
+#include "sim/Solids.h"
 #include "sim/VesselSpec.h"
 #include "sim/WaterSurface.h"
 
@@ -110,6 +111,11 @@ public:
 
     // Gravity is applied inside Step, but exposed so a gate can hold a hull in a vice.
     bool applyGravity = true;
+
+    // THE SOLIDS the ground law reads beside the bed (sim/Solids.h), in the body's frame; null or
+    // empty is the bed alone. Set by whoever knows the data, before the step; read by the contact
+    // laws (GroundAtStation, Wheel). The list must outlive the step.
+    void SetSolids(const std::vector<SolidPrism>* s) { m_solids = s; }
 
     // ---- FORMS (VesselSpec.h Form: parts plus forms) --------------------------------------------
     size_t FormCount() const { return m_spec.forms.size(); }
@@ -233,6 +239,10 @@ private:
     // the wheel element's contactSettle), 0.4 of critical as the hull's.
     double m_kGrip = 0.0, m_cGrip = 0.0;
     double m_mWheel = 1.0;   // kg: one wheel's share of the mass (the lateral spring's damping)
+    const std::vector<SolidPrism>* m_solids = nullptr;
+    // THE DEEPEST SURFACE under a point: the bed plane's penetration and normal, then every solid
+    // whose prism holds the point -- the nearest face's. The deeper one is the contact plane.
+    void DeepestSurface(const double pw[3], double bedPen, const double bedN[3], double& pen, double n[3]) const;
 
     // ---- forms: the current one, every form's CG in the datum (Build's solve, once per form),
     // the datum point the body origin stands on now, and each part's first anchor and wheel slot

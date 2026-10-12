@@ -3,8 +3,10 @@
 #include "scene/Gateway.h"
 #include "scene/Pose.h"
 
+#include "compose/BuildingSolids.h"
 #include "core/Common.h"
 #include "core/SceneConfig.h"
+#include "core/ThreadManager.h"
 #include "core/Window.h"
 #include "hal/Gpu.h"
 #include "scene/SeaLayer.h"
@@ -16,10 +18,22 @@
 #include "sim/WeatherManager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 
 namespace ga::scene {
+
+struct Entity::SolidsJob {
+    std::atomic<bool> busy{false};
+    bool asked = false;
+    double askLat = 0.0, askLon = 0.0;
+    std::mutex mx;
+    std::shared_ptr<const std::vector<BuildingSolid>> result;   // the latest set, whole
+    double ms = 0.0;
+    uint32_t composes = 0;
+};
 
 std::vector<std::string> Entity::Configure(const Wiring& w) {
     (void)w;   // a hull owns no device object: nothing to wire on this side
@@ -310,7 +324,106 @@ bool Entity::StandOn(const Space& s) {
     m_space = &m_ownSpace;
     m_spaceInRoot = m_ownSpace.To(*m_o.rootSpace).ToMotor();
     m_sea.SetChart(&m_ownChart);
+    ++m_stands;
     return true;
+}
+
+void Entity::SolidsStep(double simUnix) {
+    if (!m_o.buildings || !m_boat) {
+        m_prisms.clear();
+        return;
+    }
+    if (!m_solidsJob) m_solidsJob = std::make_shared<SolidsJob>();
+    SolidsJob& J = *m_solidsJob;
+    double cg[3] = {0.0, 0.0, 0.0};
+    m_boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+    double lat = 0.0, lon = 0.0;
+    m_sea.PlaceOf(cg[0], cg[2], lat, lon);
+    const double d2r = 3.14159265358979323846 / 180.0;
+    const double mPerLat = 111320.0, mPerLon = 111320.0 * std::cos(lat * d2r);
+    // Ask again when the hull has moved a third of the reach from the last ask (one job at a time).
+    const double dx = (lon - J.askLon) * mPerLon, dz = (lat - J.askLat) * mPerLat;
+    if ((!J.asked || std::sqrt(dx * dx + dz * dz) > kSolidsReachM / 3.0) && !J.busy.load()) {
+        J.busy = true;
+        J.asked = true;
+        J.askLat = lat;
+        J.askLon = lon;
+        const BuildingStack* stack = m_o.buildings;
+        std::shared_ptr<SolidsJob> job = m_solidsJob;
+        const double dLat = kSolidsReachM / mPerLat, dLon = kSolidsReachM / mPerLon;
+        Threads().Submit(Lane::Io, "vehicle.solids", [stack, job, lat, lon, dLat, dLon] {
+            const auto t0 = std::chrono::steady_clock::now();
+            auto out = std::make_shared<std::vector<BuildingSolid>>(
+                stack->Compose(lon - dLon, lat - dLat, lon + dLon, lat + dLat, 0.0));
+            const double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1000.0;
+            {
+                std::lock_guard<std::mutex> lk(job->mx);
+                job->result = std::move(out);
+                job->ms = ms;
+                ++job->composes;
+            }
+            job->busy = false;
+        });
+    }
+    std::shared_ptr<const std::vector<BuildingSolid>> raw;
+    double composeMs = 0.0;
+    uint32_t composes = 0;
+    {
+        std::lock_guard<std::mutex> lk(J.mx);
+        raw = J.result;
+        composeMs = J.ms;
+        composes = J.composes;
+    }
+    const uint32_t chartGen = m_stands;
+    if (raw == m_solidsSeen && chartGen == m_prismsChart) return;
+    m_solidsSeen = raw;
+    m_prismsChart = chartGen;
+    m_prisms.clear();
+    if (!raw) return;
+    // INTO THE HULL'S FRAME: each footprint vertex by the chart (FlatOf), its ground the bed under
+    // its centre (the bed page the water reads; the slow field when none), its bottom and top above
+    // that, and the sphere's drop at its distance so a far roof stands where the frame has it.
+    const Space::Anchor& chart = m_ownValid ? m_ownChart : *m_o.rootChart;
+    const double R = chart.planetR > 0.0 ? chart.planetR : 6371000.0;
+    for (const BuildingSolid& b : *raw) {
+        if (b.remove || b.rings.empty() || b.rings[0].size() < 6) continue;
+        SolidPrism pz;
+        const std::vector<double>& ring = b.rings[0];
+        double sx = 0.0, sz = 0.0;
+        int cnt = 0;
+        bool ok = true;
+        for (size_t i = 0; i + 1 < ring.size(); i += 2) {
+            double x = 0.0, z = 0.0;
+            if (!chart.FlatOf(ring[i + 1], ring[i], x, z)) { ok = false; break; }
+            pz.xz.push_back(x);
+            pz.xz.push_back(z);
+            sx += x;
+            sz += z;
+            ++cnt;
+        }
+        if (!ok || cnt < 3) continue;
+        pz.cx = sx / cnt;
+        pz.cz = sz / cnt;
+        for (size_t i = 0; i < pz.xz.size(); i += 2) {
+            const double ex = pz.xz[i] - pz.cx, ez = pz.xz[i + 1] - pz.cz;
+            pz.radius = (std::max)(pz.radius, std::sqrt(ex * ex + ez * ez));
+        }
+        pz.radius += 0.5;
+        double ground = 0.0;
+        double gLat = 0.0, gLon = 0.0;
+        chart.LatLonOf(pz.cx, pz.cz, gLat, gLon);
+        if (!(m_o.bed && m_o.bed->Read(gLat, gLon, ground))) {
+            const SurfaceSample ss = m_sea.At(pz.cx, pz.cz, simUnix);
+            if (!ss.valid) continue;
+            ground = ss.bedNavd;
+        }
+        const double drop = (pz.cx * pz.cx + pz.cz * pz.cz) / (2.0 * R);
+        pz.yBottom = ground - drop + b.bottom;
+        pz.yTop = ground - drop + b.top;
+        m_prisms.push_back(std::move(pz));
+    }
+    Log("[solids] '%s': %zu solids within %.0f m -> %zu prisms in the hull's frame (compose %u took %.1f ms on the pool)",
+        m_props.name.c_str(), raw->size(), kSolidsReachM, m_prisms.size(), composes, composeMs);
 }
 
 void Entity::Recentre(double simUnix) {
@@ -587,6 +700,9 @@ void Entity::Update(const FrameInfo& fi) {
     // Determinism is untouched -- this is still a FIXED step off the same clock, just a
     // coarser multiple of it, so the boat is as frame-rate independent as before. The
     // leftover quanta are carried, never dropped, so no owed time is lost.
+    // THE SOLIDS about the hull, in its frame, for this step's ground law.
+    SolidsStep(simUnix);
+    boat->SetSolids(m_prisms.empty() ? nullptr : &m_prisms);
     constexpr int kPerStep = 4;                     // 240 / 4 = 60 Hz
     quantaOwed += quanta;
     const int steps = quantaOwed / kPerStep;

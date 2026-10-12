@@ -219,6 +219,70 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
 // ================================================================================================
 //  Drag -- and windage, which is the same law in the other fluid.
 // ================================================================================================
+// ================================================================================================
+//  The solids (sim/Solids.h): a prism's holds test, its nearest side, and the deepest surface.
+// ================================================================================================
+bool PrismHolds(const std::vector<double>& xz, double x, double z) {
+    const size_t n = xz.size() / 2;
+    bool in = false;
+    for (size_t i = 0, j = n - 1; i < n; j = i++) {
+        const double xi = xz[2 * i], zi = xz[2 * i + 1], xj = xz[2 * j], zj = xz[2 * j + 1];
+        if (((zi > z) != (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) in = !in;
+    }
+    return in;
+}
+
+void PrismNearestSide(const std::vector<double>& xz, double x, double z, double& dist, double n[2]) {
+    const size_t cnt = xz.size() / 2;
+    dist = 1e300;
+    n[0] = 1.0; n[1] = 0.0;
+    // The footprint's winding, so the outward side of an edge is known.
+    double area2 = 0.0;
+    for (size_t i = 0, j = cnt - 1; i < cnt; j = i++) area2 += xz[2 * j] * xz[2 * i + 1] - xz[2 * i] * xz[2 * j + 1];
+    const double sgn = (area2 >= 0.0) ? 1.0 : -1.0;
+    for (size_t i = 0, j = cnt - 1; i < cnt; j = i++) {
+        const double ax = xz[2 * j], az = xz[2 * j + 1], bx = xz[2 * i], bz = xz[2 * i + 1];
+        const double ex = bx - ax, ez = bz - az;
+        const double el2 = ex * ex + ez * ez;
+        if (el2 < 1e-18) continue;
+        double t = ((x - ax) * ex + (z - az) * ez) / el2;
+        t = (t < 0.0) ? 0.0 : ((t > 1.0) ? 1.0 : t);
+        const double qx = ax + t * ex, qz = az + t * ez;
+        const double d = std::sqrt((x - qx) * (x - qx) + (z - qz) * (z - qz));
+        if (d < dist) {
+            dist = d;
+            // Outward: the edge's left normal for a counter-clockwise ring (x east, z north), flipped
+            // for a clockwise one.
+            const double el = std::sqrt(el2);
+            n[0] = sgn * (-ez / el);
+            n[1] = sgn * (ex / el);
+            // The normal must point from the point outward: check against (point - foot).
+            if (d > 1e-9 && (n[0] * (x - qx) + n[1] * (z - qz)) > 0.0) { n[0] = -n[0]; n[1] = -n[1]; }
+        }
+    }
+}
+
+void Vessel::DeepestSurface(const double pw[3], double bedPen, const double bedN[3], double& pen, double n[3]) const {
+    pen = bedPen;
+    n[0] = bedN[0]; n[1] = bedN[1]; n[2] = bedN[2];
+    if (!m_solids) return;
+    for (const SolidPrism& sp : *m_solids) {
+        const double dx = pw[0] - sp.cx, dz = pw[2] - sp.cz;
+        if (dx * dx + dz * dz > sp.radius * sp.radius) continue;
+        if (pw[1] < sp.yBottom || pw[1] > sp.yTop) continue;
+        if (!PrismHolds(sp.xz, pw[0], pw[2])) continue;
+        // Inside: the way out is the nearest face -- the top, or a side.
+        const double dTop = sp.yTop - pw[1];
+        double dSide, ns[2];
+        PrismNearestSide(sp.xz, pw[0], pw[2], dSide, ns);
+        if (dTop <= dSide) {
+            if (dTop > pen) { pen = dTop; n[0] = 0.0; n[1] = 1.0; n[2] = 0.0; }
+        } else {
+            if (dSide > pen) { pen = dSide; n[0] = ns[0]; n[1] = 0.0; n[2] = ns[1]; }
+        }
+    }
+}
+
 Bivector Vessel::GroundAtStation(const Section& st, const double* px, const double* py, int n,
                                  const Medium& med, const SurfaceSample& ss) {
     Bivector w = Bivector::Zero();
@@ -249,22 +313,26 @@ Bivector Vessel::GroundAtStation(const Section& st, const double* px, const doub
             m_body.ToWorld(pBody, pw);
             const double h = (pw[0] - bedPt[0]) * m_bedN[0] + (pw[1] - bedPt[1]) * m_bedN[1] +
                              (pw[2] - bedPt[2]) * m_bedN[2];
-            const double pen = std::max(0.0, -h);
+            // THE CONTACT PLANE: the bed's, or a solid's nearest face when the point is deeper in
+            // one (sim/Solids.h) -- the same law from here on, whichever surface it is.
+            double pen, nrm[3];
+            DeepestSurface(pw, std::max(0.0, -h), m_bedN, pen, nrm);
+            const double* n = nrm;
             double* anc = &m_anchor[3 * m_anchorIdx];
             uint8_t& on = m_anchorOn[m_anchorIdx];
             if (pen <= 0.0) { on = 0; continue; }   // the domain: a bed pushes, never pulls
             if (!on) { anc[0] = pw[0]; anc[1] = pw[1]; anc[2] = pw[2]; on = 1; }
             double v[3];
             m_body.VelocityAtBody(pBody, v);
-            const double vn = v[0] * m_bedN[0] + v[1] * m_bedN[1] + v[2] * m_bedN[2];
+            const double vn = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
             const double fn = m_kContact * pen + m_cContact * std::max(0.0, -vn);
             // The grip: (point - anchor) and the point's velocity, both in the contact plane.
             double d[3] = {pw[0] - anc[0], pw[1] - anc[1], pw[2] - anc[2]};
-            const double dn = d[0] * m_bedN[0] + d[1] * m_bedN[1] + d[2] * m_bedN[2];
+            const double dn = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
             double ft[3];
             for (int k = 0; k < 3; ++k) {
-                d[k] -= dn * m_bedN[k];
-                const double vt = v[k] - vn * m_bedN[k];
+                d[k] -= dn * n[k];
+                const double vt = v[k] - vn * n[k];
                 ft[k] = -m_kContact * d[k] - m_cContact * vt;
             }
             const double ftMag = std::sqrt(ft[0] * ft[0] + ft[1] * ft[1] + ft[2] * ft[2]);
@@ -274,7 +342,7 @@ Bivector Vessel::GroundAtStation(const Section& st, const double* px, const doub
                 // The anchor rides the cone: the deflection scaled onto it, in the plane.
                 anc[k] = pw[k] - d[k] * cone;
             }
-            const double f[3] = {fn * m_bedN[0] + ft[0], fn * m_bedN[1] + ft[1], fn * m_bedN[2] + ft[2]};
+            const double f[3] = {fn * n[0] + ft[0], fn * n[1] + ft[1], fn * n[2] + ft[2]};
             if (s_gripTrace) {
                 Log("[grip] pt %zu pen %.5f fn %.0f |d| %.5f |ft| %.0f cone %.3f v (%+.4f %+.4f %+.4f) anc (%+.4f %+.4f %+.4f) pw (%+.4f %+.4f %+.4f)",
                     m_anchorIdx, pen, fn, std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]), ftMag, cone, v[0], v[1], v[2],
@@ -1124,13 +1192,30 @@ Bivector Vessel::Wheel(const Element& e, const WaterSurface& sea, const VesselCo
     double sp[3], sn[3];
     sea.PlaneOf(ss, topW[0], topW[2], sp, sn);
     const double bedPt[3] = {sp[0], sp[1] - ss.depthM, sp[2]};
-    const double* n = m_bedN;
-    const double dn = dW[0] * n[0] + dW[1] * n[1] + dW[2] * n[2];
+    double nn[3] = {m_bedN[0], m_bedN[1], m_bedN[2]};
+    const double* n = nn;
+    double dn = dW[0] * n[0] + dW[1] * n[1] + dW[2] * n[2];
     if (dn >= -1e-6) {   // the strut does not point at the ground (the car is on its side or roof)
         on = 0;
         return Bivector::Zero();
     }
-    const double t = ((bedPt[0] - topW[0]) * n[0] + (bedPt[1] - topW[1]) * n[1] + (bedPt[2] - topW[2]) * n[2]) / dn;
+    double t = ((bedPt[0] - topW[0]) * n[0] + (bedPt[1] - topW[1]) * n[1] + (bedPt[2] - topW[2]) * n[2]) / dn;
+    // THE SOLIDS' TOPS (sim/Solids.h): the ray meets a roof or a deck before the bed when the strut
+    // top is above it and the hit lies in its footprint -- the car drives onto it.
+    if (m_solids && dW[1] < -1e-6) {
+        for (const SolidPrism& sp : *m_solids) {
+            if (topW[1] <= sp.yTop) continue;
+            const double tp = (topW[1] - sp.yTop) / (-dW[1]);
+            if (tp >= t) continue;
+            const double hx = topW[0] + dW[0] * tp, hz = topW[2] + dW[2] * tp;
+            const double ddx = hx - sp.cx, ddz = hz - sp.cz;
+            if (ddx * ddx + ddz * ddz > sp.radius * sp.radius) continue;
+            if (!PrismHolds(sp.xz, hx, hz)) continue;
+            t = tp;
+            nn[0] = 0.0; nn[1] = 1.0; nn[2] = 0.0;
+            dn = dW[1];
+        }
+    }
     // Bounded by the strut itself: the wheel cannot pass its top. A strut grazing the ground plane
     // (dn -> 0: the car on its side) made t enormous and the cubic spring 10^12 N; the shell
     // carries a rolled car, the strut only what a strut can.

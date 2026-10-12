@@ -1772,3 +1772,13 @@ per form), one entity `vehicle` in both Haulover scenes, T / Y take the next for
 law gone (the seat does it). Gate: the barge form of a barge+car body draws what the barge alone
 draws to the micrometre and stands on the same six keel points; SetForm(1) moves the origin to the
 car's CG and the car form carries its weight on four wheels. Open: the continuous transformation.
+
+**The shell and the solids (2026-10-12).** Mark's log: the car rolled at 30 kn on the sand, and on
+its side it had no ground law but its tyres: it fell through the beach, then a grazing strut's
+cubic went to 10^12 N. `Shell`: station outlines with the bed contact and no water clip (the very
+GroundAtStation Buoyancy runs); the strut bounded by its own length. Then his ask for buildings and
+roads: `sim/Solids.h`, prisms in the hull's frame from `BuildingStack::Compose` about the hull on
+the pool; the contact plane is the deepest surface (the bed's or a face's), a strut's ray the
+nearer of the bed and a top. Gates: roof and side at rest on 15 points; a wall at 8.5 m/s held at
+the face (0.45 m of shell give); a 0.4 m step climbed to 0.400 m. Open: bridge decks as solids,
+the solids for the boat (a hull against a quay), the per-point grip across two surfaces at once.

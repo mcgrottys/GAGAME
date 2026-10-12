@@ -73,6 +73,22 @@ and less hull, buoyancy falls, the bed carries what it dropped, and friction hol
 beaching, and nothing in it reads the depth to decide anything. Back off with astern thrust on
 the same law. The bed's normal is one plane per hull per step, the secant over the hull's length.
 
+## Solids: buildings, decks, kerbs
+
+The ground law reads a list of SOLIDS beside the bed (`sim/Solids.h`): right prisms in the
+vehicle's own frame, a footprint and a bottom and a top. A contact point inside one is pushed out
+through its nearest face by the same spring, grip and cone the bed uses, and a strut's ray takes
+the nearer of the bed and a top. So the car stops at a wall, climbs a kerb and drives onto a deck
+or a roof by the one expression it already had; nothing in the physics knows a building. The
+entity produces the list: the buildings stack is composed about the hull on the pool (80 m reach,
+asked again when the hull has moved a third of that), each footprint put into the hull's chart
+with its ground from the bed page. Roads stand on the composed ground the bed already is; a bridge
+deck is a solid when its span is in the stack (open: the surveyed decks are drawn, not yet listed).
+
+The car's body is a SHELL: station outlines with the hull's bed contact and no water clip, so a
+rolled car rests on its roof or side (and does not float) until the drone takes it. A strut's
+compression is bounded by the strut.
+
 ## The car: `car.baja`
 
 A 2003 Subaru Baja, its published figures (wheelbase 2.65 m, 1,610 kg curb, P225/60R16) and its

@@ -53,6 +53,7 @@
 #include <vector>
 
 namespace ga {
+class BuildingStack;
 class Gpu;
 class SeaLayer;
 class SeaState;
@@ -95,6 +96,9 @@ public:
         // hull's own tangent frame hangs under, and the root frame the scene is drawn in.
         const Space* planet = nullptr;
         const Space* rootSpace = nullptr;
+        // THE SOLIDS (2026-10-12): the buildings stack, composed about the hull on the pool and
+        // read by its ground law as prisms in its own frame (sim/Solids.h). Null: the bed alone.
+        const BuildingStack* buildings = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------
@@ -195,6 +199,17 @@ public:
 
 private:
     void StepTelemetry(TreeWater& boatSea, double simUnix);
+    // The solids about the hull: ask the stack again when the hull has moved a third of the reach
+    // (a pool job; published whole), and convert the set into the hull's frame when the set or the
+    // hull's chart changed. The prisms the step reads.
+    void SolidsStep(double simUnix);
+    struct SolidsJob;
+    std::shared_ptr<SolidsJob> m_solidsJob;
+    std::shared_ptr<const void> m_solidsSeen;      // the set the prisms were made from
+    std::vector<SolidPrism> m_prisms;
+    uint32_t m_prismsChart = 0;                    // the chart generation they were made in
+    uint32_t m_stands = 0;                         // StandOn count: the chart's generation
+    static constexpr double kSolidsReachM = 80.0;
 
 public:
 

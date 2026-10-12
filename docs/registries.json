@@ -122,7 +122,9 @@
         { "key": "wheel.rr.tyre.mu", "quantity": "1", "value": 0.9, "raw": 0.9, "unit": "1", "src": "ASSUMED: a road tyre on a firm surface" },
         { "key": "wheel.rr.tyre.corner", "quantity": "1", "value": 12, "raw": 12, "unit": "1", "src": "ASSUMED: 1/rad per newton of load -- 12 N of side force per newton per radian of slip" },
         { "key": "wheel.rr.tyre.relax", "quantity": "length", "value": 0.3, "raw": 0.3, "unit": "m", "src": "ASSUMED: a road tyre's relaxation length (0.3-0.6 m): the patch's lateral spring is corner x load over this" },
-        { "key": "wheel.rr.roll.res", "quantity": "1", "value": 0.015, "raw": 0.015, "unit": "1", "src": "ASSUMED: a road tyre's rolling coefficient" }
+        { "key": "wheel.rr.roll.res", "quantity": "1", "value": 0.015, "raw": 0.015, "unit": "1", "src": "ASSUMED: a road tyre's rolling coefficient" },
+        { "key": "body.contact.settle", "quantity": "length", "value": 0.02, "raw": 0.02, "unit": "m", "src": "ASSUMED: sheet metal and plastic on sand, softer than a keel" },
+        { "key": "body.contact.mu", "quantity": "1", "value": 0.6, "raw": 0.6, "unit": "1", "src": "ASSUMED: a car body dragged over sand" }
       ] },
       { "name": "drone.recovery", "display": "recovery drone (a velocity servo with four rotors)", "ledger": [
         { "key": "loa", "quantity": "length", "value": 0.6, "raw": 0.6, "unit": "m", "src": "ASSUMED: a 600 mm quadcopter frame" },

@@ -1781,6 +1781,7 @@ std::optional<int> FrameLoop::Session() {
         eo.rootChart = &m_A.surface.flat;   // M13 step 2: places, not the linear chart
         eo.planet = &m_planetSpace;         // ... and the two spaces a hull re-centres between
         eo.rootSpace = &m_tangentSpace;
+        eo.buildings = m_A.buildingStack.get();
         e->Configure(eo);
     }
 

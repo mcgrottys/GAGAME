@@ -715,6 +715,82 @@ bool RunVesselSelfTest() {
         }
     }
 
+    // ---- 9c. THE SOLIDS. On dry flat ground, two prisms in the car's path: a wall 3 m tall and
+    // a step 0.4 m tall. Driven at the wall at full throttle the car STOPS at it (the shell's
+    // points pushed out through the wall's face; the CG never past the face less the nose); driven
+    // at the step it CLIMBS it (the struts' rays take the step's top: the CG ends 0.4 m higher,
+    // four wheels down). Same law, two surfaces; nothing in the physics knows a building.
+    {
+        const VesselSpec car = reg.Build("car.baja");
+        StillWater dry;
+        dry.levelNavd = 0.0;
+        dry.bedNavd = 1.0;
+        auto seatCar = [&](Vessel& v) {
+            v.Build(car, Motor::Translation(0.0, 1.0 + 1.2, 0.0));
+            Settle(v, dry, 4800);
+            VesselControls c;
+            for (int i = 0; i < 120; ++i) v.Step(dry, c, i * dtLive, dtLive);
+        };
+        // (a) the wall: 20 m wide, 10 m deep, its near face at z = +12 (the car's nose at +2.5).
+        {
+            Vessel v;
+            seatCar(v);
+            std::vector<SolidPrism> solids(1);
+            solids[0].xz = {-10.0, 12.0, 10.0, 12.0, 10.0, 22.0, -10.0, 22.0};
+            solids[0].yBottom = 1.0;
+            solids[0].yTop = 4.0;
+            solids[0].cx = 0.0; solids[0].cz = 17.0; solids[0].radius = 12.0;
+            v.SetSolids(&solids);
+            VesselControls c;
+            c.throttle[0] = 1.0;
+            double zMax = -1e30, vPeak = 0.0;
+            bool sane = true;
+            for (int i = 0; i < 480; ++i) {   // 8 s: at the wall by 1.5 s, held against it after
+                v.Step(dry, c, i * dtLive, dtLive);
+                double q[3];
+                cgOf(v, q);
+                zMax = (std::max)(zMax, q[2]);
+                vPeak = (std::max)(vPeak, speedOf(v));
+                sane = sane && v.Body().Sane();
+            }
+            double q[3];
+            cgOf(v, q);
+            Log("[vessel] car at a wall: peak %.1f m/s, the CG reached z %.2f (the face at 12.00, the nose 2.16 ahead of the CG), ends at z %.2f, %d points carrying %.0f N, heel %.1f deg",
+                vPeak, zMax, q[2], v.Telemetry().contactPts, v.Telemetry().contactN, heelOf(v));
+            // The nose (the shell's front station, 2.43 m from the datum) is 2.16 m ahead of the CG;
+            // the shell gives 0.5 m at 8.5 m/s (a spring sized to sink 2 cm under the weight).
+            if (!(zMax < 12.0 - 2.16 + 0.6)) fail("solids: the car went through the wall (CG z, m)", zMax, 12.0 - 2.16);
+            if (!(q[2] < 12.0 - 2.16 + 0.1)) fail("solids: the car rests inside the wall (CG z, m)", q[2], 12.0 - 2.16);
+            if (!(zMax > 8.5)) fail("solids: the car never reached the wall (CG z, m)", zMax, 9.5);
+            if (!sane) fail("solids: the body left the domain at the wall", 0, 1);
+        }
+        // (b) the step: 0.4 m tall from z = +8 on, 20 m wide and 40 m deep.
+        {
+            Vessel v;
+            seatCar(v);
+            double q0[3];
+            cgOf(v, q0);
+            std::vector<SolidPrism> solids(1);
+            solids[0].xz = {-10.0, 8.0, 10.0, 8.0, 10.0, 48.0, -10.0, 48.0};
+            solids[0].yBottom = 1.0;
+            solids[0].yTop = 1.4;
+            solids[0].cx = 0.0; solids[0].cz = 28.0; solids[0].radius = 25.0;
+            v.SetSolids(&solids);
+            VesselControls c;
+            c.throttle[0] = 0.5;
+            for (int i = 0; i < 240; ++i) v.Step(dry, c, i * dtLive, dtLive);   // 4 s: up and on it
+            c.throttle[0] = 0.0;
+            c.tilt = 1.0;
+            for (int i = 0; i < 240; ++i) v.Step(dry, c, (240 + i) * dtLive, dtLive);   // braked to rest on it
+            double q[3];
+            cgOf(v, q);
+            Log("[vessel] car at a step: the CG rose %.3f m (the step 0.400) at z %.1f, %d wheels carrying %.0f N, %.3f m/s, heel %.1f deg",
+                q[1] - q0[1], q[2], v.Telemetry().contactPts, v.Telemetry().contactN, speedOf(v), heelOf(v));
+            if (std::abs((q[1] - q0[1]) - 0.4) > 0.1) fail("solids: the car climbed the step (m)", q[1] - q0[1], 0.4);
+            if (v.Telemetry().contactPts != 4) fail("solids: four wheels on the step", v.Telemetry().contactPts, 4);
+        }
+    }
+
     // ---- 10. PARTS PLUS FORMS. One body built from the barge and the car: in its first form it
     // is the barge (the same weight on the same six keel points on dry ground as the barge alone,
     // its draught afloat the barge's to the micrometre), and after SetForm it is the car (the same

@@ -1584,8 +1584,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             const int ch = hgtCh;
             const double R = planetR;
             auto blOwned = std::make_unique<BuildingLayer>();
+            A->buildingStack = stack;   // the vehicles' ground law composes the same solids about the hull
             blOwned->Configure(
-                shaderDir, std::move(stack), bl->radius,
+                shaderDir, stack, bl->radius,
                 // The marker pylons' placement (FrameLoop): the planet point on the sphere of the
                 // globe, rotated into the flat frame whose origin is the anchor on the surface.
                 [sf, R](double lat, double lon, double h, double out[3]) {
