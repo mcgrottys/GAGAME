@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -342,16 +343,22 @@ void Entity::SolidsStep(double simUnix) {
     m_sea.PlaceOf(cg[0], cg[2], lat, lon);
     const double d2r = 3.14159265358979323846 / 180.0;
     const double mPerLat = 111320.0, mPerLon = 111320.0 * std::cos(lat * d2r);
+    // The reach: the declared one, or the gate harness's (GAGAME_SOLIDS_REACH in the environment --
+    // a probe that wants to see a ramp's foot from the river; not a flag).
+    static const double reachM = [] {
+        const char* e = std::getenv("GAGAME_SOLIDS_REACH");
+        return (e && std::atof(e) > 1.0) ? std::atof(e) : kSolidsReachM;
+    }();
     // Ask again when the hull has moved a third of the reach from the last ask (one job at a time).
     const double dx = (lon - J.askLon) * mPerLon, dz = (lat - J.askLat) * mPerLat;
-    if ((!J.asked || std::sqrt(dx * dx + dz * dz) > kSolidsReachM / 3.0) && !J.busy.load()) {
+    if ((!J.asked || std::sqrt(dx * dx + dz * dz) > reachM / 3.0) && !J.busy.load()) {
         J.busy = true;
         J.asked = true;
         J.askLat = lat;
         J.askLon = lon;
         const BuildingStack* stack = m_o.buildings;
         std::shared_ptr<SolidsJob> job = m_solidsJob;
-        const double dLat = kSolidsReachM / mPerLat, dLon = kSolidsReachM / mPerLon;
+        const double dLat = reachM / mPerLat, dLon = reachM / mPerLon;
         Threads().Submit(Lane::Io, "vehicle.solids", [stack, job, lat, lon, dLat, dLon] {
             const auto t0 = std::chrono::steady_clock::now();
             auto out = std::make_shared<std::vector<BuildingSolid>>(
@@ -376,9 +383,13 @@ void Entity::SolidsStep(double simUnix) {
         composes = J.composes;
     }
     const uint32_t chartGen = m_stands;
-    if (raw == m_solidsSeen && chartGen == m_prismsChart) return;
+    // Re-made when the composed set, the hull's chart, or the layer's resident pages change (a
+    // deck's page streams in seconds after the hull stops under it).
+    const uint64_t pagesGen = m_o.buildingLayer ? m_o.buildingLayer->PagesVersion() : 0;
+    if (raw == m_solidsSeen && chartGen == m_prismsChart && pagesGen == m_prismsPages) return;
     m_solidsSeen = raw;
     m_prismsChart = chartGen;
+    m_prismsPages = pagesGen;
     m_prisms.clear();
     if (!raw) return;
     // INTO THE HULL'S FRAME: each footprint vertex by the chart (FlatOf), its ground the bed under
@@ -430,11 +441,12 @@ void Entity::SolidsStep(double simUnix) {
     // width across. The same solid a building is, with a slope.
     if (m_o.buildingLayer) {
         std::vector<BuildingLayer::DeckStrip> strips;
-        m_o.buildingLayer->DecksNear(lat, lon, kSolidsReachM, strips);
+        m_o.buildingLayer->DecksNear(lat, lon, reachM, strips);
         for (const BuildingLayer::DeckStrip& st : strips) {
             const double half = (std::max)(st.widthM, 2.0) * 0.5;
-            std::vector<double> vx(st.lat.size()), vz(st.lat.size()), vy(st.lat.size());
+            std::vector<double> vx(st.lat.size()), vz(st.lat.size()), vy(st.lat.size()), gv(st.lat.size());
             bool ok = true;
+            double gMin = 1e300;
             for (size_t i = 0; i < st.lat.size() && ok; ++i) {
                 ok = chart.FlatOf(st.lat[i], st.lon[i], vx[i], vz[i]);
                 double ground = 0.0;
@@ -442,10 +454,16 @@ void Entity::SolidsStep(double simUnix) {
                     const SurfaceSample ss = m_sea.At(vx[i], vz[i], simUnix);
                     ground = ss.valid ? ss.bedNavd : 0.0;
                 }
-                const double drop = (vx[i] * vx[i] + vz[i] * vz[i]) / (2.0 * R);
-                vy[i] = (std::max)(ground, 0.0) + st.over[i] - drop;
+                gv[i] = ground;
+                gMin = (std::min)(gMin, (std::max)(ground, 0.0));
             }
             if (!ok) continue;
+            // The deck at its clearance over the lowest surface its way crosses, riding the ground
+            // where the ground is higher -- the stand's law (BuildingLayer::StandBatch), word for word.
+            for (size_t i = 0; i < st.lat.size(); ++i) {
+                const double drop = (vx[i] * vx[i] + vz[i] * vz[i]) / (2.0 * R);
+                vy[i] = (st.over[i] > 0.0 ? (std::max)(gv[i], gMin + st.over[i]) : gv[i]) - drop;
+            }
             for (size_t i = 0; i + 1 < vx.size(); ++i) {
                 const double ex = vx[i + 1] - vx[i], ez = vz[i + 1] - vz[i];
                 const double len = std::sqrt(ex * ex + ez * ez);
@@ -467,8 +485,32 @@ void Entity::SolidsStep(double simUnix) {
             }
         }
     }
-    Log("[solids] '%s': %zu solids within %.0f m -> %zu prisms in the hull's frame, %zu of them deck segments (compose %u took %.1f ms on the pool)",
-        m_props.name.c_str(), raw->size(), kSolidsReachM, m_prisms.size(), m_prisms.size() - buildingsN, composes, composeMs);
+    // The nearest deck segment, said from the hull: where to drive to find the bridge.
+    double nearD = 1e300, nearDx = 0.0, nearDz = 0.0, nearTop = 0.0;
+    double lowTop = 1e300, lowLat = 0.0, lowLon = 0.0;   // the ramp's foot: the lowest deck top in reach
+    for (size_t i = buildingsN; i < m_prisms.size(); ++i) {
+        const double ddx = m_prisms[i].cx - cg[0], ddz = m_prisms[i].cz - cg[2];
+        const double d = std::sqrt(ddx * ddx + ddz * ddz);
+        if (d < nearD) { nearD = d; nearDx = ddx; nearDz = ddz; nearTop = m_prisms[i].yTop - cg[1]; }
+        const double over = m_prisms[i].yTop - cg[1];
+        if (over < lowTop) { lowTop = over; chart.LatLonOf(m_prisms[i].cx, m_prisms[i].cz, lowLat, lowLon); }
+    }
+    // Said when the counts move (the page set moves often while a place streams in).
+    static thread_local size_t saidSolids = SIZE_MAX, saidDecks = SIZE_MAX;
+    if (raw->size() == saidSolids && m_prisms.size() - buildingsN == saidDecks) return;
+    saidSolids = raw->size();
+    saidDecks = m_prisms.size() - buildingsN;
+    if (m_prisms.size() > buildingsN) {
+        Log("[solids] '%s': the lowest deck top in reach stands %+.2f m from the CG at %.6f N %.6f E", m_props.name.c_str(),
+            lowTop, lowLat, lowLon);
+    }
+    Log("[solids] '%s': %zu solids within %.0f m -> %zu prisms in the hull's frame, %zu of them deck segments%s (compose %u took %.1f ms on the pool)",
+        m_props.name.c_str(), raw->size(), reachM, m_prisms.size(), m_prisms.size() - buildingsN,
+        (m_prisms.size() > buildingsN)
+            ? (" -- the nearest deck " + std::to_string(int(nearD)) + " m off at (" + std::to_string(int(nearDx)) + " east, " +
+               std::to_string(int(nearDz)) + " north), its top " + std::to_string(nearTop).substr(0, 5) + " m from the CG").c_str()
+            : "",
+        composes, composeMs);
 }
 
 void Entity::Recentre(double simUnix) {
@@ -658,6 +700,10 @@ void Entity::Update(const FrameInfo& fi) {
     // THE HULL'S SPACE FOLLOWS THE HULL -- BEFORE the set-down and before the step, so the hull is
     // seated on the water of the space it is actually in (its first step puts it on the cloud).
     Recentre(simUnix);
+    // THE SOLIDS about the hull, in its frame -- before the set-down (the seat reads them) and
+    // before the step (the ground law reads them).
+    SolidsStep(simUnix);
+    boat->SetSolids(m_prisms.empty() ? nullptr : &m_prisms);
 
     // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
     // manager exists, so it cannot be spawned at the right height -- and NAVD 0 is half
@@ -689,7 +735,17 @@ void Entity::Update(const FrameInfo& fi) {
             // part. The keel is set `seatHeight` above it: a boat's minus its draught (the
             // undeclared default, the number this line always used), a car's zero, a drone's
             // its hover height. On water the raise is +0.0 and the boat seats as it did.
-            const double top = sp[1] + (std::max)(0.0, -ss.depthM);
+            double top = sp[1] + (std::max)(0.0, -ss.depthM);
+            // ...and the solids: a deck or a roof under the keel is the top of the stack there, so a
+            // body set down over a bridge lands on the bridge (the drone's return to the car on the
+            // span). What the solids know by now: a deck whose page has not streamed in yet is not
+            // in the list, and the body lands on what is under the deck.
+            for (const SolidPrism& pr : m_prisms) {
+                const double ddx = bp0[0] - pr.cx, ddz = bp0[2] - pr.cz;
+                if (ddx * ddx + ddz * ddz > pr.radius * pr.radius) continue;
+                if (!PrismHolds(pr.xz, bp0[0], bp0[2])) continue;
+                top = (std::max)(top, pr.TopAt(bp0[0], bp0[2]));
+            }
             const double seatH = boat->Spec().seatHeight.src.empty() ? -draft : boat->Spec().seatHeight.v;
             const double y0 = top - keel + seatH;
             // THE SEAT KEEPS THE HEADING (the Haulover portal demo, 2026-09-14). The set-down
@@ -715,7 +771,7 @@ void Entity::Update(const FrameInfo& fi) {
             boatPlaced = true;
             Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
                 "-> CG at %+.3f m NAVD (seat %+.2f over the %s)", ss.heightNavd, -keel, draft, y0,
-                seatH, (ss.depthM > 0.0) ? "water" : "ground");
+                seatH, (top > sp[1] + (std::max)(0.0, -ss.depthM) + 1e-9) ? "solid" : ((ss.depthM > 0.0) ? "water" : "ground"));
             // The snapshot the hull reads, and its age: what answered, and the instant the
             // solver's answers are coherent at (the frame's asOf, declared before this step).
             char asOf[48];
@@ -745,9 +801,6 @@ void Entity::Update(const FrameInfo& fi) {
     // Determinism is untouched -- this is still a FIXED step off the same clock, just a
     // coarser multiple of it, so the boat is as frame-rate independent as before. The
     // leftover quanta are carried, never dropped, so no owed time is lost.
-    // THE SOLIDS about the hull, in its frame, for this step's ground law.
-    SolidsStep(simUnix);
-    boat->SetSolids(m_prisms.empty() ? nullptr : &m_prisms);
     constexpr int kPerStep = 4;                     // 240 / 4 = 60 Hz
     quantaOwed += quanta;
     const int steps = quantaOwed / kPerStep;

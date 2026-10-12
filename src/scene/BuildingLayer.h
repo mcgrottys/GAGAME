@@ -140,6 +140,8 @@ public:
         double widthM = 0.0;
     };
     void DecksNear(double latDeg, double lonDeg, double rM, std::vector<DeckStrip>& out) const;
+    // ...and a count that moves whenever the resident page set does, so a reader re-asks then.
+    uint64_t PagesVersion() const { return m_pagesVersion; }
 
     // Mirrors `struct BuildingVertex` in shaders/Buildings.hlsl (priors 22).
     struct Vertex {

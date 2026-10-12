@@ -211,6 +211,7 @@ private:
     std::shared_ptr<const void> m_solidsSeen;      // the set the prisms were made from
     std::vector<SolidPrism> m_prisms;
     uint32_t m_prismsChart = 0;                    // the chart generation they were made in
+    uint64_t m_prismsPages = 0;                    // the layer's page set they were made from
     uint32_t m_stands = 0;                         // StandOn count: the chart's generation
     static constexpr double kSolidsReachM = 80.0;
 

@@ -1793,3 +1793,18 @@ records the renderer stands), the entity makes each segment a prism whose top PL
 the deck's profile at its ends (`SolidPrism` gained gradients), and the strut's ray and the
 deepest-surface law take sloped planes as they took level ones. Gates: a 10 % ramp followed to
 0.009 m with four wheels down, the deck beyond stood at 2.000 m; the wall and the step as before.
+
+**"The car isn't driving over bridges" (2026-10-12, later).** Three causes, found in order. The
+planet tree the Haulover scenes use predates the deck law: no decks anywhere in it (its lod.json
+has no decks count; the test tree was 9 minutes older than the deck commit too, rebuilt now: 230
+bridge ways, 31 surveyed). The deck's height law added the clearance to the ground under EACH
+vertex, so a deck over a 9 m bank stood 21 m up with a cliff at the abutment -- now it stands at
+its clearance over the lowest surface its way crosses and rides the ground where higher, in the
+layer's stand and the entity's conversion alike. And the prisms were re-made only when the hull
+moved: the decks' pages stream in seconds after the hull stops under them, so the conversion now
+follows the layer's page version. The seat reads the solids (a body set down over a bridge lands
+on it); `GAGAME_SOLIDS_REACH` is a probe's env var. Gate: the drone hovering over the Gillis span,
+the harness taking the car form at frame 600: "set down ... seat +0.00 over the solid", CG +12.37 m
+NAVD with 2.4 m of water under the bridge, four wheels carrying 16772 N. Open: the approach ramps
+stop at the first junction of more than two ways (the US 1 rotary), so the south approach has no
+drivable way up; and a vehicle spawned over a bridge before its page streams lands under it.
