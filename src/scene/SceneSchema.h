@@ -369,7 +369,11 @@ struct EntityProps {
     Placement at;                     // the spawn (required)
     int controller = 0;               // helm | fixed
     double throttle = 0.0, steer = 0.0;
-    // M13: THE PER-SUBJECT FLOATING ORIGIN. A space is flat and the planet is not, so a hull d
+    // THE REFERENCE MODEL (2026-10-11): a glTF binary the vessel layer draws over the physics --
+    // the Baja's body over the car's own wheels. Its frame is the spec's geometry datum (y up, +z
+    // the bow) after `meshScale` to metres and `meshYaw` about +y. Empty: the spec's boxes.
+    std::string mesh;
+    double meshScale = 1.0, meshYaw = 0.0;
 };
 struct EffectProps {
     std::string name;

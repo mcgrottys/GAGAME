@@ -1710,3 +1710,52 @@ the camera map (the correction held, because it re-quantizes the rail); a 5d rai
 regression caught by the dive-rail gate in 5e; two reload defects caught by 5f's probe. The follow-ons
 are listed in `docs/ARCHITECTURE.md` §8: a second simultaneous view, instantiation at reload, the DLL
 loader, the settle-first hold.
+
+## 25. M14 (2026-10-11): VEHICLES — the ground, the recovery drone, the car, and one helm
+
+Mark's ask: land collisions so the boat beaches; a drone with basic vertical movement that is the
+recovery mode; a car that drives like the Warthog on the Subaru Baja's model with its suspension
+raised; T / Y to cycle between them, the vehicle dropping back to water or ground when you return.
+`docs/VEHICLES.md` is the player's page. Branch `claude/vehicle-mechanics-switching-fa65ab`.
+
+**One runtime body, three new laws, no new class.** `Vessel` consumes any spec; the pass added two
+element kinds (`Hover`, `Wheel`) and one law on an old one (the bed under every Buoyancy station).
+
+- **The bed is a second surface** (step 1). Every `SurfaceSample` already carries `bedNavd`; a
+  station's outline points below the bed plane are pushed back along its normal by a spring the
+  hull's own weight sizes, damped, with Coulomb friction as a GRIP: each point keeps the ground
+  point it touched, a tangential spring to it saturated at `mu N` by the same cone a tyre uses.
+  Measured first as a velocity law: it crept `g sin(theta) dt` a step (2.36 m in 10 s on a 20 deg
+  slope). The bed's normal is one secant plane per hull per step, its three probes in the F22
+  table. Beaching is the water clip seeing less hull while the bed carries the rest; nothing reads
+  `depthM` to decide anything. Gates: dry flat (the weight on 6 keel points, residual 2e-10 N), the
+  dry slope both sides of `atan(mu)` (0.0000 m drift; 1.6083 vs 1.6083 m/s^2 sliding), the beach
+  (stops at 0.007 m/s; the water-only control sails on at 1.13 m/s). Live: the RHIB on the south
+  bank, 12.3 kn -> 0, 8.4 of its 8.8 kN on 9 keel points, fixed to the centimetre.
+- **The seat is the top of the stack** (step 2): `max(water, bed)`, the keel `seatHeight` above it
+  (a boat's minus its draught, byte for byte what it was; a car's zero; the drone's its hover
+  height). `PlaceAt` / `PlaceOver` are `ResetAtRest` at a pose. **T / Y** cycle the helm
+  (`FrameLoop::CycleVehicle`); the recovery law is the spec's `recovery` flag: switched TO, the
+  drone is placed over the vehicle; switched FROM, the vehicle is placed under it and seats itself.
+  **F** frees the camera (the old T). The helm reads each hull's own joints for its channel limits
+  and rates. The drone is one `Hover` element: `m (g up + (v_cmd - v)/tau)` and a critically damped
+  PD on the attitude bivector, tau 0.35 s, no medium. Live: the boat set down under the drone at
+  the second switch, heading kept.
+- **The car** (step 3): a `Wheel` is a strut cast onto the same bed, progressive spring
+  `k x (1 + (x/travel)^2)` (its cube the bump stop), the tyre's patch gripping a ground point: the
+  brake scales the hold along the rolling direction; across it the patch is the carcass spring over
+  a relaxation length, the anchor relaxing as it rolls -- at rest a spring, rolling exactly the
+  slip-angle law as its limit. The slip law as a velocity law chattered at 60 Hz (3.5x the explicit
+  limit) and let the brake go. `car.baja`: the Baja's published figures, its wheels and tyre measured
+  from the glb, lifted 0.25 m on a 1.2 Hz spring with 0.35 m of travel, 8 kN over four wheels to
+  32 m/s -- the Warthog in it says ASSUMED. Gates: static loads to 0.7 % and compressions to 0.6 %,
+  the braked 20 deg hill 0.0000 m, the drive law 15.92 vs 16.59 m/s, Ackermann 0.0149 vs 0.0151.
+  Live: set down on the beach, 36 kn at half throttle, four wheels loaded, heading held.
+- **The reference model** (step 4): `entities[].mesh`, a small glb reader (`scene/MeshFile`), the
+  body drawn through the same motor sandwich and pixel shader as the boxes by `SV_VertexID` through
+  the bindless uints; the model's tyres, rims, discs and glass left out, the physics' wheels drawn
+  where the struts put them, turned as they are.
+
+Prior art, named: the raycast vehicle (Halo's Warthog, Unity's WheelCollider), Pacejka's relaxation
+length for the lateral lag, the "sticky" anchor of game friction solvers; what is this engine's own
+is that every one of them is the same anchor + cone on the same bed the water reads.

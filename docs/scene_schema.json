@@ -342,7 +342,10 @@
 }, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)" },
       { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
       { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
-      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" }
+      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },
+      { "key": "mesh", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a glTF binary (.glb) drawn over the physics, its frame the spec's datum (y up, +z the bow); empty: the spec's own boxes" },
+      { "key": "meshScale", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "the mesh file's units to metres (a centimetre model: 0.01)" },
+      { "key": "meshYaw", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the turn about +y that puts the model's front on +z" }
     ] },
     { "type": "interest", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the interest's name (views[].interests names it)" },

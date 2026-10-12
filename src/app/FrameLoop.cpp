@@ -1132,6 +1132,7 @@ std::optional<int> FrameLoop::Session() {
     // ==================================================================================
     RegisterBuiltinVessels(vesselReg);
     for (auto& e : m_entities) e->Spawn(vesselReg);
+    // (The reference model an entity declares is handed to the layer with the hull: PublishHulls.)
     // The chase camera's subject: the entity the start view's `follow` names, or -- when it
     // names none -- the first hull at the helm, which is what a spawned boat has always meant.
     m_followed = nullptr;
@@ -2276,6 +2277,12 @@ void FrameLoop::PublishHulls() {
     for (const auto& e : m_entities) {
         const Vessel* hull = e->Hull();
         if (!hull) continue;
+        // THE REFERENCE MODEL is scene data (`mesh` on the entity): declared to the layer with the
+        // hull (idempotent; the layer says so once), here because the layer stands by the time the
+        // hulls are published and not necessarily when they are spawned.
+        if (!e->Declared().mesh.empty()) {
+            layer->DeclareMesh(hull, e->Declared().mesh, e->Declared().meshScale, e->Declared().meshYaw);
+        }
         const Motor base = e->DrawFrame();
         hulls.push_back(hull);
         frames.push_back(base);

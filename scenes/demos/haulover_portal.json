@@ -107,8 +107,10 @@
     {
       "name": "car",
       "vessel": "car.baja",
+      "mesh": "D:/Assets/subaru-baja/source/Subaru Baja.glb",
+      "meshScale": 0.01,
       "at": {
-        "x": -436,
+        "x": -560,
         "alt": 0,
         "z": -215,
         "az": 270

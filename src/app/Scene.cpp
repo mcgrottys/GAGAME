@@ -310,6 +310,9 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Enum("controller", n.p.controller);
             r.F64("throttle", n.p.throttle);
             r.F64("steer", n.p.steer);
+            r.Str("mesh", n.p.mesh);
+            r.F64("meshScale", n.p.meshScale);
+            r.F64("meshYaw", n.p.meshYaw);
             if (const JsonValue* at = e.Get("at")) {
                 n.hasAt = true;
                 n.at = *at;

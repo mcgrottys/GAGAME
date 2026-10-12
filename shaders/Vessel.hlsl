@@ -22,6 +22,9 @@
 
 cbuffer VesselCb : register(b1) {
     float4 gVsParams;   // x = part count (informational), y = brightness, zw = spare
+    // THE MESH PASS (VsMesh): the vertex and index buffers' heap slots (gBufU, eight uints a
+    // vertex: pos.xyz, n.xyz as float bits, rgba8, pad) and the index count. Zero for the boxes.
+    uint4 gVsMesh;
     // ---- THE VIEW'S WINDOWS (M13). A hull is drawn once for every world the view reaches
     // through the gates -- at the pose that world's geometry is drawn by (its windows' motors,
     // inverted) -- and each copy keeps only the pixels of its own depth. So a boat that has gone
@@ -93,6 +96,30 @@ VsOut VsMain(uint vid : SV_VertexID) {
     // `world` is already RELATIVE TO THE EYE: VesselLayer::Render composes the eye's reverse
     // translation onto each box's motor in doubles before the float cast, so a hull 2000 km from
     // the origin is as exact here as one at the Merrimack.
+    o.pos = mul(float4(world, 1.0f), gViewProj);
+    o.rel = world;
+    o.depth = p.opt.x;
+    return o;
+}
+
+// THE REFERENCE MODEL (2026-10-11): a vehicle's own body drawn from a glb (scene/MeshFile.h) by
+// the SAME sandwich and the same pixel shader as the boxes. gParts[0] is the hull's motor, eye-
+// relative in doubles on the CPU as every part's; the vertices are the file's, in the body frame.
+// No input assembler: SV_VertexID -> the index buffer -> the vertex, through the bindless uints.
+VsOut VsMesh(uint vid : SV_VertexID) {
+    const VesselPart p = gParts[0];
+    const uint vi = gBufU[gVsMesh.y][vid];
+    const uint b = vi * 8u;
+    const float3 local = float3(asfloat(gBufU[gVsMesh.x][b + 0u]), asfloat(gBufU[gVsMesh.x][b + 1u]),
+                                asfloat(gBufU[gVsMesh.x][b + 2u]));
+    const float3 nl = float3(asfloat(gBufU[gVsMesh.x][b + 3u]), asfloat(gBufU[gVsMesh.x][b + 4u]),
+                             asfloat(gBufU[gVsMesh.x][b + 5u]));
+    const uint c = gBufU[gVsMesh.x][b + 6u];
+    const float3 col = float3(float(c & 255u), float((c >> 8u) & 255u), float((c >> 16u) & 255u)) / 255.0f;
+    const float3 world = MotorPoint(p.re, p.du, local);
+    VsOut o;
+    o.n = MotorDir(p.re, nl);
+    o.col = col * gVsParams.y;
     o.pos = mul(float4(world, 1.0f), gViewProj);
     o.rel = world;
     o.depth = p.opt.x;

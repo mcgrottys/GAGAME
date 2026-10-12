@@ -632,7 +632,10 @@ const Schema& EntitySchema_() {
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)
-            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H);
+            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H)
+            .Bind("mesh", kEntity.mesh, "a glTF binary (.glb) drawn over the physics, its frame the spec's datum (y up, +z the bow); empty: the spec's own boxes", R)
+            .Bind("meshScale", kEntity.meshScale, Q::Dimensionless, "1", "the mesh file's units to metres (a centimetre model: 0.01)", R)
+            .Bind("meshYaw", kEntity.meshYaw, Q::Angle, "deg", "the turn about +y that puts the model's front on +z", R);
         return sc;
     }();
     return *s;
