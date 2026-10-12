@@ -15,7 +15,9 @@
     "",
     "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
     "       Q / E  split the levers (pivot)           Shift / Ctrl  trim out / in",
-    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "T / Y  take the vehicle's next / previous FORM: boat, drone, car -- one body (parts plus forms); the drone is the",
+    "       recovery: flip, T to the drone, fly, T back and the boat or car is set down where the drone is",
+    "F      free the camera from the vehicle (it keeps its controls); F again returns",
     "FLY    W A S D move, Q / E down / up, hold the right mouse button to look, wheel = speed",
     "TIME   Space pause, Up / Down time x10 / /10, Left / Right nudge.   R reload shaders.",
     "",
@@ -64,25 +66,29 @@
   },
   "hud": {
     "fps": true,
-    "minimap": {"enabled": true, "follow": "boat"}
+    "minimap": {"enabled": true, "follow": "vehicle"}
   },
   "views": [
     {
       "name": "sea",
       "follow": {
-        "target": "boat"
+        "target": "vehicle"
       },
       "interests": [
         {
-          "name": "boat"
+          "name": "vehicle"
         }
       ]
     }
   ],
   "entities": [
     {
-      "name": "boat",
-      "vessel": "rhib.novurania18",
+      "name": "vehicle",
+      "forms": [
+        {"vessel": "rhib.novurania18"},
+        {"vessel": "drone.recovery"},
+        {"vessel": "car.baja", "mesh": "D:/Assets/subaru-baja/source/Subaru Baja.glb", "meshScale": 0.01}
+      ],
       "at": {
         "x": 120,
         "alt": 0,
@@ -94,8 +100,8 @@
   ],
   "interests": [
     {
-      "name": "boat",
-      "target": "boat",
+      "name": "vehicle",
+      "target": "vehicle",
       "radius": 200
     }
   ],

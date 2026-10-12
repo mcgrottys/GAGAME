@@ -116,6 +116,11 @@ struct Attach {
     double tiltP[3] = {0, 0, 0};
     double tiltD[3] = {1, 0, 0};
     double tiltLo = 0.0, tiltHi = 0.0, tiltRate = 0.35;
+    // The tilt channel's RETURN when no key holds it: 0 is a trim pump (it stays where it was
+    // left), a brake pedal or a drone's climb lever comes back at this rate. The steer channel
+    // always returns at `rate` (the wheel centres). The helm reads these joints: the first
+    // jointed element's limits and rate are the steer's, the first tilted element's the tilt's.
+    double tiltReturn = 0.0;
 
     // The joint at angle `q`, composed onto the mount. ONE PGA primitive for every articulation
     // on every hull; the offset axis costs nothing extra.
@@ -153,7 +158,16 @@ struct Attach {
 // boat carries its weight is a real design fact -- tanks forward instead of aft is worth degrees
 // of running trim -- and because the alternative is a single hand-tuned "the CG is here" number
 // that stops being true the moment anything is added.
-enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast };
+// Hover (2026-10-11) is the recovery drone's one element: a velocity servo at the CG and an
+// attitude servo about it, in no medium at all -- it flies the same over land and sea because it
+// asks the water nothing.
+// Wheel (2026-10-11) is the car's: a strut cast down onto the SAME bed the hull beaches on, a
+// progressive spring and damper along it, and a tyre at its foot -- drive, rolling resistance, the
+// brake's grip and the slip-angle lateral law through one friction cone. Four of them are a car.
+// Shell (2026-10-12) is a body's own skin on the ground: station outlines with the hull's bed
+// contact (the grip anchors, the cone) and NO water clip -- so a rolled car rests on its roof or
+// its side instead of falling through the beach, and still does not float.
+enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast, Hover, Wheel, Shell };
 enum class MediumKind : uint8_t { Water, Air };
 
 // ================================================================================================
@@ -193,6 +207,14 @@ struct Element {
 
     // ---- Buoyancy
     std::vector<Section> stations;           // ordered by z
+    // ---- ...and the BED under the same stations (2026-10-11: beaching). The bed is the second
+    // surface every SurfaceSample already carries (`bedNavd`), and a station's outline points
+    // that lie below it are pushed back along the bed's normal: a penalty spring sized so the
+    // hull's own weight compresses it `contactSettle` metres on its keel points, critically
+    // damped per point, with Coulomb friction `contactMu` in the contact plane. Zero settle is
+    // no contact at all (the water-only hull: the gate's control), never a stiffer one.
+    Num contactSettle;                       // m: compression under the hull's weight (ASSUMED)
+    Num contactMu;                           // the bed's friction coefficient
 
     // ---- Collar (one chamber of a tube)
     Num tubeZ0, tubeZ1;                      // longitudinal extent, body z
@@ -235,11 +257,64 @@ struct Element {
     // ---- Drag (hull resistance, windage)
     Num dragArea[3];                         // reference area per BODY axis (x, y, z)
     Num dragCd[3];
+
+    // ---- Hover (the drone). The commanded velocity is the helm's: W/S along the heading and
+    // Q/E across it at hoverSpeedH, SHIFT/CTRL up and down at hoverSpeedV (the mount's tilt
+    // channel, -1..1), A/D a yaw RATE of hoverYawRate (the mount's steer channel, -1..1). The
+    // wrench is m (g up + (v_cmd - v) / tau) at the CG and a critically damped PD on the
+    // attitude (body up -> world up, yaw rate -> commanded) with the same tau.
+    Num hoverSpeedH, hoverSpeedV, hoverYawRate, hoverTau;
+
+    // ---- Wheel (the car). The mount is the STRUT TOP; the strut runs down the mount's -y and the
+    // kingpin is the mount's joint line (jointed: it steers by the helm's angle, sign-flipped,
+    // because the helm's steer is the outboard's). `suspRest` is the strut's length at full droop
+    // (top to wheel centre), `wheelRadius` the tyre's; the strut meets the bed plane at t and the
+    // compression is max(0, suspRest + wheelRadius - t). The spring is progressive, suspK x
+    // (1 + (x / suspTravel)^2), damped by suspC on the strut's rate, and never pulls. At the tyre:
+    // drive = throttle[0] x driveForce x driven, falling to zero at driveSpeed (the thruster's
+    // shape); rolling resistance rollRes x N; the brake (the helm's tilt channel, 0..1) scales
+    // the tyre's grip of its ground point along the rolling direction (the hull's anchor law,
+    // `contactSettle` its compliance). LATERAL: the contact patch is a spring across the rolling
+    // direction -- the anchor's lateral deflection times tyreCorner x N / tyreRelax -- and the
+    // anchor relaxes toward the contact as the patch rolls through its relaxation length
+    // tyreRelax. At rest that is a spring that holds a parked car across a camber; rolling, its
+    // steady state is exactly -tyreCorner x N x (slip angle): the slip law, as the limit of the
+    // one law rather than a second one (a velocity law at 60 Hz chattered and let the brake go).
+    // The whole tangential force goes through min(1, tyreMu N / |F|).
+    Num wheelRadius, suspRest, suspTravel, suspK, suspC;
+    Num driveForce, driveSpeed, driven, tyreMu, tyreCorner, tyreRelax, rollRes;
 };
 
 // ================================================================================================
 //  The spec. Pure data. Everything here is either a Num (with provenance) or geometry.
 // ================================================================================================
+// ================================================================================================
+//  Form - PARTS PLUS FORMS (2026-10-12). A spec is a list of PARTS; a form is how much of each
+//  part is engaged (0..1, a weight on its wrench) and the body's own numbers in that form. Three
+//  vehicles with no parts in common are three forms of one body whose engagements are 0 or 1; a
+//  transformer is the same table with parts in common and mounts that move between forms along
+//  their screws (Motor::Log/Exp per part -- Brockett's product of exponentials -- the follow-on).
+//  Every part's law already knows absence as zero (a wheel in the air carries nothing, a station
+//  out of the water displaces nothing, a rotor at zero throttle lifts nothing), so a form is a
+//  weighting and never a branch: the boat with its wheels folded IS the car with its wheels in
+//  the air. The body's origin is the form's CG (RigidBody.h), so taking a form moves the origin
+//  and carries the pose by the same shift; every part stands where it stood.
+// ================================================================================================
+struct Form {
+    std::string name;                    // "boat", "drone", "car"
+    std::string kind;                    // the source spec's kind: the ledger's and the logs'
+    std::string display;
+    std::vector<double> engage;          // one weight per element of the spec, 0..1
+    Num loa, beam, draftStatic;
+    Num massDry, massLoaded;
+    double hullMassCentre[3] = {0, 0, 0};
+    Num inertiaRoll, inertiaPitch, inertiaYaw;
+    Num addedMassSurge, addedMassSway, addedMassHeave;
+    Num addedInertiaRoll, addedInertiaPitch, addedInertiaYaw;
+    Num seatHeight;
+    bool recovery = false;
+};
+
 struct VesselSpec {
     std::string kind;                        // "rhib.novurania18"
     std::string display;                     // "1998 Novurania 18' RHIB, twin Yamaha F50"
@@ -256,7 +331,19 @@ struct VesselSpec {
     Num addedMassSurge, addedMassSway, addedMassHeave;
     Num addedInertiaRoll, addedInertiaPitch, addedInertiaYaw;
 
+    // THE SEAT (2026-10-11): where the set-down puts the keel (the lowest station point) ABOVE
+    // the surface the body rides -- the top of the water-over-bed stack. A boat's is minus its
+    // draught (so it floats where it floats; undeclared, that is what it was), a car's is zero
+    // (the tyres touch and settle into their springs), a drone's is its hover height.
+    Num seatHeight;
+    // The recovery body: switched TO, it is placed over the vehicle it was switched from;
+    // switched FROM, the next vehicle is placed under it and seats itself (FrameLoop::CycleVehicle).
+    bool recovery = false;
+
     std::vector<Element> elements;
+    // THE FORMS. Empty: one implicit form engaging every part with the numbers above (every
+    // hull that ever was). Build refuses a form whose engagement table is not the parts'.
+    std::vector<Form> forms;
 
     // Every Num in the spec, for the report. Built by the factory; the registry prints it.
     std::vector<std::pair<std::string, const Num*>> Ledger() const;
@@ -313,5 +400,21 @@ VesselSpec MakeTestBox();
 // rather than gated. Deep-V stations, five collar chambers, two steered outboards, a
 // skeg, hull resistance and windage. Most of its numbers are ASSUMED and say so.
 VesselSpec MakeRhib18();
+
+// The recovery drone: one Hover element, no water. Switched to when a vehicle flips; flies
+// anywhere; the vehicle switched back to is set down under it.
+VesselSpec MakeRecoveryDrone();
+
+// The car: a 2003 Subaru Baja (its published figures and its model's measured wheels), lifted
+// 0.25 m and sprung long and soft so it drives like the Warthog -- four Wheel elements, windage,
+// and a drag box low down for when it is driven into the sea. No buoyancy: it sinks, and the
+// drone is the recovery.
+VesselSpec MakeCarBaja();
+
+// ONE BODY FROM SEVERAL SPECS: their parts concatenated (each part's name prefixed by its form's),
+// one form per spec engaging only its own parts and carrying its spec's own numbers; `kind` the
+// kinds joined by '+', the top-level numbers the first form's (the ledger before Build). Empty
+// when any input is empty.
+VesselSpec CombineForms(const std::vector<std::pair<std::string, VesselSpec>>& named);
 
 }  // namespace ga

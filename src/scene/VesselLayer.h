@@ -16,9 +16,11 @@
 #pragma once
 
 #include "core/Pga.h"
+#include "hal/Gpu.h"
 #include "scene/Layer.h"
 #include "scene/WindowBox.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -51,6 +53,11 @@ public:
                     int count);
     // (The view's chain of windows and the light seen from each world it reaches are the view's
     // world table's, scene/WorldTable.h: a hull is lit where it is.)
+
+    // THE REFERENCE MODEL (2026-10-11): a glb drawn over this vessel's physics in place of its body
+    // boxes (the wheels stay the physics' own). Scene data (`entities[].mesh`); loaded and uploaded
+    // once, at the first frame that draws it, and shared by file between vessels.
+    void DeclareMesh(const Vessel* v, const std::string& file, double scale, double yawDeg);
 
     uint32_t PartCount() const { return static_cast<uint32_t>(m_cpu.size()); }
     // Whether a world point lies inside any drawn box, grown by `margin` metres -- the water
@@ -86,8 +93,28 @@ private:
     std::wstring m_shaderDir;
     hal::RootSignature m_rootSig = nullptr;
     hal::Pso m_pso;
+    hal::Pso m_meshPso;             // VsMesh + the same PsMain
     std::vector<PartCpu> m_cpu;
     std::vector<PartGpu> m_parts;   // built from m_cpu at Render, relative to that view's eye
+
+    struct MeshDecl {
+        std::string file;
+        double scale = 1.0, yawDeg = 0.0;
+    };
+    struct MeshGpu {
+        GpuBuffer vb, ib;
+        uint32_t vbSlot = 0, ibSlot = 0, indexCount = 0;
+        bool tried = false;   // loaded once; a file that fails draws nothing and says so once
+    };
+    struct MeshDraw {
+        Motor world;          // the model's frame in the root: hull * (datum -> body)
+        float depth = 0.0f;
+        const MeshDecl* decl = nullptr;
+    };
+    std::map<const Vessel*, MeshDecl> m_meshDecl;
+    std::map<std::string, MeshGpu> m_meshes;
+    std::vector<MeshDraw> m_meshDraws;
+    void UploadMesh(Gpu& gpu, const MeshDecl& d, MeshGpu& g);
 };
 
 }  // namespace ga

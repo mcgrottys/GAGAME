@@ -333,7 +333,8 @@
     ] },
     { "type": "entity", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the entity's name" },
-      { "key": "vessel", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the hull kind (VesselRegistry; --boat)" },
+      { "key": "vessel", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the hull kind (VesselRegistry; --boat); with `forms`, the first form's" },
+      { "key": "forms", "type": "list", "field": "none", "element": "entity.form", "named": false, "reload": "hot", "doc": "ONE body with several forms (sim/VesselSpec.h Form): T / Y take the next; each a hull kind and its model" },
       { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": {
   "motor": {
     "re": [1, 0, 0, 0],
@@ -342,7 +343,16 @@
 }, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)" },
       { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
       { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
-      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" }
+      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },
+      { "key": "mesh", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a glTF binary (.glb) drawn over the physics, its frame the spec's datum (y up, +z the bow); empty: the spec's own boxes" },
+      { "key": "meshScale", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "the mesh file's units to metres (a centimetre model: 0.01)" },
+      { "key": "meshYaw", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the turn about +y that puts the model's front on +z" }
+    ] },
+    { "type": "entity.form", "keys": [
+      { "key": "vessel", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "this form's hull kind (VesselRegistry)" },
+      { "key": "mesh", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a glTF binary (.glb) drawn over this form's physics; empty: the spec's boxes" },
+      { "key": "meshScale", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "the mesh file's units to metres" },
+      { "key": "meshYaw", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the turn about +y that puts the model's front on +z" }
     ] },
     { "type": "interest", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the interest's name (views[].interests names it)" },

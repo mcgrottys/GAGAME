@@ -3,6 +3,7 @@
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
 #include "hal/Shader.h"
+#include "scene/MeshFile.h"
 #include "sim/Vessel.h"
 
 #include <algorithm>
@@ -25,7 +26,59 @@ bool VesselLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     d.depthClip = TRUE;
     d.depthTest = true;
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
-    return hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "vessel"); }, "vessel");
+    const bool boxes = hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "vessel"); }, "vessel");
+    // The mesh pass: the same state, the same pixel shader, the file's vertices (VsMesh). A glb's
+    // front faces wind counter-clockwise about the outward normal, which under this chain (the
+    // box table's own note) is clockwise on screen: D3D's front, so the same cull.
+    hal::GraphicsPipelineDesc m = d;
+    m.vs = sc.Compile(path, L"VsMesh", L"vs_6_0");
+    const bool mesh = hal::Reload(m_meshPso, [&] { return hal::BuildGraphics(gpu, m, "vessel.mesh"); }, "vessel.mesh");
+    return boxes && mesh;
+}
+
+void VesselLayer::DeclareMesh(const Vessel* v, const std::string& file, double scale, double yawDeg) {
+    if (!v) return;
+    if (file.empty()) {   // the form has no model: the spec's boxes
+        m_meshDecl.erase(v);
+        return;
+    }
+    auto it = m_meshDecl.find(v);
+    if (it != m_meshDecl.end() && it->second.file == file && it->second.scale == scale && it->second.yawDeg == yawDeg) {
+        return;   // declared every publish; nothing changed
+    }
+    MeshDecl d;
+    d.file = file;
+    d.scale = scale;
+    d.yawDeg = yawDeg;
+    m_meshDecl[v] = d;
+    Log("[vessels] '%s' draws %s (scale %.4g, yaw %.1f deg) over its physics; its wheels stay the struts' own",
+        v->Spec().kind.c_str(), file.c_str(), scale, yawDeg);
+}
+
+void VesselLayer::UploadMesh(Gpu& gpu, const MeshDecl& d, MeshGpu& g) {
+    g.tried = true;
+    MeshData data;
+    std::string why;
+    // Left out of the picture: the model's own tyres, rims and brake discs (the physics draws its
+    // wheels where the struts put them) and its glass (no transparency pass: an opaque window
+    // would hide the interior the model has). Both declared here, counted by the reader.
+    const std::vector<std::string> skips = {"tire", "rim", "brakedisk"};
+    if (!LoadGlbMesh(d.file, d.scale, d.yawDeg, skips, 0.6, data, &why)) {
+        Log("[vessels] mesh %s NOT drawn: %s (the spec's boxes stand in)", d.file.c_str(), why.c_str());
+        return;
+    }
+    g.vb = gpu.CreateDefaultBuffer(data.verts.data(), data.verts.size() * sizeof(uint32_t), L"vessel.mesh.vb");
+    g.ib = gpu.CreateDefaultBuffer(data.idx.data(), data.idx.size() * sizeof(uint32_t), L"vessel.mesh.ib");
+    if (!g.vb.Valid() || !g.ib.Valid()) {
+        Log("[vessels] mesh %s NOT drawn: the buffers could not be made", d.file.c_str());
+        return;
+    }
+    g.vbSlot = gpu.CreateStructuredBufferSrv(g.vb.res.Get(), static_cast<uint32_t>(data.verts.size()), 4);
+    g.ibSlot = gpu.CreateStructuredBufferSrv(g.ib.res.Get(), static_cast<uint32_t>(data.idx.size()), 4);
+    g.indexCount = static_cast<uint32_t>(data.idx.size());
+    Log("[vessels] mesh %s on the GPU: %zu vertices (%.1f MB), %zu triangles (%.1f MB), slots %u / %u",
+        d.file.c_str(), data.VertexCount(), data.verts.size() * 4.0 / 1048576.0, data.TriangleCount(),
+        data.idx.size() * 4.0 / 1048576.0, g.vbSlot, g.ibSlot);
 }
 
 void VesselLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
@@ -51,6 +104,7 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
 void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
                              const uint8_t* depth, int count) {
     m_cpu.clear();
+    m_meshDraws.clear();
     if (!vessels) return;
     for (int i = 0; i < count; ++i) {
         const Vessel* v = vessels[i];
@@ -58,10 +112,57 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
         const size_t first = m_cpu.size();
         const Motor hull = frames ? frames[i] * v->Body().pose : v->Body().pose;
         const VesselSpec& spec = v->Spec();
+        size_t wheelIdx = 0;
+        // The reference model, when the scene declared one: the file's frame is the spec's datum,
+        // and Build moved the datum onto the CG (cgFromTransom), so datum -> body is that shift.
+        const auto meshIt = m_meshDecl.find(v);
+        const bool hasMesh = meshIt != m_meshDecl.end();
+        if (hasMesh) {
+            MeshDraw d;
+            d.world = hull * Motor::Translation(-spec.cgFromTransom[0], -spec.cgFromTransom[1], -spec.cgFromTransom[2]);
+            d.depth = depth ? static_cast<float>(depth[i]) : 0.0f;
+            d.decl = &meshIt->second;
+            m_meshDraws.push_back(d);
+        }
 
-        for (const Element& e : spec.elements) {
+        for (size_t ei = 0; ei < spec.elements.size(); ++ei) {
+            const Element& e = spec.elements[ei];
+            // A part its form does not engage is not drawn (its wheel slot still counts).
+            if (!(v->Engage(ei) > 0.0)) {
+                if (e.kind == ElementKind::Wheel) ++wheelIdx;
+                continue;
+            }
             const int pal = static_cast<int>(e.kind);
             switch (e.kind) {
+                case ElementKind::Wheel: {
+                    // THE WHEEL WHERE THE STRUT PUT IT: the live centre and steer from the physics
+                    // (Vessel::Wheels), not the mount at rest -- a tyre is drawn compressed, drooped
+                    // or in the air as it is, and turned as it is. A slab the tyre's radius and
+                    // width, turned about the kingpin by the steer.
+                    const auto& wheels = v->Wheels();
+                    if (wheelIdx >= wheels.size()) break;
+                    const Vessel::WheelState& ws = wheels[wheelIdx];
+                    const double R = (e.wheelRadius.v > 0.0) ? e.wheelRadius.v : 0.3;
+                    const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
+                    const Motor at = Motor::Translation(ws.centre[0], ws.centre[1], ws.centre[2]) *
+                                     Motor::Rotation(o, upY, ws.steer);
+                    Emit(m_cpu, hull, at, 0.0, 0.0, 0.0, 0.33 * R, R, R, pal);
+                    if (wheelIdx == 0 && !hasMesh) {
+                        // The body over the wheels when no mesh is declared (a box the spec's
+                        // length and beam, standing on the strut tops): a car with no art.
+                        double top[3];
+                        e.mount.Origin(0.0, top);
+                        const double L = (spec.loa.v > 0.0) ? spec.loa.v : 4.0;
+                        const double B = (spec.beam.v > 0.0) ? spec.beam.v : 1.8;
+                        Emit(m_cpu, hull, Motor::Identity(), 0.0, top[1] + 0.45, 0.0, 0.5 * B, 0.45,
+                             0.5 * L, static_cast<int>(ElementKind::Buoyancy));
+                    }
+                    ++wheelIdx;
+                    break;
+                }
+                case ElementKind::Shell:
+                    if (hasMesh) break;   // the model is the body
+                    [[fallthrough]];
                 case ElementKind::Buoyancy: {
                     // One box per adjacent station PAIR, sized by that pair's own outline. A
                     // single box round the whole hull would hide exactly what the stations are
@@ -117,6 +218,20 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
                     const double m = (e.mass.v > 0.0) ? e.mass.v : 1.0;
                     const double h = 0.5 * std::cbrt(m / 700.0);   // ~size by mass, gently
                     Emit(m_cpu, hull, e.mount.at, 0.0, 0.0, 0.0, h, h, h, pal);
+                    break;
+                }
+                case ElementKind::Hover: {
+                    // The drone: a body box and four rotor discs on the frame's corners, sized
+                    // from the spec's length and beam. No art, like everything else here.
+                    const double L = (spec.loa.v > 0.0) ? spec.loa.v : 0.6;
+                    const double B = (spec.beam.v > 0.0) ? spec.beam.v : 0.6;
+                    Emit(m_cpu, hull, e.mount.at, 0.0, 0.0, 0.0, 0.18 * B, 0.05, 0.18 * L, pal);
+                    for (int sx = -1; sx <= 1; sx += 2) {
+                        for (int sz = -1; sz <= 1; sz += 2) {
+                            Emit(m_cpu, hull, e.mount.at, sx * 0.4 * B, 0.04, sz * 0.4 * L,
+                                 0.17 * B, 0.008, 0.17 * L, pal);
+                        }
+                    }
                     break;
                 }
                 // Planing and Drag are LAWS over surfaces the other elements already draw --
@@ -188,21 +303,53 @@ void VesselLayer::Render(const FrameContext& ctx) {
         }
         m_parts[n].opt[0] = m_cpu[k].depth;
     }
-    if (m_parts.empty()) return;
-    PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
     // The constants: the part count and brightness (the view's chain of windows and the light in
-    // each world are its world table's). Mirrors Vessel.hlsl's cbuffer (priors 22).
+    // each world are its world table's), and the mesh pass's slots. Mirrors Vessel.hlsl's cbuffer
+    // (priors 22).
     struct {
         float params[4];
+        uint32_t mesh[4];
     } cb{};
     cb.params[0] = static_cast<float>(m_parts.size());
     cb.params[1] = 1.0f;
-    ctx.cmd->Pipeline(m_pso.Get());
-    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cmd->GraphicsConstants(1, cb);
-    ctx.cmd->GraphicsSrvAt(
-        2, ctx.gpu->PushConstants(m_parts.data(), m_parts.size() * sizeof(PartGpu)));
-    ctx.cmd->Draw(static_cast<uint32_t>(m_parts.size()) * 36u, 1, 0, 0);
+    if (!m_parts.empty()) {
+        PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
+        ctx.cmd->Pipeline(m_pso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(
+            2, ctx.gpu->PushConstants(m_parts.data(), m_parts.size() * sizeof(PartGpu)));
+        ctx.cmd->Draw(static_cast<uint32_t>(m_parts.size()) * 36u, 1, 0, 0);
+    }
+    // THE REFERENCE MODELS: one draw each, the hull's motor eye-relative in doubles exactly as a
+    // part's, the file's vertices through the bindless uints (VsMesh), the same PsMain -- lit where
+    // it stands and cut by the view's windows like every box.
+    if (m_meshDraws.empty() || !m_meshPso || !ctx.gpu) return;
+    PixScope meshScope(ctx.cmd->Native(), "vessels (reference models)");
+    for (const MeshDraw& d : m_meshDraws) {
+        if (!firstEye && d.depth != 0.0f) continue;
+        MeshGpu& g = m_meshes[d.decl->file];
+        if (!g.tried) UploadMesh(*ctx.gpu, *d.decl, g);
+        if (g.indexCount == 0) continue;
+        PartGpu part{};
+        const Motor rel = toEye * d.world;
+        double re[4], du[4];
+        rel.Real(re);
+        rel.Dual(du);
+        for (int i = 0; i < 4; ++i) {
+            part.re[i] = static_cast<float>(re[i]);
+            part.du[i] = static_cast<float>(du[i]);
+        }
+        part.opt[0] = d.depth;
+        cb.mesh[0] = g.vbSlot;
+        cb.mesh[1] = g.ibSlot;
+        cb.mesh[2] = g.indexCount;
+        ctx.cmd->Pipeline(m_meshPso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(2, ctx.gpu->PushConstants(&part, sizeof(part)));
+        ctx.cmd->Draw(g.indexCount, 1, 0, 0);
+    }
 }
 
 }  // namespace ga

@@ -142,7 +142,9 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   far end leans 90 degrees over is a look straight down at the far place.
 - **Play: the Haulover gate.** `build\bin\gagame.exe scenes\demos\haulover_portal.json` opens a window at the helm of the
   RHIB in the Merrimack entrance with a gate across the channel ahead. Helm: W/S throttles, A/D steer,
-  Q/E split the levers, Shift/Ctrl trim; T leaves the helm for the free camera and returns. Through
+  Q/E split the levers, Shift/Ctrl trim; T/Y cycle the helm through the scene's vehicles (the drone
+  is the recovery: flip, T to the drone, fly, T back and the boat is set down under it); F frees the
+  camera and returns (docs/VEHICLES.md). Through
   the box you see Haulover's sea; drive into it and you come out of Baker's Haulover Inlet heading
   out to sea. Haulover renders only
   as well as the engine's data there (its global relief floods the barrier island).

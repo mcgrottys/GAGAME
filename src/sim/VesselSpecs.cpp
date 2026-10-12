@@ -56,6 +56,12 @@ VesselSpec MakeTestBox() {
         st.oy = {-0.5 * H, -0.5 * H, 0.5 * H, 0.5 * H};
         hull.stations.push_back(st);
     }
+    // The ground under it (beaching): declared, so the ground gates have a hull with a flat
+    // bottom whose six keel points share the weight exactly.
+    hull.contactSettle = Num::Of(0.015, "m", "ASSUMED: a penalty contact that sinks 1.5 cm under "
+                                             "the hull's own weight -- stiff enough to read as "
+                                             "ground, soft enough for a 60 Hz step");
+    hull.contactMu = Num::Of(0.5, "1", "ASSUMED: GRP on wet sand");
     s.elements.push_back(hull);
 
     // Hull drag. MOUNTED LOW, at body y = -0.9: a Drag element only acts while its mount is
@@ -135,6 +141,9 @@ VesselSpec MakeRhib18() {
                                "(2.2-2.4 m); no 1998 spec sheet found");
     s.draftStatic = Num::Of(0.30, "m", "ASSUMED: hull only, drives nothing -- the clip computes "
                                        "the real draught");
+    // The seat: the keel set down at its draught below the surface, the number the set-down
+    // always used (minus draftStatic), declared so the law reads it like every other hull's.
+    s.seatHeight = Num::Of(-0.30, "m", "DERIVED: minus draft.static, the set-down's own number");
 
     // ---- masses ------------------------------------------------------------------------------
     const double M_HULL = 430.0, M_ENG = 220.0, M_LOAD = 250.0;
@@ -238,6 +247,12 @@ VesselSpec MakeRhib18() {
                                        "projected side area");
     hull.dragCd[1] = Num::Of(1.3, "1", "ASSUMED: bluff in heave, on the immersed section's own "
                                        "projected plan area");
+    // THE BEACH (2026-10-11). The same stations meet the bed: nine keel points carry the boat
+    // when it runs up a beach, the chines join as it heels onto its side.
+    hull.contactSettle = Num::Of(0.015, "m", "ASSUMED: a penalty contact that sinks 1.5 cm under "
+                                             "the hull's own weight on its keel line");
+    hull.contactMu = Num::Of(0.5, "1", "ASSUMED: gelcoat on wet sand, between the 0.3 of a "
+                                       "slipway and the 0.7 of dry sand");
     s.elements.push_back(hull);
 
     // ---- the collar: five independent chambers ------------------------------------------------
@@ -523,9 +538,242 @@ VesselSpec MakeRhib18() {
     return s;
 }
 
+// ================================================================================================
+//  drone.recovery -- the recovery vehicle. A velocity servo with four rotors drawn on it.
+//
+//  It exists so a flipped boat or car is not the end of the drive: T to the drone, fly, T back,
+//  and the vehicle is set down under it. Its numbers are a small quadcopter's and every one is
+//  ASSUMED; it reads no water, so it flies the same over the sea and the town.
+// ================================================================================================
+VesselSpec MakeRecoveryDrone() {
+    VesselSpec s;
+    s.kind = "drone.recovery";
+    s.display = "recovery drone (a velocity servo with four rotors)";
+    s.recovery = true;
+    const double L = 0.60, B = 0.60, H = 0.12, M = 6.0;
+    s.loa = Num::Of(L, "m", "ASSUMED: a 600 mm quadcopter frame");
+    s.beam = Num::Of(B, "m", "ASSUMED: square frame");
+    s.massDry = Num::Of(M, "kg", "ASSUMED: a 6 kg lifting quadcopter");
+    s.massLoaded = s.massDry;
+    s.inertiaRoll = Num::Of(M / 12.0 * (B * B + H * H), "kg", "DERIVED: solid box, m/12 (B^2+H^2)");
+    s.inertiaPitch = Num::Of(M / 12.0 * (H * H + L * L), "kg", "DERIVED: solid box, m/12 (H^2+L^2)");
+    s.inertiaYaw = Num::Of(M / 12.0 * (B * B + L * L), "kg", "DERIVED: solid box, m/12 (B^2+L^2)");
+    s.seatHeight = Num::Of(6.0, "m", "ASSUMED: it appears six metres over the vehicle it recovers");
+
+    Element h;
+    h.kind = ElementKind::Hover;
+    h.name = "rotors";
+    h.medium = MediumKind::Air;
+    // THE CONTROL CHANNELS ARE THE MOUNT'S JOINTS: the helm reads the first jointed element's
+    // limits as the steer's and the first tilted element's as the tilt's (Entity::Helm). Here both
+    // are unit fractions -- yaw-rate demand and climb demand -- that slew in a third of a second
+    // and the climb comes back to zero when the key is released (a drone's lever, not a trim pump).
+    h.mount.jointed = true;
+    h.mount.lo = -1.0; h.mount.hi = 1.0; h.mount.rate = 3.0;
+    h.mount.tilted = true;
+    h.mount.tiltLo = -1.0; h.mount.tiltHi = 1.0; h.mount.tiltRate = 3.0; h.mount.tiltReturn = 3.0;
+    h.hoverSpeedH = Num::Of(12.0, "m/s", "ASSUMED: a brisk survey speed");
+    h.hoverSpeedV = Num::Of(5.0, "m/s", "ASSUMED: climb and descent");
+    h.hoverYawRate = Num::Of(1.2, "1", "ASSUMED: rad/s -- a full turn in five seconds");
+    h.hoverTau = Num::Of(0.35, "s", "ASSUMED: the one time constant, velocity and attitude; critically damped a 30 deg tilt is under 1 deg at 5.3 tau, so 0.35 s levels it in 1.9");
+    s.elements.push_back(h);
+    return s;
+}
+
+// ================================================================================================
+//  car.baja -- a 2003 Subaru Baja, lifted and sprung like the Warthog.
+//
+//  The published figures are the Baja's (KBB / TrueDelta / Autopadre, 2003 model year); the wheel
+//  positions and the tyre radius are MEASURED from the model Mark gave as the reference
+//  (D:\Assets\subaru-baja\source\Subaru Baja.glb: centimetres, y up from the ground, +z the front
+//  -- the tail lights are at z = -2.2 m, the turn signals and badge at the front). The geometry
+//  datum is the model's own: the ground under the car, x on its centreline. What makes it a
+//  Warthog is declared and ASSUMED: a 0.25 m lift, 0.35 m of travel on a 1.2 Hz spring, half-critical
+//  damping, 8 kN of shove over four driven wheels, falling to nothing at 32 m/s.
+// ================================================================================================
+VesselSpec MakeCarBaja() {
+    VesselSpec s;
+    s.kind = "car.baja";
+    s.display = "2003 Subaru Baja, lifted 0.25 m and sprung like a Warthog (AWD, four struts)";
+    s.loa = Num::Of(4.910, "m", "TrueDelta / Autopadre 2003 Baja: length 193.3 in");
+    s.beam = Num::Of(1.781, "m", "KBB 2003 Baja: width 70.1 in");
+    s.massDry = Num::Of(3550.0, "lb", "KBB 2003 Baja: curb weight 3,550 lb (TrueDelta 3,545)");
+    const double M = 3550.0 * 0.45359237 + 100.0;
+    s.massLoaded = Num::Of(M, "kg", "DERIVED: curb weight + 100 kg driver and gear (ASSUMED)");
+    // The CG: a stock Baja's sits about 0.55 m up (ASSUMED: a wagon-bodied car); the lift raises
+    // the body but the engine, box and driveline stay where they were, so 0.62 m (ASSUMED). The
+    // law that keeps it on its wheels is the static stability factor against the tyres' grip:
+    // half-track / CG height = 0.71 / 0.62 = 1.15 > mu 0.75, so on flat ground it SLIDES before it
+    // rolls (at 0.80 m and mu 0.9 it was 0.89 < 0.9: it rolled -- Mark's log). A kerb can still
+    // trip it. 55 % of the weight is on the front axle (ASSUMED: a flat four over the front
+    // wheels), which puts the CG 0.27 m ahead of the model's wheelbase midpoint.
+    s.hullMassCentre[0] = 0.0;
+    s.hullMassCentre[1] = 0.62;
+    s.hullMassCentre[2] = 0.135 + 0.05 * 2.657;
+    const double L = 4.910, B = 1.781, H = 1.56;
+    s.inertiaRoll = Num::Of(M / 12.0 * (B * B + H * H), "kg", "ASSUMED: a solid box the body's size, m/12 (B^2+H^2)");
+    s.inertiaPitch = Num::Of(M / 12.0 * (H * H + L * L), "kg", "ASSUMED: a solid box the body's size, m/12 (H^2+L^2)");
+    s.inertiaYaw = Num::Of(M / 12.0 * (B * B + L * L), "kg", "ASSUMED: a solid box the body's size, m/12 (B^2+L^2)");
+    s.seatHeight = Num::Of(0.0, "m", "the tyres touch at full droop, then it settles into its springs");
+
+    // ---- the four struts -------------------------------------------------------------------------
+    // Measured from the model (tyre clusters): wheel centres at x = +-0.71 m, z = +1.463 (front)
+    // and -1.194 (rear) -- a 2.657 m wheelbase against the published 104.3 in = 2.649 -- the tyre
+    // 0.346 m in radius against P225/60R16's 0.338. The strut top is 0.65 m up (ASSUMED). Lifted
+    // 0.25 m: the wheel's static centre is 0.25 m below the model's, so the droop length is
+    // top - (0.346 - 0.25) + the static compression, which the 1.2 Hz spring sets.
+    const double yTop = 0.65, lift = 0.25, R = 0.338, rModel = 0.346;
+    const double mCorner = M / 4.0;
+    const double w12 = 2.0 * 3.14159265358979323846 * 1.2;
+    const double k = w12 * w12 * mCorner;
+    const double x0 = mCorner * 9.80665 / k;
+    const double droop = yTop - (rModel - lift) + x0;
+    const double c = 2.0 * 0.5 * std::sqrt(k * mCorner);
+    auto wheel = [&](const char* name, double x, double z, bool front) {
+        Element w;
+        w.kind = ElementKind::Wheel;
+        w.name = name;
+        w.medium = MediumKind::Air;
+        w.mount.at = Motor::Translation(x, yTop, z);
+        if (front) {
+            // The kingpin: the vertical line through the strut top. Steered by the helm's A/D
+            // (the first jointed element's limit and rate are the helm's).
+            w.mount.jointed = true;
+            w.mount.axisP[0] = x; w.mount.axisP[1] = yTop; w.mount.axisP[2] = z;
+            w.mount.axisD[0] = 0.0; w.mount.axisD[1] = 1.0; w.mount.axisD[2] = 0.0;
+            w.mount.lo = -0.55; w.mount.hi = 0.55; w.mount.rate = 2.5;
+            // The brake pedal: the helm's tilt channel, 0..1, SHIFT, back to 0 when released
+            // (the first tilted element's numbers are the helm's). Its joint line is not used.
+            w.mount.tilted = true;
+            w.mount.tiltLo = 0.0; w.mount.tiltHi = 1.0; w.mount.tiltRate = 4.0; w.mount.tiltReturn = 4.0;
+        }
+        w.wheelRadius = Num::Of(R, "m", "P225/60R16 (Autopadre): 16 in rim + 0.60 x 225 mm = 338 mm; the model's tyre measures 346");
+        w.suspRest = Num::Of(droop, "m", "DERIVED: strut top to the wheel centre at full droop = top - lifted static centre + static compression");
+        w.suspTravel = Num::Of(0.35, "m", "ASSUMED: a Warthog's travel; the spring's cube is its bump stop");
+        w.suspK = Num::Of(k, "1", "DERIVED: N/m, a 1.2 Hz ride on the corner's share of the mass");
+        w.suspC = Num::Of(c, "1", "DERIVED: N s/m, 0.5 of critical on the corner");
+        w.driveForce = Num::Of(2000.0, "1", "ASSUMED: N per wheel, 8 kN over four = 0.48 g: a Warthog's shove (the Baja's 165 hp would be 5 kN at 25 m/s)");
+        w.driveSpeed = Num::Of(32.0, "m/s", "ASSUMED: the drive falls to nothing at 32 m/s (115 km/h)");
+        w.driven = Num::Of(1.0, "1", "KBB: standard all-wheel drive; each wheel its full share");
+        w.tyreMu = Num::Of(0.75, "1", "ASSUMED: a road tyre on sand and old tarmac -- below the stability factor 1.15, so it slides before it rolls");
+        w.tyreCorner = Num::Of(12.0, "1", "ASSUMED: 1/rad per newton of load -- 12 N of side force per newton per radian of slip");
+        w.tyreRelax = Num::Of(0.3, "m", "ASSUMED: a road tyre's relaxation length (0.3-0.6 m): the patch's lateral spring is corner x load over this");
+        w.rollRes = Num::Of(0.015, "1", "ASSUMED: a road tyre's rolling coefficient");
+        w.contactSettle = Num::Of(0.01, "m", "ASSUMED: the tread's grip compliance under its share of the weight when braked");
+        s.elements.push_back(w);
+    };
+    wheel("wheel.fl", -0.71, 1.463, true);
+    wheel("wheel.fr", +0.71, 1.463, true);
+    wheel("wheel.rl", -0.71, -1.194, false);
+    wheel("wheel.rr", +0.71, -1.194, false);
+
+    // ---- the shell: the body on the ground when it is not on its wheels ------------------------
+    // Five rectangular stations the model's body: 1.78 m across, from the lifted floor pan (the
+    // model's sills at 0.15 m, plus the lift) to the roof rack at 1.74 m. No water clip (Shell): it
+    // carries a rolled car on its roof or side, and does not float it.
+    {
+        Element shell;
+        shell.kind = ElementKind::Shell;
+        shell.name = "body";
+        const double half = 0.89, yLo = 0.15 + lift, yHi = 1.74;
+        for (double z : {-2.43, -1.2, 0.0, 1.2, 2.43}) {
+            Section st;
+            st.z = z;
+            st.ox = {0.0, half, half, 0.0};
+            st.oy = {yLo, yLo, yHi, yHi};
+            shell.stations.push_back(st);
+        }
+        shell.contactSettle = Num::Of(0.02, "m", "ASSUMED: sheet metal and plastic on sand, softer than a keel");
+        shell.contactMu = Num::Of(0.6, "1", "ASSUMED: a car body dragged over sand");
+        s.elements.push_back(shell);
+    }
+
+    // ---- windage, and the sea --------------------------------------------------------------------
+    Element air;
+    air.kind = ElementKind::Drag;
+    air.name = "windage";
+    air.medium = MediumKind::Air;
+    air.mount.at = Motor::Translation(0.0, s.hullMassCentre[1], s.hullMassCentre[2]);
+    air.dragArea[0] = Num::Of(5.0, "1", "ASSUMED: side area, 4.9 x 1.0 m above the sills");
+    air.dragArea[1] = Num::Of(8.0, "1", "ASSUMED: plan area");
+    air.dragArea[2] = Num::Of(2.5, "1", "ASSUMED: frontal area, 1.78 x 1.4 m");
+    air.dragCd[0] = Num::Of(1.0, "1", "ASSUMED: bluff side");
+    air.dragCd[1] = Num::Of(1.1, "1", "ASSUMED: bluff plan");
+    air.dragCd[2] = Num::Of(0.45, "1", "ASSUMED: a 2003 crossover's drag coefficient");
+    s.elements.push_back(air);
+    // Driven into the sea it meets the water as a bluff box at axle height; the wheels still find
+    // the bed under the water, and nothing floats it. The drone is the recovery.
+    Element sea;
+    sea.kind = ElementKind::Drag;
+    sea.name = "body in water";
+    sea.medium = MediumKind::Water;
+    sea.mount.at = Motor::Translation(0.0, 0.0, s.hullMassCentre[2]);   // the model's ground line, raised by the lift
+    sea.dragArea[0] = Num::Of(3.0, "1", "ASSUMED: the body's side below the windows");
+    sea.dragArea[1] = Num::Of(6.0, "1", "ASSUMED: the floor");
+    sea.dragArea[2] = Num::Of(2.0, "1", "ASSUMED: the body's front below the bonnet line");
+    sea.dragCd[0] = Num::Of(1.0, "1", "ASSUMED: bluff");
+    sea.dragCd[1] = Num::Of(1.0, "1", "ASSUMED: bluff");
+    sea.dragCd[2] = Num::Of(1.0, "1", "ASSUMED: bluff");
+    s.elements.push_back(sea);
+    return s;
+}
+
+// ================================================================================================
+//  CombineForms -- one body, several forms (VesselSpec.h Form).
+// ================================================================================================
+VesselSpec CombineForms(const std::vector<std::pair<std::string, VesselSpec>>& named) {
+    VesselSpec s;
+    size_t total = 0;
+    for (const auto& nv : named) {
+        if (nv.second.kind.empty()) return VesselSpec{};
+        total += nv.second.elements.size();
+    }
+    for (const auto& nv : named) {
+        const std::string& name = nv.first;
+        const VesselSpec& src = nv.second;
+        Form f;
+        f.name = name;
+        f.kind = src.kind;
+        f.display = src.display;
+        f.engage.assign(total, 0.0);
+        f.loa = src.loa; f.beam = src.beam; f.draftStatic = src.draftStatic;
+        f.massDry = src.massDry; f.massLoaded = src.massLoaded;
+        for (int i = 0; i < 3; ++i) f.hullMassCentre[i] = src.hullMassCentre[i];
+        f.inertiaRoll = src.inertiaRoll; f.inertiaPitch = src.inertiaPitch; f.inertiaYaw = src.inertiaYaw;
+        f.addedMassSurge = src.addedMassSurge; f.addedMassSway = src.addedMassSway; f.addedMassHeave = src.addedMassHeave;
+        f.addedInertiaRoll = src.addedInertiaRoll; f.addedInertiaPitch = src.addedInertiaPitch; f.addedInertiaYaw = src.addedInertiaYaw;
+        f.seatHeight = src.seatHeight;
+        f.recovery = src.recovery;
+        for (const Element& e0 : src.elements) {
+            Element e = e0;
+            e.name = name + "." + e.name;
+            f.engage[s.elements.size()] = 1.0;
+            s.elements.push_back(e);
+        }
+        s.forms.push_back(f);
+        s.kind += (s.kind.empty() ? "" : "+") + src.kind;
+    }
+    if (s.forms.empty()) return VesselSpec{};
+    s.display = "one body, " + std::to_string(s.forms.size()) + " forms";
+    for (const Form& f : s.forms) s.display += (&f == &s.forms.front() ? ": " : ", ") + f.name;
+    // The top level reads as the first form until Build (its ledger is printed before).
+    const Form& f0 = s.forms.front();
+    s.loa = f0.loa; s.beam = f0.beam; s.draftStatic = f0.draftStatic;
+    s.massDry = f0.massDry; s.massLoaded = f0.massLoaded;
+    for (int i = 0; i < 3; ++i) s.hullMassCentre[i] = f0.hullMassCentre[i];
+    s.inertiaRoll = f0.inertiaRoll; s.inertiaPitch = f0.inertiaPitch; s.inertiaYaw = f0.inertiaYaw;
+    s.addedMassSurge = f0.addedMassSurge; s.addedMassSway = f0.addedMassSway; s.addedMassHeave = f0.addedMassHeave;
+    s.addedInertiaRoll = f0.addedInertiaRoll; s.addedInertiaPitch = f0.addedInertiaPitch; s.addedInertiaYaw = f0.addedInertiaYaw;
+    s.seatHeight = f0.seatHeight;
+    s.recovery = f0.recovery;
+    return s;
+}
+
 void RegisterBuiltinVessels(VesselRegistry& reg) {
     reg.Register("box.test", MakeTestBox);
     reg.Register("rhib.novurania18", MakeRhib18);
+    reg.Register("drone.recovery", MakeRecoveryDrone);
+    reg.Register("car.baja", MakeCarBaja);
 }
 
 }  // namespace ga

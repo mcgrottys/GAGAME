@@ -118,6 +118,7 @@ add_executable(gagame
   src/scene/MarkerLayer.cpp
   src/scene/Minimap.cpp
   src/scene/VesselLayer.cpp
+  src/scene/MeshFile.cpp
   src/scene/BuildingLayer.cpp
   src/sim/TideModel.cpp
   src/sim/SeaState.cpp

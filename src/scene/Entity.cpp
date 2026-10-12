@@ -3,8 +3,11 @@
 #include "scene/Gateway.h"
 #include "scene/Pose.h"
 
+#include "compose/BuildingSolids.h"
+#include "scene/BuildingLayer.h"
 #include "core/Common.h"
 #include "core/SceneConfig.h"
+#include "core/ThreadManager.h"
 #include "core/Window.h"
 #include "hal/Gpu.h"
 #include "scene/SeaLayer.h"
@@ -16,10 +19,23 @@
 #include "sim/WeatherManager.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 
 namespace ga::scene {
+
+struct Entity::SolidsJob {
+    std::atomic<bool> busy{false};
+    bool asked = false;
+    double askLat = 0.0, askLon = 0.0;
+    std::mutex mx;
+    std::shared_ptr<const std::vector<BuildingSolid>> result;   // the latest set, whole
+    double ms = 0.0;
+    uint32_t composes = 0;
+};
 
 std::vector<std::string> Entity::Configure(const Wiring& w) {
     (void)w;   // a hull owns no device object: nothing to wire on this side
@@ -63,7 +79,26 @@ void Entity::SetSpawn(double x, double y, double z, double headingDeg) {
 bool Entity::Spawn(const VesselRegistry& vesselReg) {
     auto& boat = m_boat;
     auto& helming = m_helming;
-    const VesselSpec spec = vesselReg.Build(m_props.vessel);
+    // ONE BODY, ITS FORMS: the scene's `forms` are several specs' parts in one body (CombineForms),
+    // each form engaging its own; without `forms`, the one kind as it always was.
+    VesselSpec spec;
+    if (!m_props.forms.empty()) {
+        std::vector<std::pair<std::string, VesselSpec>> named;
+        for (const FormProps& f : m_props.forms) {
+            VesselSpec one = vesselReg.Build(f.vessel);
+            if (one.kind.empty()) {
+                Log("[vessel] '%s': form '%s' is not a registered kind; known:", m_props.name.c_str(), f.vessel.c_str());
+                for (const std::string& k : vesselReg.Kinds()) Log("[vessel]   %s", k.c_str());
+                return false;
+            }
+            // The form's name: the kind's first word ("rhib", "drone", "car").
+            const size_t dot = f.vessel.find('.');
+            named.emplace_back(f.vessel.substr(0, dot), std::move(one));
+        }
+        spec = CombineForms(named);
+    } else {
+        spec = vesselReg.Build(m_props.vessel);
+    }
     if (spec.kind.empty()) {
         Log("[vessel] '%s' is not a registered kind; known:", m_props.vessel.c_str());
         for (const std::string& k : vesselReg.Kinds()) Log("[vessel]   %s", k.c_str());
@@ -84,7 +119,7 @@ bool Entity::Spawn(const VesselRegistry& vesselReg) {
         boat.reset();
         return false;
     }
-    helming = true;
+    helming = false;   // the loop seats ONE helm: the subject it follows (FrameLoop)
     // (The hand code printed the CAMERA's x and z here; --campos set both, so the numbers
     // were the spawn's. The spawn is what is printed now, in every case.)
     Log("[vessel] '%s' spawned at (%.1f, %.1f): %s", spec.kind.c_str(), sx, sz,
@@ -121,10 +156,24 @@ void Entity::Helm(const InputState& in, float dt) {
     auto& helming = m_helming;
     auto& boatCtl = m_ctl;
     if (!boat) return;
-    if (in.keyPressed['T']) {
-        helming = !helming;
-        Log("[vessel] %s", helming ? "helm" : "camera detached (the boat "
-                                             "keeps sailing)");
+    // (T used to detach the camera here. T/Y now cycle the helm between the scene's vehicles and
+    // F frees the camera: FrameLoop, where the subject is chosen.)
+    // THE HELM MOVES THE JOINTS AT THEIR OWN RATES WITHIN THEIR OWN LIMITS: the first jointed
+    // element's are the steer's, the first tilted element's the tilt's -- the RHIB's outboard
+    // (0.60 rad at 1.2 rad/s; -5..+15 deg at 0.20 rad/s, a trim pump that stays put), which are
+    // the numbers this block held as literals, so the boat is byte for byte what it was; a car's
+    // kingpin and brake pedal and a drone's levers declare theirs. A hull with no joint keeps
+    // the outboard's numbers.
+    double sMax = 0.6, sRate = 1.2, tLo = -0.0873, tHi = 0.2618, tRate = 0.20, tReturn = 0.0;
+    {
+        const Attach* j = nullptr;
+        const Attach* t = nullptr;
+        for (const Element& el : boat->Spec().elements) {
+            if (!j && el.mount.jointed) j = &el.mount;
+            if (!t && el.mount.tilted) t = &el.mount;
+        }
+        if (j) { sMax = j->hi; sRate = j->rate; }
+        if (t) { tLo = t->tiltLo; tHi = t->tiltHi; tRate = t->tiltRate; tReturn = t->tiltReturn; }
     }
     if (helming) {
         // Keyboard for now; the analog triggers are the twin-lever binnacle
@@ -157,39 +206,106 @@ void Entity::Helm(const InputState& in, float dt) {
         if (in.keyDown['A']) sd += 1.0;
         // A mechanical steering RATE limit, not a snap: the outboards swing
         // at a finite speed and that lag is a real part of how a boat feels.
-        const double sMax = 0.6;
         boatCtl.steer += std::clamp(sd * sMax - boatCtl.steer,
-                                    -dt * 1.2, dt * 1.2);
+                                    -dt * sRate, dt * sRate);
         boatCtl.steer = std::clamp(boatCtl.steer, -sMax, sMax);
 
         // TRIM. Shift trims OUT (bow up), Ctrl trims IN (bow down). It is
         // slow on purpose -- a trim pump takes seconds to sweep its range --
         // and it is the helmsman's only direct hold on running attitude.
+        // (A pedal or a lever declares a return rate and comes back to zero
+        // when released; the pump's is 0 and it stays where it was left.)
         double td = 0.0;
         if (in.keyDown[VK_SHIFT]) td += 1.0;
         if (in.keyDown[VK_CONTROL]) td -= 1.0;
-        boatCtl.tilt = std::clamp(boatCtl.tilt + td * dt * 0.20,
-                                  -0.0873, 0.2618);
+        const double tWant = (td > 0.0) ? tHi : ((td < 0.0) ? tLo : 0.0);
+        const double tStep = dt * ((td != 0.0) ? tRate : tReturn);
+        boatCtl.tilt += std::clamp(tWant - boatCtl.tilt, -tStep, tStep);
+        boatCtl.tilt = std::clamp(boatCtl.tilt, tLo, tHi);
     }
 }
 
+void Entity::PlaceAt(const Motor& pose) {
+    if (!m_boat) return;
+    m_boat->Body().SetPose(pose);   // at rest there
+    m_ctl = VesselControls{};
+    m_placed = false;               // seated on its surface by the next Update...
+    m_reseatKeepsYaw = true;        // ...facing the way the pose faces
+}
+
+bool Entity::CycleForm(int dir) {
+    if (!m_boat || m_boat->FormCount() < 2) return false;
+    const size_t n = m_boat->FormCount();
+    const size_t f = (m_boat->FormIndex() + n + (dir < 0 ? n - 1 : 1)) % n;
+    if (!m_boat->SetForm(f)) return false;
+    // At rest in the new form, seated by the next Update at the form's own seat height over the
+    // surface there, facing the way it faced -- the whole of the recovery law.
+    m_ctl = VesselControls{};
+    m_placed = false;
+    m_reseatKeepsYaw = true;
+    Log("[vehicle] '%s' takes form '%s' (%s)%s", m_props.name.c_str(), m_boat->CurrentForm().name.c_str(),
+        m_boat->Spec().kind.c_str(), m_boat->Spec().recovery ? ": the recovery form, seated over where it stood" : "");
+    return true;
+}
+
+size_t Entity::FormCount() const { return m_boat ? m_boat->FormCount() : 0; }
+
+const std::string& Entity::MeshFile() const {
+    if (m_boat && !m_props.forms.empty() && m_boat->FormIndex() < m_props.forms.size()) {
+        return m_props.forms[m_boat->FormIndex()].mesh;
+    }
+    return m_props.mesh;
+}
+double Entity::MeshScale() const {
+    if (m_boat && !m_props.forms.empty() && m_boat->FormIndex() < m_props.forms.size()) {
+        return m_props.forms[m_boat->FormIndex()].meshScale;
+    }
+    return m_props.meshScale;
+}
+double Entity::MeshYaw() const {
+    if (m_boat && !m_props.forms.empty() && m_boat->FormIndex() < m_props.forms.size()) {
+        return m_props.forms[m_boat->FormIndex()].meshYaw;
+    }
+    return m_props.meshYaw;
+}
+
 void Entity::ResetAtRest() {
-    auto& boat = m_boat;
-    auto& boatCtl = m_ctl;
-    auto& boatPlaced = m_placed;
     // THE CLOCK POLICY, which a stateful body needs and nothing else in this
     // engine does. Everything else here is f(simUnix) and simply re-evaluates;
     // a hull carries momentum, so jumping an hour teleports the sea out from
     // under it while it keeps the velocity it had. It came back as the boat
     // being flung. A deliberate jump resets it to rest at its last pose.
-    if (boat) {
-        boat->Body().Rest();
-        boatCtl = VesselControls{};
-        boatPlaced = false;   // re-seat it on the new instant's surface
-        m_reseatKeepsYaw = true;   // ...facing the way it was
+    if (m_boat) {
+        PlaceAt(m_boat->Body().pose);
         Log("[vessel] time jumped -- hull reset to rest (a boat cannot be "
             "integrated across a scrub)");
     }
+}
+
+bool Entity::FrameIn(const Space* s, double cg[3], double fwd[3]) const {
+    if (!m_boat) return false;
+    const RigidBody& b = m_boat->Body();
+    double c[3] = {0.0, 0.0, 0.0}, f[3] = {0.0, 0.0, 1.0};
+    b.pose.TransformPoint(c[0], c[1], c[2]);
+    b.pose.TransformDir(f[0], f[1], f[2]);
+    const Space* here = m_space ? m_space : m_o.rootSpace;
+    if (!here || !s || here == s) {
+        for (int i = 0; i < 3; ++i) { cg[i] = c[i]; fwd[i] = f[i]; }
+        return true;
+    }
+    const Placement P = here->To(*s);
+    P.Apply(c, cg);
+    P.ApplyDir(f, fwd);
+    return true;
+}
+
+void Entity::PlaceOver(const Entity& other) {
+    if (!m_boat) return;
+    double cg[3], f[3];
+    if (!other.FrameIn(m_space ? m_space : m_o.rootSpace, cg, f)) return;
+    // Upright, at its heading: the seat keeps the yaw and sets the height.
+    const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
+    PlaceAt(Motor::Translation(cg[0], cg[1], cg[2]) * Motor::Rotation(o, upY, std::atan2(f[0], f[2])));
 }
 
 // THE HULL'S OWN SPACE IS A POINT OF THE CLOUD (M13 step 2, restated on the cloud 2026-10-11).
@@ -210,7 +326,191 @@ bool Entity::StandOn(const Space& s) {
     m_space = &m_ownSpace;
     m_spaceInRoot = m_ownSpace.To(*m_o.rootSpace).ToMotor();
     m_sea.SetChart(&m_ownChart);
+    ++m_stands;
     return true;
+}
+
+void Entity::SolidsStep(double simUnix) {
+    if (!m_o.buildings || !m_boat) {
+        m_prisms.clear();
+        return;
+    }
+    if (!m_solidsJob) m_solidsJob = std::make_shared<SolidsJob>();
+    SolidsJob& J = *m_solidsJob;
+    double cg[3] = {0.0, 0.0, 0.0};
+    m_boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+    double lat = 0.0, lon = 0.0;
+    m_sea.PlaceOf(cg[0], cg[2], lat, lon);
+    const double d2r = 3.14159265358979323846 / 180.0;
+    const double mPerLat = 111320.0, mPerLon = 111320.0 * std::cos(lat * d2r);
+    // The reach: the declared one, or the gate harness's (GAGAME_SOLIDS_REACH in the environment --
+    // a probe that wants to see a ramp's foot from the river; not a flag).
+    static const double reachM = [] {
+        const char* e = std::getenv("GAGAME_SOLIDS_REACH");
+        return (e && std::atof(e) > 1.0) ? std::atof(e) : kSolidsReachM;
+    }();
+    // Ask again when the hull has moved a third of the reach from the last ask (one job at a time).
+    const double dx = (lon - J.askLon) * mPerLon, dz = (lat - J.askLat) * mPerLat;
+    if ((!J.asked || std::sqrt(dx * dx + dz * dz) > reachM / 3.0) && !J.busy.load()) {
+        J.busy = true;
+        J.asked = true;
+        J.askLat = lat;
+        J.askLon = lon;
+        const BuildingStack* stack = m_o.buildings;
+        std::shared_ptr<SolidsJob> job = m_solidsJob;
+        const double dLat = reachM / mPerLat, dLon = reachM / mPerLon;
+        Threads().Submit(Lane::Io, "vehicle.solids", [stack, job, lat, lon, dLat, dLon] {
+            const auto t0 = std::chrono::steady_clock::now();
+            auto out = std::make_shared<std::vector<BuildingSolid>>(
+                stack->Compose(lon - dLon, lat - dLat, lon + dLon, lat + dLat, 0.0));
+            const double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1000.0;
+            {
+                std::lock_guard<std::mutex> lk(job->mx);
+                job->result = std::move(out);
+                job->ms = ms;
+                ++job->composes;
+            }
+            job->busy = false;
+        });
+    }
+    std::shared_ptr<const std::vector<BuildingSolid>> raw;
+    double composeMs = 0.0;
+    uint32_t composes = 0;
+    {
+        std::lock_guard<std::mutex> lk(J.mx);
+        raw = J.result;
+        composeMs = J.ms;
+        composes = J.composes;
+    }
+    const uint32_t chartGen = m_stands;
+    // Re-made when the composed set, the hull's chart, or the layer's resident pages change (a
+    // deck's page streams in seconds after the hull stops under it).
+    const uint64_t pagesGen = m_o.buildingLayer ? m_o.buildingLayer->PagesVersion() : 0;
+    if (raw == m_solidsSeen && chartGen == m_prismsChart && pagesGen == m_prismsPages) return;
+    m_solidsSeen = raw;
+    m_prismsChart = chartGen;
+    m_prismsPages = pagesGen;
+    m_prisms.clear();
+    if (!raw) return;
+    // INTO THE HULL'S FRAME: each footprint vertex by the chart (FlatOf), its ground the bed under
+    // its centre (the bed page the water reads; the slow field when none), its bottom and top above
+    // that, and the sphere's drop at its distance so a far roof stands where the frame has it.
+    const Space::Anchor& chart = m_ownValid ? m_ownChart : *m_o.rootChart;
+    const double R = chart.planetR > 0.0 ? chart.planetR : 6371000.0;
+    for (const BuildingSolid& b : *raw) {
+        if (b.remove || b.rings.empty() || b.rings[0].size() < 6) continue;
+        SolidPrism pz;
+        const std::vector<double>& ring = b.rings[0];
+        double sx = 0.0, sz = 0.0;
+        int cnt = 0;
+        bool ok = true;
+        for (size_t i = 0; i + 1 < ring.size(); i += 2) {
+            double x = 0.0, z = 0.0;
+            if (!chart.FlatOf(ring[i + 1], ring[i], x, z)) { ok = false; break; }
+            pz.xz.push_back(x);
+            pz.xz.push_back(z);
+            sx += x;
+            sz += z;
+            ++cnt;
+        }
+        if (!ok || cnt < 3) continue;
+        pz.cx = sx / cnt;
+        pz.cz = sz / cnt;
+        for (size_t i = 0; i < pz.xz.size(); i += 2) {
+            const double ex = pz.xz[i] - pz.cx, ez = pz.xz[i + 1] - pz.cz;
+            pz.radius = (std::max)(pz.radius, std::sqrt(ex * ex + ez * ez));
+        }
+        pz.radius += 0.5;
+        double ground = 0.0;
+        double gLat = 0.0, gLon = 0.0;
+        chart.LatLonOf(pz.cx, pz.cz, gLat, gLon);
+        if (!(m_o.bed && m_o.bed->Read(gLat, gLon, ground))) {
+            const SurfaceSample ss = m_sea.At(pz.cx, pz.cz, simUnix);
+            if (!ss.valid) continue;
+            ground = ss.bedNavd;
+        }
+        const double drop = (pz.cx * pz.cx + pz.cz * pz.cz) / (2.0 * R);
+        pz.yBottom = ground - drop + b.bottom;
+        pz.yTop = ground - drop + b.top;
+        m_prisms.push_back(std::move(pz));
+    }
+    const size_t buildingsN = m_prisms.size();
+    // THE DECKS AND RAMPS (BuildingLayer::DecksNear): each ribbon segment a prism whose top plane
+    // runs through the deck's height at its two ends -- the surveyed clearance over the higher of
+    // the ground and the sea at each vertex -- a metre deep (the LOD's deck depth), the segment's
+    // width across. The same solid a building is, with a slope.
+    if (m_o.buildingLayer) {
+        std::vector<BuildingLayer::DeckStrip> strips;
+        m_o.buildingLayer->DecksNear(lat, lon, reachM, strips);
+        for (const BuildingLayer::DeckStrip& st : strips) {
+            const double half = (std::max)(st.widthM, 2.0) * 0.5;
+            std::vector<double> vx(st.lat.size()), vz(st.lat.size()), vy(st.lat.size()), gv(st.lat.size());
+            bool ok = true;
+            double gMin = 1e300;
+            for (size_t i = 0; i < st.lat.size() && ok; ++i) {
+                ok = chart.FlatOf(st.lat[i], st.lon[i], vx[i], vz[i]);
+                double ground = 0.0;
+                if (!(m_o.bed && m_o.bed->Read(st.lat[i], st.lon[i], ground))) {
+                    const SurfaceSample ss = m_sea.At(vx[i], vz[i], simUnix);
+                    ground = ss.valid ? ss.bedNavd : 0.0;
+                }
+                gv[i] = ground;
+                gMin = (std::min)(gMin, (std::max)(ground, 0.0));
+            }
+            if (!ok) continue;
+            // The deck at its clearance over the lowest surface its way crosses, riding the ground
+            // where the ground is higher -- the stand's law (BuildingLayer::StandBatch), word for word.
+            for (size_t i = 0; i < st.lat.size(); ++i) {
+                const double drop = (vx[i] * vx[i] + vz[i] * vz[i]) / (2.0 * R);
+                vy[i] = (st.over[i] > 0.0 ? (std::max)(gv[i], gMin + st.over[i]) : gv[i]) - drop;
+            }
+            for (size_t i = 0; i + 1 < vx.size(); ++i) {
+                const double ex = vx[i + 1] - vx[i], ez = vz[i + 1] - vz[i];
+                const double len = std::sqrt(ex * ex + ez * ez);
+                if (len < 0.05) continue;
+                const double ux = ex / len, uz = ez / len;
+                const double px = -uz * half, pz = ux * half;   // across the run
+                SolidPrism pr;
+                pr.xz = {vx[i] + px, vz[i] + pz, vx[i + 1] + px, vz[i + 1] + pz,
+                         vx[i + 1] - px, vz[i + 1] - pz, vx[i] - px, vz[i] - pz};
+                pr.cx = 0.5 * (vx[i] + vx[i + 1]);
+                pr.cz = 0.5 * (vz[i] + vz[i + 1]);
+                pr.yTop = 0.5 * (vy[i] + vy[i + 1]);
+                pr.yBottom = pr.yTop - 1.0;
+                const double grade = (vy[i + 1] - vy[i]) / len;
+                pr.gx = grade * ux;
+                pr.gz = grade * uz;
+                pr.radius = 0.5 * len + half + 0.5;
+                m_prisms.push_back(std::move(pr));
+            }
+        }
+    }
+    // The nearest deck segment, said from the hull: where to drive to find the bridge.
+    double nearD = 1e300, nearDx = 0.0, nearDz = 0.0, nearTop = 0.0;
+    double lowTop = 1e300, lowLat = 0.0, lowLon = 0.0;   // the ramp's foot: the lowest deck top in reach
+    for (size_t i = buildingsN; i < m_prisms.size(); ++i) {
+        const double ddx = m_prisms[i].cx - cg[0], ddz = m_prisms[i].cz - cg[2];
+        const double d = std::sqrt(ddx * ddx + ddz * ddz);
+        if (d < nearD) { nearD = d; nearDx = ddx; nearDz = ddz; nearTop = m_prisms[i].yTop - cg[1]; }
+        const double over = m_prisms[i].yTop - cg[1];
+        if (over < lowTop) { lowTop = over; chart.LatLonOf(m_prisms[i].cx, m_prisms[i].cz, lowLat, lowLon); }
+    }
+    // Said when the counts move (the page set moves often while a place streams in).
+    static thread_local size_t saidSolids = SIZE_MAX, saidDecks = SIZE_MAX;
+    if (raw->size() == saidSolids && m_prisms.size() - buildingsN == saidDecks) return;
+    saidSolids = raw->size();
+    saidDecks = m_prisms.size() - buildingsN;
+    if (m_prisms.size() > buildingsN) {
+        Log("[solids] '%s': the lowest deck top in reach stands %+.2f m from the CG at %.6f N %.6f E", m_props.name.c_str(),
+            lowTop, lowLat, lowLon);
+    }
+    Log("[solids] '%s': %zu solids within %.0f m -> %zu prisms in the hull's frame, %zu of them deck segments%s (compose %u took %.1f ms on the pool)",
+        m_props.name.c_str(), raw->size(), reachM, m_prisms.size(), m_prisms.size() - buildingsN,
+        (m_prisms.size() > buildingsN)
+            ? (" -- the nearest deck " + std::to_string(int(nearD)) + " m off at (" + std::to_string(int(nearDx)) + " east, " +
+               std::to_string(int(nearDz)) + " north), its top " + std::to_string(nearTop).substr(0, 5) + " m from the CG").c_str()
+            : "",
+        composes, composeMs);
 }
 
 void Entity::Recentre(double simUnix) {
@@ -241,7 +541,7 @@ void Entity::Recentre(double simUnix) {
     }
     // The pose, carried: the space it stands in into the new one, through the common ancestor.
     const Space& from = m_space ? *m_space : *m_o.rootSpace;
-    b.Carry(from.To(next).ToMotor());
+    m_boat->Carry(from.To(next).ToMotor());   // the body and the ground it grips
     StandOn(next);
     double after[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(after[0], after[1], after[2]);
@@ -289,7 +589,7 @@ bool Entity::Carry(const Space& into, const Motor& m, double simUnix) {
     double sp0[3] = {c0[0], 0.0, c0[2]}, sn0[3];
     m_sea.PlaneOf(s0, c0[0], c0[2], sp0, sn0);
     // ONE PRODUCT: the pose and the momenta, by the motor.
-    b.Carry(m);
+    m_boat->Carry(m);   // the body and the ground it grips
     // It stands on `into`'s point of the cloud now -- and then on its own, by its position.
     if (!StandOn(into)) {
         Log("[vessel] '%s' was carried into '%s', which stands on no cloud point: it keeps its frame",
@@ -400,6 +700,10 @@ void Entity::Update(const FrameInfo& fi) {
     // THE HULL'S SPACE FOLLOWS THE HULL -- BEFORE the set-down and before the step, so the hull is
     // seated on the water of the space it is actually in (its first step puts it on the cloud).
     Recentre(simUnix);
+    // THE SOLIDS about the hull, in its frame -- before the set-down (the seat reads them) and
+    // before the step (the ground law reads them).
+    SolidsStep(simUnix);
+    boat->SetSolids(m_prisms.empty() ? nullptr : &m_prisms);
 
     // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
     // manager exists, so it cannot be spawned at the right height -- and NAVD 0 is half
@@ -416,20 +720,34 @@ void Entity::Update(const FrameInfo& fi) {
             // sits well above the keel, so placing it at the surface immersed the hull
             // half a metre deeper than it floats and it came up like a cork. The keel
             // depth comes from the spec's own stations, after Build re-referenced them
-            // onto the CG, so it is whatever this hull actually is.
-            double keel = 0.0;
-            for (const Element& el : boat->Spec().elements) {
-                for (const Section& st : el.stations) {
-                    for (double y : st.oy) keel = (std::min)(keel, y);
-                }
-            }
+            // onto the CG, so it is whatever this hull actually is -- and a car's is its tyres
+            // at full droop (Vessel::KeelY), so it lands on them and settles into its springs.
+            const double keel = boat->KeelY();
             const double draft = (boat->Spec().draftStatic.v > 0.0)
                                      ? boat->Spec().draftStatic.v : -keel;
             // The surface in the HULL'S FRAME (WaterSurface::PlaneOf): the sphere under the hull,
             // not the datum height on a flat plane -- a metre apart 3.6 km from the frame's origin.
             double sp[3], sn[3];
             boatSea.PlaneOf(ss, bp0[0], bp0[2], sp, sn);
-            const double y0 = sp[1] - keel - draft;
+            // THE SURFACE THE BODY RIDES IS THE TOP OF THE STACK (2026-10-11): the water where
+            // there is water, the bed where it stands proud -- max(height, bed), which is what
+            // `depthM <= 0 is dry` already said, written as the water plane raised by the dry
+            // part. The keel is set `seatHeight` above it: a boat's minus its draught (the
+            // undeclared default, the number this line always used), a car's zero, a drone's
+            // its hover height. On water the raise is +0.0 and the boat seats as it did.
+            double top = sp[1] + (std::max)(0.0, -ss.depthM);
+            // ...and the solids: a deck or a roof under the keel is the top of the stack there, so a
+            // body set down over a bridge lands on the bridge (the drone's return to the car on the
+            // span). What the solids know by now: a deck whose page has not streamed in yet is not
+            // in the list, and the body lands on what is under the deck.
+            for (const SolidPrism& pr : m_prisms) {
+                const double ddx = bp0[0] - pr.cx, ddz = bp0[2] - pr.cz;
+                if (ddx * ddx + ddz * ddz > pr.radius * pr.radius) continue;
+                if (!PrismHolds(pr.xz, bp0[0], bp0[2])) continue;
+                top = (std::max)(top, pr.TopAt(bp0[0], bp0[2]));
+            }
+            const double seatH = boat->Spec().seatHeight.src.empty() ? -draft : boat->Spec().seatHeight.v;
+            const double y0 = top - keel + seatH;
             // THE SEAT KEEPS THE HEADING (the Haulover portal demo, 2026-09-14). The set-down
             // levels the hull at its draught; it never meant to turn it -- but a bare translation
             // turned every hull to north, which nothing noticed while no spawn declared a heading
@@ -452,7 +770,8 @@ void Entity::Update(const FrameInfo& fi) {
             boat->Body().SetPose(seat);
             boatPlaced = true;
             Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
-                "-> CG at %+.3f m NAVD", ss.heightNavd, -keel, draft, y0);
+                "-> CG at %+.3f m NAVD (seat %+.2f over the %s)", ss.heightNavd, -keel, draft, y0,
+                seatH, (top > sp[1] + (std::max)(0.0, -ss.depthM) + 1e-9) ? "solid" : ((ss.depthM > 0.0) ? "water" : "ground"));
             // The snapshot the hull reads, and its age: what answered, and the instant the
             // solver's answers are coherent at (the frame's asOf, declared before this step).
             char asOf[48];
@@ -520,11 +839,11 @@ void Entity::StepTelemetry(TreeWater& boatSea, double simUnix) {
             std::atan(slope) * 57.2957795, ws.vx, ws.vy, ws.vz);
         Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
             "draught %.3f vol %.2f (hull %.2f collar %.2f) lam %.2f cop %+.2f "
-            "depth %.1f%s%s | parts %u",
+            "depth %.1f ground %.0f N/%d pts%s%s | parts %u",
             bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
             t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
-            t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM,
-            (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
+            t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM, t.contactN, t.contactPts,
+            (t.immersedVol < 1e-6 && t.contactPts == 0) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
             t.waterValid ? "" : " NO-WATER",
             vesselLayer ? vesselLayer->PartCount() : 0u);
     }

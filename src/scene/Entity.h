@@ -53,6 +53,8 @@
 #include <vector>
 
 namespace ga {
+class BuildingLayer;
+class BuildingStack;
 class Gpu;
 class SeaLayer;
 class SeaState;
@@ -95,6 +97,11 @@ public:
         // hull's own tangent frame hangs under, and the root frame the scene is drawn in.
         const Space* planet = nullptr;
         const Space* rootSpace = nullptr;
+        // THE SOLIDS (2026-10-12): the buildings stack, composed about the hull on the pool and
+        // read by its ground law as prisms in its own frame (sim/Solids.h). Null: the bed alone.
+        const BuildingStack* buildings = nullptr;
+        // ...and the layer whose resident pages hold the bridge decks and ramps (DecksNear).
+        const BuildingLayer* buildingLayer = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------
@@ -138,6 +145,26 @@ public:
     void Helm(const InputState& in, float dt);
     // THE CLOCK POLICY: a deliberate time jump resets the hull to rest at its last pose.
     void ResetAtRest();
+    // PLACED (2026-10-11): at a pose, at rest, controls cleared, seated on its surface by the next
+    // Update facing that way -- ResetAtRest at a pose. The vehicle cycle's one verb.
+    void PlaceAt(const Motor& pose);
+    // ...over another entity: its CG and heading said in this hull's space, upright; the seat
+    // then puts it at its own seatHeight over the surface there (a drone six metres up, a boat
+    // on the water, a car on the ground, by the one law).
+    void PlaceOver(const Entity& other);
+    // ---- FORMS (parts plus forms, 2026-10-12): an entity declared with `forms` is one body whose
+    // T / Y take the next form (Vessel::SetForm: the origin moves to the form's CG, the pose is
+    // carried, the momenta rested) and whose seat then puts that form where it belongs -- the
+    // drone six metres up, the boat at its draught, the car on its tyres -- by the one seat law.
+    // False when the entity has one form (the loop then cycles entities).
+    bool CycleForm(int dir);
+    size_t FormCount() const;
+    // The reference model of the CURRENT form (empty: none), for the layer every publish.
+    const std::string& MeshFile() const;
+    double MeshScale() const;
+    double MeshYaw() const;
+    // The CG and horizontal heading said in `s` (null: the root), through the common ancestor.
+    bool FrameIn(const Space* s, double cg[3], double fwd[3]) const;
     // The hull's origin and horizontal heading, for the chase camera; keeps helmYawRef.
     // In the hull's OWN space (the root's, until a gate carries it).
     void ChaseFrame(double p[3], double f[3]);
@@ -175,6 +202,18 @@ public:
 
 private:
     void StepTelemetry(TreeWater& boatSea, double simUnix);
+    // The solids about the hull: ask the stack again when the hull has moved a third of the reach
+    // (a pool job; published whole), and convert the set into the hull's frame when the set or the
+    // hull's chart changed. The prisms the step reads.
+    void SolidsStep(double simUnix);
+    struct SolidsJob;
+    std::shared_ptr<SolidsJob> m_solidsJob;
+    std::shared_ptr<const void> m_solidsSeen;      // the set the prisms were made from
+    std::vector<SolidPrism> m_prisms;
+    uint32_t m_prismsChart = 0;                    // the chart generation they were made in
+    uint64_t m_prismsPages = 0;                    // the layer's page set they were made from
+    uint32_t m_stands = 0;                         // StandOn count: the chart's generation
+    static constexpr double kSolidsReachM = 80.0;
 
 public:
 

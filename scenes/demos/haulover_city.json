@@ -8,8 +8,14 @@
     "so the town is there when it resets.",
     "",
     "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
-    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
-    "MINIMAP  drag to turn the planet, wheel to zoom, the button to reset over the boat"
+    "T / Y  take the vehicle's next / previous FORM: boat, drone, car -- one body (parts plus forms); the drone is the",
+    "       recovery: flip, T to the drone, fly, T back and the boat or car is set down where the drone is",
+    "F      free the camera from the vehicle (it keeps its controls); F again returns",
+    "MINIMAP  drag to turn the planet, wheel to zoom, the button to reset over the boat",
+    "",
+    "BRIDGES: the decks come from the tree (docs/ROADS.md). The planet tree named in layers.buildings.lod must have",
+    "been built with the two bridges sources below; rebuild it (hours, every core) with",
+    "  build/bin/gagame.exe scenes/demos/haulover_city.json --tool building-lod"
   ],
   "base": "scenes/merrimack.json",
   "scene": {
@@ -46,25 +52,42 @@
   },
   "hud": {
     "fps": true,
-    "minimap": {"enabled": true, "follow": "boat", "homeAltM": 2500, "layers": "globe vessels buildings sky"}
+    "minimap": {
+      "enabled": true,
+      "follow": "vehicle",
+      "homeAltM": 2500,
+      "layers": "globe vessels buildings sky"
+    }
   },
   "views": [
     {
       "name": "sea",
       "follow": {
-        "target": "boat"
+        "target": "vehicle"
       },
       "interests": [
         {
-          "name": "boat"
+          "name": "vehicle"
         }
       ]
     }
   ],
   "entities": [
     {
-      "name": "boat",
-      "vessel": "rhib.novurania18",
+      "name": "vehicle",
+      "forms": [
+        {
+          "vessel": "rhib.novurania18"
+        },
+        {
+          "vessel": "drone.recovery"
+        },
+        {
+          "vessel": "car.baja",
+          "mesh": "D:/Assets/subaru-baja/source/Subaru Baja.glb",
+          "meshScale": 0.01
+        }
+      ],
       "at": {
         "x": 120,
         "alt": 0,
@@ -76,15 +99,24 @@
   ],
   "interests": [
     {
-      "name": "boat",
-      "target": "boat",
+      "name": "vehicle",
+      "target": "vehicle",
       "radius": 200
     }
   ],
   "layers": [
-    {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
-     "lod": "D:/DataCache/OSM/buildings/planet-261010-roads.tree",
-     "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12}
+    {
+      "name": "buildings",
+      "enabled": true,
+      "levelHeight": 3.0,
+      "defaultHeight": 7.0,
+      "radius": 9000,
+      "lod": "D:/DataCache/OSM/buildings/planet-261010-roads.tree",
+      "laneWidth": 3.5,
+      "defaultLanes": 2,
+      "pathWidth": 2.0,
+      "kerb": 0.12
+    }
   ],
   "gates": [
     {
@@ -133,8 +165,16 @@
       "manifest": "data/aerial/aerial.json",
       "feather": 25
     },
-    {"name": "osm.planet", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"},
-    {"name": "osm.roads.planet", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"},
+    {
+      "name": "osm.planet",
+      "kind": "buildings",
+      "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"
+    },
+    {
+      "name": "osm.roads.planet",
+      "kind": "roads",
+      "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"
+    },
     {
       "name": "noaa.cudem.haulover",
       "folder": "D:/DataCache/GAGAME/cudem/FL",
@@ -142,6 +182,16 @@
       "kind": "height",
       "unit": "m",
       "datum": "NAVD88"
+    },
+    {
+      "name": "nbi.2025",
+      "kind": "bridges",
+      "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"
+    },
+    {
+      "name": "noaa.enc",
+      "kind": "bridges",
+      "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"
     }
   ]
 }

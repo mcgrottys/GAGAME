@@ -1710,3 +1710,101 @@ the camera map (the correction held, because it re-quantizes the rail); a 5d rai
 regression caught by the dive-rail gate in 5e; two reload defects caught by 5f's probe. The follow-ons
 are listed in `docs/ARCHITECTURE.md` §8: a second simultaneous view, instantiation at reload, the DLL
 loader, the settle-first hold.
+
+## 25. M14 (2026-10-11): VEHICLES — the ground, the recovery drone, the car, and one helm
+
+Mark's ask: land collisions so the boat beaches; a drone with basic vertical movement that is the
+recovery mode; a car that drives like the Warthog on the Subaru Baja's model with its suspension
+raised; T / Y to cycle between them, the vehicle dropping back to water or ground when you return.
+`docs/VEHICLES.md` is the player's page. Branch `claude/vehicle-mechanics-switching-fa65ab`.
+
+**One runtime body, three new laws, no new class.** `Vessel` consumes any spec; the pass added two
+element kinds (`Hover`, `Wheel`) and one law on an old one (the bed under every Buoyancy station).
+
+- **The bed is a second surface** (step 1). Every `SurfaceSample` already carries `bedNavd`; a
+  station's outline points below the bed plane are pushed back along its normal by a spring the
+  hull's own weight sizes, damped, with Coulomb friction as a GRIP: each point keeps the ground
+  point it touched, a tangential spring to it saturated at `mu N` by the same cone a tyre uses.
+  Measured first as a velocity law: it crept `g sin(theta) dt` a step (2.36 m in 10 s on a 20 deg
+  slope). The bed's normal is one secant plane per hull per step, its three probes in the F22
+  table. Beaching is the water clip seeing less hull while the bed carries the rest; nothing reads
+  `depthM` to decide anything. Gates: dry flat (the weight on 6 keel points, residual 2e-10 N), the
+  dry slope both sides of `atan(mu)` (0.0000 m drift; 1.6083 vs 1.6083 m/s^2 sliding), the beach
+  (stops at 0.007 m/s; the water-only control sails on at 1.13 m/s). Live: the RHIB on the south
+  bank, 12.3 kn -> 0, 8.4 of its 8.8 kN on 9 keel points, fixed to the centimetre.
+- **The seat is the top of the stack** (step 2): `max(water, bed)`, the keel `seatHeight` above it
+  (a boat's minus its draught, byte for byte what it was; a car's zero; the drone's its hover
+  height). `PlaceAt` / `PlaceOver` are `ResetAtRest` at a pose. **T / Y** cycle the helm
+  (`FrameLoop::CycleVehicle`); the recovery law is the spec's `recovery` flag: switched TO, the
+  drone is placed over the vehicle; switched FROM, the vehicle is placed under it and seats itself.
+  **F** frees the camera (the old T). The helm reads each hull's own joints for its channel limits
+  and rates. The drone is one `Hover` element: `m (g up + (v_cmd - v)/tau)` and a critically damped
+  PD on the attitude bivector, tau 0.35 s, no medium. Live: the boat set down under the drone at
+  the second switch, heading kept.
+- **The car** (step 3): a `Wheel` is a strut cast onto the same bed, progressive spring
+  `k x (1 + (x/travel)^2)` (its cube the bump stop), the tyre's patch gripping a ground point: the
+  brake scales the hold along the rolling direction; across it the patch is the carcass spring over
+  a relaxation length, the anchor relaxing as it rolls -- at rest a spring, rolling exactly the
+  slip-angle law as its limit. The slip law as a velocity law chattered at 60 Hz (3.5x the explicit
+  limit) and let the brake go. `car.baja`: the Baja's published figures, its wheels and tyre measured
+  from the glb, lifted 0.25 m on a 1.2 Hz spring with 0.35 m of travel, 8 kN over four wheels to
+  32 m/s -- the Warthog in it says ASSUMED. Gates: static loads to 0.7 % and compressions to 0.6 %,
+  the braked 20 deg hill 0.0000 m, the drive law 15.92 vs 16.59 m/s, Ackermann 0.0149 vs 0.0151.
+  Live: set down on the beach, 36 kn at half throttle, four wheels loaded, heading held.
+- **The reference model** (step 4): `entities[].mesh`, a small glb reader (`scene/MeshFile`), the
+  body drawn through the same motor sandwich and pixel shader as the boxes by `SV_VertexID` through
+  the bindless uints; the model's tyres, rims, discs and glass left out, the physics' wheels drawn
+  where the struts put them, turned as they are.
+
+Prior art, named: the raycast vehicle (Halo's Warthog, Unity's WheelCollider), Pacejka's relaxation
+length for the lateral lag, the "sticky" anchor of game friction solvers; what is this engine's own
+is that every one of them is the same anchor + cone on the same bed the water reads.
+
+**Parts plus forms (the same night).** Mark wanted the three vehicles to be one entity, a body that
+could one day transform. The algebra already said how: a part's mount is a motor and its force a
+wrench at the mount, so a form is a table of mounts and engagements and a transformation is a
+screw per part (`Motor::Log/Exp`, the product of exponentials; ALGEBRA pga). Built: `Form` on the
+spec (engagement per part + the body's numbers), `CombineForms` (several specs' parts in one body,
+one form each), `Vessel::SetForm` (the origin moves to the form's CG, the pose carried, the grips
+let go, the momenta rested), every part's wrench and water ask weighted by its engagement, each
+part's anchor and wheel slots its own; the scene's `entities[].forms` (a hull kind and its model
+per form), one entity `vehicle` in both Haulover scenes, T / Y take the next form, the recovery
+law gone (the seat does it). Gate: the barge form of a barge+car body draws what the barge alone
+draws to the micrometre and stands on the same six keel points; SetForm(1) moves the origin to the
+car's CG and the car form carries its weight on four wheels. Open: the continuous transformation.
+
+**The shell and the solids (2026-10-12).** Mark's log: the car rolled at 30 kn on the sand, and on
+its side it had no ground law but its tyres: it fell through the beach, then a grazing strut's
+cubic went to 10^12 N. `Shell`: station outlines with the bed contact and no water clip (the very
+GroundAtStation Buoyancy runs); the strut bounded by its own length. Then his ask for buildings and
+roads: `sim/Solids.h`, prisms in the hull's frame from `BuildingStack::Compose` about the hull on
+the pool; the contact plane is the deepest surface (the bed's or a face's), a strut's ray the
+nearer of the bed and a top. Gates: roof and side at rest on 15 points; a wall at 8.5 m/s held at
+the face (0.45 m of shell give); a 0.4 m step climbed to 0.400 m. Open: bridge decks as solids,
+the solids for the boat (a hull against a quay), the per-point grip across two surfaces at once.
+
+**Decks, and the flip tamed (2026-10-12).** Mark's second log: on its roof at 20 kn the shell took
+135 kN on 10 points and the car flew 7 m. Hunt-Crossley damping on the station contact (c x
+pen / settle x closing speed: zero at a touch, the old damping at rest, ten times it ten settles
+deep) -- the roof landing now lifts 7 cm after it lands; the CG lowered to 0.62 m and the tyres to
+mu 0.75 so the stability factor (1.15) stands above the grip and the car slides before it rolls.
+The decks: `BuildingLayer::DecksNear` reads the kDeck ribbons from the resident pages (the same
+records the renderer stands), the entity makes each segment a prism whose top PLANE runs through
+the deck's profile at its ends (`SolidPrism` gained gradients), and the strut's ray and the
+deepest-surface law take sloped planes as they took level ones. Gates: a 10 % ramp followed to
+0.009 m with four wheels down, the deck beyond stood at 2.000 m; the wall and the step as before.
+
+**"The car isn't driving over bridges" (2026-10-12, later).** Three causes, found in order. The
+planet tree the Haulover scenes use predates the deck law: no decks anywhere in it (its lod.json
+has no decks count; the test tree was 9 minutes older than the deck commit too, rebuilt now: 230
+bridge ways, 31 surveyed). The deck's height law added the clearance to the ground under EACH
+vertex, so a deck over a 9 m bank stood 21 m up with a cliff at the abutment -- now it stands at
+its clearance over the lowest surface its way crosses and rides the ground where higher, in the
+layer's stand and the entity's conversion alike. And the prisms were re-made only when the hull
+moved: the decks' pages stream in seconds after the hull stops under them, so the conversion now
+follows the layer's page version. The seat reads the solids (a body set down over a bridge lands
+on it); `GAGAME_SOLIDS_REACH` is a probe's env var. Gate: the drone hovering over the Gillis span,
+the harness taking the car form at frame 600: "set down ... seat +0.00 over the solid", CG +12.37 m
+NAVD with 2.4 m of water under the bridge, four wheels carrying 16772 N. Open: the approach ramps
+stop at the first junction of more than two ways (the US 1 rotary), so the south approach has no
+drivable way up; and a vehicle spawned over a bridge before its page streams lands under it.

@@ -34,10 +34,12 @@
 // ================================================================================================
 #pragma once
 
+#include <array>
 #include <atomic>
 #include "core/Common.h"
 #include "sim/Medium.h"
 #include "sim/RigidBody.h"
+#include "sim/Solids.h"
 #include "sim/VesselSpec.h"
 #include "sim/WaterSurface.h"
 
@@ -71,7 +73,12 @@ struct VesselTelemetry {
     double wettedLambda = 0.0;      // Savitsky's mean wetted-length / beam -- the planing state
     double copZ = 0.0;              // where the planing pressure acts, body z
     double depthM = 0.0;            // water depth under the hull
-    bool   aground = false;
+    bool   aground = false;         // a LABEL (depth under the CG < 0.3 m); the force is below
+    // THE GROUND'S ANSWER (beaching): the bed's normal force summed over the station outline
+    // points it is pushing on, and how many of them. Zero and zero is a hull the bed does not
+    // touch; the weight on the bed is what buoyancy is no longer carrying.
+    double contactN = 0.0;          // N
+    int    contactPts = 0;
     bool   waterValid = false;      // false = no coverage; NOT the same as flat water
     int    thrustersWet = 0;
 };
@@ -94,6 +101,7 @@ public:
     // ...and the audit (the residency audit's flag): every table entry re-asked live, compared bit
     // for bit; a difference is the batch answering other than the point would.
     static bool s_batchAudit;
+    static bool s_gripTrace;   // a test's per-point trace of the ground's grip
     static std::atomic<uint64_t> s_auditChecks, s_auditFails;
 
     const RigidBody& Body() const { return m_body; }
@@ -104,6 +112,24 @@ public:
     // Gravity is applied inside Step, but exposed so a gate can hold a hull in a vice.
     bool applyGravity = true;
 
+    // THE SOLIDS the ground law reads beside the bed (sim/Solids.h), in the body's frame; null or
+    // empty is the bed alone. Set by whoever knows the data, before the step; read by the contact
+    // laws (GroundAtStation, Wheel). The list must outlive the step.
+    void SetSolids(const std::vector<SolidPrism>* s) { m_solids = s; }
+
+    // ---- FORMS (VesselSpec.h Form: parts plus forms) --------------------------------------------
+    size_t FormCount() const { return m_spec.forms.size(); }
+    size_t FormIndex() const { return m_form; }
+    const Form& CurrentForm() const { return m_spec.forms[m_form]; }
+    // The weight the current form puts on part i.
+    double Engage(size_t i) const { return (i < m_spec.forms[m_form].engage.size()) ? m_spec.forms[m_form].engage[i] : 0.0; }
+    // TAKE A FORM: the body's origin moves to that form's CG (the geometry re-referenced onto it,
+    // the pose carried by the same shift, so every part stands where it stood in the world), the
+    // body's numbers become the form's (Spec() reads them), the ground grips are let go and the
+    // momenta rested -- the discrete switch; the continuous transformer transports them along the
+    // parts' screws (the follow-on). False for an index the spec has no form for.
+    bool SetForm(size_t f);
+
     // The total body-frame wrench at the current state, without stepping. This is what the
     // gates read: a floating body at equilibrium has a wrench of zero, and that is checkable
     // to many more digits than "watch it settle" ever could be.
@@ -111,7 +137,20 @@ public:
 
 private:
     void WaterPoints(const VesselControls& c, std::vector<double>& xz) const;   // F22
+    // THE BED PLANE (beaching, 2026-10-11): one plane per hull per wrench, its normal the secant
+    // over the hull -- the bed's height at the CG and at CG + (h, 0) and CG + (0, h), h half the
+    // length overall, through the same WaterSurface::At the stations ask (so the F22 table serves
+    // it). Every contact point then takes its OWN station's bed height and this normal. The
+    // three world points, in the order WaterPoints lists them (the same doubles: a table hit).
+    void BedProbePoints(double xz[6]) const;
+    void BedPlane(const WaterSurface& sea, double simUnix);
     Bivector Buoyancy(const Element& e, const WaterSurface& sea, double simUnix);
+    // THE GROUND AT ONE STATION (beaching): the outline points below the bed plane, pushed back
+    // along it with the grip. Shared by Buoyancy (with the water clip) and Shell (without).
+    // Advances m_anchorIdx by n whether or not the bed is touched.
+    Bivector GroundAtStation(const Section& st, const double* px, const double* py, int n,
+                             const Medium& med, const SurfaceSample& ss);
+    Bivector Shell(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Collar(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Planing(const Element& e, const WaterSurface& sea, double simUnix);
     // One half of the running surface, offset across the beam. Roll stiffness and roll damping
@@ -137,6 +176,8 @@ private:
     Bivector Foil(const Element& e, const WaterSurface& sea, const VesselControls& c,
                   double simUnix);
     Bivector Drag(const Element& e, const WaterSurface& sea, double simUnix);
+    Bivector Hover(const Element& e, const VesselControls& c);
+    Bivector Wheel(const Element& e, const WaterSurface& sea, const VesselControls& c, double simUnix);
 
     VesselSpec m_spec;
     RigidBody  m_body;
@@ -149,6 +190,70 @@ private:
     double m_wetFrac = 1.0;
     double m_accDraught = 0.0;
     int    m_accStations = 0;
+
+    // ---- the bed (beaching): the plane's normal in the hull's frame, this wrench; the contact
+    // stiffness and damping PER KEEL POINT (Build: the hull's weight over `contactSettle` on the
+    // points at each station's lowest y -- one for a V, three for a flat bottom); the friction.
+    double m_bedN[3] = {0.0, 1.0, 0.0};
+    double m_kContact = 0.0;       // N/m per point
+    double m_cContact = 0.0;       // N s/m per point: critical against the mass share
+    double m_mContact = 1.0;       // kg: the mass share of one point
+    double m_settleContact = 0.015; // m: the declared settle, the Hunt-Crossley damping's scale
+    double m_muContact = 0.0;
+    // THE GRIP IS A POSITION, NOT A VELOCITY. Coulomb's static friction holds a hull at REST on a
+    // slope, and no function of velocity can: at 60 Hz a velocity law removes at most what gravity
+    // added that step, so it creeps at ~g sin(theta) dt (measured 2.36 m in 10 s on a 20 deg slope
+    // under the smooth sign with eps 0.5 mm/s in its implicit form; the brief's eps of 0.05 m/s
+    // creeps 0.36 m; an eps small enough to hold is 55x critical and explicit integration chatters).
+    // So each outline point keeps the ground point it GRIPPED: a tangential spring to its anchor
+    // (the bed's own rate and damping) saturated at mu N, the anchor dragged to the cone when it
+    // saturates. Below the cone the hull stands still to the spring's deflection; above it, it
+    // slides at exactly mu N. One expression; the cone is the same min(1, mu N / |F|) a tyre uses.
+    // Anchors live in the hull's FRAME (world points), so a carry moves them with the body (Carry).
+    std::vector<double> m_anchor;      // 3 per outline point, in Buoyancy/station/outline order
+    std::vector<uint8_t> m_anchorOn;   // the point is gripping (its anchor is live)
+    size_t m_anchorIdx = 0;            // the running index this wrench
+    bool m_groundAsks = false;         // any ground law at all: the bed plane is built, its probes listed
+
+public:
+    // CARRIED BY A MOTOR: the body (RigidBody::Carry) and the ground it grips, together.
+    void Carry(const Motor& K);
+
+    // THE WHEELS' LIVE STATE (the car, 2026-10-11): one per Wheel element in spec order, written by
+    // every wrench -- where the strut put the wheel's centre (BODY frame), its steer, its load and
+    // compression -- so the layer draws each wheel where the suspension has it, turned as it is.
+    struct WheelState {
+        double centre[3] = {0.0, 0.0, 0.0};
+        double steer = 0.0;
+        double load = 0.0;
+        double comp = 0.0;
+    };
+    const std::vector<WheelState>& Wheels() const { return m_wheels; }
+    // The lowest point of the body at rest, body frame: the keel of the stations and the tyres at
+    // full droop. The set-down puts THIS on the surface the body rides (Entity::Update).
+    double KeelY() const;
+
+private:
+    std::vector<WheelState> m_wheels;
+    size_t m_wheelIdx = 0;
+    // The braked tyre's grip of its ground point, per wheel (Build: its share of the weight over
+    // the wheel element's contactSettle), 0.4 of critical as the hull's.
+    double m_kGrip = 0.0, m_cGrip = 0.0;
+    double m_mWheel = 1.0;   // kg: one wheel's share of the mass (the lateral spring's damping)
+    const std::vector<SolidPrism>* m_solids = nullptr;
+    // THE DEEPEST SURFACE under a point: the bed plane's penetration and normal, then every solid
+    // whose prism holds the point -- the nearest face's. The deeper one is the contact plane.
+    void DeepestSurface(const double pw[3], double bedPen, const double bedN[3], double& pen, double n[3]) const;
+
+    // ---- forms: the current one, every form's CG in the datum (Build's solve, once per form),
+    // the datum point the body origin stands on now, and each part's first anchor and wheel slot
+    // (so a form that skips parts keeps every other part's grips where they were).
+    size_t m_form = 0;
+    std::vector<std::array<double, 3>> m_formCg;
+    double m_cgNow[3] = {0.0, 0.0, 0.0};
+    std::vector<size_t> m_anchorBase, m_wheelBase;
+    void ShiftGeometry(const double d[3]);        // every body coordinate minus d
+    void ApplyFormNumbers(const Form& f);         // Spec()'s top level, the mass props, the contacts
 };
 
 // ---- the section clip, exposed because it has a closed-form gate of its own ------------------

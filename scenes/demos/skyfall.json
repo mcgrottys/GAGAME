@@ -28,7 +28,7 @@
     "",
     "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
     "       Q / E  split the levers (pivot)           Shift / Ctrl  trim out / in",
-    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "F      free the camera from the boat (it keeps its throttles); F again returns",
     "FLY    W A S D move, Q / E down / up, hold the right mouse button to look, wheel = speed",
     "TIME   Space pause, Up / Down time x10 / /10, Left / Right nudge.   R reload shaders.",
     "",

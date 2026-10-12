@@ -130,6 +130,19 @@ public:
 
     size_t ResidentCells() const { return m_cells.size(); }
 
+    // THE DECKS THE PHYSICS READS (2026-10-12): every bridge deck and ramp ribbon (compose/
+    // BuildingShape.h kDeck) in the pages resident about the eye whose polyline comes within rM of
+    // the place -- its vertices in degrees with the profile each stands over the higher of the
+    // ground and the sea (metres), and its width. The frame thread's (the pages are its); the
+    // entity turns them into solids in its own frame (sim/Solids.h).
+    struct DeckStrip {
+        std::vector<double> lat, lon, over;   // per vertex
+        double widthM = 0.0;
+    };
+    void DecksNear(double latDeg, double lonDeg, double rM, std::vector<DeckStrip>& out) const;
+    // ...and a count that moves whenever the resident page set does, so a reader re-asks then.
+    uint64_t PagesVersion() const { return m_pagesVersion; }
+
     // Mirrors `struct BuildingVertex` in shaders/Buildings.hlsl (priors 22).
     struct Vertex {
         float pos[3];   // metres from the cell's origin, flat frame

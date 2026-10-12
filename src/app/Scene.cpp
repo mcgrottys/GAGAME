@@ -310,6 +310,23 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Enum("controller", n.p.controller);
             r.F64("throttle", n.p.throttle);
             r.F64("steer", n.p.steer);
+            r.Str("mesh", n.p.mesh);
+            r.F64("meshScale", n.p.meshScale);
+            r.F64("meshYaw", n.p.meshYaw);
+            if (const JsonValue* fa = ListOf(e, "forms")) {
+                for (const JsonValue& fe : fa->arr) {
+                    scene::FormProps f;
+                    f.vessel = fe.Str("vessel");
+                    f.mesh = fe.Str("mesh");
+                    f.meshScale = fe.Num("meshScale", 1.0);
+                    f.meshYaw = fe.Num("meshYaw", 0.0);
+                    if (f.vessel.empty()) {
+                        return Refuse(why, "entities." + n.p.name + ".forms: a form needs a vessel");
+                    }
+                    n.p.forms.push_back(f);
+                }
+                if (n.p.vessel.empty() && !n.p.forms.empty()) n.p.vessel = n.p.forms.front().vessel;
+            }
             if (const JsonValue* at = e.Get("at")) {
                 n.hasAt = true;
                 n.at = *at;

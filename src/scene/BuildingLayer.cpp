@@ -1582,11 +1582,23 @@ void BuildingLayer::StandBatch(std::vector<std::pair<std::shared_ptr<const Page>
                             // measured from; a road's (profile zero) is the ground itself.
                             std::vector<uint8_t> z(size_t(sv.head.nVerts) * 2);
                             const bool deck = (sv.head.flags & shape::kDeck) != 0 && sv.z;
+                            // THE DECK STANDS AT ITS CLEARANCE OVER THE LOWEST SURFACE ITS WAY CROSSES
+                            // (2026-10-12): the water of a river bridge, the cutting under an overpass --
+                            // the lowest of max(ground, sea) along the ribbon -- and rides the ground
+                            // wherever the ground is higher. Added to the ground under EACH vertex it stood
+                            // 12 m over a 9 m bank: a 21 m deck with a cliff at either abutment, which the
+                            // car met as a wall and the picture as a bridge in the sky.
+                            std::vector<double> gv(sv.head.nVerts);
+                            double gMin = 1e300;
                             for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
                                 const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
-                                const double g = gAt(lat + y / my, lon + x / mx);
+                                gv[v] = gAt(lat + y / my, lon + x / mx);
+                                gMin = (std::min)(gMin, (std::max)(gv[v], 0.0));
+                            }
+                            for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
+                                const double g = gv[v];
                                 const double zp = deck ? double(sv.z[v]) * 0.1 : 0.0;
-                                const double dz = (zp > 0.0 ? (std::max)(g, 0.0) + zp : g) - base;
+                                const double dz = (zp > 0.0 ? (std::max)(g, gMin + zp) : g) - base;
                                 const int16_t q = static_cast<int16_t>(std::clamp(std::lround(dz * 10.0), -32767L, 32767L));
                                 std::memcpy(&z[2 * v], &q, 2);
                             }
@@ -1616,6 +1628,40 @@ void BuildingLayer::StandBatch(std::vector<std::pair<std::shared_ptr<const Page>
         for (auto& d : dones) shared->standDone.push_back(std::move(d));
         shared->standInflight.fetch_sub(1);
     });
+}
+
+void BuildingLayer::DecksNear(double latDeg, double lonDeg, double rM, std::vector<DeckStrip>& out) const {
+    out.clear();
+    constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
+    const double my = kR * kDeg, mx = std::cos(latDeg * kDeg) * kR * kDeg;
+    const double r2 = rM * rM;
+    for (const auto& [key, page] : m_pages) {
+        if (!page || page->packed.empty()) continue;
+        for (size_t k = 0; k < page->blds.size() && k < page->raw.size(); ++k) {
+            const RtBld& b = page->blds[k];
+            if (b.shapeOff == UINT32_MAX || b.shapeOff >= page->packed.size()) continue;
+            ShapeView sv;
+            if (!ReadShape(page->packed.data() + b.shapeOff, page->packed.data() + page->packed.size(), sv)) continue;
+            if (!(sv.head.flags & shape::kRibbon) || !(sv.head.flags & shape::kDeck) || !sv.z || sv.head.nVerts < 2) continue;
+            double lat, lon, zc, hz, a1, a2, hd;
+            int cx, cy;
+            LodUnpack(page->raw[k], lat, lon, zc, hz, a1, a2, hd, cx, cy);
+            // Within reach: any vertex within rM of the place.
+            bool within = false;
+            DeckStrip strip;
+            strip.widthM = sv.head.pad * 0.1;
+            for (uint32_t v = 0; v < sv.head.nVerts; ++v) {
+                const double x = sv.xy[2 * v] * double(sv.unit), y = sv.xy[2 * v + 1] * double(sv.unit);
+                const double vla = lat + y / my, vlo = lon + x / mx;
+                const double dx = (vlo - lonDeg) * mx, dz = (vla - latDeg) * my;
+                if (dx * dx + dz * dz <= r2) within = true;
+                strip.lat.push_back(vla);
+                strip.lon.push_back(vlo);
+                strip.over.push_back(double(sv.z[v]) * 0.1);
+            }
+            if (within) out.push_back(std::move(strip));
+        }
+    }
 }
 
 void BuildingLayer::Simulate(const FrameContext& ctx) {

@@ -183,6 +183,7 @@ struct Assembly {
     WaterBankLayer* waterBankEye = nullptr; // another eye's own rings (the minimap's: hud.minimap)
     GlobeLayer* globe = nullptr;
     VesselLayer* vesselLayer = nullptr;   // M9bq: the hulls, drawn from their specs
+    std::shared_ptr<const BuildingStack> buildingStack;   // the solids the vehicles' ground law reads
     BuildingLayer* buildingLayer = nullptr;   // the building solids, streamed by cell about the eye
     double planetR = 0.0;
     ResidencyManager resMgr;
