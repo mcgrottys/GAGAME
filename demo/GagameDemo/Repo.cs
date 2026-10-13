@@ -134,16 +134,30 @@ public sealed class Repo
         return psi;
     }
 
-    /// A harvester, run as docs/LAUNCH.md runs them: `py -3 -I harvester\x.py args`, from the root.
-    public ProcessStartInfo HarvestStart(string script, IEnumerable<string> args)
+    /// The harvest console: beside this exe when published together, else the checkout's build of
+    /// harvest\harvest (Debug or Release, whichever is newer), else `dotnet run` on its project.
+    public (string exe, List<string> lead) HarvestExe()
     {
-        var psi = Hidden("py");
-        psi.ArgumentList.Add("-3");
-        psi.ArgumentList.Add("-I");
-        psi.ArgumentList.Add("-u");
-        psi.ArgumentList.Add(Path.Combine("harvester", script));
+        var beside = Path.Combine(AppContext.BaseDirectory, "harvest.exe");
+        if (File.Exists(beside)) return (beside, new());
+        var builds = new[] { "Debug", "Release" }
+            .Select(c => Path.Combine(Root, "harvest", "harvest", "bin", c, "net10.0", "harvest.exe"))
+            .Where(File.Exists).OrderByDescending(File.GetLastWriteTimeUtc).ToList();
+        if (builds.Count > 0) return (builds[0], new());
+        return ("dotnet", new() { "run", "--project", Path.Combine(Root, "harvest", "harvest"), "--no-launch-profile", "--" });
+    }
+
+    /// A harvester by name through the harvest console, from the root: `harvest <name> args`.
+    public ProcessStartInfo HarvestStart(string name, IEnumerable<string> args, string? dataCache = null)
+    {
+        var (exe, lead) = HarvestExe();
+        var psi = Hidden(exe);
+        foreach (var l in lead) psi.ArgumentList.Add(l);
+        psi.ArgumentList.Add(name);
         foreach (var a in args) psi.ArgumentList.Add(a);
-        psi.Environment["PYTHONIOENCODING"] = "utf-8";
+        psi.ArgumentList.Add("--root");
+        psi.ArgumentList.Add(Root);
+        if (!string.IsNullOrWhiteSpace(dataCache)) { psi.ArgumentList.Add("--datacache"); psi.ArgumentList.Add(dataCache); }
         return psi;
     }
 

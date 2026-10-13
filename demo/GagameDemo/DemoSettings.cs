@@ -15,6 +15,9 @@ public sealed class DemoSettings
     /// The folder the repo's `cache` junction points at ("" = whatever stands there today).
     public string CacheRoot { get; set; } = "";
 
+    /// The big-data drive the harvesters keep raw downloads on (GAGAME_DATACACHE; "" = D:\DataCache\GAGAME).
+    public string DataCache { get; set; } = "";
+
     /// Google tile limits, passed as `--set streaming.*` on every launch (docs/LAUNCH.md, launch-run).
     public uint TileBudget { get; set; } = 1000;
     public uint DayTiles { get; set; } = 100000;

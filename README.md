@@ -429,7 +429,10 @@ The engine after M12 — `docs/ARCHITECTURE.md` is the map, this is the index.
   Scriptorium serves `ALGEBRA.md` as `math` topics and `LAUNCH.md` as `note` sections.
 - `tools/` — the gate harness (`gate_stills.sh`, `gate_compare.sh`, `stills.sh`, `imgdiff.py`,
   `raildiff.py`), `hal_lint.py`, `algebra_lint.py`, the Scriptorium MCP server.
-- `harvester/` — the polite NOAA fetch + fit tooling (stdlib Python).
+- `harvester/` — the polite NOAA fetch + fit tooling (stdlib Python), and `harvester/cpp` (roads, bridges).
+- `harvest/` — the same harvesters in C#: `Gagame.Harvest` (the factory, one class per product, the
+  readers) and the `harvest` console the demo runs; gated byte-for-byte against the Python's
+  outputs (`harvest/README.md`).
 - `demo/GagameDemo/` — the .NET launcher to hand out (`GAGAME.sln` holds it with the Scriptorium):
   an install form for the cache, its limits, the key and the data harvests, then a toolbar that
   swaps the engine between scenes (`demo/GagameDemo/README.md`).

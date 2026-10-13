@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Gagame.Harvest;
 
 namespace GagameDemo;
 
@@ -13,6 +14,8 @@ public sealed class InstallForm : Form
 
     // cache
     readonly TextBox _cachePath = new() { Width = 420 };
+    readonly TextBox _dataCache = new() { Width = 420, PlaceholderText = @"D:\DataCache\GAGAME (the default when empty)" };
+    readonly Queue<string> _queue = new();
     readonly Label _cacheStatus = new() { AutoSize = true, MaximumSize = new Size(640, 0) };
     readonly NumericUpDown _tileBudget = Num(0, 1_000_000);
     readonly NumericUpDown _dayTiles = Num(0, 10_000_000);
@@ -152,6 +155,12 @@ public sealed class InstallForm : Form
             catch (Exception ex) { Log("[demo] link failed: " + ex.Message); }
             RefreshCache();
         };
+        var browseBig = new Button { Text = "Browse...", AutoSize = true };
+        browseBig.Click += (_, _) =>
+        {
+            using var d = new FolderBrowserDialog { Description = "The big-data drive for raw downloads", UseDescriptionForTitle = true, SelectedPath = _dataCache.Text };
+            if (d.ShowDialog(this) == DialogResult.OK) _dataCache.Text = d.SelectedPath;
+        };
         var gauge = new Button { Text = "Measure", AutoSize = true };
         gauge.Click += (_, _) => Gauge();
         var prune = new Button { Text = "List stale trees", AutoSize = true };
@@ -162,6 +171,7 @@ public sealed class InstallForm : Form
         };
 
         _cachePath.Text = _settings.CacheRoot;
+        _dataCache.Text = _settings.DataCache;
         _tileBudget.Value = _settings.TileBudget;
         _dayTiles.Value = _settings.DayTiles;
         _dayGb.Value = (decimal)(_settings.DayBytes / 1e9);
@@ -172,6 +182,7 @@ public sealed class InstallForm : Form
             ("", Note("The engine reads cache\\ beside its exe's checkout. Point that at a folder on a big disk: Link makes cache\\ a directory junction to it (nothing is moved; a cache folder with files in it is left alone and said so).")),
             ("Folder", Flow(_cachePath, browse, link, gauge)),
             ("Now", _cacheStatus),
+            ("Big-data drive", Flow(_dataCache, browseBig, Note("where the harvesters keep raw downloads (CUDEM tiles, CUSP, NHD, BlueTopo, eHydro, OFS, EOT20): GAGAME_DATACACHE"))),
             ("", Note("Google tile limits (scene keys streaming.*; passed as --set on every launch). The day caps count every engine on the machine together, per UTC day; 0 = no request that day.")),
             ("Fetches per run", Flow(_tileBudget, Note("tileBudget: the hard cap on Google fetches in one run (3000 for a long ride)"))),
             ("Requests per day", Flow(_dayTiles, Note("dayTiles: requests sent, whatever came back"))),
@@ -271,6 +282,20 @@ public sealed class InstallForm : Form
         };
         _source.Click += (_, _) => OpenSources();
         _stop.Click += (_, _) => _runner.Stop();
+        var fetchAll = new Button { Text = "Fetch all required", AutoSize = true };
+        fetchAll.Click += (_, _) =>
+        {
+            if (_runner.IsRunning) { Log("[demo] something is already running"); return; }
+            _queue.Clear();
+            foreach (var name in Datasets.Required)
+            {
+                var ds = Datasets.All.FirstOrDefault(d => d.Script == name);
+                if (ds is not null && !ds.Present(_repo)) _queue.Enqueue(name);
+            }
+            if (_queue.Count == 0) { Log("[demo] every required dataset is present"); return; }
+            Log($"[demo] fetching {_queue.Count} required dataset(s) in order: {string.Join(", ", _queue)}");
+            StartQueued();
+        };
         var refresh = new Button { Text = "Refresh", AutoSize = true };
         refresh.Click += (_, _) => RefreshData();
         var sources = new LinkLabel { Text = "SOURCES.md", AutoSize = true, Margin = new Padding(12, 7, 3, 3) };
@@ -282,7 +307,7 @@ public sealed class InstallForm : Form
         panel.Controls.Add(Note("Data is not in the repository (README). Each line is a product the engine reads and the harvester that fetches it, politely and cache-first, from its provider: Download runs it with its defaults; Source opens the provider; Insert runs it for your own place, window, file or flags. Harvesters run as `py -3 -I harvester\\<script>` from the checkout. A fresh clone renders nothing until these have run; the shipped scenes want at least Tides, Sea state, Currents, Bathymetry, Globe and Shorelines."));
         panel.Controls.Add(_list);
         panel.Controls.Add(_what);
-        panel.Controls.Add(Flow(_download, _insert, _source, _stop, refresh, sources, launch));
+        panel.Controls.Add(Flow(_download, _insert, _source, _stop, fetchAll, refresh, sources, launch));
         return Group(SectionData, "Data files", panel);
     }
 
@@ -329,7 +354,16 @@ public sealed class InstallForm : Form
     void RunSelected(List<string>? args)
     {
         if (Current() is not { Script: not null } ds) return;
-        _runner.Start(_repo.HarvestStart(ds.Script, args ?? (IEnumerable<string>)ds.DefaultArgs), ds.Name);
+        _queue.Clear();
+        _runner.Start(_repo.HarvestStart(ds.Script, args ?? (IEnumerable<string>)ds.DefaultArgs, _dataCache.Text.Trim()), ds.Name);
+    }
+
+    void StartQueued()
+    {
+        if (_queue.Count == 0) return;
+        var name = _queue.Dequeue();
+        var ds = Datasets.All.First(d => d.Script == name);
+        _runner.Start(_repo.HarvestStart(name, ds.DefaultArgs, _dataCache.Text.Trim()), ds.Name);
     }
 
     void OpenSources()
@@ -354,7 +388,7 @@ public sealed class InstallForm : Form
         _stop.Enabled = on;
         _finish.Enabled = !on;
         _build.Enabled = !on;
-        if (!on) { RefreshData(); RefreshEngine(); } else Selected();
+        if (!on) { RefreshData(); RefreshEngine(); StartQueued(); } else Selected();
     }
 
     void Log(string line)
@@ -365,6 +399,7 @@ public sealed class InstallForm : Form
     void Finish()
     {
         _settings.CacheRoot = _cachePath.Text.Trim();
+        _settings.DataCache = _dataCache.Text.Trim();
         _settings.TileBudget = (uint)_tileBudget.Value;
         _settings.DayTiles = (uint)_dayTiles.Value;
         _settings.DayBytes = (double)_dayGb.Value * 1e9;

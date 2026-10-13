@@ -53,3 +53,5 @@ harvester/cpp/bin/
 # The .NET demo launcher (demo/GagameDemo) builds here.
 demo/GagameDemo/bin/
 demo/GagameDemo/obj/
+harvest/*/bin/
+harvest/*/obj/
