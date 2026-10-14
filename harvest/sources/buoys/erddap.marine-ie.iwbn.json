@@ -1,0 +1,27 @@
+{
+  "id": "erddap.marine-ie.iwbn",
+  "title": "Irish Weather Buoy Network real time data, Marine Institute ERDDAP (tabledap IWBNetwork)",
+  "label": "Irish Weather Buoy Network on the Marine Institute ERDDAP",
+  "kind": "erddap-tabledap",
+  "rank": 2,
+  "server": "https://erddap.marine.ie/erddap",
+  "dataset": "IWBNetwork",
+  "url": "https://erddap.marine.ie/erddap/tabledap/IWBNetwork.html",
+  "license": "Creative Commons Attribution 4.0 (https://creativecommons.org/licenses/by/4.0/)",
+  "cite": "Marine Institute, Ireland: Irish Weather Buoy Network",
+  "coverage": [-16, 50, -4, 56],
+  "cache": "cache/erddap/IWBNetwork",
+  "recent": "now-1day",
+  "variables": {
+    "station": "station_id",
+    "lat": {"standard_name": "latitude"},
+    "lon": {"standard_name": "longitude"},
+    "time": {"standard_name": "time"},
+    "wdir": {"standard_name": "wind_from_direction"},
+    "wspd": {"name": "WindSpeed", "units": "knots"},
+    "hs": {"name": "WaveHeight", "units": "m"},
+    "dpd": {"name": "Tp"},
+    "apd": {"name": "WavePeriod"},
+    "mwd": {"name": "MeanWaveDirection", "direction": "from"}
+  }
+}

@@ -155,5 +155,8 @@ public sealed class HttpError : Exception
     public int Code { get; }
     /// The host's Retry-After in seconds, when it named one.
     public double? RetryAfter { get; init; }
+    /// The start of the error's body (a server's own reason: ERDDAP's 404 says "no matching
+    /// results" for an empty answer and "unknown datasetID" for a dataset it does not hold).
+    public string Body { get; init; } = "";
     public HttpError(int code, string url) : base($"HTTP Error {code} for {url}") => Code = code;
 }

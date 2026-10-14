@@ -1,0 +1,27 @@
+{
+  "id": "erddap.coastwatch.ndbcmet",
+  "title": "NDBC Standard Meteorological Buoy Data, 1970-present, through NOAA CoastWatch ERDDAP (tabledap cwwcNDBCMet)",
+  "label": "NDBC buoys on CoastWatch ERDDAP",
+  "kind": "erddap-tabledap",
+  "rank": 1,
+  "server": "https://coastwatch.pfeg.noaa.gov/erddap",
+  "dataset": "cwwcNDBCMet",
+  "url": "https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.html",
+  "license": "NOAA NDBC data via NOAA NMFS SWFSC ERD: free to use and redistribute, not for legal use (the dataset's license attribute)",
+  "cite": "NOAA NDBC; served by NOAA NMFS SWFSC ERD CoastWatch West",
+  "coverage": [-180, -90, 180, 90],
+  "cache": "cache/erddap/cwwcNDBCMet",
+  "recent": "now-1day",
+  "variables": {
+    "station": "station",
+    "lat": {"standard_name": "latitude"},
+    "lon": {"standard_name": "longitude"},
+    "time": {"standard_name": "time"},
+    "wdir": {"standard_name": "wind_from_direction"},
+    "wspd": {"standard_name": "wind_speed"},
+    "hs": {"standard_name": "sea_surface_wave_significant_height"},
+    "dpd": "DPD",
+    "apd": "APD",
+    "mwd": {"name": "MWD", "direction": "from"}
+  }
+}

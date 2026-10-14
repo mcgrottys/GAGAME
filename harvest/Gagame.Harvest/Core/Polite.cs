@@ -237,7 +237,9 @@ public sealed class Polite : Fetcher
             {
                 double? ra = null;
                 if (resp.Headers.RetryAfter?.Delta is TimeSpan ts) ra = ts.TotalSeconds;
-                throw new HttpError(status.Value, url) { RetryAfter = ra };
+                var why = method == "HEAD" ? "" : resp.Content.ReadAsStringAsync(cts.Token).GetAwaiter().GetResult();
+                got = Encoding.UTF8.GetByteCount(why);
+                throw new HttpError(status.Value, url) { RetryAfter = ra, Body = why.Length > 2000 ? why[..2000] : why };
             }
             if (method == "HEAD") { }
             else if (reader is not null)

@@ -1,0 +1,26 @@
+{
+  "id": "erddap.coastwatch.gebco2020",
+  "title": "GEBCO_2020 Grid, 15 arc-second, through NOAA CoastWatch ERDDAP (griddap GEBCO_2020)",
+  "label": "GEBCO 2020 15\"",
+  "short": "gebco15",
+  "kind": "erddap-griddap",
+  "rank": 1,
+  "server": "https://coastwatch.pfeg.noaa.gov/erddap",
+  "dataset": "GEBCO_2020",
+  "url": "https://coastwatch.pfeg.noaa.gov/erddap/griddap/GEBCO_2020.html",
+  "license": "GEBCO Grid: public domain, attribution requested (https://www.gebco.net/data-products/gridded-bathymetry-data); served by NOAA CoastWatch West",
+  "cite": "GEBCO Compilation Group 2020, GEBCO 2020 Grid, doi:10.5285/a29c5465-b138-234d-e053-6c86abc040b9",
+  "datum": "MSL",
+  "vertical_epsg": 5714,
+  "step_arcsec": 15,
+  "coverage": [-180, -90, 180, 90],
+  "variables": {
+    "elevation": {"name": "elevation", "units": "m"},
+    "lat": {"standard_name": "latitude"},
+    "lon": {"standard_name": "longitude"}
+  },
+  "chunk_deg": 1,
+  "name": "GEBCO_2020_{ns}{lat1:00}{ew}{lon0:000}.tif",
+  "cache": ["{datacache}/erddap/GEBCO_2020/{name}"],
+  "metadata_cache": "{datacache}/erddap/GEBCO_2020"
+}

@@ -3,7 +3,8 @@ namespace Gagame.Harvest;
 /// `harvest limits [--check]`: the sources' limits as Polite resolves them, one line a source;
 /// `--check` holds the file to the pace, budgets and bans Polite had as constants before the file
 /// (1.1 s a host, 2.5 s on nomads.ncep.noaa.gov, 2000 requests and 8 GB a ledger, 30 s back-off,
-/// 50 MB for an unplanned GET, ten Google host fragments) over every host a harvester names.
+/// 50 MB for an unplanned GET, ten Google host fragments) over every host a harvester names, and
+/// holds every host a source config (harvest/sources) names to an entry of its own.
 public static class LimitsCli
 {
     /// Every host the harvesters fetch from or cite (grep of harvest/ for https://, 2026-10-13).
@@ -45,6 +46,18 @@ public static class LimitsCli
             if (now != old || oldBan != (lim.BannedBy(h) is not null)) moved.Add($"{h} {old} -> {now} s");
         }
         Gate(moved.Count == 0, $"{HarvesterHosts.Length} harvester hosts keep their old gap and ban{(moved.Count > 0 ? ": " + string.Join("; ", moved) : "")}");
+        // every host a source config names (any https:// value in it) is a source the file documents
+        var configHosts = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var layer in new[] { SourceFactory.Observations, SourceFactory.Relief })
+        {
+            var dir = Path.Combine(root, "harvest", "sources", layer);
+            if (!Directory.Exists(dir)) continue;
+            foreach (var f in Directory.GetFiles(dir, "*.json"))
+                foreach (var v in JsonUtil.Load(f)!.AsObject().Select(kv => kv.Value).OfType<System.Text.Json.Nodes.JsonValue>())
+                    if (v.TryGetValue(out string? s) && s.StartsWith("https://", StringComparison.Ordinal)) configHosts.Add(Polite.HostOf(s));
+        }
+        var undocumented = configHosts.Where(h => lim.Of(h) is null).ToList();
+        Gate(undocumented.Count == 0, $"{configHosts.Count} hosts the source configs name each have an entry{(undocumented.Count > 0 ? "; not: " + string.Join(", ", undocumented) : "")}");
         var notBanned = GoogleHosts.Where(h => lim.BannedBy(h) is null).ToList();
         var oldNotBanned = GoogleHosts.Where(h => !OldBanned.Any(b => (h + ".").Contains(b))).ToList();
         Gate(notBanned.Count == 0 && oldNotBanned.Count == 0, $"{GoogleHosts.Length} Google hosts banned by the file and by the old list{(notBanned.Count > 0 ? "; not: " + string.Join(", ", notBanned) : "")}");

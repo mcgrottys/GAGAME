@@ -11,8 +11,10 @@ namespace Gagame.Harvest.Harvesters;
 ///   points   GFS-Wave forecast points, each a model node with its own lat/lon, cycle, grib box
 ///            and 13 forecast hours (f000..f048 by 4: wind, combined sea, wind sea + swell
 ///            partitions) -- Waves.HourEntry, the place's own hour
-///   buoys    every NDBC realtime2 station inside a painted region that reports met/wave lines,
-///            its latest line and spectrum, with its lat/lon
+///   buoys    every station of every observation source (harvest/sources/buoys, made by the
+///            SourceFactory: NDBC realtime2, ERDDAP tabledap networks ...) inside a painted region,
+///            its latest line (and spectrum where the source has one) in the engine's units, with
+///            its lat/lon; a station the better-ranked source answered is not asked again
 ///   hours, point_lat, point_lon, box, cycle_unix, cycle_label
 ///            the finest region's first point, for a reader that knows one point
 ///
@@ -27,11 +29,12 @@ namespace Gagame.Harvest.Harvesters;
 public sealed class ComposeSeastate : IHarvester
 {
     public string Name => "compose-seastate";
-    public string Title => "Sea-state composite (GFS-Wave + NDBC)";
-    public string What => "GFS-Wave forecast points chosen by the fidelity map and every NDBC buoy in the painted regions: one seastate.json.";
+    public string Title => "Sea-state composite (GFS-Wave + the buoy sources by configuration)";
+    public string What => "GFS-Wave forecast points chosen by the fidelity map and every buoy of the configured sources (harvest/sources/buoys) in the painted regions: one seastate.json.";
     public string[] Outputs => [];
-    public Source[] Sources => [new("NOMADS GFS-Wave", "https://nomads.ncep.noaa.gov/"), new("NDBC realtime2", "https://www.ndbc.noaa.gov/data/realtime2/")];
-    public Insert? Insert => new(InsertKind.FileArg, "A fidelity map (.gafid) and an output folder: --fidelity FILE --out data/composite/<name>/");
+    public Source[] Sources => [new("NOMADS GFS-Wave", "https://nomads.ncep.noaa.gov/"), new("NDBC realtime2", "https://www.ndbc.noaa.gov/data/realtime2/"),
+        new("ERDDAP tabledap (NDBC on CoastWatch, the Irish buoys)", "https://coastwatch.pfeg.noaa.gov/erddap/tabledap/cwwcNDBCMet.html")];
+    public Insert? Insert => new(InsertKind.FileArg, "A fidelity map (.gafid) and an output folder: --fidelity FILE --out data/composite/<name>/ [--sources id,id]");
 
     const double NodeDeg = 0.25, NodeM = NodeDeg * 111195.0;
 
@@ -118,46 +121,50 @@ public sealed class ComposeSeastate : IHarvester
         run.ReadBytes(bytesIn);
         run.Log($"{points.Count} forecast point(s) in {clusters.Count} subregion(s)");
 
-        // ---- NDBC buoys
-        var listing = FirstCopy.Earliest(NdbcStations.Dir, "_realtime2_listing_", ".html") ?? NdbcStations.ListingPath(DateTime.UtcNow);
-        var cat = NdbcStations.Read(polite, listing);
-        var buoys = new Dictionary<string, Dictionary<string, object?>>();
-        var regionBuoys = regions.Select(r => NdbcStations.Inside(cat, r.box, ["txt"])).ToList();
-        string? firstObs = null;
-        foreach (var (bid, lat, lon, bname) in regionBuoys.SelectMany(x => x).DistinctBy(x => x.sid).OrderBy(x => x.sid, StringComparer.Ordinal))
+        // ---- the buoys: every observation source (harvest/sources/buoys, or --sources), ranked;
+        // a station a better-ranked source answered is not asked of the next
+        var sources = SourceFactory.ObservationSources(new SourceEnv(ctx, polite, run.Log), new Args(argv).Opt("--sources"));
+        var found = new Dictionary<string, Dictionary<string, object?>>(StringComparer.Ordinal);
+        var regionBuoys = regions.Select(_ => new SortedSet<string>(StringComparer.Ordinal)).ToList();
+        var answered = new List<string>();
+        foreach (var src in sources)
         {
-            var stamp = DateTime.UtcNow.ToString("yyyyMMddHH", CultureInfo.InvariantCulture);
-            var met = FirstCopy.Earliest(NdbcStations.Dir, $"{bid}_", ".txt");
-            Dictionary<string, object?> b;
-            try { b = Waves.ParseNdbcMet(polite.GetTextP($"{NdbcStations.Root}/data/realtime2/{bid}.txt", met ?? Path.Combine(NdbcStations.Dir, $"{bid}_{stamp}.txt")).text) ?? new(); }
+            List<IReadOnlyList<Station>> inside;
+            try { inside = regions.Select(r => src.Stations(r.box)).ToList(); }
             catch (Polite.StopException) { throw; }
-            catch (Exception e) { run.Log($"buoy {bid}: no .txt ({e.Message})"); continue; }
-            var spec = FirstCopy.Earliest(NdbcStations.Dir, $"{bid}_", ".data_spec");
-            if (cat.Files.TryGetValue(bid, out var fs) && (fs.Contains("data_spec") || spec is not null))
+            catch (Exception e) { run.Log($"{src.Config.Id}: no stations ({e.Message}); the source is left out of this product"); continue; }
+            for (var i = 0; i < regions.Count; i++) regionBuoys[i].UnionWith(inside[i].Select(s => s.Id));
+            string? firstObs = null;
+            var got = 0;
+            foreach (var st in inside.SelectMany(x => x).DistinctBy(x => x.Id).OrderBy(x => x.Id, StringComparer.Ordinal))
             {
-                try
-                {
-                    var sp = Waves.ParseNdbcSpec(polite.GetTextP($"{NdbcStations.Root}/data/realtime2/{bid}.data_spec", spec ?? Path.Combine(NdbcStations.Dir, $"{bid}_{stamp}.data_spec")).text);
-                    if (sp is not null) b["spectrum"] = sp;
-                }
+                if (found.ContainsKey(st.Id)) continue;
+                Dictionary<string, object?>? b;
+                try { b = src.Observe(st); }
                 catch (Polite.StopException) { throw; }
-                catch (Exception e) { run.Log($"    {bid}.data_spec unavailable ({e.Message})"); }
+                catch (Exception e) { run.Log($"buoy {st.Id}: no line from {src.Config.Id} ({e.Message})"); continue; }
+                if (b is null) continue;
+                b["lat"] = st.Lat; b["lon"] = st.Lon; b["name"] = st.Name;
+                found[st.Id] = b;
+                got++;
+                if (b.GetValueOrDefault("obs_unix") is double ou && (firstObs is null || string.CompareOrdinal(IsoZ(FromUnix(ou)), firstObs) < 0)) firstObs = IsoZ(FromUnix(ou));
             }
-            b["lat"] = lat; b["lon"] = lon; b["name"] = bname;
-            buoys[bid] = b;
-            if (b.GetValueOrDefault("obs_unix") is double ou && (firstObs is null || string.CompareOrdinal(IsoZ(FromUnix(ou)), firstObs) < 0)) firstObs = IsoZ(FromUnix(ou));
+            if (got > 0)
+            {
+                answered.Add(src.Config.Label);
+                run.Input(src.Config.Id, src.Config.Title, null, src.Config.Url ?? src.Config.Server ?? "", src.Config.License, src.Config.Cite, "n/a", "none", validUtc: firstObs, fetchedUtc: src.FetchedUtc);
+            }
+            run.Log($"{src.Config.Id}: {got} buoy(s) in the regions");
         }
-        if (buoys.Count > 0)
-            run.Input("noaa.ndbc", "NOAA NDBC realtime2 met/wave lines and spectral density (the first copy cached)", null, NdbcStations.Root + "/data/realtime2/",
-                "public domain (NOAA NWS)", "NOAA NDBC", "n/a", "none", validUtc: firstObs, fetchedUtc: CompositeRun.FileUtc(listing));
+        var buoys = found.OrderBy(kv => kv.Key, StringComparer.Ordinal).ToDictionary(kv => kv.Key, kv => kv.Value);
         run.Log($"{buoys.Count} buoy(s) in the regions");
 
         for (var i = 0; i < regions.Count; i++)
             run.Coverage.Add(D(("box", new List<double> { regions[i].box.Lon0, regions[i].box.Lat0, regions[i].box.Lon1, regions[i].box.Lat1 }), ("grain_m", regions[i].grainM),
-                ("points", points.Count(p => p.region == i)), ("buoys", regionBuoys[i].Select(b => b.sid).ToList()), ("input", "noaa.gfswave")));
+                ("points", points.Count(p => p.region == i)), ("buoys", regionBuoys[i].ToList()), ("input", "noaa.gfswave")));
         var ordered = points.Select(p => p.p).ToList();
         var head = ordered.FirstOrDefault();
-        var doc = D(("generated_utc", NowIso()), ("source", "GFS-Wave via NOMADS grib filter at the fidelity map's points + NDBC realtime2 buoys in its regions"),
+        var doc = D(("generated_utc", NowIso()), ("source", $"GFS-Wave via NOMADS grib filter at the fidelity map's points + {string.Join(" + ", answered)} in its regions"),
             ("cycle_unix", head?["cycle_unix"]), ("cycle_label", head?["cycle_label"]), ("point_lat", head?["lat"]), ("point_lon", head?["lon"]), ("box", head?["box"]),
             ("hours", head?["hours"] ?? new List<object?>()), ("points", ordered), ("buoys", buoys));
         var path = Path.Combine(dir, "seastate.json");

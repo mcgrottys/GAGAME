@@ -1,0 +1,23 @@
+{
+  "id": "noaa.ndbc",
+  "title": "NOAA NDBC realtime2 met/wave lines and spectral density (the first copy cached)",
+  "label": "NDBC realtime2 buoys",
+  "kind": "ndbc-realtime2",
+  "rank": 0,
+  "server": "https://www.ndbc.noaa.gov",
+  "url": "https://www.ndbc.noaa.gov/data/realtime2/",
+  "license": "public domain (NOAA NWS)",
+  "cite": "NOAA NDBC",
+  "coverage": [-180, -90, 180, 90],
+  "cache": "cache/ndbc",
+  "variables": {
+    "time": {"name": "YY MM DD hh mm", "file": "txt"},
+    "wdir": {"name": "WDIR", "units": "degT", "direction": "from", "north": "true"},
+    "wspd": {"name": "WSPD", "units": "m/s"},
+    "hs": {"name": "WVHT", "units": "m"},
+    "dpd": {"name": "DPD", "units": "sec"},
+    "apd": {"name": "APD", "units": "sec"},
+    "mwd": {"name": "MWD", "units": "degT", "direction": "from", "north": "true"},
+    "spectrum": {"name": "spectral wave density", "units": "m2/Hz", "file": "data_spec"}
+  }
+}
