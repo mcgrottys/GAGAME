@@ -125,6 +125,59 @@ int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anc
                 mip, pyr.GroundRes(mip), same, n, worst);
         }
     }
+    // THE RAY (HeightTree::MaxAlongRay, the exposure's): the highest ground a ray toward the swell crosses,
+    // against the march it replaced -- the tree sampled every step along a line of constant bearing in
+    // degrees -- as the excess over the water line (0 NAVD here) the exposure reads, at water points
+    // about the place, five swell directions, 4 km at 13 m. Not equal by construction: the ray is the
+    // great circle and takes every texel it crosses, the march a point every step, bilinear. THE PLANT:
+    // the ray walked the other way, which must not agree.
+    {
+        constexpr double kRange = 4000.0, kStep = 13.0, kLevel = 0.0, kR = 6371000.0;
+        std::vector<double> d, dPlant;
+        double tMarch = 0.0, tRay = 0.0;
+        size_t rays = 0;
+        for (const auto& [la, lo] : place) {
+            if (tree->Sample(la, lo, kStep) > kLevel) continue;   // the exposure marches from water only
+            for (const double azDeg : {0.0, 72.0, 144.0, 216.0, 288.0}) {
+                const double ang = azDeg * kD2R, dirX = std::cos(ang), dirZ = std::sin(ang);
+                const auto t0 = std::chrono::steady_clock::now();
+                double ex = 0.0;
+                double lat = la, lon = lo;
+                const double dLat = -dirZ * kStep / kR, dLon = -dirX * kStep / (kR * std::cos(la));
+                for (int k = 0; k < int(kRange / kStep); ++k) {
+                    lat += dLat;
+                    lon += dLon;
+                    ex = (std::max)(ex, double(tree->Sample(lat, lon, kStep)) - kLevel);
+                    if (ex > 1.2) break;
+                }
+                const auto t1 = std::chrono::steady_clock::now();
+                const double top = tree->MaxAlongRay(la, lo, -dirX, -dirZ, kRange, kStep, float(kLevel), float(kLevel + 1.2000001));
+                const auto t2 = std::chrono::steady_clock::now();
+                const double back = tree->MaxAlongRay(la, lo, dirX, dirZ, kRange, kStep, float(kLevel), float(kLevel + 1.2000001));
+                const double exRay = (std::min)(1.2000001, (std::max)(0.0, top - kLevel));
+                const double exBack = (std::min)(1.2000001, (std::max)(0.0, back - kLevel));
+                ex = (std::min)(1.2000001, ex);
+                d.push_back(std::abs(exRay - ex));
+                dPlant.push_back(std::abs(exBack - ex));
+                tMarch += std::chrono::duration<double, std::nano>(t1 - t0).count();
+                tRay += std::chrono::duration<double, std::nano>(t2 - t1).count();
+                ++rays;
+            }
+        }
+        std::sort(d.begin(), d.end());
+        std::sort(dPlant.begin(), dPlant.end());
+        const auto q = [](const std::vector<double>& v, double f) { return v.empty() ? 0.0 : v[size_t(f * double(v.size() - 1))]; };
+        size_t agree = 0, agreePlant = 0;
+        for (double x : d) agree += x < 0.05 ? 1 : 0;
+        for (double x : dPlant) agreePlant += x < 0.05 ? 1 : 0;
+        Log("[height-tree] ray: %zu rays from water, |excess(ray) - excess(march)| median %.3f p95 %.3f m, within 5 cm at %.1f %% | "
+            "march %.1f us, ray %.1f us a ray",
+            rays, q(d, 0.5), q(d, 0.95), rays ? 100.0 * double(agree) / double(rays) : 0.0,
+            rays ? tMarch / double(rays) / 1000.0 : 0.0, rays ? tRay / double(rays) / 1000.0 : 0.0);
+        Log("[height-tree] PLANT the ray walked the other way: within 5 cm at %.1f %%, p95 %.3f m -- %s",
+            rays ? 100.0 * double(agreePlant) / double(rays) : 0.0, q(dPlant, 0.95),
+            agreePlant < agree ? "CAUGHT" : "NOT CAUGHT: this instrument cannot see a ray gone wrong");
+    }
     // THE PLANT: three levels too coarse, at the place, at 6 m.
     const Stat law = Measure(comp, ch, *tree, place, 6.0, 0);
     const Stat plant = Measure(comp, ch, *tree, place, 6.0, 3);

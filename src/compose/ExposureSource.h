@@ -78,9 +78,10 @@ public:
     std::string Identity() const override {
         const uint64_t p = m_params.load();
         char b[96];
-        // v6: the march reads the height TREE when one is bound (compose/HeightTree.h), else the stack
+        // v7: each ray is the height TREE's maximum along its great circle (HeightTree::MaxAlongRay), when a
+        // tree is bound; v4, the march over the stack
         snprintf(b, sizeof(b), "swell.exposure|%s fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
-                 m_comp && m_hgtCh >= 0 && m_comp->HeightTreeOf(m_hgtCh) ? "v6 tree" : "v4", kStepMinM, kMaxRangeM,
+                 m_comp && m_hgtCh >= 0 && m_comp->HeightTreeOf(m_hgtCh) ? "v7 tree ray" : "v4", kStepMinM, kMaxRangeM,
                  DirBucket(p), LevelBucket(p));
         std::string id = b;
         if (m_comp && m_hgtCh >= 0) {
@@ -145,17 +146,26 @@ public:
             const double ang = ang0 + kFanDeg[r] * kD2R;
             // Propagation direction (unit, world east/north); the march goes TOWARD the source.
             const double dirX = std::cos(ang), dirZ = std::sin(ang);
-            // PHASE C5: the step's angle on the sphere at the march's own latitude (radians).
-            const double dLat = -dirZ * stepM / GlobeModel::kR;
-            const double dLon = -dirX * stepM / (GlobeModel::kR * std::cos(lat0));
-            double lat = lat0, lon = lon0;
             double excess = 0.0;   // worst blocker height above the water line en route
-            for (int s = 0; s < maxSteps; ++s) {
-                lat += dLat;
-                lon += dLon;
-                const float e = m_comp->SampleHeight(m_hgtCh, lat, lon, stepM);
-                if (e > -9000.0f) excess = (std::max)(excess, double(e) - level);
-                if (excess > 1.2) break;   // a full wall already
+            if (HeightTree* tree = m_comp->HeightTreeOf(m_hgtCh)) {
+                // THE RAY ON THE TREE: the highest texel its great circle crosses, the floor at the water
+                // line (nothing beneath it is a blocker, so the tree passes over every block below it)
+                // and the stop at a full wall. The same excess the march took, over every texel crossed.
+                const float top = tree->MaxAlongRay(lat0, lon0, -dirX, -dirZ, kMaxRangeM, stepM, float(level),
+                                                    float(level + 1.2000001));
+                excess = (std::max)(0.0, double(top) - level);
+            } else {
+                // PHASE C5: the step's angle on the sphere at the march's own latitude (radians).
+                const double dLat = -dirZ * stepM / GlobeModel::kR;
+                const double dLon = -dirX * stepM / (GlobeModel::kR * std::cos(lat0));
+                double lat = lat0, lon = lon0;
+                for (int s = 0; s < maxSteps; ++s) {
+                    lat += dLat;
+                    lon += dLon;
+                    const float e = m_comp->SampleHeight(m_hgtCh, lat, lon, stepM);
+                    if (e > -9000.0f) excess = (std::max)(excess, double(e) - level);
+                    if (excess > 1.2) break;   // a full wall already
+                }
             }
             double tr = 1.0;
             if (excess > 0.15) {

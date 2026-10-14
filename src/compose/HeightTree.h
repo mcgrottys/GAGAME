@@ -91,6 +91,64 @@ public:
                      (double(Texel(face, mip, x0, y1)) * (1.0 - frx) + double(Texel(face, mip, x1, y1)) * frx) * fry);
     }
 
+    // THE HIGHEST GROUND ALONG A RAY (the swell's exposure, compose/ExposureSource.h): the maximum of
+    // the tree's texels a great circle crosses from a point, `towardE`/`towardN` the unit direction it
+    // leaves in, out to `rangeM`, at the level for `groundM`; never below `floorM` (the reader's own
+    // floor: nothing beneath it can matter to it); and it may stop once it reaches `stopAtM`.
+    //   STRAIGHT IN THE FACE: a face of the cube is a gnomonic projection, so a great circle is a
+    // straight line in the face's coordinates and the texels it crosses are a grid traversal
+    // (Amanatides & Woo 1987) -- no trigonometry per step, only at the ends and where it leaves a face.
+    //   SKIPPED BY THE BLOCK'S MAXIMUM: each cached tile keeps the maximum of every 16 x 16 block, and
+    // the walk crosses blocks first; a block whose maximum cannot raise the running one is passed over
+    // whole (the maximum mipmap's skip, Tevs et al. 2008, at one level). The answer is exactly the
+    // maximum over every texel the line crosses: a skipped block holds none above it.
+    float MaxAlongRay(double latRad, double lonRad, double towardE, double towardN, double rangeM, double groundM,
+                      float floorM, float stopAtM) {
+        const double R = Lattice::kMercCirc / (2.0 * 3.14159265358979323846);
+        const double cl = std::cos(latRad), sl = std::sin(latRad), co = std::cos(lonRad), so = std::sin(lonRad);
+        double p[3] = {cl * co, sl, cl * so};
+        const double E[3] = {-so, 0.0, co}, N[3] = {-sl * co, cl, -sl * so};
+        double t[3];
+        for (int k = 0; k < 3; ++k) t[k] = towardE * E[k] + towardN * N[k];
+        float best = floorM;
+        double left = rangeM / R;   // the arc still to walk, radians
+        const uint32_t mip0 = LevelFor(groundM);
+        for (int piece = 0; piece < 4 && left > 0.0 && best < stopAtM; ++piece) {
+            double uv0[2], q[3];
+            const uint32_t face = CubeFaceOfDir(p, uv0);
+            // how far along the arc the ray stays on this face: the whole rest, or the crossing found
+            // by bisection on the arc (a face is 10,000 km across; a ray of kilometres leaves rarely)
+            double s = left;
+            const auto at = [&](double a, double out[3]) {
+                for (int k = 0; k < 3; ++k) out[k] = p[k] * std::cos(a) + t[k] * std::sin(a);
+            };
+            at(s, q);
+            double uvq[2];
+            if (CubeFaceOfDir(q, uvq) != face) {
+                double lo = 0.0, hi = s;
+                for (int it = 0; it < 40; ++it) {
+                    const double mid = 0.5 * (lo + hi);
+                    at(mid, q);
+                    (CubeFaceOfDir(q, uvq) == face ? lo : hi) = mid;
+                }
+                s = lo;
+                at(s, q);
+                FaceUv(face, q, uvq);   // the face's own coordinates of the last point on it
+            }
+            best = (std::max)(best, WalkFace(face, mip0, uv0, uvq, best, stopAtM));
+            // on into the next face: the point past the crossing and the direction the arc has there
+            const double a = (std::min)(left, s + 1e-9);
+            double p2[3], t2[3];
+            for (int k = 0; k < 3; ++k) {
+                p2[k] = p[k] * std::cos(a) + t[k] * std::sin(a);
+                t2[k] = -p[k] * std::sin(a) + t[k] * std::cos(a);
+            }
+            for (int k = 0; k < 3; ++k) { p[k] = p2[k]; t[k] = t2[k]; }
+            left -= a;
+        }
+        return best;
+    }
+
     // The instrument: tiles read from the tree (misses) and the time inside those reads. Counted per
     // miss only: MEASURED, a counter per texel and a shared_ptr copy per tap -- two cache lines every
     // loader thread writes -- made a warm read 600 ns in the exposure's march, the stack's 160.
@@ -104,11 +162,88 @@ private:
     // A tile as cached: whether it is its parent magnified (then no bytes: nothing finer than every
     // source is painted, HIERARCHY 4.20), else its half floats as the tree stores them. MEASURED: the
     // magnified question asked per sample instead of per tile made a warm read 3-4x the stack's.
+    static constexpr uint32_t kBlock = 16;   // the side of a block whose maximum a tile keeps
     struct Cached {
         bool magnified = false;
         bool kept = true;   // false: a "not now" read, answered once and remembered nowhere
         std::vector<uint8_t> bytes;
+        std::vector<float> blockMax;   // (texW / kBlock) x (texH / kBlock), row-major; empty with no bytes
     };
+
+    // A point's coordinates in a given face's plane (the gnomonic projection onto it), for a point
+    // that CubeFaceOfDir may have put on its neighbour at the very edge.
+    static void FaceUv(uint32_t face, const double d[3], double uv[2]) {
+        double n[3], a[3], b[3];
+        CubeFaceAxes(face, n, a, b);
+        const double pn = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+        uv[0] = ((d[0] * a[0] + d[1] * a[1] + d[2] * a[2]) / pn) * 0.5 + 0.5;
+        uv[1] = ((d[0] * b[0] + d[1] * b[1] + d[2] * b[2]) / pn) * 0.5 + 0.5;
+    }
+
+    // The cells of side `cell` a segment (x0, y0) -> (x1, y1) crosses for t in [ta, tb], in order, each
+    // with the t it enters and leaves by; `visit` returns false to stop.
+    template <class Visit>
+    static void Traverse(double x0, double y0, double x1, double y1, double cell, double ta, double tb, Visit&& visit) {
+        const double dx = x1 - x0, dy = y1 - y0;
+        long long cx = (long long)std::floor((x0 + dx * ta) / cell), cy = (long long)std::floor((y0 + dy * ta) / cell);
+        const int sx = dx > 0 ? 1 : dx < 0 ? -1 : 0, sy = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+        constexpr double kInf = 1e300;
+        double tx = sx ? ((double(cx + (sx > 0 ? 1 : 0)) * cell) - x0) / dx : kInf;
+        double ty = sy ? ((double(cy + (sy > 0 ? 1 : 0)) * cell) - y0) / dy : kInf;
+        const double ddx = sx ? cell / std::abs(dx) : kInf, ddy = sy ? cell / std::abs(dy) : kInf;
+        double t = ta;
+        while (t < tb) {
+            const double tn = (std::min)((std::min)(tx, ty), tb);
+            if (!visit(cx, cy, t, tn)) return;
+            if (tx < ty) { cx += sx; tx += ddx; } else { cy += sy; ty += ddy; }
+            t = tn;
+        }
+    }
+
+    // The highest texel the segment uv0 -> uv1 crosses on one face, at `mip` (climbing where the level is
+    // magnified at the start), above `running`; blocks whose maximum cannot raise it are passed over.
+    float WalkFace(uint32_t face, uint32_t mip, const double uv0[2], const double uv1[2], float running, float stopAtM) {
+        while (mip + 1 < m_mips) {
+            const uint32_t dim = m_lat.faceDim >> mip;
+            const TileRequest r{face, mip, uint32_t((std::min)(uv0[0] * dim, dim - 1.0)) / m_lat.texW,
+                                uint32_t((std::min)(uv0[1] * dim, dim - 1.0)) / m_lat.texH};
+            if (!TileOf(r).magnified) break;
+            ++mip;
+        }
+        const uint32_t dim = m_lat.faceDim >> mip;
+        const double x0 = uv0[0] * dim, y0 = uv0[1] * dim, x1 = uv1[0] * dim, y1 = uv1[1] * dim;
+        const long long last = (long long)dim - 1;
+        const uint32_t bw = m_lat.texW / kBlock;
+        Traverse(x0, y0, x1, y1, double(kBlock), 0.0, 1.0, [&](long long bx, long long by, double ta, double tb) {
+            if (bx < 0 || by < 0 || bx * kBlock > last || by * kBlock > last) return true;
+            const uint64_t ux = uint64_t(bx) * kBlock, uy = uint64_t(by) * kBlock;
+            const TileRequest r{face, mip, uint32_t(ux / m_lat.texW), uint32_t(uy / m_lat.texH)};
+            const Cached& c = TileOf(r);
+            if (c.blockMax.empty()) {   // nothing covers it (the stack's 0), or the level is magnified there
+                if (c.magnified) {
+                    const double mu = (x0 + (x1 - x0) * 0.5 * (ta + tb)) / dim, mv = (y0 + (y1 - y0) * 0.5 * (ta + tb)) / dim;
+                    double d[3];
+                    ComposeCubeDir(face, mu, mv, d);
+                    const double lat = std::asin((std::max)(-1.0, (std::min)(1.0, d[1]))), lon = std::atan2(d[2], d[0]);
+                    running = (std::max)(running, Sample(lat, lon, m_lat.GroundRes(mip + 1)));
+                } else {
+                    running = (std::max)(running, 0.0f);
+                }
+                return running < stopAtM;
+            }
+            const uint32_t lbx = uint32_t(ux % m_lat.texW) / kBlock, lby = uint32_t(uy % m_lat.texH) / kBlock;
+            if (c.blockMax[size_t(lby) * bw + lbx] <= running) return true;   // nothing here can raise it
+            Traverse(x0, y0, x1, y1, 1.0, ta, tb, [&](long long ix, long long iy, double, double) {
+                if (ix < 0 || iy < 0 || ix > last || iy > last) return true;
+                uint16_t h;
+                std::memcpy(&h, c.bytes.data() + (size_t(uint64_t(iy) % m_lat.texH) * m_lat.texW + size_t(uint64_t(ix) % m_lat.texW)) * 2, 2);
+                running = (std::max)(running, HalfToFloat(h));
+                return running < stopAtM;
+            });
+            return running < stopAtM;
+        });
+        return running;
+    }
     using Tile = std::shared_ptr<const Cached>;
 
     float Texel(uint32_t face, uint32_t mip, uint32_t ix, uint32_t iy) {
@@ -162,6 +297,19 @@ private:
             const auto t0 = std::chrono::steady_clock::now();
             answer = m_read(r, c->bytes);
             if (answer != 1) c->bytes.clear();
+            if (c->bytes.size() >= size_t(m_lat.texW) * m_lat.texH * 2) {
+                // the block maxima, once a tile: what MaxAlongRay passes over
+                const uint32_t bw = m_lat.texW / kBlock, bh = m_lat.texH / kBlock;
+                c->blockMax.assign(size_t(bw) * bh, -1e30f);
+                for (uint32_t y = 0; y < m_lat.texH; ++y) {
+                    for (uint32_t x = 0; x < m_lat.texW; ++x) {
+                        uint16_t h;
+                        std::memcpy(&h, c->bytes.data() + (size_t(y) * m_lat.texW + x) * 2, 2);
+                        float& m = c->blockMax[size_t(y / kBlock) * bw + x / kBlock];
+                        m = (std::max)(m, HalfToFloat(h));
+                    }
+                }
+            }
             readUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count()),
                              std::memory_order_relaxed);
             tileReads.fetch_add(1, std::memory_order_relaxed);
