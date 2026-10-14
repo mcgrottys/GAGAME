@@ -49,6 +49,20 @@ public sealed class FidelityMap
         return l ?? Layers.FirstOrDefault(x => x.Name == AllLayers) ?? new Layer();
     }
 
+    /// A deep copy (the painter's undo keeps these).
+    public FidelityMap Clone()
+    {
+        var c = new FidelityMap { PlanetRadiusM = PlanetRadiusM };
+        c.Layers.Clear();
+        foreach (var l in Layers)
+        {
+            var n = new Layer { Name = l.Name, DefaultGrainM = l.DefaultGrainM };
+            foreach (var (k, g) in l.Cells) n.Cells[k] = g;
+            c.Layers.Add(n);
+        }
+        return c;
+    }
+
     // ------------------------------------------------------------------ the lattice
 
     /// The planet frame (Lattice.cpp, ExposurePage.h): x = cos lat cos lon, y = sin lat, z = cos lat sin lon.
@@ -185,6 +199,39 @@ public sealed class FidelityMap
         foreach (var k in l.Cells.Keys.Where(k => k.Level >= c.Level && c.Contains(k)).ToList()) l.Cells.Remove(k);
     }
 
+    /// Paint over a set of cells at once, equal to painting the set's outermost cells one by one
+    /// (a cell of the set inside another of the set is the same region at the same grain), in one
+    /// pass over the layer instead of one pass a cell: a brush stroke is thousands of cells.
+    public void PaintMany(string layer, IEnumerable<CellKey> cells, float grainM)
+    {
+        var l = Get(layer, create: true);
+        var set = Outermost(cells);
+        foreach (var k in Covered(l, set)) l.Cells.Remove(k);
+        foreach (var c in set) l.Cells[c] = grainM;
+    }
+
+    static HashSet<CellKey> Outermost(IEnumerable<CellKey> cells)
+    {
+        var set = cells.ToHashSet();
+        set.RemoveWhere(c => HasAncestorIn(c, set, c.Level - 1));
+        return set;
+    }
+
+    static bool HasAncestorIn(CellKey c, HashSet<CellKey> set, int fromLevel)
+    {
+        for (int L = fromLevel; L >= 0; --L)
+            if (set.Contains(new CellKey(c.Face, (byte)L, c.X >> (c.Level - L), c.Y >> (c.Level - L)))) return true;
+        return false;
+    }
+
+    /// The layer's cells strictly inside a cell of `set`.
+    static List<CellKey> Covered(Layer l, HashSet<CellKey> set)
+    {
+        if (set.Count == 0) return new();
+        int top = set.Min(c => (int)c.Level);
+        return l.Cells.Keys.Where(k => k.Level > top && HasAncestorIn(k, set, k.Level - 1)).ToList();
+    }
+
     // ------------------------------------------------------------------ reading
 
     /// The grain wanted at a point: the deepest painted cell holding it, else the default.
@@ -206,18 +253,36 @@ public sealed class FidelityMap
     }
 
     /// The finest grain any part of a lat/lon box wants (the default where the box reaches past
-    /// every painted cell) -- what a harvester asks a source for over that box.
+    /// every painted cell) -- what a harvester asks a source for over that box. A walk down the
+    /// lattice from the six faces, carrying the grain the deepest painted cell above hands down:
+    /// a region's grain is its own deepest cell's, so a coarse cell painted inside a fine one
+    /// answers coarse there, and the default counts only where the box meets unpainted ground.
     public float FinestIn(string layer, double lon0, double lat0, double lon1, double lat1)
     {
         var l = Get(layer);
-        float best = l.DefaultGrainM;
-        foreach (var (k, g) in l.Cells)
+        var open = new HashSet<CellKey>();   // the painted cells and their ancestors: where the walk descends
+        foreach (var k in l.Cells.Keys)
+            for (var a = k; open.Add(a) && a.Level > 0; a = a.Parent) { }
+        float Walk(CellKey c, float above)
         {
-            if (g >= best) continue;
-            var b = CellBox(k);
-            if (Overlaps(b, lon0, lat0, lon1, lat1)) best = g;
+            if (!Overlaps(CellBox(c), lon0, lat0, lon1, lat1)) return float.PositiveInfinity;
+            if (!open.Contains(c)) return above;
+            float here = l.Cells.TryGetValue(c, out float g) ? g : above, best = float.PositiveInfinity;
+            if (c.Level == MaxLevel) return here;
+            bool split = false;
+            for (uint i = 0; i < 4; ++i)
+            {
+                var ch = new CellKey(c.Face, (byte)(c.Level + 1), c.X * 2 + (i & 1), c.Y * 2 + (i >> 1));
+                if (open.Contains(ch)) split = true;
+            }
+            if (!split) return here;
+            for (uint i = 0; i < 4; ++i)
+                best = Math.Min(best, Walk(new CellKey(c.Face, (byte)(c.Level + 1), c.X * 2 + (i & 1), c.Y * 2 + (i >> 1)), here));
+            return best;
         }
-        return best;
+        float finest = float.PositiveInfinity;
+        for (byte f = 0; f < 6; ++f) finest = Math.Min(finest, Walk(new CellKey(f, 0, 0, 0), l.DefaultGrainM));
+        return finest;
     }
 
     /// Every painted cell of a layer with its box, finest grain first: the regions a harvester walks.
