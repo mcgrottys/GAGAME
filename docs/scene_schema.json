@@ -422,7 +422,8 @@
       { "key": "root", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the trees folder (\"\" = cache\\trees)" },
       { "key": "ageDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 30, "reload": "restart", "doc": "a stamp older than this is STALE; an unstamped folder gets twice it" },
       { "key": "purgeDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 7, "reload": "restart", "doc": "purge deletes the retired batches older than this" },
-      { "key": "confirm", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "retire and purge act only when this is the root's full path as the listing printed it" }
+      { "key": "confirm", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "retire and purge act only when this is the root's full path as the listing printed it" },
+      { "key": "node", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "retire only this node's stale folders (wave.field, earth.color ...); \"\" = every node" }
     ] },
     { "type": "tool", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the one-shot mode (--tool name[:args])" },

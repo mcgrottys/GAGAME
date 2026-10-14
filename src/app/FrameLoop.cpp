@@ -5424,8 +5424,9 @@ int FrameLoop::Finish() {
     // The CPU's reads of the height tree (compose/HeightTree.h): tiles taken from the tree and the time
     // inside those reads (a cold tile is painted there), and the texels answered.
     if (HeightTree* ht = m_A.compositor.HeightTreeOf(m_A.hgtCh)) {
-        Log("[height-tree] %llu tiles read from the tree in %.1f s, %zu tiles held",
-            static_cast<unsigned long long>(ht->tileReads.load()), double(ht->readUs.load()) / 1.0e6, ht->Held());
+        Log("[height-tree] %llu tiles read from the tree in %.1f s (%llu answered not now), %zu tiles held",
+            static_cast<unsigned long long>(ht->tileReads.load()), double(ht->readUs.load()) / 1.0e6,
+            static_cast<unsigned long long>(ht->transient.load()), ht->Held());
     }
     // The rasters read by being files: the windows their reads decoded and the time in the decoder.
     Log("[raster] %llu windows decoded this run, %.1f s in the decoder",

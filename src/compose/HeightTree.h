@@ -47,9 +47,9 @@ namespace ga {
 
 class HeightTree {
 public:
-    // The tree's bytes of a tile on the pyramid (true: its half floats; false: nothing covers it),
-    // and whether a tile is its parent magnified.
-    using ReadFn = std::function<bool(const TileRequest&, std::vector<uint8_t>&)>;
+    // The tree's bytes of a tile on the pyramid -- 1: its half floats; 0: nothing covers it; 2: not now
+    // (TileTree::Reader) -- and whether a tile is its parent magnified.
+    using ReadFn = std::function<int(const TileRequest&, std::vector<uint8_t>&)>;
 
     HeightTree(ReadFn read, TileQueryFn magnified, const Lattice& pyramid, size_t maxTiles = 4096)
         : m_read(std::move(read)), m_magnified(std::move(magnified)), m_lat(pyramid), m_max(maxTiles),
@@ -94,7 +94,7 @@ public:
     // The instrument: tiles read from the tree (misses) and the time inside those reads. Counted per
     // miss only: MEASURED, a counter per texel and a shared_ptr copy per tap -- two cache lines every
     // loader thread writes -- made a warm read 600 ns in the exposure's march, the stack's 160.
-    std::atomic<uint64_t> tileReads{0}, readUs{0};
+    std::atomic<uint64_t> tileReads{0}, readUs{0}, transient{0};   // transient: reads answered "not now"
     size_t Held() const {
         std::lock_guard<std::mutex> lk(m_mx);
         return m_lru.size();
@@ -106,6 +106,7 @@ private:
     // magnified question asked per sample instead of per tile made a warm read 3-4x the stack's.
     struct Cached {
         bool magnified = false;
+        bool kept = true;   // false: a "not now" read, answered once and remembered nowhere
         std::vector<uint8_t> bytes;
     };
     using Tile = std::shared_ptr<const Cached>;
@@ -138,9 +139,10 @@ private:
             if (e.owner == m_serial && e.key == key) return *e.tile;
         }
         Recent& slot = recent[next++ & 3u];
-        slot.owner = m_serial;
+        Tile t = Shared(key, r);
+        slot.owner = t->kept ? m_serial : 0;   // a "not now" answers this tap and is not remembered
         slot.key = key;
-        slot.tile = Shared(key, r);
+        slot.tile = std::move(t);
         return *slot.tile;
     }
 
@@ -155,12 +157,20 @@ private:
         }
         auto c = std::make_shared<Cached>();
         c->magnified = m_magnified && m_magnified(r);
+        int answer = 1;
         if (!c->magnified) {
             const auto t0 = std::chrono::steady_clock::now();
-            if (!m_read(r, c->bytes)) c->bytes.clear();
+            answer = m_read(r, c->bytes);
+            if (answer != 1) c->bytes.clear();
             readUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count()),
                              std::memory_order_relaxed);
             tileReads.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Not now is an answer for this read alone: kept by no cache, so the next read asks again.
+        if (answer == 2) {
+            transient.fetch_add(1, std::memory_order_relaxed);
+            c->kept = false;
+            return c;
         }
         std::lock_guard<std::mutex> lk(m_mx);
         auto it = m_index.find(key);

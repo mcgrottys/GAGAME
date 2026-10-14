@@ -524,6 +524,41 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             hstack.push_back(&srcEdits);
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
+        // THE HEIGHT TREE (M9as), built as soon as the channel stands: every CPU reader after this line --
+        // the solver's bed first -- reads it through Compositor::SampleHeight (compose/HeightTree.h), and
+        // the GPU's tenant below is fed from it. Before 2026-10-14 it stood after the solver's bed was
+        // realized, so that bed alone still read the stack.
+        if (S.streaming.colorTrees || S.Tool("tree-audit") || S.Tool("warm-trees") || S.Tool("pack-trees")) {
+            // The channel's own order, the one the CPU's stack reads (the height stack above:
+            // StackOrder, the hand edits last), so the GPU's bed and the CPU's are one over.
+            auto layers = BuildHeightStack(compositor, hgtCh);
+            const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
+            auto dc = std::make_shared<DomainCompositor>();
+            dc->SetBlend(DomainCompositor::Blend::LayeredOver);
+            std::string order;
+            for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
+                if (dc->Add(layers[i])) order += " " + std::string(layers[i]->Name()) + "(" +
+                                                 std::to_string(int(hch.height[i]->Info().cmPerPixel)) + "cm)";
+            }
+            heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
+            for (auto& l : layers) megaKeep.push_back(l);
+            Log("[height-tree] compose order, bottom to top (the channel's: `over`, the coarser "
+                "under the finer, the hand edits last):%s",
+                order.c_str());
+            heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
+            heightTree->Print();
+            // THE CPU'S READ OF IT (compose/HeightTree.h): the composed root on the pyramid, bound
+            // to the channel; Compositor::SampleHeight answers from it.
+            {
+                const Lattice pyr = hal::BlockBinding::Pyramid(256, 128);
+                compositor.BindHeightTree(hgtCh, std::make_shared<HeightTree>(heightTree->Reader(pyr),
+                                                                              heightTree->MagnifiedQuery(pyr), pyr));
+            }
+            if (S.Tool("height-tree-probe")) {
+                exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1]);
+                return nullptr;
+            }
+        }
     }
 
     // M6v/M8i: THE WATER ATLAS -- water parameters through the same registry. 18 phasor
@@ -707,10 +742,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                                               S.water.swe.riverQFallback);
         sea->SetSwe(&swe);
     }
-    if (haveCurrents && currents.Field().Valid()) {
+    if (haveCurrents && currents.FieldAt(S.place.anchor[0], S.place.anchor[1]).Valid()) {
         auto gulfOwned = std::make_unique<GulfLayer>();
         gulf = gulfOwned.get();
-        gulf->Configure(shaderDir, &currents);
+        gulf->Configure(shaderDir, &currents, &currents.FieldAt(S.place.anchor[0], S.place.anchor[1]));
         gulf->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(gulfOwned));
     }
@@ -890,37 +925,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // (the colour's slices, so the near-field land/sea gate and the normals ride
             // CUDEM truth).
             // M9as: fed by the height TileTree when --color-trees is on.
-            if (S.streaming.colorTrees || treeTool) {
-                // The channel's own order, the one the CPU's stack reads (the height stack above:
-                // StackOrder, the hand edits last), so the GPU's bed and the CPU's are one over.
-                auto layers = BuildHeightStack(compositor, hgtCh);
-                const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
-                auto dc = std::make_shared<DomainCompositor>();
-                dc->SetBlend(DomainCompositor::Blend::LayeredOver);
-                std::string order;
-                for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
-                    if (dc->Add(layers[i])) order += " " + std::string(layers[i]->Name()) + "(" +
-                                                     std::to_string(int(hch.height[i]->Info().cmPerPixel)) + "cm)";
-                }
-                heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
-                for (auto& l : layers) megaKeep.push_back(l);
-                Log("[height-tree] compose order, bottom to top (the channel's: `over`, the coarser "
-                    "under the finer, the hand edits last):%s",
-                    order.c_str());
-                heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
-                heightTree->Print();
-                // THE CPU'S READ OF IT (compose/HeightTree.h): the composed root on the pyramid, bound
-                // to the channel; Compositor::SampleHeight answers from it.
-                {
-                    const Lattice pyr = hal::BlockBinding::Pyramid(256, 128);
-                    compositor.BindHeightTree(hgtCh, std::make_shared<HeightTree>(heightTree->Reader(pyr),
-                                                                                  heightTree->MagnifiedQuery(pyr), pyr));
-                }
-                if (S.Tool("height-tree-probe")) {
-                    exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1]);
-                    return nullptr;
-                }
-            }
             {
                 // M12 step 3e: THE DECLARATION (hal/Tenant.h). Slices 0..5 the cube faces on
                 // the 16k quad-sphere, then the eye's windows; R16F metres NAVD88 in 256x128
@@ -1355,15 +1359,20 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // divergence and vorticity are properties of the COMPOSITE -- taking them
             // per-source and blending afterwards would average two different derivatives.
             if (swe.Ready() && bathy.Ready()) {
-                LoaderRegistry freg;
-                freg.Register("json", CurrentFieldLoader::Open);
-                if (auto cld = freg.Open(S.data.currents)) {   // the scene's currents, as the model reads them
-                    auto ras = std::make_shared<RasterSource>(std::move(cld), 0);
+                // EVERY field of the scene's currents, coarsest first, so the finer stand over the coarser
+                // where they overlap and a page no field reaches composes nothing (CurrentFieldLoader::
+                // OpenAll). A composite holds many regions' fields; one of them -- its finest anywhere, or
+                // the one holding the solver's anchor -- is not the solver's whole box.
+                if (auto fieldLoaders = CurrentFieldLoader::OpenAll(S.data.currents); !fieldLoaders.empty()) {
                     DomainCompositor fc;
                     LevelLadder lad;
                     lad.level0MetersPerTexel = swe.CellM();
                     fc.SetLadder(lad);
-                    fc.Add(ras);
+                    std::vector<std::shared_ptr<RasterSource>> rasters;
+                    for (auto& cld : fieldLoaders) {
+                        rasters.push_back(std::make_shared<RasterSource>(std::move(cld), 0));
+                        fc.Add(rasters.back());
+                    }
 
                     GradeBank& vb = swe.VelGradBank();
                     uint32_t wrote = 0;
@@ -1419,20 +1428,39 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         vb.UploadLevel(gpu, lvl, rgba.data(), w * 4 * sizeof(float), w, h);
                         ++wrote;
                     }
-                    Log("[compose] grad(GoMOFS) -> swe.velgrad slice 0 levels 3..%u: %u "
+                    Log("[compose] grad(current, %zu fields) -> swe.velgrad slice 0 levels 3..%u: %u "
                         "composed (loader -> source -> page -> bank)",
-                        vb.MipCount() - 1, wrote);
+                        rasters.size(), vb.MipCount() - 1, wrote);
 
                     // ---- SLICE 1: THE REGION. Same sources, same compositor, a page over
                     // the REGION's own ground instead of the window's. This is what makes
                     // the wind fallback unnecessary: outside the solve there is now a page
                     // of the SAME quantity in the SAME units, so the consumer composites
                     // two pages of one bank instead of blending in a foreign field.
-                    if (vb.Slices() > 1) {
+                    // The region is the union of the fields that reach the solver's box -- not every
+                    // field of a composite, whose union may span a coast -- and none reaching it is
+                    // no region.
+                    const SweDomain& sdr = swe.Domain();
+                    double rl0 = 1e9, ra0 = 1e9, rl1 = -1e9, ra1 = -1e9;
+                    for (const auto& r : rasters) {
+                        const GeoRef& g = r->Ref();
+                        const double l0 = g.originX, l1 = g.originX + g.scaleX * g.width;
+                        const double a0 = (std::min)(g.originY, g.originY + g.scaleY * g.height);
+                        const double a1 = (std::max)(g.originY, g.originY + g.scaleY * g.height);
+                        if (l1 < sdr.lon0 || l0 > sdr.lon1 || a1 < sdr.lat0 || a0 > sdr.lat1) continue;
+                        rl0 = (std::min)(rl0, l0); rl1 = (std::max)(rl1, l1);
+                        ra0 = (std::min)(ra0, a0); ra1 = (std::max)(ra1, a1);
+                    }
+                    if (vb.Slices() > 1 && rl1 > rl0 && ra1 > ra0) {
                         // Every level, not just the floor: an upload into an unmapped tile
                         // is discarded and the page would simply not be there.
                         vb.MapAllLevels(gpu, 1);
-                        const GeoRef& rg = ras->Ref();
+                        GeoRef rg;
+                        rg.originX = rl0;
+                        rg.originY = ra0;
+                        rg.width = rg.height = 1;
+                        rg.scaleX = rl1 - rl0;
+                        rg.scaleY = ra1 - ra0;
                         uint32_t rwrote = 0;
                         // Start where the bank's texels approach the source's own scale.
                         // Differentiating a field upsampled 8x invents structure that is
@@ -1490,7 +1518,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         globe->SetVelGradRegion(
                             rg.originX, rg.originY, rg.scaleX * double(rg.width),
                             rg.scaleY * double(rg.height));
-                        Log("[compose] grad(GoMOFS) -> swe.velgrad slice 1 (REGION): %u "
+                        Log("[compose] grad(current) -> swe.velgrad slice 1 (REGION): %u "
                             "levels over %.2f x %.2f deg -- the wind fallback is now "
                             "unnecessary",
                             rwrote, std::abs(rg.scaleX) * rg.width,

@@ -611,14 +611,16 @@ public:
                                                          : ComposeTile(frame, tag, r, box, out, loc);
     }
 
-    // THE CPU'S READ (compose/HeightTree.h): a tile's bytes, true when anything covers it -- never a
-    // place, since the bytes are wanted in this process.
-    std::function<bool(const TileRequest&, std::vector<uint8_t>&)> Reader(const ColorFrame& inherited) {
+    // THE CPU'S READ (compose/HeightTree.h): a tile's bytes -- never a place, since the bytes are
+    // wanted in this process -- and which answer it is: 1 bytes, 0 nothing covers, 2 not now (a read
+    // that failed or could not be made yet; the reader must not keep it as an answer).
+    std::function<int(const TileRequest&, std::vector<uint8_t>&)> Reader(const ColorFrame& inherited) {
         const ColorFrame frame = Resolve(inherited);
         const std::string tag = frame.Tag();
         EnsureFrame(tag);
         return [this, frame, tag](const TileRequest& r, std::vector<uint8_t>& out) {
-            return Tile(frame, tag, r, out, nullptr) == Status::Content;
+            const Status st = Tile(frame, tag, r, out, nullptr);
+            return st == Status::Content ? 1 : st == Status::Void ? 0 : 2;
         };
     }
 
