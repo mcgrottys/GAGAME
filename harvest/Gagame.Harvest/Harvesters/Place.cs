@@ -21,7 +21,6 @@ public sealed class Place : IHarvester
     public string[] DefaultArgs => ["--place", "haulover"];
     public string? Note => "Download = Haulover (the shipped demos' second place). Chesapeake is also named.";
 
-    const string Ndbc = "https://www.ndbc.noaa.gov";
     const string OfsBucket = "noaa-nos-ofs-pds";
     const long SafetyBytes = 30_000_000;
 
@@ -120,55 +119,19 @@ public sealed class Place : IHarvester
 
     // ------------------------------------------------------------------ NDBC
 
-    (Dictionary<string, (double lat, double lon, string name)> pos, Dictionary<string, HashSet<string>> files, string listing) NdbcCatalog()
+    /// The NDBC catalog with a realtime2 listing under six hours old (a fresh one otherwise).
+    NdbcStations.Catalog NdbcCatalog()
     {
-        var (tab, _) = _polite.GetTextP($"{Ndbc}/data/stations/station_table.txt", Path.Combine("cache", "coops", "_lists", "ndbc_station_table.txt"));
-        var pos = new Dictionary<string, (double, double, string)>();
-        foreach (var line in tab.Split('\n'))
-        {
-            if (line.StartsWith('#') || !line.Contains('|')) continue;
-            var f = line.Split('|').Select(c => c.Trim()).ToArray();
-            if (f.Length < 7) continue;
-            var m = Regex.Match(f[6], @"([\d.]+)\s+([NS])\s+([\d.]+)\s+([EW])");
-            if (m.Success)
-                pos[f[0].ToUpperInvariant()] = (double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) * (m.Groups[2].Value == "N" ? 1 : -1),
-                    double.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture) * (m.Groups[4].Value == "E" ? 1 : -1), f[4]);
-        }
-        var ndir = Path.Combine("cache", "ndbc");
-        Directory.CreateDirectory(ndir);
-        var fresh = Directory.GetFiles(ndir, "_realtime2_listing_*").Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Directory.CreateDirectory(NdbcStations.Dir);
+        var fresh = Directory.GetFiles(NdbcStations.Dir, "_realtime2_listing_*").Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToList();
         string? listing = null;
         if (fresh.Count > 0)
         {
             var stamp = fresh[^1]!["_realtime2_listing_".Length..^".html".Length];
             var t = DateTime.ParseExact(stamp, "yyyyMMddHH", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
-            if (NowUtc - t < TimeSpan.FromHours(6)) listing = Path.Combine(ndir, fresh[^1]!);
+            if (NowUtc - t < TimeSpan.FromHours(6)) listing = Path.Combine(NdbcStations.Dir, fresh[^1]!);
         }
-        listing ??= Path.Combine(ndir, $"_realtime2_listing_{NowUtc:yyyyMMddHH}.html");
-        var (html, _) = _polite.GetTextP($"{Ndbc}/data/realtime2/", listing);
-        var files = new Dictionary<string, HashSet<string>>();
-        foreach (Match m in Regex.Matches(html, "href=\"([^\"?/][^\"]*)\""))
-        {
-            var href = m.Groups[1].Value;
-            var dot = href.IndexOf('.');
-            var sid = dot < 0 ? href : href[..dot];
-            var ext = dot < 0 ? "" : href[(dot + 1)..];
-            if (!files.TryGetValue(sid.ToUpperInvariant(), out var s)) files[sid.ToUpperInvariant()] = s = new();
-            s.Add(ext);
-        }
-        return (pos, files, listing);
-    }
-
-    static List<(double km, string sid, string name)> NearestNdbc(Dictionary<string, (double lat, double lon, string name)> pos, Dictionary<string, HashSet<string>> files, (double lon, double lat) point, HashSet<string> want, int n, double radiusKm)
-    {
-        var got = new List<(double, string, string)>();
-        foreach (var (sid, (lat, lon, name)) in pos)
-        {
-            if (!files.TryGetValue(sid, out var f) || !want.Overlaps(f)) continue;
-            var d = Geo.FlatKm(point.lon, point.lat, lon, lat);
-            if (d <= radiusKm) got.Add((d, sid, name));
-        }
-        return got.OrderBy(g => g.Item1).ThenBy(g => g.Item2, StringComparer.Ordinal).Take(n).ToList();
+        return NdbcStations.Read(_polite, listing ?? NdbcStations.ListingPath(NowUtc));
     }
 
     // ------------------------------------------------------------------ steps
@@ -188,8 +151,7 @@ public sealed class Place : IHarvester
     {
         var out_ = Path.Combine("data", "currents", _place, "currents.json");
         if (File.Exists(out_)) { Log($"[currents] {out_} exists; step already done"); return; }
-        var (pos, files, _) = NdbcCatalog();
-        var adcp = NearestNdbc(pos, files, _p.Anchor, new() { "adcp" }, 1, _p.AdcpRadiusKm);
+        var adcp = NdbcStations.Nearest(NdbcCatalog(), _p.Anchor, new() { "adcp" }, 1, _p.AdcpRadiusKm);
         if (adcp.Count == 0) Skip("ndbc adcp", $"no NDBC station within {_p.AdcpRadiusKm:g} km of the anchor publishes realtime2 .adcp now");
         var r = new Currents().HarvestPlace(_ctx, _polite, _place, _p.Box, _p.CurrentRadiusKm, anchor: _p.Anchor, maxStations: _p.MaxCurrentStations, adcp: adcp.Count > 0 ? adcp[0].sid : null, field: field);
         Steps["currents"] = D(("files", r.Files.Select(f => new List<object?> { Rel(f.path), f.bytes }).ToList()),
@@ -202,8 +164,7 @@ public sealed class Place : IHarvester
     {
         var out_ = Path.Combine("data", "sea", _place, "seastate.json");
         if (File.Exists(out_)) { Log($"[waves] {out_} exists; step already done"); return; }
-        var (pos, files, _) = NdbcCatalog();
-        var buoys = NearestNdbc(pos, files, _p.Sea, new() { "data_spec", "spec" }, 2, 250.0);
+        var buoys = NdbcStations.Nearest(NdbcCatalog(), _p.Sea, new() { "data_spec", "spec" }, 2, 250.0);
         Log($"[waves] nearest NDBC wave stations to ({F(_p.Sea.lon)}, {F(_p.Sea.lat)}): [{string.Join(", ", buoys.Select(b => $"('{b.sid}', {F(Round(b.km, 1))})"))}]");
         var r = new Waves().HarvestPlace(_ctx, _polite, _place, _p.Sea, buoys.Select(b => b.sid).ToList());
         Steps["waves"] = D(("files", r.Files.Select(f => new List<object?> { Rel(f.path), f.bytes }).ToList()),
@@ -213,38 +174,9 @@ public sealed class Place : IHarvester
 
     static string F(double v) => v.ToString("R", CultureInfo.InvariantCulture);
 
-    Polite.S3Object? OfsVdatums(string ofs)
-    {
-        var d = Path.Combine("cache", "places", "_s3");
-        Directory.CreateDirectory(d);
-        var old = Directory.GetFiles(d, "ofs_griddatum*").Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToList();
-        var cache = Path.Combine(d, old.Count > 0 ? old[^1]! : "ofs_griddatum.xml");
-        var (objs, _) = _polite.S3List(OfsBucket, "OFS_Grid_Datum/", cache);
-        return objs.FirstOrDefault(o => o.Key.EndsWith($"/{ofs}_vdatums.nc"));
-    }
+    Polite.S3Object? OfsVdatums(string ofs) => Ofs.Vdatums(_polite, ofs);
 
-    (string ymd, int cyc, Dictionary<string, long> files, string prefix) OfsLatestCycle(string ofs)
-    {
-        for (var back = 0; back < 3; back++)
-        {
-            var day = NowUtc.AddDays(-back);
-            var prefix = $"{ofs}/netcdf/{day:yyyy/MM/dd}/";
-            var dir = Path.Combine("cache", "places", "_s3");
-            Directory.CreateDirectory(dir);
-            var cache = Path.Combine(dir, $"ofs_{ofs}_{day:yyyyMMdd}_{NowUtc:yyyyMMddHH}.xml");
-            var older = Directory.GetFiles(dir, $"ofs_{ofs}_{day:yyyyMMdd}_*").Select(Path.GetFileName).OrderBy(n => n, StringComparer.Ordinal).ToList();
-            if (older.Count > 0 && back > 0) cache = Path.Combine(dir, older[^1]!);
-            var (objs, _) = _polite.S3List(OfsBucket, prefix, cache);
-            var sizes = objs.ToDictionary(o => o.Key[(o.Key.LastIndexOf('/') + 1)..], o => o.Size);
-            foreach (var cyc in new[] { 18, 12, 6, 0 })
-            {
-                var names = Enumerable.Range(1, 6).Select(i => $"{ofs}.t{cyc:00}z.{day:yyyyMMdd}.fields.n{i:000}.nc").ToList();
-                names.Add($"{ofs}.t{cyc:00}z.{day:yyyyMMdd}.stations.nowcast.nc");
-                if (names.All(sizes.ContainsKey)) return ($"{day:yyyyMMdd}", cyc, names.ToDictionary(n => n, n => sizes[n]), prefix);
-            }
-        }
-        throw new InvalidOperationException($"no complete {ofs} nowcast cycle in the last three days");
-    }
+    (string ymd, int cyc, Dictionary<string, long> files, string prefix) OfsLatestCycle(string ofs) => Ofs.LatestCycle(_polite, ofs, NowUtc);
 
     Dictionary<string, object?>? StepOfs(bool planOnly = false)
     {
@@ -288,101 +220,10 @@ public sealed class Place : IHarvester
         return D(("ymd", ymd), ("cyc", cyc), ("dir", destDir), ("raw", raw));
     }
 
-    static float[] ScatterOfs(Currents.Grid grid, double[] lon, double[] lat, double[] vals, double[]? mask)
-    {
-        var out_ = new float[grid.Nx * grid.Ny];
-        Array.Fill(out_, -999.0f);
-        for (var k = 0; k < vals.Length; k++)
-        {
-            if (mask is not null && !(mask[k] > 0.5)) continue;
-            var x = vals[k];
-            if (double.IsNaN(x) || Math.Abs(x) > 100) continue;
-            var gx = (int)((lon[k] - grid.Lon0) / grid.Dlon);
-            var gy = (int)((lat[k] - grid.Lat0) / grid.Dlat);
-            for (var oy = 0; oy <= 1; oy++)
-                for (var ox = 0; ox <= 1; ox++)
-                {
-                    int xx = gx + ox, yy = gy + oy;
-                    if (0 <= xx && xx < grid.Nx && 0 <= yy && yy < grid.Ny) out_[yy * grid.Nx + xx] = (float)x;
-                }
-        }
-        return out_;
-    }
-
     (Currents.PlaceField field, Dictionary<string, object?> declared) ConvertOfs(string ofs, string ofsDir, List<string> cycleFiles, Box box)
     {
         var fields = cycleFiles.Where(n => n.Contains(".fields.n")).OrderBy(n => n, StringComparer.Ordinal).ToList();
-        var path = Path.Combine(ofsDir, fields[^1]);
-        using var nc = new NetCdf4(path);
-        var need = new[] { "u", "v", "lon_u", "lat_u", "lon_v", "lat_v", "mask_u", "mask_v", "angle", "lon_rho", "lat_rho", "ocean_time" };
-        var missing = need.Where(n => !nc.Has(n)).ToList();
-        if (missing.Count > 0) throw new InvalidOperationException($"{fields[^1]}: missing [{string.Join(", ", missing)}] (has [{string.Join(", ", nc.Vars.Keys.OrderBy(k => k, StringComparer.Ordinal).Take(40))}])");
-        (double[] vals, int ny, int nx) Surface(string name)
-        {
-            var (vals, shape) = nc.Read(name);
-            int ny = shape[^2], nx = shape[^1];
-            return (vals[^(ny * nx)..], ny, nx);
-        }
-        var (u, uny, unx) = Surface("u");
-        var (v, vny, vnx) = Surface("v");
-        var rd = new[] { "lon_u", "lat_u", "lon_v", "lat_v", "mask_u", "mask_v", "angle", "lon_rho", "lat_rho" }.ToDictionary(n => n, n => nc.Read(n).values);
-        var (t, _) = nc.Read("ocean_time");
-        double[] lonR = rd["lon_rho"], latR = rd["lat_rho"];
-        var wet = Enumerable.Range(0, lonR.Length).Where(k => box.Contains(lonR[k], latR[k])).Select(k => (lonR[k], latR[k])).ToList();
-        var lon0 = Math.Max(box.Lon0, wet.Min(p => p.Item1));
-        var lon1 = Math.Min(box.Lon1, wet.Max(p => p.Item1));
-        var lat0 = Math.Max(box.Lat0, wet.Min(p => p.Item2));
-        var lat1 = Math.Min(box.Lat1, wet.Max(p => p.Item2));
-        const double step = 0.005;
-        var grid = new Currents.Grid(lon0, lat0, lon0 + ((int)((lon1 - lon0) / step) + 1) * step, lat0 + ((int)((lat1 - lat0) / step) + 1) * step, (int)((lon1 - lon0) / step) + 1, (int)((lat1 - lat0) / step) + 1);
-        var gu = ScatterOfs(grid, rd["lon_u"], rd["lat_u"], u, rd["mask_u"]);
-        var gv = ScatterOfs(grid, rd["lon_v"], rd["lat_v"], v, rd["mask_v"]);
-        var ga = ScatterOfs(grid, lonR, latR, rd["angle"], null);
-        foreach (var g in new[] { gu, gv, ga }) Currents.GapFill(grid, g, 3);
-        var n = grid.Nx * grid.Ny;
-        var outU = new float[n]; var outV = new float[n];
-        Array.Fill(outU, -999.0f); Array.Fill(outV, -999.0f);
-        var filled = 0;
-        for (var k = 0; k < n; k++)
-        {
-            float uu = gu[k], vv = gv[k], aa = ga[k];
-            if (uu > -900 && vv > -900)
-            {
-                var a = aa > -900 ? aa : 0.0;
-                outU[k] = (float)(uu * Math.Cos(a) - vv * Math.Sin(a));
-                outV[k] = (float)(uu * Math.Sin(a) + vv * Math.Cos(a));
-                filled++;
-            }
-        }
-        var tunits = nc.Attr("ocean_time", "units") ?? "";
-        string? valid = null;
-        var m = Regex.Match(tunits, @"seconds since (\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})");
-        if (m.Success)
-        {
-            var t0 = DateTime.ParseExact(m.Groups[1].Value + " " + m.Groups[2].Value, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
-            valid = IsoZ(t0.AddSeconds(t[^1]));
-        }
-        var declared = D(("file", fields[^1]), ("ocean_time_units", tunits), ("valid_utc", valid),
-            ("u_units", nc.Attr("u", "units")), ("u_long_name", nc.Attr("u", "long_name")), ("v_units", nc.Attr("v", "units")),
-            ("zeta_units", nc.Has("zeta") ? nc.Attr("zeta", "units") : null), ("zeta_long_name", nc.Has("zeta") ? nc.Attr("zeta", "long_name") : null),
-            ("angle_units", nc.Attr("angle", "units")),
-            ("global", nc.GlobalAttrs("title", "type", "Conventions", "history", "grd_file", "source", "institution").ToDictionary(kv => kv.Key, kv => (object?)kv.Value)),
-            ("model_grid", D(("u", new List<int> { uny, unx }), ("v", new List<int> { vny, vnx }), ("rho", nc.Shape("lon_rho")))));
-        Log($"[ofs] {fields[^1]}: surface u/v rotated to east/north, {filled} of {n} cells water on a {grid.Nx}x{grid.Ny} grid at {step} deg; valid {valid ?? "None"}");
-        var field = new Currents.PlaceField
-        {
-            File = $"{ofs}_uv.f32", Nx = grid.Nx, Ny = grid.Ny, Lon0 = grid.Lon0, Lat0 = grid.Lat0, Dlon = step, Dlat = step,
-            Source = $"{ofs.ToUpperInvariant()} {fields[^1]} (NODD noaa-nos-ofs-pds), surface level", ValidUtc = valid, U = outU, V = outV,
-        };
-        return (field, declared);
-    }
-
-    static Dictionary<string, object?> VdatumsDeclared(string path)
-    {
-        var nc = new NetCdf3(File.ReadAllBytes(path));
-        static object? Strip(object? s) => s is string str ? str.Trim() : s;
-        return D(("global", nc.GAtts.ToDictionary(kv => kv.Key, kv => Strip(kv.Value))),
-            ("variables", nc.Vars.ToDictionary(kv => kv.Key, kv => (object?)D(("long_name", Strip(kv.Value.Atts.GetValueOrDefault("long_name"))), ("unit", Strip(kv.Value.Atts.GetValueOrDefault("unit")))))));
+        return Ofs.Convert(ofs, Path.Combine(ofsDir, fields[^1]), box, 0.005, Log) ?? throw new InvalidOperationException($"{fields[^1]}: no rho point inside {box}");
     }
 
     void StepOfsField()
@@ -396,7 +237,7 @@ public sealed class Place : IHarvester
         var fieldDir = Path.GetDirectoryName(paths.First(p => p.Contains(".fields.")))!;
         var (field, declared) = ConvertOfs(_p.Ofs!, fieldDir, names, _p.Box);
         var vd = paths.FirstOrDefault(p => p.EndsWith("_vdatums.nc"));
-        if (vd is not null) declared["vdatums"] = VdatumsDeclared(vd);
+        if (vd is not null) declared["vdatums"] = Ofs.VdatumsDeclared(vd);
         ofs["declared"] = declared;
         StepCurrents(field);
     }
