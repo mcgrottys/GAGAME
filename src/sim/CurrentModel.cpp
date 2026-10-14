@@ -93,6 +93,10 @@ bool CurrentModel::Load(const std::string& jsonPath) {
         adcpId = adcp->Str("id", "");
         adcpMs = adcp->Num("ms", 0);
         adcpTowardDeg = adcp->Num("toward_deg", 0);
+        if (adcp->Get("lat") && adcp->Get("lon")) {
+            adcpLat = adcp->Num("lat", 0);
+            adcpLon = adcp->Num("lon", 0);
+        }
         adcpObsUnix = adcp->Num("obs_unix", 0);
     }
 
@@ -104,7 +108,7 @@ bool CurrentModel::Load(const std::string& jsonPath) {
         m_field.dlon = jf->Num("dlon", 0);
         m_field.dlat = jf->Num("dlat", 0);
         m_field.source = jf->Str("source");
-        const std::string file = DirOf(jsonPath) + "/" + jf->Str("file", "gomofs_uv.f32");
+        const std::string file = DirOf(jsonPath) + "/" + jf->Str("file");
         std::ifstream f(file, std::ios::binary);
         const size_t n = static_cast<size_t>(m_field.nx) * m_field.ny;
         if (f && n > 0 && n < (1u << 24)) {
@@ -135,6 +139,10 @@ void CurrentModel::Place(const std::string& id, double latDeg, double lonDeg) {
         if (s.id != id || std::isfinite(s.lat)) continue;
         s.lat = latDeg;
         s.lon = lonDeg;
+    }
+    if (adcpValid && id == adcpId && !std::isfinite(adcpLat)) {
+        adcpLat = latDeg;
+        adcpLon = lonDeg;
     }
 }
 

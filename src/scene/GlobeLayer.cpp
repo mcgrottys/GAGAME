@@ -2,6 +2,7 @@
 #include "render/Renderer.h"
 #include "compose/Compositor.h"
 #include "scene/Air.h"
+#include "scene/SceneSchema.h"
 #include "core/ThreadManager.h"
 
 #include "hal/GpuProfiler.h"
@@ -734,12 +735,41 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
                         "globe.lens");
         }
     }
+    // The debug views likewise (SV_Barycentrics wants shader model 6.1).
+    if (DebugViewOn()) {
+        ShaderBlob psD = sc.Compile(m_shaderDir + L"/DebugView.hlsl", L"PsDebugView", L"ps_6_1");
+        if (psD.Valid()) {
+            d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            d.PS = {psD.Data(), psD.Size()};
+            hal::Reload(m_psoDebug, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.debug"); },
+                        "globe.debug");
+        }
+    }
     return true;
 }
 
 void GlobeLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
     BuildPso(gpu, sc);
     if (m_msPath) BuildMeshPso(gpu, sc);
+}
+
+bool GlobeLayer::SetDebug(const scene::DebugSection& d) {
+    // The view's names in SceneSchema.cpp's order: none flat edges normals height depth (the
+    // debug pipeline's modes 0..5), meshlets, albedo, residency, residency.height, .landsea.
+    const int v = d.view;
+    debugView.on = (v >= 1 && v <= 5) || d.wirePx > 0.0f;
+    debugView.mode = (v >= 1 && v <= 5) ? v : 0;
+    debugView.wirePx = d.wirePx;
+    for (int i = 0; i < 3; ++i) debugView.wireRgb[i] = d.wireColor[i];
+    debugView.wireBy = d.wireBy;
+    debugView.contourM = d.contourM;
+    debugView.depthNearM = d.depthNearM;
+    debugView.depthFarM = d.depthFarM;
+    debugView.edgeRefM = d.edgeRefM;
+    if (v == 6) surfaceDebug = 2;
+    if (v == 7) albedoLens = true;
+    if (v >= 8 && v <= 10) debugLens = 9 + (v - 8);
+    return (debugView.on && !DebugPsoReady()) || (ResidencyLensOn() && !LensPsoReady());
 }
 
 bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
@@ -830,6 +860,20 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
                 m_msPsoLens = psoL;
             } else {
                 Log("[globe] mesh RESIDENCY-LENS PSO creation failed (solid path unaffected)");
+            }
+        }
+    }
+    // ...and the debug views (shaders/DebugView.hlsl), only while one is on.
+    if (DebugViewOn()) {
+        ShaderBlob psD = sc.Compile(m_shaderDir + L"/DebugView.hlsl", L"PsDebugView", L"ps_6_5");
+        if (psD.Valid()) {
+            d.fill = D3D12_FILL_MODE_SOLID;
+            d.ps = psD;
+            hal::Pso psoD = hal::BuildMesh(gpu, d, "globe.mesh.debug");
+            if (psoD) {
+                m_msPsoDebug = psoD;
+            } else {
+                Log("[globe] mesh DEBUG-VIEW PSO creation failed (solid path unaffected)");
             }
         }
     }
@@ -2412,6 +2456,16 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     for (int i = 0; i < 4; ++i) m_cb.lensA[i] = m_lensGeo[i];
     for (int i = 0; i < 4; ++i) m_cb.lensB[i] = m_lensChain[i];
     for (int i = 0; i < 4; ++i) m_cb.lensR[i] = m_lensRegion[i];
+    if (DebugViewOn()) {   // the lens's rows are the debug view's while one is on (DebugView.hlsl)
+        m_cb.lensU[0] = static_cast<uint32_t>(debugView.mode);
+        m_cb.lensU[1] = static_cast<uint32_t>(debugView.wireBy);
+        for (int i = 0; i < 3; ++i) m_cb.lensA[i] = debugView.wireRgb[i];
+        m_cb.lensA[3] = debugView.wirePx;
+        m_cb.lensB[0] = debugView.contourM;
+        m_cb.lensB[1] = debugView.depthNearM;
+        m_cb.lensB[2] = debugView.depthFarM;
+        m_cb.lensB[3] = debugView.edgeRefM;
+    }
     m_cb.bankA[3] = sliceOn ? 1.0f : 0.0f;
     m_cb.bankC[3] = sliceD;
     memcpy(m_cb.bankOrg01, &m_bankOrg[0], 16);
@@ -2763,7 +2817,8 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                             std::chrono::steady_clock::now() - copy0)
                             .count();
         hal::PsoPtr msSel = m_msPso.Get();
-        if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
+        if (DebugViewOn() && m_msPsoDebug) msSel = m_msPsoDebug.Get();
+        else if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
         else if (ResidencyLensOn() && m_msPsoLens) msSel = m_msPsoLens.Get();
@@ -2825,7 +2880,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
             // THE KEPT FRAME (GlobeLayer.h keepOn). Keepable: the keep on, no lens or probe (they draw
             // other pictures), a view the renderer handed its inputs and targets, and a cache the
             // record count fits.
-            const bool keepable = keepOn && surfaceDebug == 0 && !ResidencyLensOn() && !overdrawProbe &&
+            const bool keepable = keepOn && surfaceDebug == 0 && !ResidencyLensOn() && !DebugViewOn() && !overdrawProbe &&
                                   m_msPsoKeep.Get() && m_keepPso.Get() && m_classPso.Get() && ctx.viewIndex <= kMaxOtherEyes &&
                                   ctx.constants && ctx.colorRtv.ptr && ctx.depthTex && ctx.frameW && ctx.frameH &&
                                   n <= kClassMax;
@@ -2947,7 +3002,8 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         return;
     }
     hal::PsoPtr sel = m_pso.Get();
-    if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
+    if (DebugViewOn() && m_psoDebug) sel = m_psoDebug.Get();
+    else if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
     else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
     else if (ResidencyLensOn() && m_psoLens) sel = m_psoLens.Get();
     ctx.cmd->Pipeline(sel);

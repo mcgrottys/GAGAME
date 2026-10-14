@@ -73,15 +73,18 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
     m_cb.geo[1] = static_cast<float>(f.lat0);
     m_cb.geo[2] = static_cast<float>(f.dlon * f.nx);
     m_cb.geo[3] = static_cast<float>(f.dlat * f.ny);
-    m_cb.marker[0] = static_cast<float>((kBuoyLon - f.lon0) / (f.dlon * f.nx));
-    m_cb.marker[1] = static_cast<float>((kBuoyLat - f.lat0) / (f.dlat * f.ny));
+    // The ADCP buoy where its file or the scene places it (CurrentModel::adcpLat); none, no ring.
+    const double bLon = m_currents->adcpLon, bLat = m_currents->adcpLat;
+    const bool placed = std::isfinite(bLat);
+    m_cb.marker[0] = placed ? static_cast<float>((bLon - f.lon0) / (f.dlon * f.nx)) : -1.0f;
+    m_cb.marker[1] = placed ? static_cast<float>((bLat - f.lat0) / (f.dlat * f.ny)) : -1.0f;
     m_cb.marker[2] = 0.012f;
-    m_cb.marker[3] = 1.0f;
+    m_cb.marker[3] = placed ? 1.0f : 0.0f;
 
     // ---- numeric gate: field at the buoy vs its ADCP
     float mu = 0, mv = 0;
     char buf[160];
-    if (m_currents->Field().Sample(kBuoyLon, kBuoyLat, mu, mv)) {
+    if (placed && m_currents->Field().Sample(bLon, bLat, mu, mv)) {
         const double ms = std::sqrt(mu * mu + mv * mv);
         const double toward = std::fmod(std::atan2(mu, mv) * 180.0 / kPi + 360.0, 360.0);
         if (m_currents->adcpValid) {

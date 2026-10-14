@@ -82,6 +82,10 @@ const Schema& DataSchema() {
             .BindPath("seastate", p.seastate, "the sea state (--seastate)", R)
             .BindPath("currents", p.currents, "the currents (--currents)", R)
             .BindPath("bathy", p.bathy, "the bathymetry survey (\"\" = none)", R)
+            .BindPath("river", p.river, "the river gauges' discharges, as harvest river writes them (\"\" = none)", R)
+            .BindPath("edits", p.edits,
+                      "the hand polygons, a geojson: land, water and structures that override every survey, in the "
+                      "height stack, the land/sea mask and the solver's bed (\"\" = none)", R)
             .BindPath("route", p.route, "the chart's channel route, a geojson (\"\" = none)", R)
             .Bind("tideFocus", p.tideFocus,
                   "the tide station whose clock and datum link the water takes (\"\" = the nearest the solver's anchor)", R);
@@ -113,13 +117,22 @@ const Schema& TimeSchema() {
     return *s;
 }
 
+const Schema& ClockSchema(const char* name, ClockProps& p) {
+    Schema* sc = new Schema(name, &p);
+    sc->Bind("start", p.start, "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the scene's time.start", R)
+        .Bind("rate", p.rate, Q::Dimensionless, "1", "its pace against the scene's clock (1 = the same, 0 = held)", R);
+    return *sc;
+}
+
 const Schema& EarthSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.sun.earth;
         Schema* sc = new Schema("sun.earth", &p);
         sc->Bind("at", p.at, Q::Length, "m", "the Earth's centre; the sun is a light at 0,0,0", R)
             .Bind("axis", p.axis, Q::Dimensionless, "", "the Earth's spin axis in that frame", R)
-            .Bind("spin", p.spin, Q::Angle, "deg", "the Earth's turn about its axis", R);
+            .Bind("spin", p.spin, Q::Angle, "deg", "the Earth's turn about its axis", R)
+            .Nest("clock", ClockSchema("sun.earth.clock", p.clock), &p.clock,
+                  "ephemeris: the clock of the Earth's turn (the time of day), apart from the sun's");
         return sc;
     }();
     return *s;
@@ -134,7 +147,10 @@ const Schema& SunSchema() {
                      "around a sun at the origin (sun.earth) with no clock at all", R)
             .Bind("az", p.az, Q::Angle, "deg", "pinned azimuth, compass", H)
             .Bind("el", p.el, Q::Angle, "deg", "pinned elevation", H)
-            .Nest("earth", EarthSchema(), &p.earth, "the Earth's place around the sun");
+            .Nest("earth", EarthSchema(), &p.earth, "the Earth's place around the sun")
+            .Nest("clock", ClockSchema("sun.clock", p.clock), &p.clock,
+                  "ephemeris: the clock of the sun's place on the ecliptic (declination and distance: the season), "
+                  "apart from the Earth's turn");
         return sc;
     }();
     return *s;
@@ -202,7 +218,14 @@ const Schema& SweSchema() {
             .Bind("westBoundary", p.westBoundary, "the west-boundary deviation; false = zeroed (--swe-west-off)", R)
             .Bind("spinupH", p.spinupH, Q::Time, "h", "history integrated before the first frame (--swe-spinup)", R)
             .Bind("gain", p.gain, Q::Dimensionless, "1", "solved-current gain (--swe-gain)", H)
-            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "river discharge, m^3/s; < 0 = data/river/river.json (--river)", R)
+            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "river discharge, m^3/s; < 0 = riverGauges in data.river (--river)", R)
+            .Bind("riverGauges", p.riverGauges,
+                  "the gauges the discharge is read from, in the order believed: \"id[*scale] ...\" (a USGS site in "
+                  "data.river; scale = the river at the face over the river at the gauge)", R)
+            .Bind("upriverAreaM2", p.upriverAreaM2, Q::Dimensionless, "1",
+                  "m^2: the river's tidal reach above the solver's face: its prism, filled and drained through the face", R)
+            .Bind("riverQFallback", p.riverQFallback, Q::Dimensionless, "1",
+                  "m^3/s when no gauge reports (0 = no river flow)", R)
             .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
             .BindEnum("window", p.window, {"full-weight", "survey"},
@@ -387,7 +410,9 @@ const Schema& SourceSchema() {
             .BindPath("manifest", kSource.manifest,
                       "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source", R)
             .Bind("kind", kSource.kind,
-                  "colour | height | seastate (a sea-state file: its forecast and buoys at its box); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
+                  "colour | height | seastate (a sea-state file: its forecast and buoys at its box) | survey (a harvested "
+                  "grid's .json, a height of the stack; `dormant` stands a solver on it) | composite (a GACOMP01 product of many "
+                  "sources, docs/FIDELITY.md: its tiers join as rasters); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
                   "channel of 16-bit or float: height)", R)
             .Bind("crs", kSource.crs, "EPSG:nnnn, read only where the file carries none", R)
             .Bind("over", kSource.over, Q::Dimensionless, "1",
@@ -401,7 +426,35 @@ const Schema& SourceSchema() {
             .Bind("offset", kSource.offset, Q::Length, "m",
                   "added to a height whose datum is not the engine's (NAVD88): the separation at the "
                   "place; such a file is refused without it, and a file on NAVD88 takes none", R)
-            .Optional();   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
+            .Optional()    // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
+            .Bind("dormant", kSource.dormant, "survey: a solver stands on it, asleep until the eye comes", R)
+            .Bind("station", kSource.station, "survey: the tide station (its id in data.tides) its open sea is held to", R)
+            .Bind("river", kSource.river, "survey: the side a river enters its solver by (west | none)", R);
+        return sc;
+    }();
+    return *s;
+}
+
+const Schema& DebugSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.debug;
+        Schema* sc = new Schema("debug", &p);
+        sc->BindEnum("view", p.view,
+                     {"none", "flat", "edges", "normals", "height", "depth", "meshlets", "albedo", "residency",
+                      "residency.height", "residency.landsea"},
+                     "the surface drawn as: the picture (none), flat grey, its triangles' size (one hue an octave "
+                     "about edgeRefM), its geometric normal in east/north/up, its height (hypsometric, a line every "
+                     "contourM), its distance (a log ramp), the meshlets, the raw colour, or what the residency lets "
+                     "the colour / height / land-sea mask read (shaders/ResidencyLens.hlsl)",
+                     R)
+            .Bind("wirePx", p.wirePx, Q::Dimensionless, "1", "pixels: the triangles' edges drawn over the view this wide; 0 = none", R)
+            .BindColor("wireColor", p.wireColor, "the wire's colour when wireBy is colour", R)
+            .BindEnum("wireBy", p.wireBy, {"colour", "edge", "depth"},
+                      "the wire's colour: its own, a hue by its triangle's size, or by distance", R)
+            .Bind("contourM", p.contourM, Q::Length, "m", "height: the contour interval", R)
+            .Bind("depthNearM", p.depthNearM, Q::Length, "m", "depth: where the log ramp starts", R)
+            .Bind("depthFarM", p.depthFarM, Q::Length, "m", "depth: where it ends", R)
+            .Bind("edgeRefM", p.edgeRefM, Q::Length, "m", "edges: the triangle size the hue wheel is centred on", R);
         return sc;
     }();
     return *s;
@@ -831,6 +884,7 @@ const Schema& SceneFileSchema() {
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
             .Nest("render", RenderSchema(), &kDoc.render, "the renderer: the kept frame and its grains")
+            .Nest("debug", DebugSchema(), &kDoc.debug, "the debug views of the globe's surface")
             .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")

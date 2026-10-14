@@ -1,0 +1,8 @@
+{
+  "_readme": ["The drawn height: hypsometric, a contour every metre and a heavier one every five -- for A/B of the bed's loaders.",
+    "The debug views (scene key `debug`, shaders/DebugView.hlsl): G in the window steps through all of them.",
+    "Point `base` at any scene to read that scene this way."],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "debug-height"},
+  "debug": {"view": "height", "contourM": 1}
+}

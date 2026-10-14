@@ -35,6 +35,8 @@
 
 namespace ga {
 
+namespace scene { struct DebugSection; }
+
 class GlobeLayer : public Layer {
 public:
     static constexpr int kMaxDepth = 6;      // smallest node ~156 km: vertex spacing == texel
@@ -503,6 +505,25 @@ public:
     // drew it, and where the CDLOD rings hand over -- readable at altitudes where
     // every-triangle wireframe collapses into moire). PSO-selected; PsMain untouched.
     int surfaceDebug = 0;
+    // THE DEBUG VIEWS (the scene's `debug` section; shaders/DebugView.hlsl's header has the law and
+    // the rows). mode: 0 the picture under the wire, 1 flat grey, 2 the triangles' size, 3 the
+    // geometric normal, 4 the height, 5 the distance. Drawn through a pipeline of its own, built
+    // only while one is on, so a run without them compiles and draws what it did before.
+    struct DebugView {
+        int mode = 0;
+        float wirePx = 0.0f;
+        float wireRgb[3] = {1.0f, 0.85f, 0.2f};
+        int wireBy = 0;
+        float contourM = 1.0f, depthNearM = 10.0f, depthFarM = 1.0e6f, edgeRefM = 1.0f;
+        bool on = false;
+    } debugView;
+    // The scene's `debug` section onto the views above, the meshlet tint, the albedo and the
+    // residency lens; a view of `none` and no wire leaves what the flags set. Returns true when a
+    // pipeline it now needs is not built yet (the caller reloads the shaders).
+    bool SetDebug(const scene::DebugSection& d);
+    bool DebugViewOn() const { return debugView.on; }
+    bool DebugPsoReady() const { return m_msPath ? bool(m_msPsoDebug) : bool(m_psoDebug); }
+    bool LensPsoReady() const { return m_msPath ? bool(m_msPsoLens) : bool(m_psoLens); }
     // THE GLOBE KEPT (2026-10-11; the owner: "reuse seems ideal for this engine"). The surface is a
     // pure function of its inputs; while they stand its picture stands. The full draw goes into the
     // view's own colour + depth (Keep), the pixel's class in the alpha and the meshlet's in a buffer
@@ -919,6 +940,7 @@ private:
     // The residency lens (shaders/ResidencyLens.hlsl): built only when debugLens asks for it.
     // (14 was the address lens, --lens addr: deleted with the Mercator pages, B3.)
     hal::Pso m_msPsoLens, m_psoLens;
+    hal::Pso m_msPsoDebug, m_psoDebug;   // the debug views (DebugView.hlsl), built only while one is on
     bool ResidencyLensOn() const { return (debugLens >= 9 && debugLens <= 11) || debugLens >= 14; }
     std::vector<MeshletRec> m_meshlets;
     // THE WALK KEPT (2026-10-11, the owner: "the math gives us things for free"). The walk is a

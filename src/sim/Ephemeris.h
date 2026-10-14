@@ -161,8 +161,13 @@ inline cga::Mv Mirror(const cga::Mv& n, const cga::Mv& X) { return cga::Gp(cga::
 inline SolarSystem BuildChain(const Apparent& app, double ex, double ey, double ez,
                               const cga::Mv& spinRotor);
 
-inline SolarSystem Build(double unixSeconds) {
-    const Apparent app = Solar(unixSeconds);
+// TWO CLOCKS (the scene's sun.clock and sun.earth.clock): the sun's place on the ecliptic at
+// `sunUnix` -- its right ascension, declination and distance, the Earth's place around it -- and
+// the Earth's turn at `earthUnix`. The same unix second in both is the sky as it was.
+inline SolarSystem Build(double sunUnix, double earthUnix) {
+    Apparent app = Solar(sunUnix);
+    app.gmstDeg = GmstDeg(JulianDay(earthUnix) - kJ2000Jd);
+    app.subsolarLonDeg = Wrap180(app.raDeg - app.gmstDeg);
     const double ra = app.raDeg * kDeg, dec = app.decDeg * kDeg;
     // The sun seen FROM the Earth lies at (RA, dec) and distance R, so the Earth seen from the
     // SUN lies at exactly minus that.
@@ -170,6 +175,7 @@ inline SolarSystem Build(double unixSeconds) {
                       -app.distAu * std::cos(dec) * std::sin(ra), -app.distAu * std::sin(dec),
                       cga::Rotor(0.0, 0.0, 1.0, -app.gmstDeg * kDeg));   // about the pole (z_eq)
 }
+inline SolarSystem Build(double unixSeconds) { return Build(unixSeconds, unixSeconds); }
 
 // THE EARTH, PLACED BY A SCENE. The sun is a light at 0,0,0; the Earth's centre is `atM` metres
 // from it and the Earth is turned `spinDeg` about `axis`. No clock anywhere: the apparent

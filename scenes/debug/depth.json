@@ -1,0 +1,8 @@
+{
+  "_readme": ["Distance from the eye on a log ramp, 5 m to 20 km.",
+    "The debug views (scene key `debug`, shaders/DebugView.hlsl): G in the window steps through all of them.",
+    "Point `base` at any scene to read that scene this way."],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "debug-depth"},
+  "debug": {"view": "depth", "depthNearM": 5, "depthFarM": 20000}
+}

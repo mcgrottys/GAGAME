@@ -87,7 +87,8 @@ public:
     // wants it (the globe walk's culled, sized leaves), once, then served from the tile tree on
     // disk -- into an LRU of kLandCacheBytes. A tile decimates each ring to a quarter of its own
     // texel, so a tile of the whole globe walks a few points a ring, not 79 M.
-    bool Load(const std::string& dir, const std::string& landPath = std::string());
+    bool Load(const std::string& dir, const std::string& landPath = std::string(),
+              const std::string& editsPath = std::string());
     bool Ready() const { return !m_coast.empty() || !m_landIdx.empty(); }
 
     // The union of the loaded rings' own bounding boxes, in degrees -- the source's declared

@@ -43,6 +43,7 @@
       { "key": "water", "type": "object", "field": "none", "schema": "water", "reload": "hot", "doc": "the water" },
       { "key": "streaming", "type": "object", "field": "none", "schema": "streaming", "reload": "hot", "doc": "residency: scene state" },
       { "key": "render", "type": "object", "field": "none", "schema": "render", "reload": "hot", "doc": "the renderer: the kept frame and its grains" },
+      { "key": "debug", "type": "object", "field": "none", "schema": "debug", "reload": "hot", "doc": "the debug views of the globe's surface" },
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": false, "reload": "hot", "doc": "rasters that are sources by being files, in any order" },
       { "key": "stations", "type": "list", "field": "none", "element": "station", "named": false, "reload": "hot", "doc": "where a station of the data stands when its file does not say" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
@@ -73,10 +74,12 @@
     ] },
     { "type": "data", "keys": [
       { "key": "shaders", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "shaders", "reload": "restart", "doc": "the shader directory (--shaders)" },
-      { "key": "tides", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/tides/stations.json", "reload": "restart", "doc": "the tide stations (--tides)" },
-      { "key": "seastate", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/sea/seastate.json", "reload": "restart", "doc": "the sea state (--seastate)" },
-      { "key": "currents", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/currents/currents.json", "reload": "restart", "doc": "the currents (--currents)" },
+      { "key": "tides", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the tide stations (--tides)" },
+      { "key": "seastate", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the sea state (--seastate)" },
+      { "key": "currents", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the currents (--currents)" },
       { "key": "bathy", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the bathymetry survey (\"\" = none)" },
+      { "key": "river", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the river gauges' discharges, as harvest river writes them (\"\" = none)" },
+      { "key": "edits", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the hand polygons, a geojson: land, water and structures that override every survey, in the height stack, the land/sea mask and the solver's bed (\"\" = none)" },
       { "key": "route", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the chart's channel route, a geojson (\"\" = none)" },
       { "key": "tideFocus", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the tide station whose clock and datum link the water takes (\"\" = the nearest the solver's anchor)" }
     ] },
@@ -93,12 +96,22 @@
       { "key": "source", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "ephemeris", "names": ["ephemeris", "pinned", "earth"], "reload": "restart", "doc": "the ephemeris at the scene's time, pinned at az/el, or the Earth placed around a sun at the origin (sun.earth) with no clock at all" },
       { "key": "az", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 112, "reload": "hot", "doc": "pinned azimuth, compass" },
       { "key": "el", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "pinned elevation" },
-      { "key": "earth", "type": "object", "field": "none", "schema": "sun.earth", "reload": "hot", "doc": "the Earth's place around the sun" }
+      { "key": "earth", "type": "object", "field": "none", "schema": "sun.earth", "reload": "hot", "doc": "the Earth's place around the sun" },
+      { "key": "clock", "type": "object", "field": "none", "schema": "sun.clock", "reload": "hot", "doc": "ephemeris: the clock of the sun's place on the ecliptic (declination and distance: the season), apart from the Earth's turn" }
     ] },
     { "type": "sun.earth", "keys": [
       { "key": "at", "type": "vec3", "field": "double3", "quantity": "length", "unit": "m", "default": [-149597870700, 0, 0], "reload": "restart", "doc": "the Earth's centre; the sun is a light at 0,0,0" },
       { "key": "axis", "type": "vec3", "field": "double3", "quantity": "1", "unit": "1", "default": [0, 0, 1], "reload": "restart", "doc": "the Earth's spin axis in that frame" },
-      { "key": "spin", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the Earth's turn about its axis" }
+      { "key": "spin", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the Earth's turn about its axis" },
+      { "key": "clock", "type": "object", "field": "none", "schema": "sun.earth.clock", "reload": "hot", "doc": "ephemeris: the clock of the Earth's turn (the time of day), apart from the sun's" }
+    ] },
+    { "type": "sun.earth.clock", "keys": [
+      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the scene's time.start" },
+      { "key": "rate", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "its pace against the scene's clock (1 = the same, 0 = held)" }
+    ] },
+    { "type": "sun.clock", "keys": [
+      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the scene's time.start" },
+      { "key": "rate", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "its pace against the scene's clock (1 = the same, 0 = held)" }
     ] },
     { "type": "air", "keys": [
       { "key": "aod550", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "the day's aerosol optical depth at 550 nm, the air's one row that changes with the day (src/scene/Air.h); < 0 = the planet's typical value (Earth 0.10, the Maritime Aerosol Network's open-ocean mean; Mars's dust 0.5)" },
@@ -135,7 +148,10 @@
       { "key": "westBoundary", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the west-boundary deviation; false = zeroed (--swe-west-off)" },
       { "key": "spinupH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 1, "reload": "restart", "doc": "history integrated before the first frame (--swe-spinup)" },
       { "key": "gain", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "solved-current gain (--swe-gain)" },
-      { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "river discharge, m^3/s; < 0 = data/river/river.json (--river)" },
+      { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "river discharge, m^3/s; < 0 = riverGauges in data.river (--river)" },
+      { "key": "riverGauges", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the gauges the discharge is read from, in the order believed: \"id[*scale] ...\" (a USGS site in data.river; scale = the river at the face over the river at the gauge)" },
+      { "key": "upriverAreaM2", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "m^2: the river's tidal reach above the solver's face: its prism, filled and drained through the face" },
+      { "key": "riverQFallback", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "m^3/s when no gauge reports (0 = no river flow)" },
       { "key": "bedWait", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "whole", "names": ["none", "map", "whole"], "reload": "restart", "doc": "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)" },
       { "key": "window", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "full-weight", "names": ["full-weight", "survey"], "reload": "restart", "doc": "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included" },
       { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells the survey's angular cell over it in true metres at that latitude, its bed the stack's; zeros = the survey's window (`window`)" },
@@ -215,19 +231,32 @@
       { "key": "keepSunGrainDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0.01, "reload": "hot", "doc": "the sun's grain for the kept frame: the globe is redrawn when the sun has moved by more" },
       { "key": "keepTideGrainM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.001, "reload": "hot", "doc": "the tide's grain for the kept frame: the globe is redrawn when the water level has moved by more" }
     ] },
+    { "type": "debug", "keys": [
+      { "key": "view", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "none", "names": ["none", "flat", "edges", "normals", "height", "depth", "meshlets", "albedo", "residency", "residency.height", "residency.landsea"], "reload": "restart", "doc": "the surface drawn as: the picture (none), flat grey, its triangles' size (one hue an octave about edgeRefM), its geometric normal in east/north/up, its height (hypsometric, a line every contourM), its distance (a log ramp), the meshlets, the raw colour, or what the residency lets the colour / height / land-sea mask read (shaders/ResidencyLens.hlsl)" },
+      { "key": "wirePx", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "pixels: the triangles' edges drawn over the view this wide; 0 = none" },
+      { "key": "wireColor", "type": "color", "field": "float4", "quantity": "unknown", "unit": "", "default": [1, 0.85, 0.2, 1], "reload": "restart", "doc": "the wire's colour when wireBy is colour" },
+      { "key": "wireBy", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "colour", "names": ["colour", "edge", "depth"], "reload": "restart", "doc": "the wire's colour: its own, a hue by its triangle's size, or by distance" },
+      { "key": "contourM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 1, "reload": "restart", "doc": "height: the contour interval" },
+      { "key": "depthNearM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 10, "reload": "restart", "doc": "depth: where the log ramp starts" },
+      { "key": "depthFarM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 1000000, "reload": "restart", "doc": "depth: where it ends" },
+      { "key": "edgeRefM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 1, "reload": "restart", "doc": "edges: the triangle size the hue wheel is centred on" }
+    ] },
     { "type": "source", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a label (\"\" = the file's own name)" },
       { "key": "file", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "one raster: a GeoTIFF, or a PNG / JPEG beside its world file" },
       { "key": "folder", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a folder whose files matching `match` are one source" },
       { "key": "match", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folder's pattern, * and ? (\"\" = every file)" },
       { "key": "manifest", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source" },
-      { "key": "kind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "colour | height | seastate (a sea-state file: its forecast and buoys at its box); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one channel of 16-bit or float: height)" },
+      { "key": "kind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "colour | height | seastate (a sea-state file: its forecast and buoys at its box) | survey (a harvested grid's .json, a height of the stack; `dormant` stands a solver on it) | composite (a GACOMP01 product of many sources, docs/FIDELITY.md: its tiers join as rasters); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one channel of 16-bit or float: height)" },
       { "key": "crs", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "EPSG:nnnn, read only where the file carries none" },
       { "key": "over", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the stack order's first key, ascending upward (every built-in source is 0); the second is the grain, the coarser under the finer" },
       { "key": "feather", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "the edge of the whole softened over this far (smoothstep); 0 = a hard edge" },
       { "key": "unit", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's unit (m, ft, ftUS), read only where the file names none" },
       { "key": "datum", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's vertical datum (NAVD88, MSL, EGM2008 ...), read only where the file names none" },
-      { "key": "offset", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": null, "optional": true, "reload": "restart", "doc": "added to a height whose datum is not the engine's (NAVD88): the separation at the place; such a file is refused without it, and a file on NAVD88 takes none" }
+      { "key": "offset", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": null, "optional": true, "reload": "restart", "doc": "added to a height whose datum is not the engine's (NAVD88): the separation at the place; such a file is refused without it, and a file on NAVD88 takes none" },
+      { "key": "dormant", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "survey: a solver stands on it, asleep until the eye comes" },
+      { "key": "station", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "survey: the tide station (its id in data.tides) its open sea is held to" },
+      { "key": "river", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "none", "reload": "restart", "doc": "survey: the side a river enters its solver by (west | none)" }
     ] },
     { "type": "station", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the station's id in its file" },

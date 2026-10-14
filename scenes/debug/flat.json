@@ -1,0 +1,8 @@
+{
+  "_readme": ["The geometry alone: flat grey, depth-cued, the wire in yellow.",
+    "The debug views (scene key `debug`, shaders/DebugView.hlsl): G in the window steps through all of them.",
+    "Point `base` at any scene to read that scene this way."],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "debug-flat"},
+  "debug": {"view": "flat", "wirePx": 1}
+}

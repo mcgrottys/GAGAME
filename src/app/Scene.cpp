@@ -425,6 +425,9 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Str("datum", s.datum);
             r.F64("offset", s.offset);
             s.hasOffset = e.Get("offset") != nullptr;
+            r.Bool("dormant", s.dormant);
+            r.Str("station", s.station);
+            r.Str("river", s.river);
             if (!ok) return false;
             if (s.file.empty() + s.folder.empty() + s.manifest.empty() != 2) {
                 return Refuse(why, "sources: an entry names a file, a folder and a match, or a manifest -- one of the three");

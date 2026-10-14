@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,9 @@ public:
     bool adcpValid = false;
     std::string adcpId;
     double adcpMs = 0, adcpTowardDeg = 0, adcpObsUnix = 0;
+    // Where the ADCP buoy stands: its file's `lat`/`lon`, else the scene's `stations` entry of its
+    // id (Place); NaN = nowhere known (the gulf map draws no marker and no comparison).
+    double adcpLat = std::numeric_limits<double>::quiet_NaN(), adcpLon = std::numeric_limits<double>::quiet_NaN();
 
 private:
     std::vector<TidalCurrentStation> m_stations;
