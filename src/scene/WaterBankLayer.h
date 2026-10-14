@@ -30,7 +30,11 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 
+#include <array>
+#include <condition_variable>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -154,8 +158,26 @@ public:
     // (SurfaceFrame::FlatRows). Must precede the first Render.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     // The coast mask (GisVectorMask): a ring tile the survey calls water anywhere is wet, whatever
-    // the height under it says (TileWet).
+    // the height under it says (MaskWet, HeightWet).
     void SetMask(const class GisVectorMask* m) { m_mask = m; }
+    // The mask rasters' state, shared with the loader threads that run them (AskMask). Close: no
+    // raster starts after it, and it returns when none runs -- the mask must outlive them, so the
+    // Assembly closes every bank's before its gisMask destructs (by this state: a bank's layer may
+    // already be gone by then).
+    struct MaskJobs {
+        std::mutex mx;
+        std::condition_variable idle;
+        uint64_t want[kMips] = {}, ready[kMips] = {};   // the ring's latest ask; the ask answered
+        std::vector<std::pair<int, uint8_t>> answers[kMips];
+        int inflight = 0;
+        bool closed = false;
+        void Close() {
+            std::unique_lock<std::mutex> lk(mx);
+            closed = true;
+            idle.wait(lk, [&] { return inflight == 0; });
+        }
+    };
+    std::shared_ptr<MaskJobs> MaskJobsOf() const { return m_maskJobs; }
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
     // the cascade closures outside the window, which is also the fallback everywhere).
     void SetWaveField(const class WaveField* wf) { m_wave = wf; }
@@ -304,7 +326,11 @@ private:
     };
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
-    bool TileWet(double wx0, double wz0, double spanM) const;
+    // A tile carries waves where the mask calls any of it water, or the height under it is low.
+    void MaskBox(double wx0, double wz0, double spanM, double box[4]) const;   // the tile's lat/lon box
+    static bool MaskAnswer(const class GisVectorMask& mask, const double box[4]);
+    void AskMask(int m, const std::vector<std::pair<int, std::array<double, 4>>>& tiles);
+    bool HeightWet(double wx0, double wz0, double spanM, bool& provisional) const;
     void CornerParams(double wx, double wz, float& lvl, float& bed) const;
     // M13 step 2: the place of a ring point, and the tile rows above. Both go through the
     // surface's chart where it carries the renderer's rows; without them (a bank built before a
@@ -351,6 +377,11 @@ private:
     float m_baseTexelM = 4.8f;
     float m_orgX[kMips] = {}, m_orgZ[kMips] = {};
     bool m_orgValid[kMips] = {};
+    uint8_t m_maskWet[kMips][kRingTiles * kRingTiles] = {};   // the mask's answer where the ring stands
+    uint8_t m_maskKnown[kMips][kRingTiles * kRingTiles] = {};   // answered (else asked, and wet meanwhile)
+    std::shared_ptr<MaskJobs> m_maskJobs = std::make_shared<MaskJobs>();
+    bool m_provisional[kMips] = {};   // a height read answered coarser than asked at the last test
+    uint64_t m_landSeen[kMips] = {};   // the height tree's loads when each ring's land test last ran
     uint8_t m_wet[kMips][kRingTiles * kRingTiles] = {};   // per logical tile
     double m_simUnix = 0, m_camX = 0, m_camZ = 0;   // the eye in the chart
     double m_eyeFlat[3] = {};                       // ...and in the flat frame

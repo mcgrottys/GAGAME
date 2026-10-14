@@ -191,6 +191,11 @@ public:
     void BindHeightTree(int channel, std::shared_ptr<HeightTree> tree) { m_channels[channel].heightTree = std::move(tree); }
     float SampleHeight(int channel, double latRad, double lonRad, double groundResM) const;
     HeightTree* HeightTreeOf(int channel) const { return m_channels[channel].heightTree.get(); }
+    // THE FRAME THREAD'S READ: what is held, never a paint (HeightTree::SampleResident); the stack
+    // when no tree is bound. HeightLanded counts the tree's loads, so a kept answer can be asked again.
+    float SampleHeightResident(int channel, double latRad, double lonRad, double groundResM,
+                               bool* provisional = nullptr) const;
+    uint64_t HeightLanded(int channel) const;
 
     // The schema table, logged at startup: what feeds each channel, in what structure.
     void LogRegistry() const;

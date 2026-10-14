@@ -108,7 +108,11 @@ std::vector<RasterEntry> CompositeTiers(const scene::SourceProps& s) {
         snprintf(g, sizeof(g), ".t%g", t.Num("grain_m", 0));
         e.name = layer + g;
         e.kind = root.Str("kind") == "height" ? "height" : t.Str("kind");
-        e.over = s.over + t.Num("over", 0);
+        // The scene's `over` alone: a tier stacks by its grain among every height the scene reads
+        // (StackOrder, the coarser under the finer). A tier's own rank (`over`, which files made before
+        // 2026-10-14 carry) put the composite's 463 m gap fill over the scene's 13.7 m survey, and the
+        // river showed ETOPO's 15" blocks wherever the 3.4 m tier had no data (Mark's flats and wall).
+        e.over = s.over;
         e.feather = s.feather;
         e.unit = t.Str("unit", root.Str("unit").c_str());
         e.datum = t.Str("datum", root.Str("datum").c_str());
@@ -787,7 +791,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // the world.flat chart: the rings' places (PHASE C5)
-        waterBank->SetMask(&gisMask);      // the coast's water makes a ring tile wet
+        waterBank->SetMask(&gisMask);
+        A->bankMaskClose.jobs.push_back(waterBank->MaskJobsOf());      // the coast's water makes a ring tile wet
         waterBank->flatBed = S.water.bank.flatBed;
         waterBank->flatBedNavd = S.water.bank.flatBedNavd;
         if (S.water.bank.flatBed) {
@@ -813,6 +818,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
             waterBankB->SetMask(&gisMask);
+            A->bankMaskClose.jobs.push_back(waterBankB->MaskJobsOf());
             waterBankB->flatBed = S.water.bank.flatBed;
             waterBankB->flatBedNavd = S.water.bank.flatBedNavd;
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -829,6 +835,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankEye->SetBaseTexel(waterScene.bankTexelM);
             waterBankEye->SetSurface(&surface);
             waterBankEye->SetMask(&gisMask);
+            A->bankMaskClose.jobs.push_back(waterBankEye->MaskJobsOf());
             waterBankEye->flatBed = S.water.bank.flatBed;
             waterBankEye->flatBedNavd = S.water.bank.flatBedNavd;
             waterBankEye->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());

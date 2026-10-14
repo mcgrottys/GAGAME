@@ -28,6 +28,7 @@
 
 #include "core/Common.h"
 #include "core/Lattice.h"
+#include "core/ThreadManager.h"
 #include "core/TileAddress.h"
 
 #include <algorithm>
@@ -37,10 +38,12 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <condition_variable>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ga {
@@ -89,6 +92,62 @@ public:
         const uint32_t x0 = clampI(fx0), x1 = clampI(fx0 + 1.0), y0 = clampI(fy0), y1 = clampI(fy0 + 1.0);
         return float((double(Texel(face, mip, x0, y0)) * (1.0 - frx) + double(Texel(face, mip, x1, y0)) * frx) * (1.0 - fry) +
                      (double(Texel(face, mip, x0, y1)) * (1.0 - frx) + double(Texel(face, mip, x1, y1)) * frx) * fry);
+    }
+
+    // THE FRAME'S READ: never waits on a paint. The answer is the finest level HELD at or coarser than
+    // the one `groundResM` asks for -- the GPU's own rule, the finest resident mip -- and a level not
+    // held is asked of a loader thread (Lane::Io) and answered next time. The coarsest level is read
+    // in place when it is not held (one tile a face, once a run), so an answer always exists.
+    // MEASURED (2026-10-14, flood rail on the composite Merrimack): the water bank's land test and
+    // corners read through Sample() on the frame thread waited 69.8 s on 1,024 cold tiles (68 ms a
+    // tile, a coarse tile is the fold of its children), 55 ms a frame. Landed() counts the loads
+    // that arrived, so a reader that kept an answer knows when a finer one may stand.
+    // `provisional`, when given, is set where the answer came from a level coarser than asked because
+    // the asked one was not held (a level above, magnified, is the asked level's own answer).
+    float SampleResident(double latRad, double lonRad, double groundResM, bool* provisional = nullptr) {
+        const double cl = std::cos(latRad);
+        const double d[3] = {cl * std::cos(lonRad), std::sin(latRad), cl * std::sin(lonRad)};
+        double uv[2] = {0.0, 0.0};
+        const uint32_t face = CubeFaceOfDir(d, uv);
+        for (uint32_t mip = LevelFor(groundResM); mip < m_mips; ++mip) {
+            const uint32_t dim = m_lat.faceDim >> mip;
+            const double tx = uv[0] * dim - 0.5, ty = uv[1] * dim - 0.5;
+            const double fx0 = std::floor(tx), fy0 = std::floor(ty), frx = tx - fx0, fry = ty - fy0;
+            const double dmax = double(dim) - 1.0;
+            const auto clampI = [&](double t) { return uint32_t((std::min)((std::max)(t, 0.0), dmax)); };
+            const uint32_t xs[2] = {clampI(fx0), clampI(fx0 + 1.0)}, ys[2] = {clampI(fy0), clampI(fy0 + 1.0)};
+            const bool last = mip + 1 == m_mips;
+            float v[4];
+            bool held = true;
+            for (int k = 0; k < 4 && held; ++k) {
+                const uint32_t ix = xs[k & 1], iy = ys[k >> 1];
+                const TileRequest r{face, mip, ix / m_lat.texW, iy / m_lat.texH};
+                const Cached* t = last ? &TileOf(r) : HeldOf(r);
+                if (!t) {
+                    Request(r);
+                    held = false;
+                    if (provisional) *provisional = true;
+                } else if (t->magnified) {
+                    held = false;   // the level above, magnified: the answer is the one above
+                } else {
+                    v[k] = TexelIn(*t, ix, iy);
+                }
+            }
+            if (held) {
+                return float((double(v[0]) * (1.0 - frx) + double(v[1]) * frx) * (1.0 - fry) +
+                             (double(v[2]) * (1.0 - frx) + double(v[3]) * frx) * fry);
+            }
+        }
+        return 0.0f;   // unreachable: the coarsest level is read in place
+    }
+    uint64_t Landed() const { return m_landed.load(std::memory_order_acquire); }
+
+    // No load starts after this, and it returns when none is running: the tree a load reads must not
+    // die under it (the Assembly closes this before its height TileTree destructs).
+    void Close() {
+        std::unique_lock<std::mutex> lk(m_mx);
+        m_closed = true;
+        m_idle.wait(lk, [&] { return m_inflight == 0; });
     }
 
     // THE HIGHEST GROUND ALONG A RAY (the swell's exposure, compose/ExposureSource.h): the maximum of
@@ -153,6 +212,8 @@ public:
     // miss only: MEASURED, a counter per texel and a shared_ptr copy per tap -- two cache lines every
     // loader thread writes -- made a warm read 600 ns in the exposure's march, the stack's 160.
     std::atomic<uint64_t> tileReads{0}, readUs{0}, transient{0};   // transient: reads answered "not now"
+    // INSTRUMENT: the reads made on the calling thread (any tree), so a frame loop can see what it waited on
+    static inline thread_local uint64_t tlReads = 0, tlReadUs = 0;
     size_t Held() const {
         std::lock_guard<std::mutex> lk(m_mx);
         return m_lru.size();
@@ -247,8 +308,9 @@ private:
     using Tile = std::shared_ptr<const Cached>;
 
     float Texel(uint32_t face, uint32_t mip, uint32_t ix, uint32_t iy) {
-        const TileRequest r{face, mip, ix / m_lat.texW, iy / m_lat.texH};
-        const Cached& t = TileOf(r);
+        return TexelIn(TileOf(TileRequest{face, mip, ix / m_lat.texW, iy / m_lat.texH}), ix, iy);
+    }
+    float TexelIn(const Cached& t, uint32_t ix, uint32_t iy) const {
         if (t.bytes.size() < size_t(m_lat.texW) * m_lat.texH * 2) return 0.0f;   // nothing covers: the stack's 0
         uint16_t h;
         std::memcpy(&h, t.bytes.data() + (size_t(iy % m_lat.texH) * m_lat.texW + ix % m_lat.texW) * 2, 2);
@@ -267,7 +329,7 @@ private:
     // The tile, held alive by this thread's slot until the slot is reused: the four taps of a sample
     // read through the reference, never touching a count another thread writes.
     const Cached& TileOf(const TileRequest& r) {
-        const uint64_t key = (uint64_t(r.face) << 61) | (uint64_t(r.mip) << 56) | (uint64_t(r.y) << 28) | r.x;
+        const uint64_t key = KeyOf(r);
         thread_local Recent recent[4];
         thread_local uint32_t next = 0;
         for (const Recent& e : recent) {
@@ -279,6 +341,58 @@ private:
         slot.key = key;
         slot.tile = std::move(t);
         return *slot.tile;
+    }
+
+    static uint64_t KeyOf(const TileRequest& r) {
+        return (uint64_t(r.face) << 61) | (uint64_t(r.mip) << 56) | (uint64_t(r.y) << 28) | r.x;
+    }
+
+    // The tile if this reader holds it, else null; never reads.
+    const Cached* HeldOf(const TileRequest& r) {
+        const uint64_t key = KeyOf(r);
+        thread_local Recent recent[4];
+        thread_local uint32_t next = 0;
+        for (const Recent& e : recent) {
+            if (e.owner == m_serial && e.key == key) return e.tile.get();
+        }
+        Tile t;
+        {
+            std::lock_guard<std::mutex> lk(m_mx);
+            auto it = m_index.find(key);
+            if (it == m_index.end()) return nullptr;
+            m_lru.splice(m_lru.begin(), m_lru, it->second);
+            t = it->second->second;
+        }
+        Recent& slot = recent[next++ & 3u];
+        slot.owner = m_serial;
+        slot.key = key;
+        slot.tile = std::move(t);
+        return slot.tile.get();
+    }
+
+    // Ask a loader thread for a tile not held: once while it is asked, never after Close().
+    void Request(const TileRequest& r) {
+        const uint64_t key = KeyOf(r);
+        {
+            std::lock_guard<std::mutex> lk(m_mx);
+            if (m_closed || m_index.count(key) || !m_pending.insert(key).second) return;
+            ++m_inflight;
+        }
+        Threads().Submit(Lane::Io, "height.tree", [this, key, r] {
+            bool closed;
+            {
+                std::lock_guard<std::mutex> lk(m_mx);
+                closed = m_closed;
+            }
+            if (!closed) Shared(key, r);
+            {
+                std::lock_guard<std::mutex> lk(m_mx);
+                m_pending.erase(key);
+                --m_inflight;
+            }
+            m_landed.fetch_add(1, std::memory_order_release);
+            m_idle.notify_all();
+        });
     }
 
     Tile Shared(uint64_t key, const TileRequest& r) {
@@ -310,8 +424,10 @@ private:
                     }
                 }
             }
-            readUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count()),
-                             std::memory_order_relaxed);
+            const uint64_t us = uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+            readUs.fetch_add(us, std::memory_order_relaxed);
+            ++tlReads;
+            tlReadUs += us;
             tileReads.fetch_add(1, std::memory_order_relaxed);
         }
         // Not now is an answer for this read alone: kept by no cache, so the next read asks again.
@@ -339,6 +455,11 @@ private:
     const uint64_t m_serial;   // names this reader's tiles in the threads' own four
     uint32_t m_mips = 1;
     mutable std::mutex m_mx;
+    std::condition_variable m_idle;
+    std::unordered_set<uint64_t> m_pending;   // tiles asked of a loader and not yet back
+    uint32_t m_inflight = 0;
+    bool m_closed = false;
+    std::atomic<uint64_t> m_landed{0};
     std::list<std::pair<uint64_t, Tile>> m_lru;
     std::unordered_map<uint64_t, std::list<std::pair<uint64_t, Tile>>::iterator> m_index;
 };
