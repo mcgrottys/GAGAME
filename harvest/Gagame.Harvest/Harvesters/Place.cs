@@ -526,7 +526,7 @@ public sealed class Place : IHarvester
         var se = inspected.GetValueOrDefault("Southeast_Caribbean.zip") as Dictionary<string, object?> ?? new();
         var members = (se.GetValueOrDefault("members") as List<Dictionary<string, object?>>) ?? new();
         var shp = members.Where(m => ((string)m["name"]!).ToLowerInvariant().EndsWith(".shp")).ToList();
-        if (shp.Count > 0 && shp.Max(m => (long)m["compressed"]!) > Polite.BigBytes)
+        if (shp.Count > 0 && shp.Max(m => (long)m["compressed"]!) > _polite.Limits.BigBytes)
             Skip("cusp shoreline", $"not cheap: Florida's Atlantic shoreline is one {(long)shp[0]["compressed"]! / 1e6:0.0} MB deflate member (Southeast_Caribbean.shp) of the {Convert.ToDouble(se["bytes"]) / 1e6:0.0} MB regional zip, and a deflate member cannot be read in part; FIF_20260908.zip is per-state inland (22 states, no Florida). Read through the zips' central directories only (two suffix-range requests)");
         return report;
     }

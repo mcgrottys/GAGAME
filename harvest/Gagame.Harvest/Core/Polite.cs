@@ -8,22 +8,21 @@ using System.Text.RegularExpressions;
 namespace Gagame.Harvest;
 
 /// The polite fetcher for PLACE harvests (harvester/polite.py): cache first forever, one
-/// request in flight across processes (a lock file), >= 1.1 s between requests to a host
-/// (2.5 s on NOMADS), one retry after Retry-After or 30 s, a persistent byte and request
-/// budget charged BEFORE each request, planned streaming downloads that resume from .part,
-/// no Google hosts, and the product token without the contact address.
+/// request in flight across processes (a lock file), the least gap between requests to a
+/// SOURCE (all its hosts paced as one) and the bans from the sources' limits file
+/// (harvest/sources.limits.json, docs/FIDELITY.md section 2: 1.1 s by default, 2.5 s on NCEP's
+/// hosts, no Google host), one retry after Retry-After or the file's back-off, a persistent
+/// byte and request budget charged BEFORE each request (and a source's own day of bytes where
+/// it states one), planned streaming downloads that resume from .part, and the product token
+/// without the contact address.
 public sealed class Polite : Fetcher
 {
     public const string UA = "GAGAME/0.1 (hobby ocean simulator)";
-    public const long MaxBytes = 8_000_000_000;
-    public const int MaxRequests = 2000;
-    public const double MinHostGapS = 1.1;
-    public const double BackoffS = 30.0;
-    public const long BigBytes = 50_000_000;
-    public const long SmallGetLimit = BigBytes;
-    static readonly Dictionary<string, double> HostGapS = new() { ["nomads.ncep.noaa.gov"] = 2.5 };
-    static readonly string[] Banned = ["google.", "googleapis.", "gstatic.", "ggpht.", "googleusercontent.", "youtube.",
-        "withgoogle.", "gvt1.", "blogspot.", "googlevideo."];
+
+    /// The sources' limits this fetcher obeys (read once, at construction).
+    public SourceLimits Limits { get; }
+    long MaxBytes => (long)Limits.BudgetBytes;
+    long MaxRequests => Limits.BudgetRequests;
 
     public sealed class StopException : Exception
     {
@@ -39,6 +38,7 @@ public sealed class Polite : Fetcher
     {
         _ctx = ctx;
         LedgerPath = Environment.GetEnvironmentVariable("GAGAME_LEDGER") ?? Path.Combine("out", "places", "ledger.jsonl");
+        Limits = SourceLimits.Load(ctx.Root);
         _ledger = new Ledger(LedgerPath);
     }
 
@@ -51,6 +51,7 @@ public sealed class Polite : Fetcher
         public int Requests;
         public readonly Dictionary<string, long[]> PerHost = new();
         public readonly Dictionary<string, double> LastAt = new();
+        public readonly List<(string host, double tEnd, long bytes)> Lines = new();
         public (long bytes, string url) Largest = (0, "");
 
         public Ledger(string path)
@@ -76,6 +77,7 @@ public sealed class Polite : Fetcher
             h[1] += n;
             var tEnd = e.TryGetProperty("t_end", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetDouble() : 0.0;
             LastAt[host] = Math.Max(LastAt.GetValueOrDefault(host), tEnd);
+            Lines.Add((host, tEnd, n));
             if (n > Largest.bytes) Largest = (n, e.GetProperty("url").GetString() ?? "");
         }
 
@@ -89,7 +91,7 @@ public sealed class Polite : Fetcher
         }
     }
 
-    public (long bytes, int requests) Remaining() => (MaxBytes - _ledger.Bytes, MaxRequests - _ledger.Requests);
+    public (long bytes, int requests) Remaining() => (MaxBytes - _ledger.Bytes, (int)(MaxRequests - _ledger.Requests));
 
     public Dictionary<string, object?> Summary() => new()
     {
@@ -137,23 +139,37 @@ public sealed class Polite : Fetcher
 
     public static string HostOf(string url) => Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "?";
 
-    static void CheckHost(string url)
+    /// A host any banned source names is refused, however specific another entry naming it is.
+    void CheckHost(string url)
     {
-        var h = HostOf(url).ToLowerInvariant() + ".";
-        if (Banned.Any(b => h.Contains(b))) throw new StopException($"refusing a Google host: {h.TrimEnd('.')}");
+        var h = HostOf(url);
+        if (Limits.BannedBy(h) is { } s) throw new StopException($"refusing a banned host: {h} ({s.Title}; {Limits.Path})");
     }
 
     static double Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
 
+    /// The last request to any host of the same source, so a source's hosts share one pace.
+    double LastAtSource(string host)
+    {
+        var key = Limits.KeyOf(host);
+        return _ledger.LastAt.Where(kv => Limits.KeyOf(kv.Key) == key).Select(kv => kv.Value).DefaultIfEmpty(0.0).Max();
+    }
+
     void Pace(string host)
     {
-        var gap = HostGapS.GetValueOrDefault(host, MinHostGapS);
-        var wait = gap - (Now() - _ledger.LastAt.GetValueOrDefault(host));
+        var wait = Limits.GapOf(host) - (Now() - LastAtSource(host));
         if (wait > 0) Thread.Sleep(TimeSpan.FromSeconds(wait));
     }
 
     void Admit(string url, long? expectBytes)
     {
+        if (Limits.Of(HostOf(url)) is { DayBytes: > 0 } src)
+        {
+            var since = Now() - 86400.0;
+            var day = _ledger.Lines.Where(l => l.tEnd > since && Limits.KeyOf(l.host) == src.Id).Sum(l => l.bytes);
+            if (day + (expectBytes ?? 0) > src.DayBytes)
+                throw new StopException($"{src.Title}: {day / 1e9:0.000} GB in the last 24 h + {(expectBytes ?? 0) / 1e9:0.000} GB planned > its {src.DayBytes / 1e9:0.0} GB a day; not requesting {url}");
+        }
         if (_ledger.Requests + 1 > MaxRequests)
             throw new StopException($"request budget spent ({_ledger.Requests}/{MaxRequests}); not requesting {url}");
         if (_ledger.Bytes + (expectBytes ?? 0) > MaxBytes)
@@ -168,7 +184,7 @@ public sealed class Polite : Fetcher
     };
 
     double RetryAfter(Exception e) =>
-        e is HttpError { RetryAfter: double ra } ? Math.Min(Math.Max(ra, 1.0), 300.0) : BackoffS;
+        e is HttpError { RetryAfter: double ra } ? Math.Min(Math.Max(ra, 1.0), 300.0) : Limits.BackoffS;
 
     static readonly HttpClient Http = Make();
     static HttpClient Make()
@@ -232,7 +248,7 @@ public sealed class Polite : Fetcher
             else
             {
                 var n = resp.Content.Headers.ContentLength;
-                if (n is not null && n > SmallGetLimit)
+                if (n is not null && n > Limits.BigBytes)
                     throw new InvalidOperationException($"{url} announces {n / 1e6:0.0} MB: too big for an unplanned GET (plan it with a known size)");
                 body = resp.Content.ReadAsByteArrayAsync(cts.Token).GetAwaiter().GetResult();
                 got = body.Length;
@@ -306,7 +322,7 @@ public sealed class Polite : Fetcher
     public (byte[] data, bool cached) Get(string url, string? cachePath, int timeoutS = 120, string note = "", long? expect = null)
     {
         if (cachePath is not null && File.Exists(cachePath)) return (File.ReadAllBytes(cachePath), true);
-        if (expect is not null && expect > BigBytes)
+        if (expect is not null && expect > Limits.BigBytes)
         {
             Download(url, cachePath!, expect.Value, timeoutS, note);
             return (File.ReadAllBytes(cachePath!), false);

@@ -3,6 +3,8 @@ using Gagame.Harvest;
 /// harvest <name> [args]       run one harvester from the checkout (found by walking up from the exe,
 ///                             or named by --root DIR); the big-data drive by --datacache DIR or GAGAME_DATACACHE
 /// harvest --list [--json]     what the factory can make: name, title, outputs, sources, inserts
+/// harvest fidelity ...        the fidelity map (.gafid): new, paint-box, erase-box, at, finest, dump, stats, check
+/// harvest limits [--check]    the sources' limits Polite obeys (harvest/sources.limits.json)
 static class Program
 {
     static int Main(string[] argv)
@@ -12,7 +14,7 @@ static class Program
         string? dataCache = Take(args, "--datacache");
         if (args.Count == 0 || args[0] is "--help" or "-h")
         {
-            Console.WriteLine("harvest <name> [args] | harvest --list [--json]   (--root DIR, --datacache DIR)");
+            Console.WriteLine("harvest <name> [args] | harvest --list [--json] | harvest fidelity ... | harvest limits [--check]   (--root DIR, --datacache DIR)");
             Console.WriteLine("names: " + string.Join(", ", HarvesterFactory.Names));
             return args.Count == 0 ? 1 : 0;
         }
@@ -38,6 +40,21 @@ static class Program
                 foreach (var x in HarvesterFactory.All())
                     Console.WriteLine($"{x.Name,-18} {x.Title,-34} {string.Join(", ", x.Outputs)}");
             return 0;
+        }
+        if (args[0] == "fidelity")
+        {
+            try { return FidelityCli.Run(args.Skip(1).ToArray(), Console.Out); }
+            catch (Exception e) when (e is HarvestStop or InvalidDataException or IOException or FormatException or ArgumentException)
+            {
+                Console.Error.WriteLine(e.Message);
+                return 2;
+            }
+        }
+        if (args[0] == "limits")
+        {
+            root ??= FindRoot(AppContext.BaseDirectory) ?? FindRoot(Environment.CurrentDirectory);
+            if (root is null) { Console.Error.WriteLine("not inside a GAGAME checkout; name it with --root DIR"); return 2; }
+            return LimitsCli.Run(root, args.Skip(1).ToArray(), Console.Out);
         }
         var name = args[0];
         if (!HarvesterFactory.Has(name))
