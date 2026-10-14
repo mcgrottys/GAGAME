@@ -47,6 +47,39 @@ registers every implementation in the assembly and makes one by name; the demo's
 | overture | <stem>-<dataset>.buildings.* | harvest_overture.py |
 | land-polygons | <out>.galand | harvest_land_polygons.py |
 | place | data/{tides,currents,sea,bathy}/<place>/, data/places/<place>.json | harvest_place.py |
+| compose-bed | <out>/water.bed.composite.json + bed/<tier>/*.tif | (new) |
+| compose-tides | <out>/tides.composite.json + tides/stations.json | (new) |
+| compose-currents | <out>/currents.composite.json + currents/currents.json + fields | (new) |
+| compose-seastate | <out>/seastate.composite.json + sea/seastate.json | (new) |
+| compose-river | <out>/river.composite.json + river/river.json | (new) |
+| compose-water | all five above | (new) |
+| compose-check | <out>/check.json (the composites' gates) | (new) |
+
+## The composites: no places
+
+`harvest compose-<layer> --fidelity FILE.gafid --out data/composite/<name>/` takes every source of
+one water layer that has data in the regions a fidelity map paints, ranks them by grain, and
+writes ONE product (GACOMP01, docs/FIDELITY.md sections 3 and 6): the bed as tiers of float32
+GeoTIFFs (CUDEM 1/9" and 1/3" over ETOPO 2022 15" over 60"), tides as one stations.json (CO-OPS
+fitted stations + EOT20 model stations), currents as one currents.json (CO-OPS stations, NDBC
+ADCP buoys, a surface field per region and ROMS OFS), sea state as one seastate.json (GFS-Wave
+points + NDBC buoys), rivers as one river.json (USGS gauges). No place name anywhere: a region is
+a cell of the map. Every time-varying source is read from the FIRST copy the cache holds and is
+never refetched for a newer one; each input records its valid and fetched time.
+
+```bat
+harvest compose-water --fidelity harvest\testdata\coast3_3to10m.gafid --out data\composite\coast3
+harvest compose-check --out data\composite\coast3 --against-tides data\tides\haulover\stations.json
+```
+
+`harvest/testdata/` holds the four maps the measurements were made on (docs/FIDELITY.md 5):
+`box5km_3m` (one ~5 km box at 3 m), `coast3_3to10m` (three ~20 km coastal boxes at 3, 3 and
+10 m), `natlantic_463m` (the North Atlantic at 463 m), `globe_base` (nothing painted: the base).
+`compose-check` is the gate: every tier file read back (GeoKeys, nodata, step), the stacked bed
+against its own sources at a grid of points (equal to the bit where pixels are copied), no
+unanswered point in a painted region, a gap planted in a copy of a finest tile filled by the next
+tier with its own source's value, and stations, buoys and forecast points against older per-place
+files, entry for entry.
 
 ## Packages and ports
 
