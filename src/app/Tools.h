@@ -83,6 +83,8 @@ int RunSelfTest(const Options& opt);
 // ---- During assembly (the call keeps its exact place in the boot sequence).
 
 // --water-map / --bathy-map: the reprojection proof (Lambert conformal sheet); exit 0.
+// --tool height-tree-probe: the CPU's read of the height tree against the stack (compose/HeightTree.h).
+int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anchorLatDeg);
 int RunWaterMap(const Options& opt, Gpu& gpu, Compositor& compositor,
                 int hgtCh, const WaterAtlas& waterAtlas, const Space::Anchor& chart);
 // --gis-dump PATH: the survey gate over its box as a PGM; std::exit(0) from inside.

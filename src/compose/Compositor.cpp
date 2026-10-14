@@ -566,6 +566,11 @@ float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,
     return h;
 }
 
+float Compositor::SampleHeight(int channel, double latRad, double lonRad, double groundResM) const {
+    if (HeightTree* t = m_channels[channel].heightTree.get()) return t->Sample(latRad, lonRad, groundResM);
+    return SampleHeightStack(channel, latRad, lonRad, groundResM);
+}
+
 void Compositor::SampleFieldStack(int channel, double latRad, double lonRad,
                                   double groundResM, float out[2]) const {
     const Channel& ch = m_channels[channel];

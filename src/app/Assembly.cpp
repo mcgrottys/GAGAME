@@ -909,6 +909,17 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     order.c_str());
                 heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
                 heightTree->Print();
+                // THE CPU'S READ OF IT (compose/HeightTree.h): the composed root on the pyramid, bound
+                // to the channel; Compositor::SampleHeight answers from it.
+                {
+                    const Lattice pyr = hal::BlockBinding::Pyramid(256, 128);
+                    compositor.BindHeightTree(hgtCh, std::make_shared<HeightTree>(heightTree->Reader(pyr),
+                                                                                  heightTree->MagnifiedQuery(pyr), pyr));
+                }
+                if (S.Tool("height-tree-probe")) {
+                    exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1]);
+                    return nullptr;
+                }
             }
             {
                 // M12 step 3e: THE DECLARATION (hal/Tenant.h). Slices 0..5 the cube faces on
@@ -1559,7 +1570,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
-                              "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles",
+                              "gis-dump", "gis-sweep-test", "height-tree-probe", "ingest", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "roads-probe", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",

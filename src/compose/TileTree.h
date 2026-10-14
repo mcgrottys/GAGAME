@@ -611,6 +611,17 @@ public:
                                                          : ComposeTile(frame, tag, r, box, out, loc);
     }
 
+    // THE CPU'S READ (compose/HeightTree.h): a tile's bytes, true when anything covers it -- never a
+    // place, since the bytes are wanted in this process.
+    std::function<bool(const TileRequest&, std::vector<uint8_t>&)> Reader(const ColorFrame& inherited) {
+        const ColorFrame frame = Resolve(inherited);
+        const std::string tag = frame.Tag();
+        EnsureFrame(tag);
+        return [this, frame, tag](const TileRequest& r, std::vector<uint8_t>& out) {
+            return Tile(frame, tag, r, out, nullptr) == Status::Content;
+        };
+    }
+
     // The residency manager's view of this tree: a place if it can take one, else bytes, else
     // zeros where nothing covers.
     TileProviderFn Provider(const ColorFrame& inherited) {

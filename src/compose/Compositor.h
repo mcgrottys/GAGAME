@@ -34,6 +34,7 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/HeightTree.h"
 #include "compose/TileArchive.h"
 #include "hal/Residency.h"
 #include "core/Lattice.h"
@@ -185,6 +186,11 @@ public:
     double HeightGrainM(int channel, double latRad, double lonRad) const;
     float SampleHeightStack(int channel, double latRad, double lonRad,
                             double groundResM) const;
+    // THE ONE READ OF A CHANNEL'S HEIGHT for a CPU reader (compose/HeightTree.h): the tree the GPU
+    // reads when one is bound, else the stack. The stack stays what the tree itself paints from.
+    void BindHeightTree(int channel, std::shared_ptr<HeightTree> tree) { m_channels[channel].heightTree = std::move(tree); }
+    float SampleHeight(int channel, double latRad, double lonRad, double groundResM) const;
+    HeightTree* HeightTreeOf(int channel) const { return m_channels[channel].heightTree.get(); }
 
     // The schema table, logged at startup: what feeds each channel, in what structure.
     void LogRegistry() const;
@@ -194,6 +200,7 @@ public:
         std::vector<ColorSource*> color;
         std::vector<HeightSource*> height;
         std::vector<FieldSource*> field;
+        std::shared_ptr<HeightTree> heightTree;   // the tree the GPU reads, when one is bound
         // M9ak: THE GATE. Parallel to `color`. A layer's paint weight is MULTIPLIED by the
         // coverage of its gate, per texel, which is a different composition from the stack's
         // own paint-over: the stack resolves who is on top, a gate resolves whether a layer
