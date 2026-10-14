@@ -141,6 +141,12 @@ reads the product, never the sources, and does not know how many there were.
   one raster set as the engine already reads a folder (`compose/RasterFileSource.h`: one CRS and
   one grain a set); the engine stacks the tiers by `over`, finer over coarser, and its tree folds
   and magnifies between them (HIERARCHY 4.20). Where a finer tier has nodata the coarser shows.
+  A tier is written in **parts**, one folder (`bed/<tier>/p<k>`) for each group of tiles that touch,
+  each a `tiers` entry of its own with its `box`: the engine takes a set's footprint as ONE box, and
+  one tier read whole from Florida to Maine claimed every tile of the coast between (2026-10-13:
+  the Merrimack never settled). The engine reads a height's box past two texels a side by the
+  windows' summed-area tables (`RasterFileSource::WindowSat`), so a coarse ask of a fine part costs
+  the windows it touches.
 - A **point and field** layer (`tides`, `currents`, `seastate`, `river`) is one `file` in the
   engine's existing schema for that kind, holding every region at once: all the stations, all
   the fields, all the forecast points, each carrying its own position and box. The engine picks
@@ -214,10 +220,10 @@ relative to the folder of its `.composite.json`.
 
 ```
 data/composite/<name>/
-  water.bed.composite.json   tiers[]: grain_m, step_deg, folder, match "*.tif", over, inputs, decimation,
+  water.bed.composite.json   tiers[] (one a part): grain_m, step_deg, folder, box, match "*.tif", over, inputs, decimation,
                              datum, vertical_epsg, unit, nodata, offset_m, offset_measured, source_files, stats;
                              datum_separation, phases_s, later
-  bed/<source>_<grain>m/*.tif  float32 GeoTIFF tiles (section 3), named by their NW corner (n42x8125_w70x8125.tif)
+  bed/<source>_<grain>m/p<k>/*.tif  float32 GeoTIFF tiles (section 3), named by their NW corner (n42x8125_w70x8125.tif)
   tides.composite.json       file "tides/stations.json"
   tides/stations.json        the TideModel schema: year, epoch_unix, stations[] (+ kind "station"|"model", source)
   tides/official_<id>_<year>.f32
