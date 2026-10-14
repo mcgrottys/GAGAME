@@ -19,6 +19,8 @@ public abstract class CellOverlay
 
     /// Lat/lon boxes outlined over the cells.
     public virtual IEnumerable<(double lon0, double lat0, double lon1, double lat1, Color colour)> Boxes => [];
+    /// Lattice cells outlined over the cells, by their own edges.
+    public virtual IEnumerable<(FidelityMap.CellKey cell, Color colour)> Outlines => [];
 
     /// Inferno, perceptually ordered: t = 0 dark violet, t = 1 pale yellow.
     public static Color Inferno(double t)

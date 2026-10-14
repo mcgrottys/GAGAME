@@ -253,7 +253,7 @@ public sealed class GlobeView : Control
         if (ShowCoast) DrawCoast(g);
         if (ShowGraticule) DrawGraticule(g);
         if (ShowLattice) DrawLattice(g);
-        if (Overlay is not null) DrawBoxes(g, Overlay);
+        if (Overlay is not null) { DrawBoxes(g, Overlay); DrawOutlines(g, Overlay); }
         DrawBrush(g);
         if (Overlay is not null) DrawLegend(g, Overlay);
     }
@@ -344,6 +344,17 @@ public sealed class GlobeView : Control
             if (Outline(k, mustFace: true) is PointF[] pts) g.FillPolygon(b, pts);
         }
         return bmp;
+    }
+
+    /// Lattice cells by their own edges (great circles on the cube's faces).
+    void DrawOutlines(Graphics g, CellOverlay overlay)
+    {
+        foreach (var (k, colour) in overlay.Outlines)
+        {
+            if (Outline(k, mustFace: true) is not PointF[] pts) continue;
+            using var pen = new Pen(colour, 1.5f);
+            g.DrawPolygon(pen, pts);
+        }
     }
 
     /// Lat/lon boxes, their edges sampled (a parallel is not a great circle).

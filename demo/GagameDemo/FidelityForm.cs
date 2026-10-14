@@ -44,7 +44,7 @@ public sealed class FidelityForm : Form
     readonly FidelityOverlay _fidelity = new();
     readonly StorageOverlay _storage = new();
     readonly Label _feeds = new() { AutoSize = true, MaximumSize = new Size(300, 0), ForeColor = SystemColors.GrayText };
-    readonly ComboBox _sSource = Combo(), _sParam = Combo(), _sStore = Combo(), _sLevel = Combo();
+    readonly ComboBox _sSource = Combo(), _sParam = Combo(), _sStore = Combo(), _sLevel = Combo(), _sProduct = Combo();
     readonly CheckBox _sCoverage = new() { Text = "Coverage boxes (who answers: composites)", AutoSize = true, Checked = true };
     readonly Label _sStatus = new() { AutoSize = true, MaximumSize = new Size(300, 0) };
     readonly Label _sHere = new() { AutoSize = true, MaximumSize = new Size(300, 0), Font = new Font("Consolas", 8f) };
@@ -507,7 +507,9 @@ public sealed class FidelityForm : Form
         Add(Head("Store")); Add(_sStore);
         Add(Head("Cell level")); Add(_sLevel);
         Add(_sCoverage);
+        Add(Head("Coverage of product")); Add(_sProduct);
         foreach (var c in new[] { _sSource, _sParam, _sStore, _sLevel }) c.SelectedIndexChanged += (_, _) => Refilter();
+        _sProduct.SelectedIndexChanged += (_, _) => { _storage.Product = (_sProduct.SelectedItem as Choice)?.Value; _globe.Invalidate(); };
         _sCoverage.CheckedChanged += (_, _) => { _storage.ShowCoverage = _sCoverage.Checked; _globe.Invalidate(); };
         Add(Head("Totals (filtered)"));
         _sTotals.Columns.Add("parameter", 104);
@@ -582,6 +584,7 @@ public sealed class FidelityForm : Form
         Fill(_sSource, all.GroupBy(e => e.Source).Select(g => (g.Key, g.Sum(e => e.Bytes))));
         Fill(_sParam, all.GroupBy(e => e.Param).Select(g => (g.Key, g.Sum(e => e.Bytes))));
         Fill(_sStore, all.GroupBy(e => e.Store).Select(g => (g.Key, g.Sum(e => e.Bytes))));
+        Fill(_sProduct, x.AllCoverage.GroupBy(c => c.Product).Select(g => (g.Key, (long)g.Count())), k => k);
         Fill(_sLevel, all.GroupBy(e => StorageIndex.Unpack(e.Cell).Level).Select(g => (g.Key.ToString(CultureInfo.InvariantCulture), g.Sum(e => e.Bytes))),
             k => $"level {k}, cells ~{FidelityRegions.FormatLength(_map.CellEdgeM(int.Parse(k, CultureInfo.InvariantCulture)))}");
     }

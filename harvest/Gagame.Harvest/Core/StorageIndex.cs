@@ -27,7 +27,7 @@ namespace Gagame.Harvest;
 /// own ground size. What is DERIVED and how is said where it is done (`Derived` on each entry).
 public sealed class StorageIndex
 {
-    public const string Magic = "GASTOR03";
+    public const string Magic = "GASTOR04";
     /// The deepest cell bytes are put in: about 2.4 km (a finer tile adds to its level-12 ancestor).
     /// Measured on the owner's cache (13.2 M tiles, 2026-10-14): level 14 kept 1.47 M aggregates in a
     /// 55 MB index; level 12 keeps the index small enough to hold whole in the painter.
@@ -42,7 +42,11 @@ public sealed class StorageIndex
     public sealed record Unmapped(string Source, string Param, string Store, long Bytes, int Files, string Why);
 
     /// A composite's coverage[]: which input answers a box at what grain (read, as written).
-    public sealed record Coverage(string Product, string Layer, string Input, double Lon0, double Lat0, double Lon1, double Lat1, double GrainM, bool GapFill);
+    /// `Cell` is the fidelity map's cell the box was written from (Pack; NoCell where the box is
+    /// no cell of it: the default region, the whole planet): a box is that cell's lat/lon box
+    /// (FidelityMap.CellBox), wider than the cell wherever the cell is tilted to the meridians.
+    public sealed record Coverage(string Product, string Layer, string Input, double Lon0, double Lat0, double Lon1, double Lat1, double GrainM, bool GapFill, ulong Cell);
+    public const ulong NoCell = ulong.MaxValue;
 
     /// One folder or file the index read, keyed by its path and stamp, so a rescan reads only
     /// what changed (a directory's write time moves when a tile is added, renamed or removed).
@@ -374,13 +378,40 @@ public sealed class StorageIndex
             }
         }
         foreach (var ((src, cell, derived), (b, n)) in sum) f.Entries.Add(new Entry(src, layer, "composite:" + product, "lattice", cell, b, n, derived));
-        // coverage[]: who answers where, as written
+        // coverage[]: who answers where, as written; each box back to the fidelity cell it is the
+        // box of (the product's own map, `fidelity.file`), matched to a hundredth of a microdegree
         if (j["coverage"] is JsonArray cov)
+        {
+            var cellOf = CellsByBox(j["fidelity"]?["file"]?.GetValue<string>());
             foreach (var c in cov.OfType<JsonObject>())
                 if (c["box"] is JsonArray b && b.Count == 4)
-                    f.Coverage.Add(new Coverage(product, layer, c["input"]?.GetValue<string>() ?? "?", b[0]!.GetValue<double>(), b[1]!.GetValue<double>(),
-                        b[2]!.GetValue<double>(), b[3]!.GetValue<double>(), c["grain_m"]?.GetValue<double>() ?? double.NaN, c["gap_fill"]?.GetValue<bool>() ?? false));
+                {
+                    double l0 = b[0]!.GetValue<double>(), a0 = b[1]!.GetValue<double>(), l1 = b[2]!.GetValue<double>(), a1 = b[3]!.GetValue<double>();
+                    f.Coverage.Add(new Coverage(product, layer, c["input"]?.GetValue<string>() ?? "?", l0, a0, l1, a1,
+                        c["grain_m"]?.GetValue<double>() ?? double.NaN, c["gap_fill"]?.GetValue<bool>() ?? false,
+                        cellOf.TryGetValue(BoxKey(l0, a0, l1, a1), out var k) ? Pack(k) : NoCell));
+                }
+        }
         return f;
+    }
+
+    static (long, long, long, long) BoxKey(double l0, double a0, double l1, double a1) =>
+        ((long)Math.Round(l0 * 1e8), (long)Math.Round(a0 * 1e8), (long)Math.Round(l1 * 1e8), (long)Math.Round(a1 * 1e8));
+
+    /// Every painted cell of a fidelity map (every layer) by its lat/lon box; empty when the map is gone.
+    Dictionary<(long, long, long, long), FidelityMap.CellKey> CellsByBox(string? file)
+    {
+        var d = new Dictionary<(long, long, long, long), FidelityMap.CellKey>();
+        if (file is null) return d;
+        var path = Path.IsPathRooted(file) ? file : Path.Combine(Root, file);
+        if (!File.Exists(path)) return d;
+        foreach (var l in FidelityMap.Load(path).Layers)
+            foreach (var k in l.Cells.Keys)
+            {
+                var (l0, a0, l1, a1) = FidelityMap.CellBox(k);
+                d.TryAdd(BoxKey(l0, a0, l1, a1), k);
+            }
+        return d;
     }
 
     // ------------------------------------------------------------------ the file
@@ -416,7 +447,7 @@ public sealed class StorageIndex
                 w.Write(f.Unmapped.Count);
                 foreach (var u in f.Unmapped) { w.Write(S(u.Source)); w.Write(S(u.Param)); w.Write(S(u.Store)); w.Write(u.Bytes); w.Write(u.Files); w.Write(S(u.Why)); }
                 w.Write(f.Coverage.Count);
-                foreach (var c in f.Coverage) { w.Write(S(c.Product)); w.Write(S(c.Layer)); w.Write(S(c.Input)); w.Write(c.Lon0); w.Write(c.Lat0); w.Write(c.Lon1); w.Write(c.Lat1); w.Write(c.GrainM); w.Write(c.GapFill); }
+                foreach (var c in f.Coverage) { w.Write(S(c.Product)); w.Write(S(c.Layer)); w.Write(S(c.Input)); w.Write(c.Lon0); w.Write(c.Lat0); w.Write(c.Lon1); w.Write(c.Lat1); w.Write(c.GrainM); w.Write(c.GapFill); w.Write(c.Cell); }
             }
         }
         File.Move(tmp, path, overwrite: true);
@@ -443,7 +474,7 @@ public sealed class StorageIndex
                 int nu = r.ReadInt32();
                 for (int k = 0; k < nu; ++k) f.Unmapped.Add(new Unmapped(s[r.ReadInt32()], s[r.ReadInt32()], s[r.ReadInt32()], r.ReadInt64(), r.ReadInt32(), s[r.ReadInt32()]));
                 int nc = r.ReadInt32();
-                for (int k = 0; k < nc; ++k) f.Coverage.Add(new Coverage(s[r.ReadInt32()], s[r.ReadInt32()], s[r.ReadInt32()], r.ReadDouble(), r.ReadDouble(), r.ReadDouble(), r.ReadDouble(), r.ReadDouble(), r.ReadBoolean()));
+                for (int k = 0; k < nc; ++k) f.Coverage.Add(new Coverage(s[r.ReadInt32()], s[r.ReadInt32()], s[r.ReadInt32()], r.ReadDouble(), r.ReadDouble(), r.ReadDouble(), r.ReadDouble(), r.ReadDouble(), r.ReadBoolean(), r.ReadUInt64()));
                 x.Folders[f.Path] = f;
             }
         }

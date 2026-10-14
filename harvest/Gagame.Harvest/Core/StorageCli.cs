@@ -23,6 +23,9 @@ public static class StorageCli
         var entries = x.Entries.ToList();
         o.WriteLine($"[storage] {entries.Count:#,0} cell aggregates, {entries.Sum(e => e.Bytes) / 1e9:0.000} GB in cells, " +
                     $"{x.AllUnmapped.Sum(u => u.Bytes) / 1e9:0.000} GB not in a cell, {x.Folders.Values.Sum(f => f.Voids):#,0} void markers");
+        o.WriteLine("  coverage by product: entries, the cells they were written for (outlined by their own edges), the rest boxes");
+        foreach (var g in x.AllCoverage.GroupBy(c => c.Product).OrderBy(g => g.Key, StringComparer.Ordinal))
+            o.WriteLine($"    {g.Key,-22} {g.Count(),6:#,0} entries, {g.Count(c => c.Cell != StorageIndex.NoCell),6:#,0} on a cell ({g.Where(c => c.Cell != StorageIndex.NoCell).Select(c => c.Cell).Distinct().Count():#,0} distinct), {g.Count(c => c.Cell == StorageIndex.NoCell),4:#,0} boxes");
         o.WriteLine("  by parameter and store:");
         foreach (var g in entries.GroupBy(e => (e.Param, e.Store)).OrderByDescending(g => g.Sum(e => e.Bytes)).Take(40))
             o.WriteLine($"    {g.Key.Param,-28} {g.Key.Store,-22} {FidelityRegions.FormatBytes(g.Sum(e => e.Bytes)),10} {g.Sum(e => (long)e.Tiles),10:#,0} tiles {g.Select(e => e.Source).Distinct().Count(),5} sources");
