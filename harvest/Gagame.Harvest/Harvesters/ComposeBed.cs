@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using Gagame.Harvest.Readers;
@@ -292,7 +292,7 @@ public sealed class ComposeBed : IHarvester
                 Parallel.ForEach(grp, ot =>
                 {
                     var t0 = Stopwatch.GetTimestamp();
-                    var cut = Cut(tif, lonEdge, latEdge, 1 << tk.K, ot.Box, out var t1);
+                    var cut = Cut(tif, lonEdge, latEdge, 1 << tk.K, tk.S.StepDeg * (1 << tk.K), ot.Box, out var t1);
                     var t2 = Stopwatch.GetTimestamp();
                     if (cut is null) return;
                     var (vals, w, h, lon0, lat1, sx, sy) = cut.Value;
@@ -337,6 +337,7 @@ public sealed class ComposeBed : IHarvester
                 ("datum", tk.S.Datum), ("vertical_epsg", tk.S.VEpsg), ("unit", "m"), ("nodata", (double)NoData),
                 ("offset_m", egm ? Round(offset ?? 0.0, 3) : 0.0),
                 ("offset_measured", egm ? offset is not null : null),
+                ("source_files", tiles[tk].Values.Select(o => o.File.Dest).Distinct().Where(File.Exists).Select(_run.Rel).OrderBy(x => x, StringComparer.Ordinal).ToList()),
                 ("stats", tierStats[tk])));
         }
 
@@ -364,8 +365,11 @@ public sealed class ComposeBed : IHarvester
 
     /// The pixels of tile `t` from one source file: its own (block 1) or the mean of block x block
     /// of them, a block on the global lattice of the tier's step, taken where its samples are at
-    /// least half there (so a coverage edge stays where it was). NaN where nothing is.
-    static (float[] vals, int w, int h, double lon0, double lat1, double sx, double sy)? Cut(GeoTiff tif, double lonEdge, double latEdge, int block, Box t, out long tDecoded)
+    /// least half there (so a coverage edge stays where it was). NaN where nothing is. The tile
+    /// declares the tier's exact `step`, not the file's rounded one (CUDEM writes 1/9" three ways,
+    /// 3.08642E-05, 3.0864194E-05, 3.0864198718E-05, and the engine takes a set of one grain to
+    /// 1e-9): the origin is the file's own, so a tile's far edge moves under a millimetre.
+    static (float[] vals, int w, int h, double lon0, double lat1, double sx, double sy)? Cut(GeoTiff tif, double lonEdge, double latEdge, int block, double step, Box t, out long tDecoded)
     {
         double sx = tif.Sx, sy = tif.Sy;
         long gx0 = (long)Math.Floor((lonEdge + 180) / sx + 0.5), gy0 = (long)Math.Floor((90 - latEdge) / sy + 0.5);
@@ -402,7 +406,7 @@ public sealed class ComposeBed : IHarvester
                 }
         }
         if (!vals.Any(v => !float.IsNaN(v))) return null;
-        return (vals, w, h, lonEdge + x0 * sx, latEdge - y0 * sy, bsx, bsy);
+        return (vals, w, h, lonEdge + x0 * sx, latEdge - y0 * sy, step, step);
     }
 
     /// ETOPO 15" minus the mean of the CUDEM samples inside each 15" cell this window wholly

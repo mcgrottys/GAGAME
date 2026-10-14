@@ -187,7 +187,9 @@ public sealed class ComposeSeastate : IHarvester
             if (g is null) continue;
             double latA = g.Lat1, latB = g.Lat1 + (g.Nj - 1) * ((g.Scan & 0x40) != 0 ? g.Dlat : -g.Dlat);
             double lonA = Grib2Message.Mod360(g.Lon1), lonB = lonA + (g.Ni - 1) * g.Dlon;
-            if (Math.Min(latA, latB) <= gb.BottomLat + 1e-9 && Math.Max(latA, latB) >= gb.TopLat - 1e-9 && lonA <= gb.LeftLon + 1e-9 && lonB >= gb.RightLon - 1e-9)
+            // the filter answers [left, right) in longitude and [bottom, top] in latitude, its nodes
+            // a few 1e-5 deg off the quarter degrees: compare to a thousandth
+            if (Math.Min(latA, latB) <= gb.BottomLat + 1e-3 && Math.Max(latA, latB) >= gb.TopLat - 1e-3 && lonA <= gb.LeftLon + 1e-3 && lonB >= gb.RightLon - NodeDeg - 1e-3)
                 found.Add((Path.GetDirectoryName(day)!, ymd, cyc));
         }
         return found.Count == 0 ? null : found.OrderBy(x => x.Item2, StringComparer.Ordinal).ThenBy(x => x.Item3).First();
