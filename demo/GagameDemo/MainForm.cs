@@ -49,6 +49,9 @@ public sealed class MainForm : Form
         clear.Click += (_, _) => _log.Clear();
         bar.Items.AddRange([_scenes, _relaunch, _stop, new ToolStripSeparator(), _current,
             new ToolStripSeparator(), _setup, openScene, help, clear]);
+        // the debug views on a row of their own, so the scene bar never overflows into a chevron
+        var debugBar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, RenderMode = ToolStripRenderMode.System };
+        debugBar.Items.AddRange(DebugGroup());
 
         // The nag banner: what is missing, and the two things that mend most of it.
         var flow = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill };
@@ -64,6 +67,7 @@ public sealed class MainForm : Form
 
         Controls.Add(_log);
         Controls.Add(_banner);
+        Controls.Add(debugBar);
         Controls.Add(bar);
         Controls.Add(status);
 
@@ -110,10 +114,62 @@ public sealed class MainForm : Form
         Item("Cache and limits...", () => Setup(InstallForm.SectionCache));
         Item("Google key...", () => Setup(InstallForm.SectionKey));
         Item("Data files...", () => Setup(InstallForm.SectionData));
+        Item("Fidelity map...", () => new FidelityForm(_repo, _settings).Show(this));
         _setup.DropDownItems.Add(new ToolStripSeparator());
         Item("Build engine (build.bat)", Build);
         Item("Choose checkout...", ChooseCheckout);
         Item("Open checkout folder", () => Open(_repo.Root));
+    }
+
+    /// The engine's debug views (scene section `debug`; G in the window steps through the views):
+    /// each control is kept in the settings and passed as `--set debug.*` at the next launch, and
+    /// only where it differs from the engine's default, so a debug scene's own section stands.
+    ToolStripItem[] DebugGroup()
+    {
+        string[] views = ["", "none", "flat", "edges", "normals", "height", "depth", "meshlets", "albedo", "residency", "residency.height", "residency.landsea"];
+        var view = new ToolStripComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AutoSize = false, Width = 120, ToolTipText = "debug.view (blank = the scene's)" };
+        view.Items.AddRange(views.Select(v => (object)(v.Length == 0 ? "(scene)" : v)).ToArray());
+        view.SelectedIndex = Math.Max(0, Array.IndexOf(views, _settings.DebugView));
+        view.SelectedIndexChanged += (_, _) => { _settings.DebugView = views[view.SelectedIndex]; DebugChanged(); };
+
+        var wire = new NumericUpDown { Minimum = 0, Maximum = 16, DecimalPlaces = 1, Increment = 0.5m, Width = 52, Value = (decimal)Math.Clamp(_settings.DebugWirePx, 0, 16) };
+        wire.ValueChanged += (_, _) => { _settings.DebugWirePx = (double)wire.Value; DebugChanged(); };
+
+        var colour = new ToolStripButton("■") { ToolTipText = "debug.wireColor (right click: the engine's)", ForeColor = WireColour() ?? SystemColors.GrayText };
+        colour.MouseUp += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right) _settings.DebugWireColor = null;
+            else
+            {
+                using var d = new ColorDialog { Color = WireColour() ?? Color.FromArgb(255, 217, 51), FullOpen = true };
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                _settings.DebugWireColor = [Math.Round(d.Color.R / 255.0, 3), Math.Round(d.Color.G / 255.0, 3), Math.Round(d.Color.B / 255.0, 3), 1];
+            }
+            colour.ForeColor = WireColour() ?? SystemColors.GrayText;
+            DebugChanged();
+        };
+
+        string[] bys = ["", "colour", "edge", "depth"];
+        var by = new ToolStripComboBox { DropDownStyle = ComboBoxStyle.DropDownList, AutoSize = false, Width = 86, ToolTipText = "debug.wireBy (blank = the scene's)" };
+        by.Items.AddRange(bys.Select(v => (object)(v.Length == 0 ? "(scene)" : v)).ToArray());
+        by.SelectedIndex = Math.Max(0, Array.IndexOf(bys, _settings.DebugWireBy));
+        by.SelectedIndexChanged += (_, _) => { _settings.DebugWireBy = bys[by.SelectedIndex]; DebugChanged(); };
+
+        var contour = new NumericUpDown { Minimum = 0, Maximum = 10000, DecimalPlaces = 1, Increment = 1, Width = 64, Value = (decimal)Math.Clamp(_settings.DebugContourM, 0, 10000) };
+        contour.ValueChanged += (_, _) => { _settings.DebugContourM = (double)contour.Value; DebugChanged(); };
+
+        return [new ToolStripLabel("Debug"), view, new ToolStripLabel("wire px"), new ToolStripControlHost(wire) { ToolTipText = "debug.wirePx (0 = no wire)" },
+            colour, by, new ToolStripLabel("contour m"), new ToolStripControlHost(contour) { ToolTipText = "debug.contourM (0 = none)" }];
+    }
+
+    Color? WireColour() => _settings.DebugWireColor is { Length: 4 } c
+        ? Color.FromArgb((int)(Math.Clamp(c[0], 0, 1) * 255), (int)(Math.Clamp(c[1], 0, 1) * 255), (int)(Math.Clamp(c[2], 0, 1) * 255))
+        : null;
+
+    void DebugChanged()
+    {
+        _settings.Save();
+        _status.Text = "debug views apply at the next launch (Relaunch)";
     }
 
     // ------------------------------------------------------------------ the banner

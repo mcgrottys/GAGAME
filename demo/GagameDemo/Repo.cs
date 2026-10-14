@@ -52,6 +52,7 @@ public sealed class Repo
         }
         Add("scenes", "Base");
         Add(Path.Combine("scenes", "demos"), "Demos");
+        Add(Path.Combine("scenes", "debug"), "Debug");
         return list;
     }
 

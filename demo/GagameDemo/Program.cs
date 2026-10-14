@@ -12,6 +12,14 @@ static class Program
 
         // The checkout: the one named on the command line, else the one this exe sits inside, else
         // the one remembered, else the one the demo was started from, else ask.
+        // `--fidelity [FILE]` opens the fidelity painter alone: no scene bar, no engine started.
+        var fidelity = Array.IndexOf(args, "--fidelity");
+        string? fidelityFile = null;
+        if (fidelity >= 0)
+        {
+            if (fidelity + 1 < args.Length && !args[fidelity + 1].StartsWith("--", StringComparison.Ordinal)) fidelityFile = Path.GetFullPath(args[fidelity + 1]);
+            args = args.Where((_, i) => i != fidelity && !(fidelityFile is not null && i == fidelity + 1)).ToArray();
+        }
         var settings = DemoSettings.Load();
         var own = args.Length > 0 && Directory.Exists(args[0]) ? Path.GetFullPath(args[0]) : Repo.FindRoot(AppContext.BaseDirectory);
         if (Repo.IsRepoRoot(own)) settings.RepoRoot = own!;
@@ -37,6 +45,11 @@ static class Program
             settings.Save();
         }
 
+        if (fidelity >= 0)
+        {
+            Application.Run(new FidelityForm(new Repo(settings.RepoRoot), settings, fidelityFile));
+            return;
+        }
         // The scene bar is the first thing seen; setup is a dropdown there and a banner for what is missing.
         Application.Run(new MainForm(new Repo(settings.RepoRoot), settings));
     }

@@ -29,6 +29,22 @@ public sealed class DemoSettings
 
     public string LastScene { get; set; } = "scenes/demos/haulover_portal.json";
 
+    /// The fidelity painter: the map last opened or saved, where the view looked, the brush.
+    public string LastFidelityFile { get; set; } = "";
+    public double FidelityViewLat { get; set; } = 20;
+    public double FidelityViewLon { get; set; } = -60;
+    public double FidelityBrushM { get; set; } = 50_000;
+
+    /// The engine's debug views (scene section `debug`), passed as `--set debug.*` only where they
+    /// differ from the engine's defaults, so a debug scene's own section stands otherwise:
+    /// view "" = the scene's, wirePx 0 = no wire, wireColor null = the engine's, wireBy "" = the
+    /// scene's, contourM 0 = none.
+    public string DebugView { get; set; } = "";
+    public double DebugWirePx { get; set; }
+    public double[]? DebugWireColor { get; set; }
+    public string DebugWireBy { get; set; } = "";
+    public double DebugContourM { get; set; }
+
     [JsonIgnore]
     public static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GAGAME", "demo.json");
@@ -60,5 +76,11 @@ public sealed class DemoSettings
         yield return ("--set", $"streaming.dayTiles={DayTiles}");
         yield return ("--set", $"streaming.dayBytes={DayBytes:0}");
         yield return ("--set", $"streaming.googleZoom={GoogleZoom}");
+        static string N(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        if (DebugView.Length > 0) yield return ("--set", $"debug.view={DebugView}");
+        if (DebugWirePx > 0) yield return ("--set", $"debug.wirePx={N(DebugWirePx)}");
+        if (DebugWireColor is { Length: 4 } c) yield return ("--set", $"debug.wireColor=[{string.Join(",", c.Select(N))}]");
+        if (DebugWireBy.Length > 0) yield return ("--set", $"debug.wireBy={DebugWireBy}");
+        if (DebugContourM > 0) yield return ("--set", $"debug.contourM={N(DebugContourM)}");
     }
 }
