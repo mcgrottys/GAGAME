@@ -1,6 +1,6 @@
 # Fidelity, sources and composites: the data a region wants, where it comes from, and the one product
 
-Started 2026-10-13. Three files, three readers. Nothing in them names a place: a region is a cell
+Started 2026-10-13. Four kinds of file, four readers. Nothing in them names a place: a region is a cell
 of the engine's lattice or a box, and what is there is what the data says.
 
 | file | type | written by | read by |
@@ -8,6 +8,7 @@ of the engine's lattice or a box, and what is there is what the data says.
 | `*.gafid` | the fidelity map: the finest grain each region wants | the painter (demo launcher) | every harvester; later the engine's residency |
 | `harvest/sources.limits.json` | what each data source allows: rates, sizes, days | by hand, from each source's documentation | `Polite` (every harvester's fetch) |
 | `*.composite.json` | one product of one data layer, made of many sources | a composite harvester | the engine (a scene's `sources` entry `composite`) |
+| `harvest/sources/<layer>/*.json` | one source each: its reader, server, variable map, units, datum (section 7) | by hand | the composite harvesters, through `Core/SourceFactory.cs` |
 
 ## 1. The fidelity map, `.gafid` (GAFID01)
 
@@ -275,3 +276,179 @@ node against a harbour gauge).
 **The first copy** (Mark, 2026-10-13): a time-varying source (a forecast cycle, a buoy's line, a
 prediction window, an OFS cycle, a gauge response) is read from the earliest copy the cache
 holds and fetched only when there is none; each input records `valid_utc` and `fetched_utc`.
+
+## 7. Sources by configuration (`harvest/sources/<layer>/<id>.json`)
+
+Started 2026-10-14 (Mark: "a factory design pattern taking buoy data from different sources ... ERDDAP
+for a semi standard to follow, with configs allowing us to adjust to the schema different researchers
+use. same with the relief"). A source is ONE file; adding a buoy network or a DEM a reader already
+reads is writing a config, not C#. `Core/SourceFactory.cs` finds the reader a config's `kind` names
+(the assembly's `[SourceKind]` classes) and makes it; `compose-seastate` and `compose-bed` take every
+config of their layer, or the ids `--sources a,b` lists, ranked.
+
+### 7.1 ERDDAP, the semi-standard
+
+ERDDAP (NOAA NMFS SWFSC ERD) puts one request grammar and one metadata model in front of whatever
+files a data centre holds. Read 2026-10-14 from the servers' own documentation pages
+(https://coastwatch.pfeg.noaa.gov/erddap/tabledap/documentation.html,
+https://coastwatch.pfeg.noaa.gov/erddap/griddap/documentation.html):
+
+- **tabledap** (tables: stations, profiles, trajectories): `<server>/tabledap/<datasetID>.<type>?<vars>&<constraints>`;
+  the variables comma-separated, each constraint `&var<op>value` with `= != =~ < <= > >=`, strings
+  in double quotes, times ISO 8601 (`time>=2026-10-13T00:00:00Z`), seconds since 1970, or relative
+  (`now-1day`, `max(time)-10minutes`); server-side functions `orderByMax("station,time")` (the latest
+  row of each station), `distinct()`, `orderBy...`. The query must be percent-encoded: Tomcat answers
+  400 to a bare `"` or `>` (measured).
+- **griddap** (grids): `<server>/griddap/<datasetID>.<type>?<var>[(start):stride:(stop)][...]`, one
+  bracket per axis in the variable's axis order; `(value)` takes the nearest axis value, a bare number
+  is an index; since v2.17 a high/low pair in the "wrong" order is swapped. A very large request
+  "will usually fail": ask in pieces.
+- **Types**: `.csv` (row 1 the names, row 2 the units, `NaN` where missing, ISO times), `.csvp`,
+  `.json` (`table.columnNames/columnUnits/rows`, `null` where missing), `.nc` (classic netCDF-3:
+  `Readers/NetCdf3.cs` reads it), `.ncCF` (CF Discrete Sampling Geometries), `.geotif` (griddap,
+  lon/lat only, all longitudes on one side of 180).
+- **An empty answer is HTTP 404** with "Your query produced no matching results"; an unknown dataset is
+  also 404 ("Currently unknown datasetID", seen while CoastWatch restarted). `Polite` now keeps the
+  start of an error's body (`HttpError.Body`) so the two are told apart: only the first is kept as an
+  empty first copy, and only for a box's latest rows (a moment the server does not hold YET is not).
+- **Metadata**: `<server>/info/<datasetID>/index.csv` (or `.json`): one row per variable (`variable`)
+  or grid axis (`dimension`), one per attribute. CF attributes per variable (`standard_name`, `units`,
+  `_FillValue`, `positive`, `actual_range`), ACDD/CF globals (`cdm_data_type` Grid / TimeSeries /
+  Point / Profile / Trajectory, `featureType`, `cdm_timeseries_variables` naming the station
+  variables, `geospatial_lat/lon_min/max`, `time_coverage_start/end`, `license`, `infoUrl`,
+  `institution`).
+- **Discovery**: `<server>/tabledap/allDatasets.csv?datasetID,cdm_data_type,...&<constraints>` (every
+  dataset of the server as a table, measured on upwell), `<server>/search/index.csv?searchFor=...`
+  (free text), `<server>/search/advanced.csv?standard_name=...&minLon=...` (by CF name and box).
+- **Limits**: no ERDDAP page states a number; each documentation page asks to "run just one script or
+  curl command at a time" (one request in flight is already `Polite`'s law). Administrators throttle
+  per IP in their own setup, unpublished. Entries `erddap.coastwatch` and `erddap.marine-ie` in
+  `harvest/sources.limits.json` (`stated: false`); `harvest limits --check` now holds every host a
+  source config names to an entry of its own.
+
+**Servers** (each answered 2026-10-14 unless said):
+
+| server | holds (for the engine) | note |
+|---|---|---|
+| https://coastwatch.pfeg.noaa.gov/erddap (CoastWatch West, ERD) | `cwwcNDBCMet` NDBC standard met 1970-present (TimeSeries); `GEBCO_2020` 15"; `srtm15plus`, `srtm30plus*`, `etopo180` / `etopo1_*` (ETOPO1 60"), `etopo5` | down (503, then "unknown datasetID") for part of the morning; its mirror https://upwell.pfeg.noaa.gov/erddap answers info pages but REDIRECTS data requests (302) back to coastwatch.pfeg |
+| https://erddap.marine.ie/erddap (Marine Institute, Ireland) | `IWBNetwork` Irish Weather Buoy Network (TimeSeries, CC BY 4.0) | wind in knots, Hs labelled `sea_surface_swell_wave_significant_height` |
+| https://erddap.secoora.org/erddap (SECOORA) | NDBC and regional buoys, ONE dataset a station (`gov-ndbc-41013`, `41159-lej3wave-...`) | |
+| https://erddap.sensors.ioos.us/erddap (IOOS sensor map) | every IOOS RA's stations, one dataset a station | |
+| https://data.neracoos.org/erddap (NERACOOS; www.neracoos.org/erddap redirects there) | Gulf of Maine buoys (A01 = NDBC 44029 ...) | not queried |
+| https://erddap.cencoos.org/erddap, https://pae-paha.pacioos.hawaii.edu/erddap | CeNCOOS, PacIOOS | pae-paha did not answer the first probe |
+| https://erddap.dataexplorer.oceanobservatories.org/erddap (OOI) | OOI arrays | not queried |
+| https://coastwatch.noaa.gov/erddap, https://polarwatch.noaa.gov/erddap, https://www.ncei.noaa.gov/erddap | CoastWatch central, PolarWatch, NCEI | no wave search hit on NCEI |
+| https://erddap.emodnet.eu/erddap (EMODnet Physics) | European in-situ | no wave search hit |
+
+**What the metadata gets wrong** (each seen on the servers above; why a config DECLARES what it must):
+
+- CoastWatch `cwwcNDBCMet` `MWD`: `standard_name` `sea_surface_wave_to_direction`, while NDBC defines
+  MWD as the direction the waves COME FROM. Trusting the name turns every wave 180 degrees; the config
+  declares `"direction": "from"` and the reader logs the contradiction. The agreement gate (7.3) holds
+  the declaration right (41122: 59 deg in both).
+- `DPD` and `APD` share `standard_name` `sea_surface_swell_wave_period`: a period is NAMED in a config,
+  never matched (the resolver refuses a standard_name two variables hold).
+- `GEBCO_2020` `elevation`: `standard_name` `height_above_reference_ellipsoid`; GEBCO states heights
+  relative to mean sea level. The config declares `"datum": "MSL"` (EPSG:5714).
+- IWBN `WaveHeight`: `sea_surface_swell_wave_significant_height` for the total Hs; `WindSpeed` in
+  `knots`; `WindDirection` in `degrees true` (a space) where NDBC writes `degrees_true`. Its
+  `WavePeriod` is taken as the average period: an assumption, not checked against the network's docs.
+
+### 7.2 The config
+
+Common keys (both layers): `id` (unique), `title`, `label` (the phrase a product's text names it by),
+`kind` (the reader), `rank` (lower answers first: for the same station, or at equal native step),
+`server`, `dataset`, `url` (the input's url), `license`, `cite`, `coverage` [lon0, lat0, lon1, lat1]
+(a box outside it is never asked), `variables` {quantity: "name" | {`name` or `standard_name`, `units`,
+`direction` "from"|"toward", `north` "true", `file`}}. A quantity matched by `standard_name` is the ONE
+variable holding it; units the config leaves out are the server's; a direction's way is the config's,
+else its standard_name's (`*_from_direction` / `*_to_direction`); a magnetic north is refused (no
+declination model). `Units` (`Core/SourceConfig.cs`) turns a unit into the engine's by one factor (m,
+ft, cm; s; m/s, knots, km/h, mph; degrees true; m2/Hz) and refuses one it does not know; a factor of 1
+leaves the value untouched, so a ported source is bit-identical.
+
+Buoys (`harvest/sources/buoys`): the quantities `time station lat lon name wdir wspd hs dpd apd mwd
+spectrum` (sim/SeaState.cpp's buoy keys), plus per kind:
+- `ndbc-realtime2`: `cache` (the first-copy folder); `time` is the five columns year month day hour
+  minute; each quantity names its column in the file's header and its `file` (`txt`, `data_spec`).
+- `erddap-tabledap`: `cache`, `recent` (the `time>=` of a box's latest-rows request, `now-1day`).
+
+```json
+{ "id": "erddap.coastwatch.ndbcmet", "kind": "erddap-tabledap", "rank": 1,
+  "server": "https://coastwatch.pfeg.noaa.gov/erddap", "dataset": "cwwcNDBCMet",
+  "cache": "cache/erddap/cwwcNDBCMet", "recent": "now-1day",
+  "variables": { "station": "station", "lat": {"standard_name": "latitude"}, "lon": {"standard_name": "longitude"},
+    "time": {"standard_name": "time"}, "wdir": {"standard_name": "wind_from_direction"},
+    "wspd": {"standard_name": "wind_speed"}, "hs": {"standard_name": "sea_surface_wave_significant_height"},
+    "dpd": "DPD", "apd": "APD", "mwd": {"name": "MWD", "direction": "from"} } }
+```
+
+Relief (`harvest/sources/relief`): also `short` (the tier folder's stem), `datum` and `vertical_epsg`
+(the GeoKey its tiers carry), `step_arcsec` (15, or "1/9" for the division the step is),
+`variables.elevation` (its units; a kind that copies pixels refuses anything but metres), plus per kind:
+- `cudem-index`: `bucket`, `prefix`, `index`, `index_cache`, `cache` (path templates of `{datacache}`,
+  `{region}`, `{name}`: the first existing is read, the first is where a fetch lands), `listing_cache`.
+- `tiled-geotiff`: `tile_deg` [w, h], `name` (`{ns}{lat1:00}{ew}{lon0:000}` of the NW corner), `fetch`
+  (URL template), `cache`.
+- `erddap-griddap`: `chunk_deg` (one request a chunk of the tile lattice, a whole number of steps),
+  `name`, `cache`, `metadata_cache`; `variables.lat/lon` name the axes. A chunk is the pixel centres
+  inside it, its axes checked against the lattice of `step_arcsec` to a thousandth of a step (a grid
+  off it is refused, never resampled), written beside its `.nc` as the composites' float32 GeoTIFF.
+
+```json
+{ "id": "erddap.coastwatch.gebco2020", "kind": "erddap-griddap", "rank": 1, "short": "gebco15",
+  "server": "https://coastwatch.pfeg.noaa.gov/erddap", "dataset": "GEBCO_2020",
+  "datum": "MSL", "vertical_epsg": 5714, "step_arcsec": 15, "chunk_deg": 1,
+  "variables": { "elevation": {"name": "elevation", "units": "m"},
+    "lat": {"standard_name": "latitude"}, "lon": {"standard_name": "longitude"} },
+  "name": "GEBCO_2020_{ns}{lat1:00}{ew}{lon0:000}.tif", "cache": ["{datacache}/erddap/GEBCO_2020/{name}"],
+  "metadata_cache": "{datacache}/erddap/GEBCO_2020" }
+```
+
+**The interfaces** (`Core/SourceFactory.cs`): `IObservationSource { Config; Stations(Box);
+Observe(Station, double? at = null); FetchedUtc }` and `IReliefSource { Config; Meets(Box) ->
+List<ReliefFile> }`, a `ReliefFile` a GeoTIFF on disk once made (`Dest`, `Cell`, `Url`, `Size`,
+`SizeOf`, `Make`: a subset service's fetch-and-write, null for a planned download).
+
+**The laws the factory adds.** Buoys: sources by rank; a station id a better-ranked source answered is
+not asked of the next; the product names (`source`, `inputs`) only the sources that answered. Relief:
+of the sources of one native step holding files in a region the lowest rank answers; at equal grain the
+better rank lies over; the PRODUCT's datum is the finest source's; each other datum's offset is
+measured against that datum's finest source and its tiers carry it; `datum_separation` is that one
+object when the product has one other datum, an object of them by datum when it has several.
+
+### 7.3 Measured (2026-10-14, coast3_3to10m)
+
+- **Ported, byte for byte.** `compose-bed` through the factory (all five configs, and the four ported
+  ones by `--sources`) against the pre-factory binary on the same map: 162 of 162 tier GeoTIFFs equal
+  by SHA-256; `water.bed.composite.json` equal in every value but `generated_utc`, `stats`, `phases_s`
+  and one text, `datum_separation.what` (now spelled from the configs' labels: "CUDEM 1/9" or CUDEM
+  1/3" ... covered by them" for "CUDEM 1/9" or 1/3" ... covered by CUDEM"). `compose-seastate`
+  (`noaa.ndbc` alone, and all three buoy configs) equal in every value but `generated_utc` and
+  `stats`. `compose-check` on the ported product: 6 of 6 gates (with `--against-sea` haulover and
+  chesapeake).
+- **ERDDAP tabledap against NDBC realtime2** (`harvest sources agree-buoys --a noaa.ndbc --b
+  erddap.coastwatch.ndbcmet`, coast3 + a Mass Bay box): 13 stations, 18 of 18 quantities held by both
+  equal (worst difference 0 in every quantity; tolerance half NDBC's last printed digit), 14 held by
+  one only: CoastWatch has no row for 44013 and 44098 at their first copies' 2026-08-28 lines (older
+  than the realtime window), for 44087 at :26, nor for 44029's line 2 hours old (its
+  time_coverage_end lagged). Only one wave buoy (41122) compared its waves. The 13 latest-row requests
+  of a cold `compose-seastate` with the ERDDAP source took 491 s (about 35 s each, the server's own
+  time); warm, 0.2 s.
+- **ERDDAP griddap against ETOPO 2022 15"** (`agree-relief --a erddap.coastwatch.gebco2020 --b
+  noaa.etopo2022.15s`, coast3 + the slope box -74.5,36.5,-73.5,37.5; 12 chunks): 82,751 pixels,
+  centres equal (0 px); GEBCO minus ETOPO: deep (<= -200 m) median +2.35 m, |d| median 2.70 m, p90
+  9.5 m, max 166 m; shelf median +1.32 m, |d| p90 6.0 m; land median +4.93 m. The gate, stated before
+  the run (one lattice, deep median |d| <= 5 m): pass.
+- **A bed with the griddap tier in place of ETOPO 15"** (`--sources noaa.cudem.ninth,noaa.cudem.third,
+  erddap.coastwatch.gebco2020,noaa.etopo2022.60s`): tiers cudem19 3.43 / 13.73 m, gebco15 463 m (8
+  files), etopo60; `compose-check` 4 of 4 (geotiff, bed, holes, gap). NAVD88 - MSL measured against
+  GEBCO: -0.967 m (GEBCO minus CUDEM median +0.967, MAD 0.673, p05 -0.84, p95 +4.65 over 7,933 cells):
+  GEBCO 2020 near these coasts is not CUDEM, where ETOPO 2022 is (0.000).
+- The session's harvester fetches: 41 requests, 2.1 MB (40 to coastwatch.pfeg, one NDBC file).
+
+**Not yet**: the IOOS regional servers publish one dataset a station, and a config is one dataset, so
+a network there is a config a station, or a kind that lists its stations by `allDatasets` or
+`search/advanced` by standard_name (not built). No spectra from ERDDAP (cwwcNDBCMet has none). The
+per-tile keys of `datum_separation` keep their old names (`cudem_tile`, `median_etopo_minus_cudem_m`)
+so the product's keys are unchanged, though the reference may now be another source.

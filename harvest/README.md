@@ -79,16 +79,17 @@ registers every implementation in the assembly and makes one by name; the demo's
 | compose-river | <out>/river.composite.json + river/river.json | (new) |
 | compose-water | all five above | (new) |
 | compose-check | <out>/check.json (the composites' gates) | (new) |
+| sources | lists the source configs; <out>/sources_agree_*.json (two sources against each other) | (new) |
 
 ## The composites: no places
 
 `harvest compose-<layer> --fidelity FILE.gafid --out data/composite/<name>/` takes every source of
 one water layer that has data in the regions a fidelity map paints, ranks them by grain, and
 writes ONE product (GACOMP01, docs/FIDELITY.md sections 3 and 6): the bed as tiers of float32
-GeoTIFFs (CUDEM 1/9" and 1/3" over ETOPO 2022 15" over 60"), tides as one stations.json (CO-OPS
-fitted stations + EOT20 model stations), currents as one currents.json (CO-OPS stations, NDBC
-ADCP buoys, a surface field per region and ROMS OFS), sea state as one seastate.json (GFS-Wave
-points + NDBC buoys), rivers as one river.json (USGS gauges). No place name anywhere: a region is
+GeoTIFFs (the relief configs: CUDEM 1/9" and 1/3" over ETOPO 2022 15" over 60"), tides as one
+stations.json (CO-OPS fitted stations + EOT20 model stations), currents as one currents.json (CO-OPS
+stations, NDBC ADCP buoys, a surface field per region and ROMS OFS), sea state as one seastate.json
+(GFS-Wave points + the buoy configs' stations), rivers as one river.json (USGS gauges). No place name anywhere: a region is
 a cell of the map. Every time-varying source is read from the FIRST copy the cache holds and is
 never refetched for a newer one; each input records its valid and fetched time.
 
@@ -96,6 +97,28 @@ never refetched for a newer one; each input records its valid and fetched time.
 harvest compose-water --fidelity harvest\testdata\coast3_3to10m.gafid --out data\composite\coast3
 harvest compose-check --out data\composite\coast3 --against-tides data\tides\haulover\stations.json
 ```
+
+## The sources: one config file each
+
+`harvest/sources/buoys/*.json` and `harvest/sources/relief/*.json` (tracked) are the composites'
+sources, one file a source (docs/FIDELITY.md 7): its reader (`kind`), server and dataset, the map from
+the engine's quantities to the source's variables (a name, or a CF `standard_name`), the units and
+direction conventions it writes, a relief's datum and native step, its rank and coverage.
+`Core/SourceFactory.cs` makes each with the reader its kind names (`[SourceKind]` classes under
+`Sources/`): `ndbc-realtime2`, `erddap-tabledap` (buoys), `cudem-index`, `tiled-geotiff`,
+`erddap-griddap` (relief). `compose-seastate` and `compose-bed` take every config of their layer, or
+`--sources id,id`.
+
+```bat
+harvest sources list
+harvest sources agree-buoys --a noaa.ndbc --b erddap.coastwatch.ndbcmet --fidelity harvest\testdata\coast3_3to10m.gafid --out data\composite\coast3
+harvest sources agree-relief --a erddap.coastwatch.gebco2020 --b noaa.etopo2022.15s --fidelity harvest\testdata\coast3_3to10m.gafid --box -74.5,36.5,-73.5,37.5 --out data\composite\coast3
+harvest compose-bed --fidelity harvest\testdata\coast3_3to10m.gafid --out data\composite\gebco --sources noaa.cudem.ninth,noaa.cudem.third,erddap.coastwatch.gebco2020,noaa.etopo2022.60s
+```
+
+`list` makes every config (its reader checks it) without a fetch; `agree-buoys` holds two sources of
+one instrument to equality at the same station and moment (half the last digit NDBC prints);
+`agree-relief` holds two grids to one lattice and measures their difference by depth band.
 
 `harvest/testdata/` holds the four maps the measurements were made on (docs/FIDELITY.md 5):
 `box5km_3m` (one ~5 km box at 3 m), `coast3_3to10m` (three ~20 km coastal boxes at 3, 3 and
