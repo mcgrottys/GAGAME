@@ -330,10 +330,26 @@ public sealed class Tides : IHarvester
     /// Fit every station and write stations.json + official sidecars into outDir.
     public Record Harvest(List<Station> stations, int year, string outDir, string cacheDir, bool exclusive = false, bool tolerant = false)
     {
-        var epoch = Unix(new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Utc));
-        Directory.CreateDirectory(outDir);
         if (exclusive && File.Exists(Path.Combine(outDir, "stations.json")))
             throw new HarvestStop($"refusing to overwrite {outDir}/stations.json (places only add)");
+        var rec = Fit(stations, year, outDir, cacheDir, exclusive, tolerant);
+        var doc = D(
+            ("generated_utc", NowIso()),
+            ("source", "NOAA CO-OPS harcon frequencies + least-squares fit to official hourly predictions (see this script's docstring)"),
+            ("year", year), ("epoch_unix", rec.EpochUnix), ("stations", rec.Stations));
+        var path = Path.Combine(outDir, "stations.json");
+        Save(path, doc, exclusive);
+        _ctx.Log($"wrote {path} ({rec.Stations.Count} stations) -- the engine is now network-free");
+        rec.Files.Add((path, new FileInfo(path).Length));
+        return rec;
+    }
+
+    /// Fit every station and write its official sidecar into outDir: the station entries of
+    /// stations.json, for a caller that writes the document itself (a place, a composite).
+    public Record Fit(List<Station> stations, int year, string outDir, string cacheDir, bool exclusive = false, bool tolerant = false)
+    {
+        var epoch = Unix(new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        Directory.CreateDirectory(outDir);
         _ctx.Log($"harvest_tides: year {year}, epoch {epoch:0}, normal-equations solver");
         var rec = new Record { Year = year, EpochUnix = epoch };
         (double lat, double lon)? prev = null;
@@ -414,14 +430,6 @@ public sealed class Tides : IHarvester
                 ("official_file", offFile), ("official_start_unix", times[0]), ("official_dt_s", 3600), ("official_n", values.Count),
                 ("coeffs", coeffs)));
         }
-        var doc = D(
-            ("generated_utc", NowIso()),
-            ("source", "NOAA CO-OPS harcon frequencies + least-squares fit to official hourly predictions (see this script's docstring)"),
-            ("year", year), ("epoch_unix", epoch), ("stations", rec.Stations));
-        var path = Path.Combine(outDir, "stations.json");
-        Save(path, doc, exclusive);
-        _ctx.Log($"wrote {path} ({rec.Stations.Count} stations) -- the engine is now network-free");
-        rec.Files.Add((path, new FileInfo(path).Length));
         return rec;
     }
 }
