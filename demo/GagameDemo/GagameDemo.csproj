@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>GagameDemo</AssemblyName>
+    <RootNamespace>GagameDemo</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- One exe to hand out: the engine, scenes, shaders and data stay in the checkout it points at. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The harvesters' catalog (names, outputs, sources, inserts) comes from the factory; the runs go through harvest.exe. -->
+    <ProjectReference Include="..\..\harvest\Gagame.Harvest\Gagame.Harvest.csproj" />
+    <ProjectReference Include="..\..\harvest\harvest\harvest.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

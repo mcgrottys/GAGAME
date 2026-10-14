@@ -49,3 +49,9 @@ out/
 
 # the harvester's C++ tool (harvester/cpp/build.bat)
 harvester/cpp/bin/
+
+# The .NET demo launcher (demo/GagameDemo) builds here.
+demo/GagameDemo/bin/
+demo/GagameDemo/obj/
+harvest/*/bin/
+harvest/*/obj/
