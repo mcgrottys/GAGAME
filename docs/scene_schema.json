@@ -21,7 +21,8 @@
     { "key": "nodes", "kind": "list", "node": "component", "doc": "typed nodes (scene/Component.h), by name, typed by ComponentSchemas" },
     { "key": "prune", "kind": "object", "node": "tool", "doc": "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm" },
     { "key": "tools", "kind": "list", "node": "tool", "doc": "the one-shot modes this scene runs (--tool)" },
-    { "key": "stations", "kind": "list", "node": "station", "doc": "where a station of the data stands when its file does not say (PHASE C3)" }
+    { "key": "stations", "kind": "list", "node": "station", "doc": "where a station of the data stands when its file does not say (PHASE C3)" },
+    { "key": "solvers", "kind": "list", "node": "solver", "doc": "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide" }
   ],
   "placement": [
     { "spelling": "compass", "keys": ["x", "alt", "z", "az", "pitch"], "doc": "the flat world frame in metres and compass degrees: Camera::SetFromCompass, then FromCamera" },
@@ -46,6 +47,7 @@
       { "key": "debug", "type": "object", "field": "none", "schema": "debug", "reload": "hot", "doc": "the debug views of the globe's surface" },
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": false, "reload": "hot", "doc": "rasters that are sources by being files, in any order" },
       { "key": "stations", "type": "list", "field": "none", "element": "station", "named": false, "reload": "hot", "doc": "where a station of the data stands when its file does not say" },
+      { "key": "solvers", "type": "list", "field": "none", "element": "solver", "named": false, "reload": "hot", "doc": "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
       { "key": "hud", "type": "object", "field": "none", "schema": "hud", "reload": "hot", "doc": "the windshield: readouts and the minimap on the glass" },
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
@@ -247,21 +249,26 @@
       { "key": "folder", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a folder whose files matching `match` are one source" },
       { "key": "match", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folder's pattern, * and ? (\"\" = every file)" },
       { "key": "manifest", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source" },
-      { "key": "kind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "colour | height | seastate (a sea-state file: its forecast and buoys at its box) | survey (a harvested grid's .json, a height of the stack; `dormant` stands a solver on it) | composite (a GACOMP01 product of many sources, docs/FIDELITY.md: its tiers join as rasters); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one channel of 16-bit or float: height)" },
+      { "key": "kind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "colour | height | seastate (a sea-state file: its forecast and buoys at its box) | composite (a GACOMP01 product of many sources, docs/FIDELITY.md: its tiers join as rasters); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one channel of 16-bit or float: height)" },
       { "key": "crs", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "EPSG:nnnn, read only where the file carries none" },
       { "key": "over", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the stack order's first key, ascending upward (every built-in source is 0); the second is the grain, the coarser under the finer" },
       { "key": "feather", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "the edge of the whole softened over this far (smoothstep); 0 = a hard edge" },
       { "key": "unit", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's unit (m, ft, ftUS), read only where the file names none" },
       { "key": "datum", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's vertical datum (NAVD88, MSL, EGM2008 ...), read only where the file names none" },
-      { "key": "offset", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": null, "optional": true, "reload": "restart", "doc": "added to a height whose datum is not the engine's (NAVD88): the separation at the place; such a file is refused without it, and a file on NAVD88 takes none" },
-      { "key": "dormant", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "survey: a solver stands on it, asleep until the eye comes" },
-      { "key": "station", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "survey: the tide station (its id in data.tides) its open sea is held to" },
-      { "key": "river", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "none", "reload": "restart", "doc": "survey: the side a river enters its solver by (west | none)" }
+      { "key": "offset", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": null, "optional": true, "reload": "restart", "doc": "added to a height whose datum is not the engine's (NAVD88): the separation at the place; such a file is refused without it, and a file on NAVD88 takes none" }
     ] },
     { "type": "station", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the station's id in its file" },
       { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its latitude" },
       { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its longitude" }
+    ] },
+    { "type": "solver", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the window's name (the logs, the title)" },
+      { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "its domain, [lon0, lat0, lon1, lat1] degrees" },
+      { "key": "nx", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "cells east to west" },
+      { "key": "ny", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "cells south to north" },
+      { "key": "station", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the tide station (its id in data.tides) its open sea is held to" },
+      { "key": "river", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "none", "names": ["west", "none"], "reload": "restart", "doc": "the side a river enters by" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },

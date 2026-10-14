@@ -17,7 +17,8 @@
     {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
     {"name": "noaa.cudem.haulover", "folder": "D:/DataCache/GAGAME/cudem/FL",
      "match": "ncei19_n26X*_w080X25_2018v1.tif", "kind": "height", "unit": "m", "datum": "NAVD88"},
-    {"name": "gfswave.haulover", "file": "data/sea/haulover/seastate.json", "kind": "seastate"}
+    {"name": "gfswave.haulover", "file": "data/sea/haulover/seastate.json", "kind": "seastate"},
+    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif", "unit": "m", "datum": "EGM2008", "offset": -0.092}
   ],
   "water": {
     "swe": {"box": [-80.22, 25.82, -80.03, 26.02], "river": "none"}

@@ -137,16 +137,6 @@ struct Assembly {
     bool globeDataOk = false;
     GlobeModel* activeGlobe = nullptr;   // main's `GlobeModel&`: marsModel when ready, else globeModel
     BathyModel bathyRaw;
-    // THE SCENE'S SURVEYS (`sources` of kind survey): harvested grids that are heights of the
-    // stack; a dormant one carries a solver of its own, asleep until the eye comes (its grid drawn
-    // in as the main solver's is, HIERARCHY 4.17).
-    struct Survey {
-        std::string name, label, station, river;   // label: the file's stem, for the logs
-        bool dormant = false;
-        BathyModel grid, swe;
-        std::unique_ptr<CudemHeightSource> src;
-    };
-    std::vector<std::unique_ptr<Survey>> surveys;
     bool haveBathyRaw = false;
     Compositor compositor;
     double navdAboveMsl = 0.0;
@@ -155,7 +145,6 @@ struct Assembly {
     double mslToNavd = 0.0;
     std::optional<EquirectHeightSource> srcEtopo;   // emplaced once globeModel is loaded: the
     std::optional<EquirectHeightSource> srcMola;    // grid dimensions are constructor arguments
-    std::unique_ptr<WindowHeightSource> srcNe15;
     std::unique_ptr<CudemHeightSource> srcCudem;
     EditsHeightSource srcEdits;   // M6w: the hand edits ARE a stack layer now -- their
                                   // cache identity is the geojson content, so an operator

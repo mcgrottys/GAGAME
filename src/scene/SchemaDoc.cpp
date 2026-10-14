@@ -180,6 +180,7 @@ const SectionNote kSections[] = {
     {"prune", "tool", "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm"},
     {"tools", "tool", "the one-shot modes this scene runs (--tool)"},
     {"stations", "station", "where a station of the data stands when its file does not say (PHASE C3)"},
+    {"solvers", "solver", "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide"},
 };
 
 // The placement sugar: ONE parser, four spellings (scene/Props.h ResolvePlacement).

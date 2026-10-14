@@ -236,7 +236,8 @@
   "tools": [],
   "sources": [
     {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
-    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1}
+    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1},
+    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif", "unit": "m", "datum": "EGM2008", "offset": -0.092}
   ],
   "stations": [
     {"name": "ACT0816", "lat": 42.81833, "lon": -70.81},

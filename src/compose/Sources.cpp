@@ -148,37 +148,6 @@ float EquirectHeightSource::Sample(double latRad, double lonRad, double, float& 
     return 1.0f;
 }
 
-// ------------------------------------------------------------------------------ window grid
-
-WindowHeightSource::WindowHeightSource(const char* name, const char* structure,
-                                       double cmPerPixel, const std::vector<int16_t>* elev,
-                                       int nx, int ny, double lon0, double lat1, double dLon,
-                                       double dLat, double featherFrac, double datumShiftM)
-    : m_elev(elev), m_nx(nx), m_ny(ny), m_lon0(lon0), m_lat1(lat1), m_dLon(dLon),
-      m_dLat(std::abs(dLat)), m_feather(featherFrac), m_datumShift(datumShiftM) {
-    char crs[96];   // was a function-local static shared by every instance
-    if (datumShiftM != 0.0) {
-        snprintf(crs, sizeof(crs), "EPSG:4326 window (row 0 N), vdatum %+.3f m -> NAVD88",
-                 datumShiftM);
-    } else {
-        snprintf(crs, sizeof(crs), "EPSG:4326 window (row 0 north)");
-    }
-    m_info = {name, structure, crs, cmPerPixel, lon0, lat1 - ny * std::abs(dLat),
-              lon0 + nx * dLon, lat1};
-}
-
-float WindowHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
-    if (!m_elev || m_nx <= 0) return 0.0f;
-    const double lonDeg = lonRad * 180.0 / kPi, latDeg = latRad * 180.0 / kPi;
-    const double u = (lonDeg - m_lon0) / (m_nx * m_dLon);
-    const double v = (m_lat1 - latDeg) / (m_ny * m_dLat);
-    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return 0.0f;
-    metres = Bilinear(*m_elev, m_nx, m_ny, u * m_nx, v * m_ny, false) +
-             static_cast<float>(m_datumShift);
-    const double edge = (std::min)((std::min)(u, 1.0 - u), (std::min)(v, 1.0 - v));
-    return Feather(edge, m_feather);   // the old render-time NeWeight feather, at paint time
-}
-
 // ------------------------------------------------------------------------------ CUDEM
 
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,

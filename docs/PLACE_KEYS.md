@@ -342,7 +342,8 @@ read what they read before:
 | row | was | now |
 |---|---|---|
 | a2 | the velocity-gradient bank reopened `data/currents/currents.json` | `data.currents` |
-| a3, a4, b3 | the Cape Ann and Boston surveys and Boston's dormant solver, by path, station and a dammed river | `sources` entries of kind `survey`: `dormant`, `station`, `river` |
+| a3, a4, b3 | the Cape Ann and Boston surveys and Boston's dormant solver, by path, station and a dammed river | DELETED (2026-10-14, the owner's word): the insets are gone; a dormant solver is a scene's `solvers` entry, a box of nx x ny cells on the stack's bed and a station's tide, no survey file. None is declared: Boston has no fine bed until a composite paints it |
+| a18 | the ETOPO 15" New England window, cropped to int16 in globe.json and read by its own source class | DELETED (2026-10-14): the 15" tile it was a crop of is a `sources` entry of kind height in every Earth scene that lists sources (EGM2008, offset -0.092 m); WindowHeightSource and GlobeModel's window gone |
 | a7 | `data/gis/edits.geojson` in three readers | `data.edits` ("" = none) |
 | a10, b6, d5 | Lawrence, else Lowell x 1.08, else 70 m^3/s | `data.river`, `water.swe.riverGauges` ("id[*scale] ..."), `water.swe.riverQFallback` |
 | a19, a20 | `gomofs_uv.f32` and `noaa.gomofs.current` | the field's own `file` and `model` (no default file) |
@@ -361,10 +362,9 @@ Boston's dormant solver, which the code used to force on every Earth scene. By f
 height source re-keys the stack, so those scenes' trees repaint once.
 
 **Still standing, and why.** a5/a8/a11/a13/a15/a16 name global or the owner's data folders, not
-a place's (`data/water`, `data/gis/`, `data/wave_scene.json`); the `_ne` names (a15, a16, a18:
-`coast_ne`, `rivers_ne`, `nhd_water_ne.bin`, the ETOPO 15 s New England window) go with the
-composite height product (docs/FIDELITY.md), which replaces the window, the surveys and the
-insets with one product; a21/a22 are names taken from the scene; the solver's geography (d1-d3,
+a place's (`data/water`, `data/gis/`, `data/wave_scene.json`); the `_ne` names (a15, a16:
+`coast_ne`, `rivers_ne`, `nhd_water_ne.bin`) are the New England survey's files, still read by
+those names; a21/a22 are names taken from the scene; the solver's geography (d1-d3,
 d7, d8) stays the assumption 4.15 names; f4/f5 (the wave field's window about the anchor and the
 bar's normal) are relative to the scene's place and written in its file; f10 is a material's
 optics, not a place; the tide ribbon (d11) is the chart's river-kilometre view.

@@ -1334,16 +1334,10 @@ bool RunRealHeightsCheck() {
     e60.file = "cache/globe/ETOPO_2022_v1_60s_surface.tif";
     e60.name = "noaa.etopo2022.60s";
     e60.hasOffset = true;
-    RasterEntry e15 = e60;
-    e15.file = "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif";
-    e15.name = "noaa.etopo2022.15s";
-    const auto et = LoadRasterSources({e60, e15});
-    if (et.size() != 2) return false;
+    const auto et = LoadRasterSources({e60});
+    if (et.size() != 1) return false;
     EquirectHeightSource rel("noaa.etopo2022", "equirect-grid int16 8192x4096", 489200.0, &gm.Elev(), gm.Nx(), gm.Ny());
-    WindowHeightSource ne("noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0, &gm.NeElev(), gm.NeNx(),
-                          gm.NeNy(), gm.NeLon0(), gm.NeLat1(), gm.NeDLon(), gm.NeDLat());
-    std::vector<double> dp, dc, dn;
-    size_t roundEq = 0;
+    std::vector<double> dp, dc;
     for (int i = 0; i < 2000; ++i) {
         // the global relief: a point uniform on the sphere, and the cell it falls in, at its centre
         const double lat = std::asin(2.0 * u01(rng) - 1.0), lon = (2.0 * u01(rng) - 1.0) * kPi;
@@ -1356,19 +1350,9 @@ bool RunRealHeightsCheck() {
         if (et[0]->Sample(clat * kD2R, clon * kD2R, cell / std::cos(clat * kD2R), fb) > 0.0f) {
             dc.push_back(double(fb) - gm.Elev()[size_t(cy) * gm.Nx() + size_t(cx)]);
         }
-        // the NE ring: a cell of ne_15s at its centre, which is the 15" file's texel centre
-        const double nx = std::floor(u01(rng) * gm.NeNx()), ny = std::floor(u01(rng) * gm.NeNy());
-        const double nlon = gm.NeLon0() + (nx + 0.5) * gm.NeDLon(), nlat = gm.NeLat1() + (ny + 0.5) * gm.NeDLat();
-        float g15 = 0.0f, n15 = 0.0f;
-        if (et[1]->Sample(nlat * kD2R, nlon * kD2R, 1e-3, g15) > 0.0f && ne.Sample(nlat * kD2R, nlon * kD2R, 0.0, n15) > 0.0f) {
-            dn.push_back(double(g15) - n15);
-            roundEq += std::lround(g15) == std::lround(n15) ? 1 : 0;
-        }
     }
     Distribution("C.2 ETOPO 60\" file (bilinear) - the engine's relief (bilinear on 8192x4096 int16)", dp);
     Distribution("C.2   the file's area mean over a relief cell - that cell's int16", dc);
-    Distribution("C.2 ETOPO 15\" file at a ne_15s cell's centre - that cell's int16", dn);
-    Log("[realheights] C.2   the 15\" file rounded equals ne_15s at %zu of %zu cells", roundEq, dn.size());
     // A SECOND HAND: the hill Python wrote (out\s3\make_hill.py: deflate, the float predictor, tiled)
     // at the 36 points, against this file's closed form.
     RasterEntry he;

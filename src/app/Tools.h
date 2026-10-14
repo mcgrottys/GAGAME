@@ -83,7 +83,7 @@ int RunSelfTest(const Options& opt);
 // ---- During assembly (the call keeps its exact place in the boot sequence).
 
 // --water-map / --bathy-map: the reprojection proof (Lambert conformal sheet); exit 0.
-int RunWaterMap(const Options& opt, Gpu& gpu, const GlobeModel& globeModel, Compositor& compositor,
+int RunWaterMap(const Options& opt, Gpu& gpu, Compositor& compositor,
                 int hgtCh, const WaterAtlas& waterAtlas, const Space::Anchor& chart);
 // --gis-dump PATH: the survey gate over its box as a PGM; std::exit(0) from inside.
 void RunGisDump(const Options& opt, const GisVectorMask& gisMask);

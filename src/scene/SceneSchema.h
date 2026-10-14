@@ -345,11 +345,6 @@ struct SourceProps {
     std::string name, file, folder, match, manifest, kind, crs, unit, datum;
     double over = 0.0, feather = 0.0, offset = 0.0;
     bool hasOffset = false;
-    // kind "survey" (a harvested grid: its .json beside its .f32, sim/BathyModel.h): a solver stands
-    // on it DORMANT, waking when the eye comes, its open sea held to the tide of `station` (a tide
-    // station's id in data.tides); `river` is the side a river enters by (west | none).
-    bool dormant = false;
-    std::string station, river = "none";
 };
 struct PortalProps {
     std::string name;
@@ -461,6 +456,16 @@ struct NodeProps {
 struct ToolProps {
     std::string name;
     std::string args;
+};
+// A SOLVER ASLEEP UNTIL THE EYE COMES (sim/WeatherManager.h AddDormantWindow): its domain a lat/lon
+// box of nx x ny cells, its bed the height stack at those cells, its open sea held to the tide of
+// `station` (a tide station's id in data.tides) on NAVD88, a river entering by `river`.
+struct SolverProps {
+    std::string name;
+    double box[4] = {0.0, 0.0, 0.0, 0.0};   // lon0, lat0, lon1, lat1
+    uint32_t nx = 0, ny = 0;
+    std::string station;
+    int river = 1;                          // west | none
 };
 // PHASE C3: where a station of the scene's data stands when its own file does not say.
 struct StationProps {

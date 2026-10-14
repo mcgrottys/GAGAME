@@ -26,6 +26,7 @@ BuildingsLayerProps kBuildings;
 NodeProps kNode;
 ToolProps kTool;
 StationProps kStation;
+SolverProps kSolver;
 SourceProps kSource;
 
 using Q = Quantity;
@@ -410,9 +411,8 @@ const Schema& SourceSchema() {
             .BindPath("manifest", kSource.manifest,
                       "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source", R)
             .Bind("kind", kSource.kind,
-                  "colour | height | seastate (a sea-state file: its forecast and buoys at its box) | survey (a harvested "
-                  "grid's .json, a height of the stack; `dormant` stands a solver on it) | composite (a GACOMP01 product of many "
-                  "sources, docs/FIDELITY.md: its tiers join as rasters); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
+                  "colour | height | seastate (a sea-state file: its forecast and buoys at its box) | composite (a GACOMP01 "
+                  "product of many sources, docs/FIDELITY.md: its tiers join as rasters); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
                   "channel of 16-bit or float: height)", R)
             .Bind("crs", kSource.crs, "EPSG:nnnn, read only where the file carries none", R)
             .Bind("over", kSource.over, Q::Dimensionless, "1",
@@ -426,10 +426,7 @@ const Schema& SourceSchema() {
             .Bind("offset", kSource.offset, Q::Length, "m",
                   "added to a height whose datum is not the engine's (NAVD88): the separation at the "
                   "place; such a file is refused without it, and a file on NAVD88 takes none", R)
-            .Optional()    // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
-            .Bind("dormant", kSource.dormant, "survey: a solver stands on it, asleep until the eye comes", R)
-            .Bind("station", kSource.station, "survey: the tide station (its id in data.tides) its open sea is held to", R)
-            .Bind("river", kSource.river, "survey: the side a river enters its solver by (west | none)", R);
+            .Optional();   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
         return sc;
     }();
     return *s;
@@ -838,6 +835,20 @@ const Schema& StationSchema() {
     return *s;
 }
 
+const Schema& SolverSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("solver", &kSolver);
+        sc->Bind("name", kSolver.name, "the window's name (the logs, the title)", R)
+            .BindBox("box", kSolver.box, "its domain, [lon0, lat0, lon1, lat1] degrees", R)
+            .Bind("nx", kSolver.nx, Q::Dimensionless, "1", "cells east to west", R)
+            .Bind("ny", kSolver.ny, Q::Dimensionless, "1", "cells south to north", R)
+            .Bind("station", kSolver.station, "the tide station (its id in data.tides) its open sea is held to", R)
+            .BindEnum("river", kSolver.river, {"west", "none"}, "the side a river enters by", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& PruneSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.prune;
@@ -887,6 +898,7 @@ const Schema& SceneFileSchema() {
             .Nest("debug", DebugSchema(), &kDoc.debug, "the debug views of the globe's surface")
             .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
+            .List("solvers", &SolverSchema(), "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .Nest("hud", HudSchema(), &kDoc.hud, "the windshield: readouts and the minimap on the glass")
             .List("views", &ViewSchema_(), "the cameras, by name")

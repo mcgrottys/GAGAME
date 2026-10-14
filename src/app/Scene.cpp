@@ -425,14 +425,30 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Str("datum", s.datum);
             r.F64("offset", s.offset);
             s.hasOffset = e.Get("offset") != nullptr;
-            r.Bool("dormant", s.dormant);
-            r.Str("station", s.station);
-            r.Str("river", s.river);
             if (!ok) return false;
             if (s.file.empty() + s.folder.empty() + s.manifest.empty() != 2) {
                 return Refuse(why, "sources: an entry names a file, a folder and a match, or a manifest -- one of the three");
             }
             out.sources.push_back(std::move(s));
+        }
+    }
+    if (const JsonValue* a = ListOf(doc, "solvers")) {
+        const PropDecl* decl = root.Find("solvers");
+        for (const JsonValue& e : a->arr) {
+            scene::SolverProps s;
+            ElementReader r(scene::ElementChain(*decl, e), e, "solvers", why, &ok);
+            r.Str("name", s.name);
+            if (const JsonValue* b = e.Get("box"); b && b->arr.size() == 4) {
+                for (int k = 0; k < 4; ++k) s.box[k] = b->arr[size_t(k)].number;
+            }
+            r.U32("nx", s.nx);
+            r.U32("ny", s.ny);
+            r.Str("station", s.station);
+            std::string river = "none";
+            r.Str("river", river);
+            s.river = river == "west" ? 0 : 1;
+            if (!ok) return false;
+            out.solvers.push_back(std::move(s));
         }
     }
     if (const JsonValue* a = ListOf(doc, "stations")) {

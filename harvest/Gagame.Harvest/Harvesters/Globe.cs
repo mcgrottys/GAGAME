@@ -15,7 +15,7 @@ public sealed class Globe : IHarvester
     public string[] Outputs => ["data/globe/globe.json", "data/globe/etopo_8192.i16"];
     public Source[] Sources => [new("ETOPO 2022", "https://www.ncei.noaa.gov/products/etopo-global-relief-model"), new("GFS-Wave on AWS", "https://registry.opendata.aws/noaa-gfs-bdp-pds/")];
     public Insert? Insert => new(InsertKind.Flags, "Refresh only some sections: tick what to SKIP.",
-        Flags: ["--skip-etopo", "--skip-ne", "--skip-mars", "--skip-windvec", "--skip-clouds", "--skip-ocean", "--skip-ice", "--skip-waves"]);
+        Flags: ["--skip-etopo", "--skip-mars", "--skip-windvec", "--skip-clouds", "--skip-ocean", "--skip-ice", "--skip-waves"]);
 
     static readonly string[] EtopoUrls =
     [
@@ -23,8 +23,6 @@ public sealed class Globe : IHarvester
         "https://www.ngdc.noaa.gov/thredds/fileServer/global/ETOPO2022/60s/60s_surface_elev_gtif/ETOPO_2022_v1_60s_N90W180_surface.tif",
     ];
     const int Onx = 8192, Ony = 4096;
-    static readonly string[] Ne15Urls = ["https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/15s/15s_surface_elev_gtif/ETOPO_2022_v1_15s_N45W075_surface.tif"];
-    static readonly Box NeWin = new(-72.0, 40.0, -66.0, 45.0);
     static readonly string[] MolaUrls = ["https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg016/megt90n000eb.img"];
     static readonly (int mb, int alt)[] CloudLevels = [(1000, 110), (925, 760), (850, 1460), (700, 3010), (600, 4200), (500, 5570), (400, 7180), (300, 9160), (250, 10360), (200, 11780)];
     const string Erddap = "https://coastwatch.noaa.gov/erddap/griddap";
@@ -56,7 +54,6 @@ public sealed class Globe : IHarvester
             try { Merge(DoMars()); }
             catch (Exception e) { ctx.Log($"  MOLA unavailable ({e.Message}); Mars stays a textured sphere"); }
         }
-        if (!skip.Contains("--skip-ne")) { ctx.Log("[ne15] New England 15-arc-second window"); Merge(DoNe15()); }
         if (!skip.Contains("--skip-windvec")) { ctx.Log("[windvec] global 10 m wind vector"); Merge(DoWindVec()); }
         if (!skip.Contains("--skip-waves")) { ctx.Log("[waves] live global sea state"); Merge(DoWaves()); }
         if (!skip.Contains("--skip-clouds")) { ctx.Log("[clouds] live cloud layers"); Merge(DoClouds()); }
@@ -116,30 +113,6 @@ public sealed class Globe : IHarvester
         _ctx.Log($"  wrote data/globe/etopo_8192.i16 ({Onx}x{Ony} int16, {new FileInfo(p).Length >> 20} MB)");
         return D(("relief_file", "etopo_8192.i16"), ("nx", Onx), ("ny", Ony), ("lon0", -180.0), ("lat0", 90.0), ("dlon", 360.0 / Onx), ("dlat", -180.0 / Ony),
             ("source", "ETOPO 2022 v1 60s ice-surface (NOAA NCEI), box-decimated"));
-    }
-
-    Dictionary<string, object?> DoNe15()
-    {
-        var tifPath = Path.Combine(Cache, "ETOPO_2022_v1_15s_N45W075_surface.tif");
-        _fetch.DownloadBig(Ne15Urls, tifPath, tag: "ETOPO 15s");
-        var g = new GeoTiff(File.ReadAllBytes(tifPath));
-        _ctx.Log($"  15s tile {g.Width}x{g.Height}, origin ({g.Lat0:0.00}, {g.Lon0:0.00})");
-        var x0 = Math.Max(g.PxOfLon(NeWin.Lon0), 0);
-        var x1 = Math.Min(g.PxOfLon(NeWin.Lon1), g.Width);
-        var y0 = Math.Max(g.PyOfLat(NeWin.Lat1), 0);
-        var y1 = Math.Min(g.PyOfLat(NeWin.Lat0), g.Height);
-        int w = x1 - x0, h = y1 - y0;
-        var vals = g.ReadWindow(x0, y0, w, h);
-        var out_ = new short[w * h];
-        for (var i = 0; i < out_.Length; i++)
-        {
-            var v = vals[i];
-            out_[i] = float.IsNaN(v) ? (short)0 : (short)Math.Max(-32000, Math.Min(32000, (int)Math.Round(v, MidpointRounding.ToEven)));
-        }
-        Directory.CreateDirectory(Out);
-        Bin.WriteI16(Path.Combine(Out, "ne_15s.i16"), out_);
-        _ctx.Log($"  wrote data/globe/ne_15s.i16 ({w}x{h} int16, ~460 m)");
-        return D(("ne_file", "ne_15s.i16"), ("ne_nx", w), ("ne_ny", h), ("ne_lon0", NeWin.Lon0), ("ne_lat1", NeWin.Lat1), ("ne_dlon", 15.0 / 3600.0), ("ne_dlat", -15.0 / 3600.0));
     }
 
     Dictionary<string, object?> DoMars()

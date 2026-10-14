@@ -237,7 +237,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& datumFrom = A->datumFrom;
     auto& haveMslLink = A->haveMslLink;
     auto& mslToNavd = A->mslToNavd;
-    auto& srcNe15 = A->srcNe15;
     auto& srcCudem = A->srcCudem;
     auto& srcEdits = A->srcEdits;
     auto& hgtCh = A->hgtCh;
@@ -330,7 +329,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         std::vector<RasterEntry> entries;
         for (const scene::SourceProps& s : S.sources) {
             if (s.kind == "seastate") continue;   // PHASE C2: a sea state, not a raster (below)
-            if (s.kind == "survey") continue;     // a harvested grid, not a file the loaders read (below)
             if (s.kind == "buildings") continue;  // solids, not a raster: the buildings layer's (below)
             if (s.kind == "roads") continue;      // ways, not a raster: the tree's ribbons (--tool building-lod)
             if (s.kind == "bridges") continue;    // spans, not a raster: the decks' clearances (--tool building-lod)
@@ -477,26 +475,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         (marsMode && marsModel.Ready()) ? marsModel : globeModel;
     A->activeGlobe = &activeGlobe;   // the loop reads the same choice through the Assembly
 
-    // The raw CUDEM planes are SOURCES (immutable after load -- their bytes are part of
-    // the tile-cache identity): the scene's data.bathy, and every `sources` entry of kind
-    // survey (the M6w insets were two of these, named in code).
+    // The raw CUDEM plane is a SOURCE (immutable after load -- its bytes are part of the tile-cache
+    // identity): the scene's data.bathy. Every other height is a file of the scene's `sources`.
     haveBathyRaw = bathyRaw.Load(S.data.bathy);
-    for (const scene::SourceProps& s : S.sources) {
-        if (s.kind != "survey") continue;
-        auto v = std::make_unique<Assembly::Survey>();
-        if (!v->grid.Load(s.file)) {
-            Log("[survey] %s: cannot be read; the scene goes on without it", s.file.c_str());
-            continue;
-        }
-        std::string stem = s.file.substr(s.file.find_last_of("/\\") + 1);
-        stem = stem.substr(0, stem.find('.'));
-        v->label = stem;
-        v->name = s.name.empty() ? "noaa.cudem." + stem : s.name;
-        v->station = s.station;
-        v->river = s.river;
-        v->dormant = s.dormant;
-        A->surveys.push_back(std::move(v));
-    }
 
     // M9n: THE HEIGHT STACK'S VERTICAL DATUM, resolved once and applied at the sources.
     // ETOPO is MSL/geoid referenced and everything above it in the stack is NAVD88; the two
@@ -524,18 +505,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         hgtCh = compositor.AddHeightChannel("mars.height", {&srcMola});
     } else if (globeDataOk) {
         std::vector<HeightSource*> hstack{&srcEtopo};
-        if (globeModel.NeNx() > 0) {
-            srcNe15 = std::make_unique<WindowHeightSource>(
-                "noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0,
-                &globeModel.NeElev(), globeModel.NeNx(), globeModel.NeNy(),
-                globeModel.NeLon0(), globeModel.NeLat1(), globeModel.NeDLon(),
-                globeModel.NeDLat(), 0.04, mslToNavd);
-            hstack.push_back(srcNe15.get());
-        }
-        for (auto& v : A->surveys) {
-            v->src = std::make_unique<CudemHeightSource>(&v->grid, 0.04, v->name.c_str());
-            hstack.push_back(v->src.get());
-        }
         if (haveBathyRaw) {
             // PHASE C5: the survey's name is its file's (the scene's data.bathy), not a place's.
             std::string stem = S.data.bathy;
@@ -556,16 +525,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
     }
-    // A dormant survey's solver stands by the same law and the same code as the scene's own
-    // (below). A side with no river is a wall, so where it has none no side carries an open face
-    // that reads the bed and it keeps the survey's extent. Its grid is its own copy: the
-    // activation realizes the bed into it, and the survey the source reads stays the file.
-    for (auto& v : A->surveys) {
-        if (v->dormant && v->src) {
-            v->swe.DrawFrom(v->grid, v->src.get(), S.water.swe.window == 0, v->river == "west",
-                            v->label.c_str());
-        }
-    }
 
     // M6v/M8i: THE WATER ATLAS -- water parameters through the same registry. 18 phasor
     // channels (water.tide.M2..O1): equilibrium base <- EOT20 global medium <- the NE
@@ -573,7 +532,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // RG16F window tiles on demand. The sim manager consumes these next.
     waterAtlas.Init(compositor, model, "data/water");
     if (S.Tool("water-map") || S.Tool("bathy-map")) {
-        exitCode = tools::RunWaterMap(opt, gpu, globeModel, compositor, hgtCh, waterAtlas, surface.flat);
+        exitCode = tools::RunWaterMap(opt, gpu, compositor, hgtCh, waterAtlas, surface.flat);
         return nullptr;
     }
 

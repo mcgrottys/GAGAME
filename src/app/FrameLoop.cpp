@@ -1262,24 +1262,24 @@ std::optional<int> FrameLoop::Session() {
                  haveCurrents ? &currents : nullptr);
     if (sea) weather.SetSeaSources(sea->Sources());   // PHASE C2: the sea state's sources
     if (swe.Ready()) weather.AddExternalWindow(S.scene.name.c_str(), &swe, oceanAt);   // C3: the scene's name
-    // The scene's dormant surveys (`sources` of kind survey, `dormant`): each a solver asleep
-    // until the eye comes, its open sea held to its own station's tide on NAVD88.
-    for (auto& v : m_A.surveys) {
-        if (!v->dormant || !v->swe.Ready()) continue;
+    // The scene's dormant solvers (`solvers`): each asleep until the eye comes, its domain a box of
+    // cells on the stack's bed, its open sea held to its own station's tide on NAVD88.
+    for (const scene::SolverProps& v : S.solvers) {
         int st = -1;
         for (size_t i = 0; i < model.Count(); ++i) {
-            if (model.S(i).id == v->station) st = static_cast<int>(i);
+            if (model.S(i).id == v.station) st = static_cast<int>(i);
         }
-        if (st < 0 || model.S(st).mllwMinusNavdM <= -900.0) {
-            Log("[survey] %s: its station '%s' is not in data.tides with a NAVD88 link; its solver stays off",
-                v->label.c_str(), v->station.c_str());
+        if (st < 0 || model.S(st).mllwMinusNavdM <= -900.0 || !v.nx || !v.ny) {
+            Log("[solver] %s: its station '%s' is not in data.tides with a NAVD88 link, or it names no cells; it stays off",
+                v.name.c_str(), v.station.c_str());
             continue;
         }
         const double off = model.S(st).mllwMinusNavdM;
         auto oceanAt = [&model, st, off](double t) { return model.Height(static_cast<size_t>(st), t) + off; };
         SweConfig cfg;
-        cfg.westBoundary = v->river == "west";
-        weather.AddDormantWindow(v->label.c_str(), &v->swe, cfg, oceanAt, 0.5);
+        cfg.westBoundary = v.river == 0;
+        const double box[4] = {v.box[1], v.box[0], v.box[3], v.box[2]};   // the window's lat0, lon0, lat1, lon1
+        weather.AddDormantWindow(v.name.c_str(), box, v.nx, v.ny, cfg, oceanAt, 0.5);
     }
     // PHASE B2 (D4): every solver binds the standing window (it reads it where the window holds its
     // cells, the cube elsewhere), and the pin and the whole-bed wait ask for its tiles. PHASE C1: this

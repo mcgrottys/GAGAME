@@ -75,25 +75,6 @@ private:
     SourceInfo m_info;
 };
 
-// A regional equirect int16 window (row 0 = north), edge-feathered so it fades into whatever
-// sits beneath it in the stack -- the render-time NeWeight feather, moved to paint time.
-class WindowHeightSource : public HeightSource {
-public:
-    WindowHeightSource(const char* name, const char* structure, double cmPerPixel,
-                       const std::vector<int16_t>* elev, int nx, int ny, double lon0,
-                       double lat1, double dLon, double dLat, double featherFrac = 0.04,
-                       double datumShiftM = 0.0);
-    const SourceInfo& Info() const override { return m_info; }
-    float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
-
-private:
-    const std::vector<int16_t>* m_elev;
-    int m_nx, m_ny;
-    double m_lon0, m_lat1, m_dLon, m_dLat, m_feather;
-    double m_datumShift = 0.0;
-    SourceInfo m_info;
-};
-
 // (The plane orthos and the overlays are scene sources now, compose/RasterFileSource.h.)
 
 // A CUDEM topobathy window through an already-loaded, thalweg-preserving BathyModel grid.
