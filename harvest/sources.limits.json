@@ -86,6 +86,22 @@
       "stated": true,
       "note": "Rate-limited per hour, higher with a free key; the number is not on the page but in each response's X-RateLimit-Limit / X-RateLimit-Remaining headers (the page's example shows 1000)."
     },
+    "erddap.coastwatch": {
+      "title": "NOAA CoastWatch West ERDDAP (NMFS SWFSC ERD) and its mirror upwell",
+      "hosts": ["coastwatch.pfeg.noaa.gov", "upwell.pfeg.noaa.gov"],
+      "documented": "https://coastwatch.pfeg.noaa.gov/erddap/griddap/documentation.html",
+      "quote": "run just one script or curl command at a time",
+      "stated": false,
+      "note": "A request for one request in flight (Polite's own law), no number; the tabledap documentation page says the same. griddap: a very large request 'will usually fail', so the bed asks one 1 degree chunk at a time. upwell answers metadata itself but redirects data requests (302) to coastwatch.pfeg; both are one source here. Checked 2026-10-14."
+    },
+    "erddap.marine-ie": {
+      "title": "Marine Institute (Ireland) ERDDAP",
+      "hosts": ["erddap.marine.ie"],
+      "documented": "https://erddap.marine.ie/erddap/tabledap/documentation.html",
+      "quote": "run just one script or curl command at a time",
+      "stated": false,
+      "note": "The stock ERDDAP request for one request in flight, no number. The Irish Weather Buoy Network is CC BY 4.0 (the dataset's license attribute). Checked 2026-10-14."
+    },
     "copernicus.marine": {
       "title": "Copernicus Marine Service (CMEMS)",
       "hosts": ["marine.copernicus.eu"],

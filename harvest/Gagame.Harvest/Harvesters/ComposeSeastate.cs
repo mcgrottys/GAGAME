@@ -126,6 +126,7 @@ public sealed class ComposeSeastate : IHarvester
         var sources = SourceFactory.ObservationSources(new SourceEnv(ctx, polite, run.Log), new Args(argv).Opt("--sources"));
         var found = new Dictionary<string, Dictionary<string, object?>>(StringComparer.Ordinal);
         var regionBuoys = regions.Select(_ => new SortedSet<string>(StringComparer.Ordinal)).ToList();
+        var answered = new List<string>();
         foreach (var src in sources)
         {
             List<IReadOnlyList<Station>> inside;
@@ -149,7 +150,10 @@ public sealed class ComposeSeastate : IHarvester
                 if (b.GetValueOrDefault("obs_unix") is double ou && (firstObs is null || string.CompareOrdinal(IsoZ(FromUnix(ou)), firstObs) < 0)) firstObs = IsoZ(FromUnix(ou));
             }
             if (got > 0)
+            {
+                answered.Add(src.Config.Label);
                 run.Input(src.Config.Id, src.Config.Title, null, src.Config.Url ?? src.Config.Server ?? "", src.Config.License, src.Config.Cite, "n/a", "none", validUtc: firstObs, fetchedUtc: src.FetchedUtc);
+            }
             run.Log($"{src.Config.Id}: {got} buoy(s) in the regions");
         }
         var buoys = found.OrderBy(kv => kv.Key, StringComparer.Ordinal).ToDictionary(kv => kv.Key, kv => kv.Value);
@@ -160,7 +164,7 @@ public sealed class ComposeSeastate : IHarvester
                 ("points", points.Count(p => p.region == i)), ("buoys", regionBuoys[i].ToList()), ("input", "noaa.gfswave")));
         var ordered = points.Select(p => p.p).ToList();
         var head = ordered.FirstOrDefault();
-        var doc = D(("generated_utc", NowIso()), ("source", $"GFS-Wave via NOMADS grib filter at the fidelity map's points + {string.Join(" + ", sources.Select(s => s.Config.Label))} in its regions"),
+        var doc = D(("generated_utc", NowIso()), ("source", $"GFS-Wave via NOMADS grib filter at the fidelity map's points + {string.Join(" + ", answered)} in its regions"),
             ("cycle_unix", head?["cycle_unix"]), ("cycle_label", head?["cycle_label"]), ("point_lat", head?["lat"]), ("point_lon", head?["lon"]), ("box", head?["box"]),
             ("hours", head?["hours"] ?? new List<object?>()), ("points", ordered), ("buoys", buoys));
         var path = Path.Combine(dir, "seastate.json");

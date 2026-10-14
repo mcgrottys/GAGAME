@@ -87,7 +87,9 @@ public sealed class ErddapTabledap : IObservationSource
             var iso = FromUnix(t).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
             var path = Path.Combine(_dir, $"at_{st.Id}_{FromUnix(t):yyyyMMddHHmm}.csv");
             var url = $"{_server}/tabledap/{_dataset}.csv?{Erddap.Q(Columns())}&{Erddap.Q($"{_station}=\"{st.Id}\"")}&{Erddap.Q($"{_time}={iso}")}";
-            row = Rows(Erddap.GetOrEmpty(_env, url, path, Columns(), "erddap tabledap at")).FirstOrDefault();
+            // a moment the server does not hold YET (its copy lags the source) is not kept as empty
+            try { row = Rows(_env.Polite.GetTextP(url, path, note: "erddap tabledap at").text).FirstOrDefault(); }
+            catch (HttpError e) when (e.Code == 404 && e.Body.Contains("no matching results", StringComparison.OrdinalIgnoreCase)) { row = null; }
         }
         else row = _latest.GetValueOrDefault(st.Id);
         if (row is null) return null;
