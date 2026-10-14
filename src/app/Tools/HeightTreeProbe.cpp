@@ -16,6 +16,7 @@
 
 #include "compose/Compositor.h"
 #include "compose/HeightTree.h"
+#include "compose/TileTree.h"
 #include "core/Common.h"
 
 #include <algorithm>
@@ -91,6 +92,37 @@ int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anc
                 "%llu tiles read cold, %llu warm",
                 where ? "sphere" : "place", g, tree->LevelFor(g), s.median, s.p95, s.worst, cold.treeNs, s.treeNs, s.stackNs,
                 static_cast<unsigned long long>(r1 - r0), static_cast<unsigned long long>(tree->tileReads.load() - r1));
+        }
+    }
+    // THE TEXEL'S CENTRE AT ITS OWN LEVEL (HeightPage's read, the hull's bed): the tree's answer there is
+    // the texel itself -- the bytes the GPU loads. Where every source paints that level directly it is the
+    // stack at the centre through the GPU's quantization; where a source's own level is finer, it is the
+    // FOLD of the four texels beneath (HIERARCHY 4.20), and the stack's direct read is not what is drawn.
+    // MEASURED on the Merrimack: equal at 93 % of texels at level 9, 68 % at 11, 49 % at 13 (worst 2 cm,
+    // 25 cm, 2.7 m): the folds' distance from the stack, which a twin of the GPU must not pretend away.
+    {
+        const Lattice pyr = Lattice::Cube(Lattice::kFaceDim << 17, 256, 128);
+        for (const uint32_t mip : {9u, 11u, 13u}) {
+            double worst = 0.0;
+            size_t same = 0, n = 0;
+            for (const auto& [la, lo] : place) {
+                const double cl = std::cos(la);
+                const double d[3] = {cl * std::cos(lo), std::sin(la), cl * std::sin(lo)};
+                double uv[2];
+                const uint32_t face = CubeFaceOfDir(d, uv);
+                const uint32_t dim = pyr.faceDim >> mip;
+                const uint32_t ix = uint32_t(uv[0] * dim), iy = uint32_t(uv[1] * dim);
+                const TileRequest r{face, mip, ix / pyr.texW, iy / pyr.texH};
+                double cla = 0.0, clo = 0.0;
+                pyr.Texel(r, ix % pyr.texW, iy % pyr.texH, cla, clo);
+                const float t = tree->Sample(cla, clo, pyr.GroundRes(mip));
+                const float h = HalfToFloat(tree_detail::F2H(comp.SampleHeightStack(ch, cla, clo, pyr.GroundRes(mip))));
+                worst = (std::max)(worst, std::abs(double(t) - double(h)));
+                same += t == h ? 1 : 0;
+                ++n;
+            }
+            Log("[height-tree] texel centres at level %2u (%.2f m): the tree (what the GPU loads) equals the stack's half float at %zu of %zu, worst %.4f m",
+                mip, pyr.GroundRes(mip), same, n, worst);
         }
     }
     // THE PLANT: three levels too coarse, at the place, at 6 m.

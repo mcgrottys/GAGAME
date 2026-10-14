@@ -255,7 +255,7 @@ bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
         const double fz = (k == 4) ? 0.5 : (k & 2) ? 0.96 : 0.04;
         double lat = 0.0, lon = 0.0;
         PlaceOfRing(wx0 + fx * spanM, wz0 + fz * spanM, lat, lon);
-        if (m_comp->SampleHeightStack(m_hgtCh, lat * kD2R, lon * kD2R, spanM * 0.25) < 2.5f) {
+        if (m_comp->SampleHeight(m_hgtCh, lat * kD2R, lon * kD2R, spanM * 0.25) < 2.5f) {
             return true;
         }
     }
@@ -271,7 +271,7 @@ void WaterBankLayer::CornerParams(double wx, double wz, float& lvl, float& bed) 
                                  m_atlas->Level(lat, lon, m_simUnix, 500.0));
     }
     bed = (m_comp && m_hgtCh >= 0)
-              ? m_comp->SampleHeightStack(m_hgtCh, lat * kD2R, lon * kD2R, 100.0)
+              ? m_comp->SampleHeight(m_hgtCh, lat * kD2R, lon * kD2R, 100.0)
               : -30.0f;
 }
 

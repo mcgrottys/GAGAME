@@ -2066,7 +2066,7 @@ bool FrameLoop::TravelTo(double toLat, double toLon) {
     auto topAt = [&](double lat, double lon) {
         const double d2r = 3.14159265358979323846 / 180.0;
         const double g = (m_A.hgtCh >= 0)
-                             ? double(m_A.compositor.SampleHeightStack(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
+                             ? double(m_A.compositor.SampleHeight(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
                              : 0.0;
         return (std::max)(g, 0.0);
     };

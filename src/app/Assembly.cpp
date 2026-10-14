@@ -573,7 +573,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
                 sweDomain.Place(lat0, lon0, lat1, lon1, cx, cy, planetR);
                 sweDomain.FillBed([&](double la, double lo, double resM) {
-                    return compositor.SampleHeightStack(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
+                    return compositor.SampleHeight(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
                 });
                 surface.StandAbout(sweDomain.latC, sweDomain.lonC, 2u);
             } else {

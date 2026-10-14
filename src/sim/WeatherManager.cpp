@@ -83,7 +83,7 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         SweDomain dom;
         dom.Place(w.box[0], w.box[1], w.box[2], w.box[3], w.nx, w.ny, m_planetR);
         dom.FillBed([&](double la, double lo, double resM) {
-            return m_comp->SampleHeightStack(m_hgtCh, la * kD2R, lo * kD2R, resM);
+            return m_comp->SampleHeight(m_hgtCh, la * kD2R, lo * kD2R, resM);
         });
         // M9ar: NO per-window bed texture. The owned solver reads the height megatexture --
         // the same page slice the Merrimack solver, the sea shader and the water bank read.
@@ -389,7 +389,7 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
 
     // ---- the bed: the one composed stack, provenance = the topmost covering source.
     if (m_comp && m_hgtCh >= 0) {
-        s.bedNavd = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad, groundResM);
+        s.bedNavd = m_comp->SampleHeight(m_hgtCh, latRad, lonRad, groundResM);
         s.bedSrc = "earth.height base";
         const auto& ch = m_comp->ChannelAt(m_hgtCh);
         for (const auto* src : ch.height) {

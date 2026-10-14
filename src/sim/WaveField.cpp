@@ -1074,6 +1074,8 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
             mixBytes("|", 1);
             mixBytes(hs->Info().structure.data(), hs->Info().structure.size());
         }
+        // the bed read through the height TREE when one is bound (compose/HeightTree.h): another field
+        if (m_comp->HeightTreeOf(m_hgtCh)) mixBytes("height tree v2", 14);
     }
     return hsh;
 }
@@ -1246,7 +1248,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
                                 180.0);
     }
 
-    // bed: the ONE composed height stack, sampled at texel centers at the cell's own
+    // bed: the ONE composed height (the tree when bound, compose/HeightTree.h), at texel centers at the cell's own
     // resolution -- the same per-texel math the renderer's tiles run (sources are stateless;
     // the residency workers already paint through this stack concurrently).
     in.bed.resize(cells);
@@ -1259,7 +1261,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
                     m_cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
                     const double latR = la * (kPiW / 180.0), lonR = lo * (kPiW / 180.0);
                     in.bed[row + i] =
-                        m_comp->SampleHeightStack(m_hgtCh, latR, lonR, m_cfg.cellM);
+                        m_comp->SampleHeight(m_hgtCh, latR, lonR, m_cfg.cellM);
                 }
             }
         });

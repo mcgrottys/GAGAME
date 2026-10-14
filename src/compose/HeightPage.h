@@ -99,7 +99,10 @@ private:
         const TileRequest r{face, mip, ix / lat.texW, iy / lat.texH};
         double latR = 0.0, lonR = 0.0;
         lat.Texel(r, ix % lat.texW, iy % lat.texH, latR, lonR);
-        const float h = m_comp->SampleHeightStack(m_ch, latR, lonR, lat.GroundRes(mip));
+        // The height TREE's texel when one is bound (compose/HeightTree.h): the bytes the GPU loads, a fold
+        // of the texels beneath where a source's own level is finer -- which the stack read at the centre
+        // was not (the probe: 49 % equal at the 38 m level).
+        const float h = m_comp->SampleHeight(m_ch, latR, lonR, lat.GroundRes(mip));
         const float q = HalfToFloat(tree_detail::F2H(h));   // the one quantization: the GPU's
         m_memo.emplace(key, q);
         return q;
