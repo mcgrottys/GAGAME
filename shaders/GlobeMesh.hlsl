@@ -386,9 +386,10 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     // --gate-overdraw: one world per dispatch (gOptB.w = its slot + 1; 0, the default, draws all).
     const uint only = (uint)gOptB.w;
     const bool liveA = gid < count && (rec.cell0 >> 31) == 0u && (only == 0u || rec.level + 1u == only);
-    // THE KEPT FRAME (GlobeLayer.h Keep): a meshlet whose every pixel was land at the last full
-    // draw stands in the cache and is not drawn again; one with water is (its class, by its pixels).
-    const bool live = liveA && (gKeepU.y == 0u || gBufU[gKeepU.x][min(gid, max(count, 1u) - 1u)] != 0u);
+    // THE KEPT FRAME (GlobeLayer.h Keep): a meshlet whose pixels at the last full draw were all land,
+    // none beside water, stands in the cache and is not drawn again (its class 1, GlobeClass.hlsl);
+    // one with water, land beside it, or no pixel at all is.
+    const bool live = liveA && (gKeepU.y == 0u || gBufU[gKeepU.x][gKeepU.z + min(gid, max(count, 1u) - 1u)] != 1u);
     // M10: this record's Droste level -- its eye, sun, exaggeration, bank set and the gauge's
     // outward map. A seam band's coarse neighbour is always a record of the SAME level (the
     // seam table keys on it), so one load serves every vertex this group writes.
