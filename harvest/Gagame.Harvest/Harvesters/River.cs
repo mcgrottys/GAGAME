@@ -47,6 +47,21 @@ public sealed class River : IHarvester
             }
         }
 
+        var sites = Latest(data);
+        var out_ = D(("generated_utc", NowIso()),
+            ("source", "USGS waterservices IV (legacy; migrate to api.waterdata.usgs.gov by 2027Q1)"),
+            ("sites", sites.Values.ToList()));
+        var path = Path.Combine(outDir, "river.json");
+        Save(path, out_);
+        foreach (var s in sites.Values)
+            ctx.Log($"  {s["id"]} {s["name"]}: {s.GetValueOrDefault("discharge_cms") ?? "?"} m3/s, stage {s.GetValueOrDefault("gage_ft") ?? "?"} ft @ {s.GetValueOrDefault("obs_iso") ?? "?"}");
+        ctx.Log($"wrote {path}");
+        return 0;
+    }
+
+    /// Each site's latest discharge (cfs and m3/s) and stage from an IV response, by site code.
+    public static Dictionary<string, Dictionary<string, object?>> Latest(JsonNode data)
+    {
         var sites = new Dictionary<string, Dictionary<string, object?>>();
         foreach (var ts in data.Obj("value").Arr("timeSeries"))
         {
@@ -64,14 +79,6 @@ public sealed class River : IHarvester
             else if (param == "00065") entry["gage_ft"] = v;
             entry["obs_iso"] = t;
         }
-        var out_ = D(("generated_utc", NowIso()),
-            ("source", "USGS waterservices IV (legacy; migrate to api.waterdata.usgs.gov by 2027Q1)"),
-            ("sites", sites.Values.ToList()));
-        var path = Path.Combine(outDir, "river.json");
-        Save(path, out_);
-        foreach (var s in sites.Values)
-            ctx.Log($"  {s["id"]} {s["name"]}: {s.GetValueOrDefault("discharge_cms") ?? "?"} m3/s, stage {s.GetValueOrDefault("gage_ft") ?? "?"} ft @ {s.GetValueOrDefault("obs_iso") ?? "?"}");
-        ctx.Log($"wrote {path}");
-        return 0;
+        return sites;
     }
 }
