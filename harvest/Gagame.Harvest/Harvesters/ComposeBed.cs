@@ -265,6 +265,7 @@ public sealed class ComposeBed : IHarvester
         var ordered = tiles.Keys.OrderBy(t => t.Grain).ToList();
         var tierStats = new Dictionary<TierKey, Dictionary<string, object?>>();
         double tRead = 0, tDecode = 0, tResample = 0, tWrite = 0;
+        long decodedPx = 0;
         foreach (var tk in ordered)
         {
             var clock = Stopwatch.StartNew();
@@ -286,13 +287,14 @@ public sealed class ComposeBed : IHarvester
                 var pointRaster = tif.GeoKeys().GetValueOrDefault("GTRasterType") is int rt && rt == 2;
                 var lonEdge = tif.Lon0 - tif.TieI * tif.Sx - (pointRaster ? 0.5 * tif.Sx : 0);
                 var latEdge = tif.Lat0 + tif.TieJ * tif.Sy + (pointRaster ? 0.5 * tif.Sy : 0);
-                var measure = tk.S.Datum == "NAVD88" && tk.K == 0 ? E15(src.Cell) : null;
+                var measure = tk.S.Datum == "NAVD88" ? E15(src.Cell) : null;
                 double dDec = 0, dRes = 0, dWr = 0;
                 var lk = new object();
                 Parallel.ForEach(grp, ot =>
                 {
                     var t0 = Stopwatch.GetTimestamp();
-                    var cut = Cut(tif, lonEdge, latEdge, 1 << tk.K, tk.S.StepDeg * (1 << tk.K), ot.Box, out var t1);
+                    var cut = Cut(tif, lonEdge, latEdge, 1 << tk.K, tk.S.StepDeg * (1 << tk.K), ot.Box, out var t1, out var decoded);
+                    Interlocked.Add(ref decodedPx, decoded);
                     var t2 = Stopwatch.GetTimestamp();
                     if (cut is null) return;
                     var (vals, w, h, lon0, lat1, sx, sy) = cut.Value;
@@ -357,7 +359,8 @@ public sealed class ComposeBed : IHarvester
             ("p05_m", ds.Length > 0 ? Round(ds[(int)(0.05 * (ds.Length - 1))], 3) : null), ("p95_m", ds.Length > 0 ? Round(ds[(int)(0.95 * (ds.Length - 1))], 3) : null),
             ("per_tile", perFile));
         _run.Extra["later"] = later.Select(_run.Rel).OrderBy(x => x, StringComparer.Ordinal).ToList();
-        _run.Extra["phases_s"] = D(("read", Round(tRead, 2)), ("decode", Round(tDecode, 2)), ("resample", Round(tResample, 2)), ("encode_write", Round(tWrite, 2)),
+        _run.Extra["phases_s"] = D(("read", Round(tRead, 2)), ("decode", Round(tDecode, 2)), ("resample", Round(tResample, 2)), ("encode_write", Round(tWrite, 2)), ("decoded_mpx", Round(decodedPx / 1e6, 1)),
+            ("decode_mb_per_thread_s", Round(decodedPx * 4 / 1e6 / Math.Max(tDecode, 1e-9), 1)),
             ("note", "decode, resample and encode_write are summed over the worker threads; read is the file loads, one at a time"));
         _run.Save(D(("unit", "m"), ("datum", "NAVD88"), ("tiers", tierDocs)));
         return later.Count == 0 ? 0 : 3;
@@ -369,7 +372,7 @@ public sealed class ComposeBed : IHarvester
     /// declares the tier's exact `step`, not the file's rounded one (CUDEM writes 1/9" three ways,
     /// 3.08642E-05, 3.0864194E-05, 3.0864198718E-05, and the engine takes a set of one grain to
     /// 1e-9): the origin is the file's own, so a tile's far edge moves under a millimetre.
-    static (float[] vals, int w, int h, double lon0, double lat1, double sx, double sy)? Cut(GeoTiff tif, double lonEdge, double latEdge, int block, double step, Box t, out long tDecoded)
+    static (float[] vals, int w, int h, double lon0, double lat1, double sx, double sy)? Cut(GeoTiff tif, double lonEdge, double latEdge, int block, double step, Box t, out long tDecoded, out long decodedPx)
     {
         double sx = tif.Sx, sy = tif.Sy;
         long gx0 = (long)Math.Floor((lonEdge + 180) / sx + 0.5), gy0 = (long)Math.Floor((90 - latEdge) / sy + 0.5);
@@ -380,11 +383,13 @@ public sealed class ComposeBed : IHarvester
         j0 = Math.Max(j0, (int)Math.Ceiling(-(double)bx / block)); i0 = Math.Max(i0, (int)Math.Ceiling(-(double)by / block));
         j1 = Math.Min(j1, (tif.Width - bx + block - 1) / block); i1 = Math.Min(i1, (tif.Height - by + block - 1) / block);
         tDecoded = Stopwatch.GetTimestamp();
+        decodedPx = 0;
         int w = j1 - j0, h = i1 - i0;
         if (w <= 0 || h <= 0) return null;
         int x0 = bx + j0 * block, y0 = by + i0 * block;
         int ww = Math.Min(w * block, tif.Width - x0), wh = Math.Min(h * block, tif.Height - y0);
         var src = tif.ReadWindow(x0, y0, ww, wh);
+        decodedPx = (long)ww * wh;
         tDecoded = Stopwatch.GetTimestamp();
         float[] vals;
         if (block == 1) vals = src;

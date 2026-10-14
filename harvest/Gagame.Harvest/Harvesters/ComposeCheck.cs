@@ -184,6 +184,7 @@ public sealed class ComposeCheck : IHarvester
             D(("painted_points", points.Count(p => p.painted)), ("unanswered", unanswered)));
 
         // the planted gap: the centre ninth of the first finest file set to nodata in a copy
+        if (tiers.Count < 2) { _ctx.Log("[check] gap: one tier, nothing under it to fill a gap: not run"); return; }
         var fine = tiers.First();
         var victim = fine.Files.OrderByDescending(f => (long)f.W * f.H).First();
         var vals = new GeoTiff(File.ReadAllBytes(victim.Path)).ReadWindow(0, 0, victim.W, victim.H);
