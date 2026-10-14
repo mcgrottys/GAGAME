@@ -103,10 +103,10 @@ public sealed class Currents : IHarvester
 
     static string Q(Dictionary<string, string> p) => string.Join("&", p.Select(kv => Uri.EscapeDataString(kv.Key) + "=" + Uri.EscapeDataString(kv.Value)));
 
-    public Dictionary<string, object?> FetchTidalStation(string sid, string name, string cacheDir, int? bin = null)
+    /// 45 days of max/slack events from `from` (default ten days before now), in two requests.
+    public Dictionary<string, object?> FetchTidalStation(string sid, string name, string cacheDir, int? bin = null, DateTime? from = null)
     {
-        var now = DateTime.UtcNow;
-        var begin = now.AddDays(-10);
+        var begin = from ?? DateTime.UtcNow.AddDays(-10);
         var events = new List<(double t, string type, double ms)>();
         double? floodDeg = null, ebbDeg = null;
         for (var chunk = 0; chunk < 2; chunk++)
@@ -171,6 +171,14 @@ public sealed class Currents : IHarvester
         string text;
         try { (text, _) = FetchText($"{Ndbc}/{bid}.adcp", Path.Combine(cacheDir, $"{bid}_{stamp}.adcp"), maxAgeS: 1800); }
         catch (Exception e) { _ctx.Log($"buoy {bid}: no .adcp ({e.Message})"); return null; }
+        var r = ParseAdcp(bid, text);
+        if (r is not null) _ctx.Log($"buoy {bid}: {(double)r["ms"]!:0.00} m/s toward {(double)r["toward_deg"]!:0} degT at {(double)r["depth_m"]!:0.0} m depth");
+        return r;
+    }
+
+    /// The newest line of a realtime2 .adcp file: obs time, depth, direction toward, speed.
+    public static Dictionary<string, object?>? ParseAdcp(string bid, string text)
+    {
         foreach (var ln in text.Split('\n'))
         {
             if (ln.StartsWith('#') || ln.Trim().Length == 0) continue;
@@ -182,7 +190,6 @@ public sealed class Currents : IHarvester
                 var dep = double.Parse(t[5], CultureInfo.InvariantCulture);
                 var dir = double.Parse(t[6], CultureInfo.InvariantCulture);
                 var spd = double.Parse(t[7], CultureInfo.InvariantCulture) / 100.0;
-                _ctx.Log($"buoy {bid}: {spd:0.00} m/s toward {dir:0} degT at {dep:0.0} m depth");
                 return D(("id", bid), ("obs_unix", Unix(obs)), ("depth_m", dep), ("toward_deg", dir), ("ms", spd));
             }
             catch (FormatException) { continue; }
