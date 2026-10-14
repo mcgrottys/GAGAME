@@ -3,7 +3,7 @@ using System.Text;
 
 namespace Gagame.Harvest.Sources;
 
-/// What every ERDDAP server answers alike (docs/FIDELITY.md 7): `info/<dataset>/index.csv` (one
+/// What every ERDDAP server answers alike (docs/FIDELITY.md 8): `info/<dataset>/index.csv` (one
 /// row per variable and per attribute: units, standard_name, _FillValue ...), the `.csv` answers
 /// of tabledap (row 1 the names, row 2 the units, ISO 8601 times, NaN where missing), and the
 /// request grammar, percent-encoded (Tomcat refuses a bare `"`, `>`, `[`).

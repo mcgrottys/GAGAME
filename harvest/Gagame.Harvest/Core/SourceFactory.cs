@@ -72,7 +72,7 @@ public static class SourceFactory
     public static List<SourceConfig> Configs(HarvestContext ctx, string layer, string? only = null)
     {
         var dir = Folder(ctx, layer);
-        if (!Directory.Exists(dir)) throw new HarvestStop($"{dir}: no source configs (docs/FIDELITY.md 7)");
+        if (!Directory.Exists(dir)) throw new HarvestStop($"{dir}: no source configs (docs/FIDELITY.md 8)");
         var all = Directory.GetFiles(dir, "*.json").OrderBy(f => f, StringComparer.Ordinal).Select(f => SourceConfig.Load(f, layer)).ToList();
         foreach (var g in all.GroupBy(c => c.Id).Where(g => g.Count() > 1))
             throw new HarvestStop($"source id {g.Key} is in {string.Join(" and ", g.Select(c => c.Path))}");
@@ -120,7 +120,7 @@ public sealed record Resolved(string Quantity, string Column, double Factor, boo
     /// DPD and APD share sea_surface_swell_wave_period, so a period is named, not matched). The
     /// units are the spec's, else the server's; a direction is the spec's, else its standard_name's.
     /// A declaration the metadata contradicts is kept and logged: the metadata is not always right
-    /// (CoastWatch's MWD says sea_surface_wave_to_direction of a direction FROM, docs/FIDELITY.md 7).
+    /// (CoastWatch's MWD says sea_surface_wave_to_direction of a direction FROM, docs/FIDELITY.md 8).
     public static Resolved Of(SourceConfig.VarSpec spec, Dictionary<string, Dictionary<string, string>>? meta, string where, Action<string> log)
     {
         var name = spec.Name;

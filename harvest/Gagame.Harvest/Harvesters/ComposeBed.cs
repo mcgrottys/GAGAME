@@ -12,7 +12,7 @@ namespace Gagame.Harvest.Harvesters;
 /// coarser sources' own tiers, the global base under everything.
 ///
 /// THE SOURCES are the configs of harvest/sources/relief (or the `--sources` ids), made by the
-/// SourceFactory: each its reader (`kind`), native step, datum and rank (docs/FIDELITY.md 7).
+/// SourceFactory: each its reader (`kind`), native step, datum and rank (docs/FIDELITY.md 8).
 ///
 /// THE LAW. A source of native step a offers the grains a 2^k (k = 0 its own pixels, k > 0 the
 /// mean of 2^k x 2^k of them). Of the sources of one native step holding files in a region, the

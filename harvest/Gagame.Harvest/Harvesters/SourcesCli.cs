@@ -4,7 +4,7 @@ using static Gagame.Harvest.JsonUtil;
 
 namespace Gagame.Harvest.Harvesters;
 
-/// THE SOURCE CONFIGS AND THEIR AGREEMENT (docs/FIDELITY.md 7):
+/// THE SOURCE CONFIGS AND THEIR AGREEMENT (docs/FIDELITY.md 8):
 ///
 ///   list            every config of harvest/sources/{buoys,relief}, its kind's reader, rank and
 ///                   coverage; each is made (its reader validates the config) without a fetch

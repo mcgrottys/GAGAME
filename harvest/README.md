@@ -110,7 +110,7 @@ harvest compose-check --out data\composite\coast3 --against-tides data\tides\hau
 ## The sources: one config file each
 
 `harvest/sources/buoys/*.json` and `harvest/sources/relief/*.json` (tracked) are the composites'
-sources, one file a source (docs/FIDELITY.md 7): its reader (`kind`), server and dataset, the map from
+sources, one file a source (docs/FIDELITY.md 8): its reader (`kind`), server and dataset, the map from
 the engine's quantities to the source's variables (a name, or a CF `standard_name`), the units and
 direction conventions it writes, a relief's datum and native step, its rank and coverage.
 `Core/SourceFactory.cs` makes each with the reader its kind names (`[SourceKind]` classes under

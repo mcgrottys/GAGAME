@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 
 namespace Gagame.Harvest;
 
-/// ONE SOURCE, ONE FILE (docs/FIDELITY.md 7): `harvest/sources/<layer>/<id>.json`. The file says
+/// ONE SOURCE, ONE FILE (docs/FIDELITY.md 8): `harvest/sources/<layer>/<id>.json`. The file says
 /// which reader (`kind`) opens the source, where it lives, and how ITS schema maps to the
 /// engine's quantities: the variable each quantity is (by name, or by CF standard_name), the
 /// units and conventions the source writes it in, the vertical datum and native grain of a
