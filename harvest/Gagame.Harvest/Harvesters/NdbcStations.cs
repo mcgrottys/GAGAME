@@ -13,10 +13,10 @@ public static class NdbcStations
     public sealed record Catalog(Dictionary<string, (double lat, double lon, string name)> Pos, Dictionary<string, HashSet<string>> Files, string Listing);
 
     /// The station table and the realtime2 listing cached at `listing` (the caller picks the copy:
-    /// a place takes one under six hours old, a composite the first it ever took).
-    public static Catalog Read(Polite polite, string listing)
+    /// a place takes one under six hours old, a composite the first it ever took), from `root`.
+    public static Catalog Read(Polite polite, string listing, string root = Root)
     {
-        var (tab, _) = polite.GetTextP($"{Root}/data/stations/station_table.txt", Path.Combine("cache", "coops", "_lists", "ndbc_station_table.txt"));
+        var (tab, _) = polite.GetTextP($"{root}/data/stations/station_table.txt", Path.Combine("cache", "coops", "_lists", "ndbc_station_table.txt"));
         var pos = new Dictionary<string, (double, double, string)>();
         foreach (var line in tab.Split('\n'))
         {
@@ -28,8 +28,8 @@ public static class NdbcStations
                 pos[f[0].ToUpperInvariant()] = (double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) * (m.Groups[2].Value == "N" ? 1 : -1),
                     double.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture) * (m.Groups[4].Value == "E" ? 1 : -1), f[4]);
         }
-        Directory.CreateDirectory(Dir);
-        var (html, _) = polite.GetTextP($"{Root}/data/realtime2/", listing);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(listing))!);
+        var (html, _) = polite.GetTextP($"{root}/data/realtime2/", listing);
         var files = new Dictionary<string, HashSet<string>>();
         foreach (Match m in Regex.Matches(html, "href=\"([^\"?/][^\"]*)\""))
         {
