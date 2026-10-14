@@ -11,58 +11,54 @@ namespace Gagame.Harvest.Harvesters;
 /// tiers of float32 GeoTIFFs in EPSG:4326 (one grain a tier), gaps under them filled by the
 /// coarser sources' own tiers, the global base under everything.
 ///
+/// THE SOURCES are the configs of harvest/sources/relief (or the `--sources` ids), made by the
+/// SourceFactory: each its reader (`kind`), native step, datum and rank (docs/FIDELITY.md 7).
+///
 /// THE LAW. A source of native step a offers the grains a 2^k (k = 0 its own pixels, k > 0 the
-/// mean of 2^k x 2^k of them). A region wanting grain g takes, of every source holding data there,
-/// the least offered grain >= g (a tie goes to the coarser native: the same grain from fewer
-/// bytes), and under it every source of coarser native at ITS least grain >= g: the gap fill.
-/// A region wanting +Infinity (unpainted, the default) takes the coarsest source at its own
-/// grain. The grain of a pixel is its latitude extent on the sphere (the coarser axis).
+/// mean of 2^k x 2^k of them). Of the sources of one native step holding files in a region, the
+/// lowest rank answers. A region wanting grain g takes, of those, the least offered grain >= g (a
+/// tie goes to the coarser native: the same grain from fewer bytes), and under it every source of
+/// coarser native at ITS least grain >= g: the gap fill. A region wanting +Infinity (unpainted,
+/// the default) takes the coarsest source at its own grain. The grain of a pixel is its latitude
+/// extent on the sphere (the coarser axis).
 ///
 /// THE LATTICE. A tier's pixels are its source file's own pixels (k = 0: copied, not resampled)
 /// or blocks of them aligned to the global lattice of that step (k > 0), so two runs and two maps
 /// write the same tile for the same (source, grain, tile). A tile is the 0.25 deg x 2^m box of at
 /// most 2048 pixels a side, cut to the source file's cell; a tile with no data is not written.
 ///
-/// THE DATUM. CUDEM is NAVD88 and is written as it is (GeoKey 5703). ETOPO 2022 is EGM2008
-/// (GeoKey 3855) and is written as it is too: the separation NAVD88 - EGM2008 is a field, not a
-/// constant, so the tier carries the offset MEASURED where both sources hold the ground of this
-/// map (the median over 15" cells of ETOPO minus the CUDEM area mean) and its spread, and the
-/// engine adds it as the entry's `offset` (compose/RasterFileSource.h).
+/// THE DATUM. The product's datum is the finest source's (CUDEM: NAVD88, GeoKey 5703). Every
+/// source is written in its own datum (ETOPO 2022: EGM2008, GeoKey 3855): a separation between
+/// two datums is a field, not a constant, so a tier of another datum carries the offset MEASURED
+/// where a product-datum source and that datum's finest source both hold the ground of this map
+/// (the median over the reference's cells of it minus the product source's area mean) and its
+/// spread, and the engine adds it as the entry's `offset` (compose/RasterFileSource.h).
 public sealed class ComposeBed : IHarvester
 {
     public string Name => "compose-bed";
-    public string Title => "Bed composite (CUDEM + ETOPO)";
-    public string What => "Every painted region's seafloor and land from the finest source that has it, CUDEM 1/9\" and 1/3\" over ETOPO 2022 15\" over 60\", as tiers of GeoTIFFs.";
+    public string Title => "Bed composite (the relief sources by configuration)";
+    public string What => "Every painted region's seafloor and land from the finest source that has it (harvest/sources/relief: CUDEM 1/9\" and 1/3\" over ETOPO 2022 15\" over 60\", an ERDDAP grid), as tiers of GeoTIFFs.";
     public string[] Outputs => [];
-    public Source[] Sources => [new("NOAA CUDEM (NODD)", "https://registry.opendata.aws/noaa-coastal-lidar/"), new("ETOPO 2022", "https://www.ncei.noaa.gov/products/etopo-global-relief-model")];
-    public Insert? Insert => new(InsertKind.FileArg, "A fidelity map (.gafid) and an output folder: --fidelity FILE --out data/composite/<name>/");
+    public Source[] Sources => [new("NOAA CUDEM (NODD)", "https://registry.opendata.aws/noaa-coastal-lidar/"), new("ETOPO 2022", "https://www.ncei.noaa.gov/products/etopo-global-relief-model"),
+        new("ERDDAP griddap (GEBCO 2020 on CoastWatch)", "https://coastwatch.pfeg.noaa.gov/erddap/griddap/GEBCO_2020.html")];
+    public Insert? Insert => new(InsertKind.FileArg, "A fidelity map (.gafid) and an output folder: --fidelity FILE --out data/composite/<name>/ [--sources id,id]");
 
     const double R = 6371000.0;
     const float NoData = -99999.0f;
     const int MaxTilePx = 2048;
-    const string Etopo15Url = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/15s/15s_surface_elev_gtif/";
-    const string Etopo60Url = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/60s/60s_surface_elev_gtif/ETOPO_2022_v1_60s_N90W180_surface.tif";
 
     // ------------------------------------------------------------------ sources
 
-    sealed class SrcFile
+    /// A relief source as the bed ranks it: its config (harvest/sources/relief/<id>.json, made by
+    /// the SourceFactory) and the law's offer.
+    sealed class Src(IReliefSource r)
     {
-        public string Key = "";
-        public Box Cell = new(0, 0, 0, 0);
-        public string Dest = "";
-        public string Url = "";
-        public long? Size;
-        /// Where the size of an uncached file is learnt (a bucket listing), asked only when it is fetched.
-        public Func<long?>? SizeOf;
-    }
-
-    sealed class Src
-    {
-        public string Id = "", Short = "", Title = "", Url = "", License = "", Cite = "", Datum = "";
-        public int VEpsg;
-        public double StepDeg;
+        public readonly string Id = r.Config.Id, Short = r.Config.S("short"), Title = r.Config.Title, Label = r.Config.Label, Url = r.Config.Url ?? r.Config.Server ?? "",
+            License = r.Config.License, Cite = r.Config.Cite, Datum = r.Config.Datum!;
+        public readonly int VEpsg = r.Config.VerticalEpsg, Rank = r.Config.Rank;
+        public readonly double StepDeg = r.Config.StepDeg;
         public double NativeM => StepDeg * Geo.DegToRad * R;
-        public Func<Box, List<SrcFile>> Meets = _ => new();
+        public List<ReliefFile> Meets(Box box) => r.Meets(box);
         /// The least grain this source offers that is >= g (k, grain); +Infinity wants k = 0.
         public (int k, double grain) Offer(double g)
         {
@@ -72,79 +68,7 @@ public sealed class ComposeBed : IHarvester
         }
     }
 
-    HarvestContext _ctx = null!;
     CompositeRun _run = null!;
-    readonly Dictionary<string, Bathy.Tile> _cudemIndexed = new();
-
-    Src Cudem(string id, string shortName, string title, string dir, string index, double stepDeg, string bigSub)
-    {
-        var big = bigSub.Length == 0 ? _ctx.Big("cudem") : _ctx.Big("cudem", bigSub);
-        var url = $"https://{Bathy.S3Bucket}.s3.amazonaws.com/{dir}{index}";
-        var (zip, _) = _run.Polite.Get(url, Path.Combine(big, index));
-        var tiles = Bathy.ReadTileIndex(zip);
-        var cells = tiles.Select(t => (t, cell: Bathy.TileBounds(t.Name) ?? (t.Bbox is { } b ? new Box(b[0], b[1], b[2], b[3]) : null)))
-            .Where(x => x.cell is not null).ToList();
-        var sizes = new Dictionary<string, Dictionary<string, long>>();
-        long? SizeOf(Bathy.Tile t)
-        {
-            if (!sizes.TryGetValue(t.Region, out var s))
-            {
-                var (objs, _) = _run.Polite.S3List(Bathy.S3Bucket, $"{dir}{t.Region}/", Path.Combine("cache", "places", "_s3", $"cudem_{(bigSub.Length == 0 ? "" : bigSub + "_")}{t.Region}.xml"));
-                sizes[t.Region] = s = objs.ToDictionary(o => o.Key[(o.Key.LastIndexOf('/') + 1)..], o => o.Size);
-            }
-            return s.TryGetValue(t.Name, out var n) ? n : null;
-        }
-        return new Src
-        {
-            Id = id, Short = shortName, Title = title, StepDeg = stepDeg, Datum = "NAVD88", VEpsg = 5703,
-            Url = $"https://{Bathy.S3Bucket}.s3.amazonaws.com/{dir}", License = "public domain (NOAA); NODD: open to the public",
-            Cite = "Amante, C. et al. 2023, Continuously Updated Digital Elevation Model (CUDEM), NOAA NCEI",
-            Meets = box => cells.Where(c => box.Meets(c.cell!.Lon0, c.cell.Lat0, c.cell.Lon1, c.cell.Lat1))
-                .OrderBy(c => c.t.Url, StringComparer.Ordinal)
-                .Select(c =>
-                {
-                    var have = bigSub.Length == 0 ? Bathy.CachedTile(c.t, big) : File.Exists(Path.Combine(big, c.t.Region, c.t.Name)) ? Path.Combine(big, c.t.Region, c.t.Name) : null;
-                    return new SrcFile { Key = c.t.Name, Cell = c.cell!, Url = c.t.Url, Dest = have ?? Path.Combine(big, c.t.Region, c.t.Name), Size = have is null ? null : new FileInfo(have).Length, SizeOf = () => SizeOf(c.t) };
-                }).ToList(),
-        };
-    }
-
-    /// ETOPO 2022 15" comes in 15 deg tiles named by their north-west corner.
-    Src Etopo15()
-    {
-        var keep = Path.Combine(Path.GetDirectoryName(_ctx.DataCache.TrimEnd('\\', '/'))!, "ETOPO", "15s");
-        List<SrcFile> Meets(Box box)
-        {
-            var out_ = new List<SrcFile>();
-            for (var lat1 = 90 - 15 * (int)Math.Floor((90 - box.Lat1) / 15); lat1 > box.Lat0 && lat1 > -90; lat1 -= 15)
-            {
-                for (var lon0 = -180 + 15 * (int)Math.Floor((box.Lon0 + 180) / 15); lon0 < box.Lon1 && lon0 < 180; lon0 += 15)
-                {
-                    var name = $"ETOPO_2022_v1_15s_{(lat1 >= 0 ? 'N' : 'S')}{Math.Abs(lat1):00}{(lon0 >= 0 ? 'E' : 'W')}{Math.Abs(lon0):000}_surface.tif";
-                    var have = new[] { Path.Combine(keep, name), Path.Combine("cache", "globe", name) }.FirstOrDefault(File.Exists);
-                    out_.Add(new SrcFile { Key = name, Cell = new Box(lon0, lat1 - 15, lon0 + 15, lat1), Url = Etopo15Url + name, Dest = have ?? Path.Combine(keep, name), Size = have is null ? null : new FileInfo(have).Length });
-                }
-            }
-            return out_;
-        }
-        return new Src
-        {
-            Id = "noaa.etopo2022.15s", Short = "etopo15", Title = "ETOPO 2022 v1 15 arc-second surface elevation", StepDeg = 15.0 / 3600.0, Datum = "EGM2008", VEpsg = 3855,
-            Url = Etopo15Url, License = "public domain (NOAA NCEI)", Cite = "NOAA NCEI 2022, ETOPO 2022 15 Arc-Second Global Relief Model, doi:10.25921/fd45-gt74", Meets = Meets,
-        };
-    }
-
-    Src Etopo60()
-    {
-        var path = Path.Combine("cache", "globe", "ETOPO_2022_v1_60s_surface.tif");
-        var f = new SrcFile { Key = "ETOPO_2022_v1_60s_N90W180_surface.tif", Cell = new Box(-180, -90, 180, 90), Url = Etopo60Url, Dest = path, Size = File.Exists(path) ? new FileInfo(path).Length : null };
-        return new Src
-        {
-            Id = "noaa.etopo2022.60s", Short = "etopo60", Title = "ETOPO 2022 v1 60 arc-second surface elevation", StepDeg = 1.0 / 60.0, Datum = "EGM2008", VEpsg = 3855,
-            Url = Etopo60Url, License = "public domain (NOAA NCEI)", Cite = "NOAA NCEI 2022, ETOPO 2022 60 Arc-Second Global Relief Model, doi:10.25921/fd45-gt74",
-            Meets = box => new() { f },
-        };
-    }
 
     // ------------------------------------------------------------------ tiers
 
@@ -156,7 +80,7 @@ public sealed class ComposeBed : IHarvester
 
     sealed class OutTile
     {
-        public SrcFile File = null!;
+        public ReliefFile File = null!;
         public Box Box = null!;
         public string Name = "";
         public int Part;
@@ -226,18 +150,16 @@ public sealed class ComposeBed : IHarvester
 
     public int Run(HarvestContext ctx, string[] argv)
     {
-        _ctx = ctx;
         var a = new Args(argv);
         var (mapPath, outDir) = CompositeRun.Paths(a, Name);
         _run = new CompositeRun(ctx, new Polite(ctx), mapPath, outDir, "water.bed", "height");
-        var sources = new List<Src>
-        {
-            Cudem("noaa.cudem.ninth", "cudem19", "NOAA CUDEM 1/9 arc-second topobathy (NCEI_ninth_Topobathy_2014_8483)", Bathy.S3Dir, Bathy.IndexName, 1.0 / 9.0 / 3600.0, ""),
-            Cudem("noaa.cudem.third", "cudem13", "NOAA CUDEM 1/3 arc-second topobathy (NCEI_third_Topobathy_2014_8580)", "dem/NCEI_third_Topobathy_2014_8580/", "tileindex_NCEI_third_Topobathy_2014.zip", 1.0 / 3.0 / 3600.0, "third"),
-            Etopo15(),
-            Etopo60(),
-        };
-        sources = sources.OrderBy(s => s.StepDeg).ToList();
+        var sources = SourceFactory.ReliefSources(new SourceEnv(ctx, _run.Polite, _run.Log), a.Opt("--sources"))
+            .Select(r => new Src(r)).OrderBy(s => s.StepDeg).ThenBy(s => s.Rank).ToList();
+        if (sources.Count == 0) throw new HarvestStop("compose-bed: no relief source configured");
+        // THE PRODUCT'S DATUM is the finest source's; every other datum's tiers carry the offset
+        // measured against it (below)
+        var datum = sources[0].Datum;
+        _run.Log($"{sources.Count} relief source(s): {string.Join(", ", sources.Select(s => $"{s.Id} ({s.Datum}, rank {s.Rank})"))}");
 
         var regions = _run.Regions();
         regions.Add((new Box(-180, -90, 180, 90), _run.DefaultGrainM));   // the unpainted rest wants the default
@@ -248,7 +170,9 @@ public sealed class ComposeBed : IHarvester
         var regionTiers = new List<(Box box, double g, List<TierKey> tiers)>();
         foreach (var (box, g) in regions)
         {
-            var have = sources.Select(s => (s, files: s.Meets(box))).Where(x => x.files.Count > 0).ToList();
+            // of the sources of one native step holding files here, the best ranked answers
+            var have = sources.Select(s => (s, files: s.Meets(box))).Where(x => x.files.Count > 0)
+                .GroupBy(x => x.s.StepDeg).Select(grp => grp.OrderBy(x => x.s.Rank).First()).ToList();
             if (have.Count == 0) continue;
             List<TierKey> take;
             if (double.IsInfinity(g)) take = [new TierKey(have[^1].s, 0)];
@@ -274,35 +198,41 @@ public sealed class ComposeBed : IHarvester
 
         // ---- fetch what is not cached, planned against the budget, finest tier first
         var plan = _run.Polite.NewPlan("bed composite sources");
+        var toMake = new Dictionary<string, ReliefFile>();
         foreach (var f in tiles.OrderBy(t => t.Key.Grain).SelectMany(t => t.Value.Values.Select(o => o.File)).DistinctBy(f => f.Dest))
             if (!File.Exists(f.Dest))
             {
                 f.Size ??= f.SizeOf?.Invoke() ?? _run.Polite.Head(f.Url).Length;
                 plan.Add(f.Key, f.Url, f.Size, f.Dest);
+                toMake[f.Dest] = f;
             }
         var later = new HashSet<string>();
         if (plan.Items.Count > 0)
         {
             var (keep, cut) = plan.Fit();
             plan.Print(keep, cut);
-            foreach (var it in keep.Where(i => !i.Cached)) _run.Polite.Download(it.Url, it.Dest, it.Size!.Value, note: "compose-bed");
+            foreach (var it in keep.Where(i => !i.Cached))
+                if (toMake[it.Dest].Make is { } make) make(_run.Polite);
+                else _run.Polite.Download(it.Url, it.Dest, it.Size!.Value, note: "compose-bed");
             foreach (var it in cut) later.Add(it.Dest);
         }
 
-        // ---- the datum: NAVD88 - EGM2008, measured where CUDEM and ETOPO 15" both hold the ground
-        var sep = new ConcurrentBag<(string file, double d)>();
-        var e15 = sources.First(s => s.Short == "etopo15");
-        var e15Cache = new ConcurrentDictionary<string, GeoTiff?>();
-        GeoTiff? E15(Box cell)
+        // ---- the datums: each other datum's offset to the product's, measured against that
+        // datum's finest source where a source of the product's datum holds the ground
+        var otherDatums = tiles.Keys.Select(k => k.S.Datum).Where(d => d != datum).Distinct().ToList();
+        var refs = otherDatums.ToDictionary(d => d, d => sources.First(s => s.Datum == d));
+        var sep = otherDatums.ToDictionary(d => d, _ => new ConcurrentBag<(string file, double d)>());
+        var refCache = new ConcurrentDictionary<string, GeoTiff?>();
+        GeoTiff? RefAt(Src rs, Box cell)
         {
-            var f = e15.Meets(new Box(cell.CenterLon, cell.CenterLat, cell.CenterLon, cell.CenterLat)).FirstOrDefault();
+            var f = rs.Meets(new Box(cell.CenterLon, cell.CenterLat, cell.CenterLon, cell.CenterLat)).FirstOrDefault();
             if (f is null || !File.Exists(f.Dest)) return null;
-            return e15Cache.GetOrAdd(f.Dest, p => new GeoTiff(File.ReadAllBytes(p)));
+            return refCache.GetOrAdd(f.Dest, p => new GeoTiff(File.ReadAllBytes(p)));
         }
 
         // ---- write every tier
         var tierDocs = new List<Dictionary<string, object?>>();
-        var ordered = tiles.Keys.OrderBy(t => t.Grain).ToList();
+        var ordered = tiles.Keys.OrderBy(t => t.Grain).ThenBy(t => t.S.Rank).ToList();
         var tierStats = new Dictionary<TierKey, Dictionary<string, object?>>();
         var tierParts = new Dictionary<TierKey, List<Box>>();
         double tRead = 0, tDecode = 0, tResample = 0, tWrite = 0;
@@ -329,7 +259,7 @@ public sealed class ComposeBed : IHarvester
                 var pointRaster = tif.GeoKeys().GetValueOrDefault("GTRasterType") is int rt && rt == 2;
                 var lonEdge = tif.Lon0 - tif.TieI * tif.Sx - (pointRaster ? 0.5 * tif.Sx : 0);
                 var latEdge = tif.Lat0 + tif.TieJ * tif.Sy + (pointRaster ? 0.5 * tif.Sy : 0);
-                var measure = tk.S.Datum == "NAVD88" ? E15(src.Cell) : null;
+                List<(string d, GeoTiff? t)> measure = tk.S.Datum != datum ? [] : otherDatums.Select(d => (d, t: RefAt(refs[d], src.Cell))).Where(x => x.t is not null).ToList();
                 double dDec = 0, dRes = 0, dWr = 0;
                 var lk = new object();
                 Parallel.ForEach(grp, ot =>
@@ -340,7 +270,7 @@ public sealed class ComposeBed : IHarvester
                     var t2 = Stopwatch.GetTimestamp();
                     if (cut is null) return;
                     var (vals, w, h, lon0, lat1, sx, sy) = cut.Value;
-                    if (measure is not null) Separation(measure, vals, w, h, lon0, lat1, sx, sy, src.Key, sep);
+                    foreach (var (d, rt) in measure) Separation(rt!, vals, w, h, lon0, lat1, sx, sy, src.Key, sep[d]);
                     var path = Path.Combine(dir, $"p{ot.Part}", ot.Name);
                     var n = GeoTiffWriter.Write(path, vals, w, h, lon0, lat1, sx, sy, tk.S.VEpsg, NoData);
                     var t3 = Stopwatch.GetTimestamp();
@@ -363,20 +293,33 @@ public sealed class ComposeBed : IHarvester
         }
 
         // ---- the separation measured, the offset declared
-        var ds = sep.Select(x => x.d).OrderBy(x => x).ToArray();
-        double? offset = ds.Length > 0 ? -Median(ds) : null;
-        var perFile = sep.GroupBy(x => x.file).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g =>
+        var offsets = new Dictionary<string, double?>();
+        var separations = new Dictionary<string, object?>();
+        var finest = sources.Where(s => s.Datum == datum).ToList();
+        foreach (var d in otherDatums)
         {
-            var v = g.Select(x => x.d).OrderBy(x => x).ToArray();
-            return D(("cudem_tile", g.Key), ("cells", v.Length), ("median_etopo_minus_cudem_m", Round(Median(v), 3)), ("mad_m", Round(Mad(v), 3)));
-        }).ToList();
-        if (offset is double off) _run.Log($"NAVD88 - EGM2008 offset {off:+0.000;-0.000;0.000} m from {ds.Length} 15\" cells (MAD {Mad(ds):0.000} m; per tile medians {string.Join(", ", perFile.Select(p => p["median_etopo_minus_cudem_m"]))})");
-        else _run.Log("no 15\" cell where CUDEM and ETOPO both hold the ground: the EGM2008 tiers' offset is unmeasured (0 declared)");
+            var rs = refs[d];
+            var cell = ArcSec(rs.StepDeg);
+            var ds = sep[d].Select(x => x.d).OrderBy(x => x).ToArray();
+            double? offset = offsets[d] = ds.Length > 0 ? -Median(ds) : null;
+            var perFile = sep[d].GroupBy(x => x.file).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g =>
+            {
+                var v = g.Select(x => x.d).OrderBy(x => x).ToArray();
+                return D(("cudem_tile", g.Key), ("cells", v.Length), ("median_etopo_minus_cudem_m", Round(Median(v), 3)), ("mad_m", Round(Mad(v), 3)));
+            }).ToList();
+            if (offset is double off) _run.Log($"{datum} - {d} offset {off:+0.000;-0.000;0.000} m from {ds.Length} {cell} cells of {rs.Id} (MAD {Mad(ds):0.000} m; per tile medians {string.Join(", ", perFile.Select(p => p["median_etopo_minus_cudem_m"]))})");
+            else _run.Log($"no {cell} cell where a {datum} source and {rs.Id} both hold the ground: the {d} tiers' offset is unmeasured (0 declared)");
+            separations[d] = D(("what", $"{rs.Label} ({d}) minus the mean of the {string.Join(" or ", finest.Select(s => s.Label))} ({datum}) samples over the same {cell} cell, cells wholly covered by them and flat within 1 m"),
+                ("cells", ds.Length), ("median_m", ds.Length > 0 ? Round(Median(ds), 3) : null), ("mad_m", ds.Length > 0 ? Round(Mad(ds), 3) : null),
+                ("p05_m", ds.Length > 0 ? Round(ds[(int)(0.05 * (ds.Length - 1))], 3) : null), ("p95_m", ds.Length > 0 ? Round(ds[(int)(0.95 * (ds.Length - 1))], 3) : null),
+                ("per_tile", perFile));
+        }
 
         var over = ordered.Count(tierStats.ContainsKey);
         foreach (var tk in ordered.Where(tierStats.ContainsKey))
         {
-            var egm = tk.S.Datum != "NAVD88";
+            var other = tk.S.Datum != datum;
+            var offset = other ? offsets[tk.S.Datum] : null;
             --over;
             for (int p = 0; p < tierParts[tk].Count; ++p)
             {
@@ -386,8 +329,8 @@ public sealed class ComposeBed : IHarvester
                 ("box", new List<double> { pb.Lon0, pb.Lat0, pb.Lon1, pb.Lat1 }),
                 ("over", over), ("inputs", new List<object?> { tk.S.Id }), ("decimation", 1 << tk.K),
                 ("datum", tk.S.Datum), ("vertical_epsg", tk.S.VEpsg), ("unit", "m"), ("nodata", (double)NoData),
-                ("offset_m", egm ? Round(offset ?? 0.0, 3) : 0.0),
-                ("offset_measured", egm ? offset is not null : null),
+                ("offset_m", other ? Round(offset ?? 0.0, 3) : 0.0),
+                ("offset_measured", other ? offset is not null : null),
                 ("source_files", tiles[tk].Values.Select(o => o.File.Dest).Distinct().Where(File.Exists).Select(_run.Rel).OrderBy(x => x, StringComparer.Ordinal).ToList()),
                 ("stats", tierStats[tk])));
             }
@@ -396,23 +339,22 @@ public sealed class ComposeBed : IHarvester
         foreach (var s in sources.Where(s => tierStats.Keys.Any(k => k.S == s)))
         {
             var used = tiles.Where(t => t.Key.S == s).SelectMany(t => t.Value.Values.Select(o => o.File.Dest)).Distinct().Where(File.Exists).ToList();
+            var offset = s.Datum == datum ? null : offsets.GetValueOrDefault(s.Datum);
             _run.Input(s.Id, s.Title, Round(s.NativeM, 3), s.Url, s.License, s.Cite, s.Datum,
-                s.Datum == "NAVD88" ? "none" : $"declared EGM2008; offset {Round(offset ?? 0.0, 3)} m to NAVD88 {(offset is null ? "unmeasured" : "measured")}",
+                s.Datum == datum ? "none" : $"declared {s.Datum}; offset {Round(offset ?? 0.0, 3)} m to {datum} {(offset is null ? "unmeasured" : "measured")}",
                 fetchedUtc: used.Count > 0 ? used.Select(CompositeRun.FileUtc).Min() : null);
         }
         foreach (var (box, g, take) in regionTiers)
             foreach (var tk in take.Where(tierStats.ContainsKey))
                 _run.Coverage.Add(D(("box", new List<double> { box.Lon0, box.Lat0, box.Lon1, box.Lat1 }), ("wanted_grain_m", double.IsInfinity(g) ? null : g),
                     ("grain_m", Round(tk.Grain, 3)), ("input", tk.S.Id), ("tier", $"bed/{tk.Folder}"), ("gap_fill", take[0] != tk)));
-        _run.Extra["datum_separation"] = D(("what", "ETOPO 2022 15\" (EGM2008) minus the mean of the CUDEM 1/9\" or 1/3\" (NAVD88) samples over the same 15\" cell, cells wholly covered by CUDEM and flat within 1 m"),
-            ("cells", ds.Length), ("median_m", ds.Length > 0 ? Round(Median(ds), 3) : null), ("mad_m", ds.Length > 0 ? Round(Mad(ds), 3) : null),
-            ("p05_m", ds.Length > 0 ? Round(ds[(int)(0.05 * (ds.Length - 1))], 3) : null), ("p95_m", ds.Length > 0 ? Round(ds[(int)(0.95 * (ds.Length - 1))], 3) : null),
-            ("per_tile", perFile));
+        // one other datum (every product so far) writes its separation as the object; several, an object of them by datum
+        _run.Extra["datum_separation"] = separations.Count == 1 ? separations.Values.First() : separations;
         _run.Extra["later"] = later.Select(_run.Rel).OrderBy(x => x, StringComparer.Ordinal).ToList();
         _run.Extra["phases_s"] = D(("read", Round(tRead, 2)), ("decode", Round(tDecode, 2)), ("resample", Round(tResample, 2)), ("encode_write", Round(tWrite, 2)), ("decoded_mpx", Round(decodedPx / 1e6, 1)),
             ("decode_mb_per_thread_s", Round(decodedPx * 4 / 1e6 / Math.Max(tDecode, 1e-9), 1)),
             ("note", "decode, resample and encode_write are summed over the worker threads; read is the file loads, one at a time"));
-        _run.Save(D(("unit", "m"), ("datum", "NAVD88"), ("tiers", tierDocs)));
+        _run.Save(D(("unit", "m"), ("datum", datum), ("tiers", tierDocs)));
         return later.Count == 0 ? 0 : 3;
     }
 
@@ -495,6 +437,8 @@ public sealed class ComposeBed : IHarvester
                 into.Add((key, e - s / n));
             }
     }
+
+    static string ArcSec(double stepDeg) => (stepDeg * 3600).ToString("0.###", CultureInfo.InvariantCulture) + "\"";
 
     static double Median(double[] sorted) => sorted.Length == 0 ? double.NaN : sorted.Length % 2 == 1 ? sorted[sorted.Length / 2] : 0.5 * (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]);
     static double Mad(double[] sorted)
