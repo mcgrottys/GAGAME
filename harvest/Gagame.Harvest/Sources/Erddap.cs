@@ -18,7 +18,7 @@ public static class Erddap
         foreach (var r in Csv(text).Skip(1))
         {
             if (r.Length < 5) continue;
-            if (r[0] == "variable") vars[r[1]] = new() { ["_type"] = r[3] };
+            if (r[0] is "variable" or "dimension") vars[r[1]] = new() { ["_type"] = r[3] };   // a grid's axes are its dimensions
             else if (r[0] == "attribute" && r[1] != "NC_GLOBAL" && vars.TryGetValue(r[1], out var a)) a[r[2]] = r[4];
         }
         if (vars.Count == 0) throw new InvalidDataException($"{server}/info/{dataset}: no variables in the answer");
