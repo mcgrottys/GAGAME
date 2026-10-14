@@ -44,8 +44,49 @@ Settings live in `%LOCALAPPDATA%\GAGAME\demo.json`; the key never does.
 
 ## Scene bar
 
-`Scene` lists `scenes\*.json` and `scenes\demos\*.json`, titled by each file's `_readme`. Picking
+`Scene` lists `scenes\*.json`, `scenes\demos\*.json` and `scenes\debug\*.json` (whatever stands there at run time), titled by each file's `_readme`. Picking
 one stops the running engine and boots the next (the restart waits for the first exit, so the GPU
 and the cache's files are released first). `Relaunch`, `Stop`, `Open scene file` (edit it: the
 engine hot-reloads what is hot) and `Controls` (`docs/LAUNCH.md`) are beside it; the engine's
 log is the window.
+
+## Debug views (second toolbar row)
+
+The engine's debug views (scene section `debug`; `G` in the window steps through them): a view
+dropdown (`none flat edges normals height depth meshlets albedo residency residency.height
+residency.landsea`), wire width in pixels, a wire colour (right click returns it to the engine's),
+`wireBy` (`colour edge depth`) and contour metres. Each is kept in `demo.json` and passed at the
+next launch as `--set debug.view=height --set debug.wirePx=1.5 --set debug.wireColor=[1,0.85,0.2,1]
+...`, and only where it differs from the default (`(scene)`, 0, no colour picked), so a debug
+scene's own section stands otherwise.
+
+## Fidelity map (`Setup` > `Fidelity map...`, or `GagameDemo --fidelity [FILE]`)
+
+The painter for `.gafid` files (`docs/FIDELITY.md` section 1): the finest grain, in metres on the
+ground, each region of the planet wants, which every harvester reads. `--fidelity` opens it alone,
+with no scene bar and no engine started.
+
+- **The globe.** Orthographic, software rendered (no GPU). The orientation is one rotor of Cl(3)
+  (`Rotor.cs`, planet frame to view; the engine's planet frame is mirrored against east-north-out,
+  so the view reflects z once and the rotor does the rest). Drag rotates (left in Look, right
+  always), the wheel zooms about the cursor from the whole globe to a view about 2 km across. The
+  base is the checkout's own data: the relief raster `data\globe\globe.json` names and every
+  `coast*` polyline file `data\gis\gis.json` names, under the graticule (its step follows the zoom)
+  and the lattice's cells at the level a view-sized brush would paint. Coarse while moving, full
+  resolution at rest.
+- **The brush.** A radius in ground metres (slider, log, 1 m to 2000 km; or typed), a grain on a
+  log slider from 1 mm to 100 km, and Paint / Erase. A dab writes the lattice cells whose centres
+  lie within the radius, at the level whose cells are a quarter of the radius (about 50 cells a
+  dab, never more than 4096: a bigger set is cut at a coarser level). Erase returns the ground to
+  the layer's default (`FidelityRegions.Clear`). `Paint a box` takes lon0, lat0, lon1, lat1 and a
+  grain (`= view` fills it from the view). Undo keeps the last 32 strokes (Ctrl+Z).
+- **The overlay.** Painted cells in inferno over the log of the grain (fine is bright), deepest
+  last as `GrainAt` reads them, with a legend. The status bar reads the point under the cursor:
+  lat/lon, the grain wanted there, the painted cell that answers, the brush's cell there.
+- **Layer and default.** The layer list is the file's (`*` for now); the default takes units
+  (`30 m`, `2 km`) or `coarsest` (+Inf).
+- **The summary.** Cells, ground per decade of grain (km², each cell less the painted cells below
+  it), and an ESTIMATE of a height layer at that grain: area / grain² x 4 bytes, plus a third for
+  the pyramid. Arithmetic, not what any source holds.
+- **Files.** New, Open, Save, Save as; the last file, the view and the brush are kept in
+  `demo.json`. Dialogs start in `data\fidelity`.

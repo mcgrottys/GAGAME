@@ -6,7 +6,7 @@ of the engine's lattice or a box, and what is there is what the data says.
 | file | type | written by | read by |
 |---|---|---|---|
 | `*.gafid` | the fidelity map: the finest grain each region wants | the painter (demo launcher) | every harvester; later the engine's residency |
-| `data/sources.limits.json` | what each data source allows: rates, sizes, days | by hand, from each source's documentation | `Polite` (every harvester's fetch) |
+| `harvest/sources.limits.json` | what each data source allows: rates, sizes, days | by hand, from each source's documentation | `Polite` (every harvester's fetch) |
 | `*.composite.json` | one product of one data layer, made of many sources | a composite harvester | the engine (a scene's `sources` entry `composite`) |
 
 ## 1. The fidelity map, `.gafid` (GAFID01)
@@ -53,35 +53,60 @@ per layer:
 
 A cell off the lattice (face > 5, level > 31, x or y >= 2^level) refuses the file.
 
-## 2. The sources' limits, `data/sources.limits.json`
+**Painting tools** (`harvest/Gagame.Harvest/Core/FidelityRegions.cs`, shared by the painter and
+`harvest fidelity`). A box or a brush circle names cells of one level: an eighth of the region's
+extent (a box's shorter side, a brush's diameter), at most 4096 cells a region, a coarser level
+past that (the outline coarsens, the grain asked for does not). A box takes every cell its lat/lon
+box meets, so the box is covered whole; a brush takes the cells whose centres lie within its
+radius. A brush's ERASE and `erase-box` are `Clear`: the region returns to the layer's default, a
+coarser painted cell reaching over it is cut into the children outside it (each keeping its
+grain). `FinestIn` walks the lattice down from the six faces carrying the grain the deepest
+painted cell above hands down, so a coarse cell painted inside a fine one answers coarse.
+
+## 2. The sources' limits, `harvest/sources.limits.json`
 
 One entry per data source a harvester fetches from, with the limits its own documentation
 states and the page that states them. Where a source publishes none, the entry says so and
-takes the conservative default, never a guess presented as policy. `Polite` reads it; the
-constants that were in `Polite.cs` become the file's defaults.
+takes the conservative default, never a guess presented as policy. `Polite` reads it (the file
+`GAGAME_SOURCE_LIMITS` names, else `harvest/sources.limits.json` in the checkout: tracked in git,
+which `data/` is not); the constants that were in `Polite.cs` became the file's defaults, and
+`harvest limits --check` holds the shipped file to them over every host a harvester names.
 
 ```json
 {
   "_readme": "...",
-  "default": {"minIntervalS": 1.1, "maxConcurrent": 1, "dayRequests": 2000, "dayBytes": 8e9,
-              "retryAfterS": 30, "maxRetries": 1, "bigBytes": 5e7},
+  "default": {"minIntervalS": 1.1, "budgetRequests": 2000, "budgetBytes": 8e9,
+              "backoffS": 30, "bigBytes": 5e7},
   "sources": {
     "<id>": {
       "title": "NOAA CO-OPS Data API",
       "hosts": ["api.tidesandcurrents.noaa.gov"],
-      "minIntervalS": 1.1, "maxConcurrent": 1, "dayRequests": ..., "dayBytes": ...,
-      "maxSpan": "31 days per request for 6-minute data",
+      "minIntervalS": 1.1, "perSecond": 0, "perMinute": 0, "perHour": 0, "perDay": 0, "dayBytes": 0,
+      "maxSpan": "6-minute 1 month; hourly 1 year; ...",
       "documented": "https://...", "quote": "under 15 words from the page, if it states a limit",
-      "stated": true,
+      "stated": true, "note": "...",
       "banned": false
     }
   }
 }
 ```
 
-`stated: false` means the source publishes no limit and the numbers are ours. `banned: true`
-means no harvester may fetch from the host (Google's hosts: the engine's own day ledger,
-`core/DayLedger.h`, governs the Google tile source, not the harvesters).
+- `default`: the pace for a host no entry names; the request and byte budget of one ledger
+  (`GAGAME_LEDGER`, all hosts together, as before); the back-off before the one retry when a host
+  names no Retry-After; the largest unplanned GET.
+- A host takes the most specific entry naming it: equal or a subdomain (`s3.amazonaws.com` holds
+  every bucket), or a pattern ending in `.` found anywhere in host + `.` (the Google fragments).
+  A ban holds whatever more specific entry also names the host.
+- A source's pace is ONE law: the least gap is the slowest of its `minIntervalS` (ours, default
+  the default's) and every stated rate turned into a gap (`perMinute` 120 is 0.5 s, `perDay` 10000
+  is 8.64 s). All the hosts of a source share the pace (NCEP's 120 hits a minute is summed over its
+  hosts). `dayBytes` is checked against the ledger's last 24 hours of that source.
+- One request in flight and one retry are laws of `Polite`, not numbers of a source; the earlier
+  draft's `maxConcurrent`, `maxRetries` and per-day budget names are gone (the budget was always
+  a ledger's, not a day's).
+- `stated: false` means the source publishes no limit and the numbers are ours. `banned: true`
+  means no harvester may fetch from the host (Google's hosts: the engine's own day ledger,
+  `core/DayLedger.h`, governs the Google tile source, not the harvesters).
 
 ## 3. The composite, `*.composite.json` (GACOMP01)
 

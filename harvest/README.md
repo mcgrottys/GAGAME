@@ -16,6 +16,31 @@ drive is `GAGAME_DATACACHE` or `--datacache DIR` (default `D:\DataCache\GAGAME`)
 harvester's own flags are the Python's (`--place --box --anchor --sea --radius-km`,
 `--window`, `--skip-*`, `--eot20`, `--offline`, `--out`, ...).
 
+## The fidelity map and the sources' limits (docs/FIDELITY.md)
+
+```bat
+harvest fidelity new data\fidelity\world.gafid --default inf
+harvest fidelity paint-box data\fidelity\world.gafid -72,40,-69,43 30m [--layer NAME] [--level L]
+harvest fidelity erase-box data\fidelity\world.gafid 5,45,10,48
+harvest fidelity at|finest|dump|stats FILE ...
+harvest fidelity check
+harvest limits --check
+```
+
+`Core/Fidelity.cs` is the GAFID01 reader and writer; `Core/FidelityRegions.cs` turns boxes and
+brush circles into lattice cells (cells an eighth of the region's extent, at most 4096 a region,
+coarser past that), clears a region back to the default, measures each cell's ground exactly
+(the gnomonic cube's solid angle) and estimates a height layer's bytes. Grains take units (`1mm`,
+`5cm`, `30m`, `2km`, `inf`). `fidelity check` is the contract's self-test: the lattice round trip
+(20000 directions), every cell box holding its cell's points, save/load equal cell for cell and
+GrainAt for GrainAt, a planted off-lattice cell refusing the file, PaintMany and Clear against
+their one-cell definitions, FinestIn against dense sampling.
+
+`harvest/sources.limits.json` (tracked; `GAGAME_SOURCE_LIMITS` names another) is what each source
+allows, with the page that says so; `Polite` reads its pace, budgets and bans from it. `limits
+--check` holds the shipped file to the constants Polite had before (1.1 s, 2.5 s on NOMADS, 2000
+requests, 8 GB, 30 s, 50 MB, the Google fragments) over every host a harvester names.
+
 ## The factory
 
 `IHarvester` is one product: its `Name` (the command), `Title`, `What`, the `Outputs` whose
