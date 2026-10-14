@@ -99,8 +99,8 @@ int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anc
     const bool caught = plant.p95 > 2.0 * law.p95 + 0.05;
     Log("[height-tree] PLANT three levels coarse at the place, 6 m: p95 %.3f against the law's %.3f m -- %s",
         plant.p95, law.p95, caught ? "CAUGHT" : "NOT CAUGHT: this instrument cannot see a level gone wrong");
-    Log("[height-tree] the cache: %zu tiles held, %llu tile reads, %llu texel reads", tree->Held(),
-        static_cast<unsigned long long>(tree->tileReads.load()), static_cast<unsigned long long>(tree->texelReads.load()));
+    Log("[height-tree] the cache: %zu tiles held, %llu tile reads in %.1f s", tree->Held(),
+        static_cast<unsigned long long>(tree->tileReads.load()), double(tree->readUs.load()) / 1.0e6);
     return caught ? 0 : 1;
 }
 

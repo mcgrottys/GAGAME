@@ -78,8 +78,10 @@ public:
     std::string Identity() const override {
         const uint64_t p = m_params.load();
         char b[96];
-        snprintf(b, sizeof(b), "swell.exposure|v4 fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
-                 kStepMinM, kMaxRangeM, DirBucket(p), LevelBucket(p));
+        // v6: the march reads the height TREE when one is bound (compose/HeightTree.h), else the stack
+        snprintf(b, sizeof(b), "swell.exposure|%s fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
+                 m_comp && m_hgtCh >= 0 && m_comp->HeightTreeOf(m_hgtCh) ? "v6 tree" : "v4", kStepMinM, kMaxRangeM,
+                 DirBucket(p), LevelBucket(p));
         std::string id = b;
         if (m_comp && m_hgtCh >= 0) {
             for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
@@ -119,7 +121,7 @@ public:
         const double ang0 = dirB * kDirBucketDeg * 3.14159265358979 / 180.0;
         constexpr double kD2R = 3.14159265358979 / 180.0;
         const double lat0 = q.lat * kD2R, lon0 = q.lon * kD2R;
-        const float e0 = m_comp->SampleHeightStack(m_hgtCh, lat0, lon0, q.groundM);
+        const float e0 = m_comp->SampleHeight(m_hgtCh, lat0, lon0, q.groundM);
         out.c[0] = 1.0f;
         out.weight = 1.0f;
         if (e0 > level) return true;   // land: exposed by convention; never sampled as water
@@ -151,7 +153,7 @@ public:
             for (int s = 0; s < maxSteps; ++s) {
                 lat += dLat;
                 lon += dLon;
-                const float e = m_comp->SampleHeightStack(m_hgtCh, lat, lon, stepM);
+                const float e = m_comp->SampleHeight(m_hgtCh, lat, lon, stepM);
                 if (e > -9000.0f) excess = (std::max)(excess, double(e) - level);
                 if (excess > 1.2) break;   // a full wall already
             }

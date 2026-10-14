@@ -403,6 +403,8 @@ bool BedSynthSource::Load(const std::string& rulesPath, const Compositor* comp,
     };
     mix(text);
     mix(zonesText);
+    // it reads the height TREE when one is bound (compose/HeightTree.h): another reading, another tile
+    if (m_comp->HeightTreeOf(m_hgtCh)) mix("height tree v2");
     for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
         mix(hs->Info().name);
         mix(hs->Info().structure);
@@ -448,7 +450,7 @@ float BedSynthSource::Sample(double latRad, double lonRad, double groundResM,
                    (std::min)(lat - m_info.lat0, m_info.lat1 - lat)) / fd;
     if (fEdge <= 0.0) return 0.0f;
     const float wBox = static_cast<float>((std::min)(fEdge, 1.0));
-    const float bed = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad, groundResM);
+    const float bed = m_comp->SampleHeight(m_hgtCh, latRad, lonRad, groundResM);
     // Paint the band the refracted ray can SEE: fade out where the water is deep enough
     // that transmittance kills the bed term anyway, and above the waterline band where
     // land imagery is authoritative.
@@ -478,7 +480,7 @@ float BedSynthSource::Sample(double latRad, double lonRad, double groundResM,
             for (int sx = 0; sx < n; ++sx) {
                 const double la = latRad + (sy - (n - 1) * 0.5) * dLat;
                 const double lo = lonRad + (sx - (n - 1) * 0.5) * dLon;
-                acc += alphaAt(m_comp->SampleHeightStack(m_hgtCh, la, lo, 45.0));
+                acc += alphaAt(m_comp->SampleHeight(m_hgtCh, la, lo, 45.0));
             }
         }
         a = static_cast<float>(acc / (n * n)) * wBox;
@@ -490,8 +492,8 @@ float BedSynthSource::Sample(double latRad, double lonRad, double groundResM,
     const double dM = (std::max)(groundResM, 8.0);
     const double dLatR = dM / 6371000.0;
     const double dLonR = dM / (6371000.0 * (std::max)(std::cos(latRad), 0.2));
-    const float bE = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad + dLonR, groundResM);
-    const float bN = m_comp->SampleHeightStack(m_hgtCh, latRad + dLatR, lonRad, groundResM);
+    const float bE = m_comp->SampleHeight(m_hgtCh, latRad, lonRad + dLonR, groundResM);
+    const float bN = m_comp->SampleHeight(m_hgtCh, latRad + dLatR, lonRad, groundResM);
     const double slope = std::sqrt(static_cast<double>(bE - bed) * (bE - bed) +
                                    static_cast<double>(bN - bed) * (bN - bed)) / dM;
     const Rule* rule = PickRule(slope);
@@ -607,6 +609,7 @@ bool SeafloorReliefSource::Load(const std::string& rulesPath, const Compositor* 
     };
     mix(text);
     mix("ramp v1 grad central-at-grain");
+    if (m_comp->HeightTreeOf(m_hgtCh)) mix("height tree v2");   // as synth.bed
     double finest = 1e9;
     for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
         mix(hs->Info().name);
@@ -638,7 +641,7 @@ int SeafloorReliefSource::FinestMip(const Lattice& l, double lat0, double lat1, 
 float SeafloorReliefSource::Sample(double latRad, double lonRad, double groundResM,
                                    const PaintCtx&, uint8_t rgba[4]) {
     if (!m_comp) return 0.0f;
-    const float bed = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad, groundResM);
+    const float bed = m_comp->SampleHeight(m_hgtCh, latRad, lonRad, groundResM);
     // The waterline band, folded as COVERAGE at coarse texels (M7s, as synth.bed): average the
     // thresholded field, never threshold the average. No deep cutoff: the ocean is all ours.
     auto alphaAt = [&](float b) {
@@ -656,7 +659,7 @@ float SeafloorReliefSource::Sample(double latRad, double lonRad, double groundRe
             for (int sx = 0; sx < n; ++sx) {
                 const double la = latRad + (sy - (n - 1) * 0.5) * dLat;
                 const double lo = lonRad + (sx - (n - 1) * 0.5) * dLon;
-                acc += alphaAt(m_comp->SampleHeightStack(m_hgtCh, la, lo, 45.0));
+                acc += alphaAt(m_comp->SampleHeight(m_hgtCh, la, lo, 45.0));
             }
         }
         a = static_cast<float>(acc / (n * n));
@@ -673,10 +676,10 @@ float SeafloorReliefSource::Sample(double latRad, double lonRad, double groundRe
                                  m_comp->HeightGrainM(m_hgtCh, latRad, lonRad));
     const double dLatR = 0.5 * dM / 6371000.0;
     const double dLonR = 0.5 * dM / (6371000.0 * (std::max)(std::cos(latRad), 0.2));
-    const float bE = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad + dLonR, groundResM);
-    const float bW = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad - dLonR, groundResM);
-    const float bN = m_comp->SampleHeightStack(m_hgtCh, latRad + dLatR, lonRad, groundResM);
-    const float bS = m_comp->SampleHeightStack(m_hgtCh, latRad - dLatR, lonRad, groundResM);
+    const float bE = m_comp->SampleHeight(m_hgtCh, latRad, lonRad + dLonR, groundResM);
+    const float bW = m_comp->SampleHeight(m_hgtCh, latRad, lonRad - dLonR, groundResM);
+    const float bN = m_comp->SampleHeight(m_hgtCh, latRad + dLatR, lonRad, groundResM);
+    const float bS = m_comp->SampleHeight(m_hgtCh, latRad - dLatR, lonRad, groundResM);
     double nx = -m_exagg * (bE - bW) / dM, ny = -m_exagg * (bN - bS) / dM, nz = 1.0;
     const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
     nx /= nl;

@@ -9,10 +9,13 @@
 //  THE LAW is HeightPage's (the hull's bed, compose/HeightPage.h), its texels taken from the tree
 //  instead of recomputed from the stack: the pyramid by direction (CubeFaceOfDir), PageLoad4's
 //  bilinear in doubles -- centres at -0.5, four taps clamped at the face's edge -- over the texels
-//  of one level. The level is ONE FINER than the ground asked: the coarsest whose texel is no
-//  larger than half the reader's ground, so the reader's own footprint spans two texels and the
-//  bilinear's facets stay below what it asked for. A level finer than every source's own is the
-//  level above, magnified (HIERARCHY 4.20); the reader climbs until a level holds bytes.
+//  of one level. The level is the coarsest whose texel is no larger than the ground asked: a texel of
+//  the tree at that grain IS the area mean the stack answered (the tree folds its children into it),
+//  and the bilinear between such texels is the stack's own read at that grain. MEASURED, one level
+//  finer (texel at most half the ground) quadrupled the tiles a march touches -- the exposure read
+//  4,114 tiles and thrashed a 4,096-tile cache -- for nothing the reader asked for. A level finer than
+//  every source's own is the level above, magnified (HIERARCHY 4.20); the reader climbs until a level
+//  holds bytes.
 //
 //  WHAT IT DOES NOT DO: decide what is stored (the tree paints a missing tile as the loader would get
 //  it, synchronously, on the caller's thread), or keep anything but decoded tiles: an LRU of at most
@@ -29,6 +32,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -54,10 +58,10 @@ public:
         for (uint32_t d = m_lat.faceDim; d >= m_lat.texW && d >= m_lat.texH; d >>= 1) ++m_mips;
     }
 
-    // The level a reader of `groundResM` reads: the coarsest whose texel is at most half of it.
+    // The level a reader of `groundResM` reads: the coarsest whose texel is no larger than it.
     uint32_t LevelFor(double groundResM) const {
         const double g0 = m_lat.GroundRes(0);
-        const double m = std::floor(std::log2((std::max)(0.5 * groundResM, g0) / g0));
+        const double m = std::floor(std::log2((std::max)(groundResM, g0) / g0));
         return uint32_t(std::clamp(m, 0.0, double(m_mips - 1)));
     }
 
@@ -74,7 +78,7 @@ public:
             const uint32_t dim = m_lat.faceDim >> mip;
             const TileRequest r{face, mip, uint32_t((std::min)(uv[0] * dim, dim - 1.0)) / m_lat.texW,
                                 uint32_t((std::min)(uv[1] * dim, dim - 1.0)) / m_lat.texH};
-            if (!TileOf(r)->magnified) break;
+            if (!TileOf(r).magnified) break;
             ++mip;
         }
         const uint32_t dim = m_lat.faceDim >> mip;
@@ -87,8 +91,10 @@ public:
                      (double(Texel(face, mip, x0, y1)) * (1.0 - frx) + double(Texel(face, mip, x1, y1)) * frx) * fry);
     }
 
-    // The instrument: tiles read from the tree (misses) and texels answered from the cache (hits).
-    std::atomic<uint64_t> tileReads{0}, texelReads{0};
+    // The instrument: tiles read from the tree (misses) and the time inside those reads. Counted per
+    // miss only: MEASURED, a counter per texel and a shared_ptr copy per tap -- two cache lines every
+    // loader thread writes -- made a warm read 600 ns in the exposure's march, the stack's 160.
+    std::atomic<uint64_t> tileReads{0}, readUs{0};
     size_t Held() const {
         std::lock_guard<std::mutex> lk(m_mx);
         return m_lru.size();
@@ -105,12 +111,11 @@ private:
     using Tile = std::shared_ptr<const Cached>;
 
     float Texel(uint32_t face, uint32_t mip, uint32_t ix, uint32_t iy) {
-        texelReads.fetch_add(1, std::memory_order_relaxed);
         const TileRequest r{face, mip, ix / m_lat.texW, iy / m_lat.texH};
-        const Tile t = TileOf(r);
-        if (t->bytes.size() < size_t(m_lat.texW) * m_lat.texH * 2) return 0.0f;   // nothing covers: the stack's 0
+        const Cached& t = TileOf(r);
+        if (t.bytes.size() < size_t(m_lat.texW) * m_lat.texH * 2) return 0.0f;   // nothing covers: the stack's 0
         uint16_t h;
-        std::memcpy(&h, t->bytes.data() + (size_t(iy % m_lat.texH) * m_lat.texW + ix % m_lat.texW) * 2, 2);
+        std::memcpy(&h, t.bytes.data() + (size_t(iy % m_lat.texH) * m_lat.texW + ix % m_lat.texW) * 2, 2);
         return HalfToFloat(h);
     }
 
@@ -123,18 +128,20 @@ private:
         return ++n;
     }
 
-    Tile TileOf(const TileRequest& r) {
+    // The tile, held alive by this thread's slot until the slot is reused: the four taps of a sample
+    // read through the reference, never touching a count another thread writes.
+    const Cached& TileOf(const TileRequest& r) {
         const uint64_t key = (uint64_t(r.face) << 61) | (uint64_t(r.mip) << 56) | (uint64_t(r.y) << 28) | r.x;
         thread_local Recent recent[4];
         thread_local uint32_t next = 0;
         for (const Recent& e : recent) {
-            if (e.owner == m_serial && e.key == key) return e.tile;
+            if (e.owner == m_serial && e.key == key) return *e.tile;
         }
         Recent& slot = recent[next++ & 3u];
         slot.owner = m_serial;
         slot.key = key;
         slot.tile = Shared(key, r);
-        return slot.tile;
+        return *slot.tile;
     }
 
     Tile Shared(uint64_t key, const TileRequest& r) {
@@ -149,7 +156,10 @@ private:
         auto c = std::make_shared<Cached>();
         c->magnified = m_magnified && m_magnified(r);
         if (!c->magnified) {
+            const auto t0 = std::chrono::steady_clock::now();
             if (!m_read(r, c->bytes)) c->bytes.clear();
+            readUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count()),
+                             std::memory_order_relaxed);
             tileReads.fetch_add(1, std::memory_order_relaxed);
         }
         std::lock_guard<std::mutex> lk(m_mx);
