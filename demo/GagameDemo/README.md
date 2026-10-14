@@ -83,8 +83,19 @@ with no scene bar and no engine started.
 - **The overlay.** Painted cells in inferno over the log of the grain (fine is bright), deepest
   last as `GrainAt` reads them, with a legend. The status bar reads the point under the cursor:
   lat/lon, the grain wanted there, the painted cell that answers, the brush's cell there.
-- **Layer and default.** The layer list is the file's (`*` for now); the default takes units
-  (`30 m`, `2 km`) or `coarsest` (+Inf).
+- **Layer and default.** The layers are `*`, the file's own, and every data layer a composite
+  product (`data\composite\*\<layer>.composite.json`) or a source config (`harvest\sources\**\*.json`,
+  a `layer` key) names, with the sources that feed each listed under it. Painting a layer writes
+  that layer's cells; until it is painted its readers take `*` (docs/FIDELITY.md section 1). The
+  default takes units (`30 m`, `2 km`) or `coarsest` (+Inf).
+- **Storage tab.** The same globe, coloured by the bytes STORED per lattice cell (log, 1 kB to
+  100 GB), from the storage index (docs/FIDELITY.md section 7: tile trees, archives, the composed
+  cache, the composites, read by name and size only). Filters: source (a tree's `<name>.<id>`, a
+  composed channel, a composite input), parameter (the tree's name or the composite's layer),
+  store (loose, archive, archive.stale, composite:<product>) and cell level. The composites'
+  `coverage[]` boxes are outlined: who answers where. A totals table per parameter and store
+  (double-click a row to filter by it), and under the cursor the bytes per source and the
+  coverage boxes there. `Rescan` reads only what moved; `Rebuild` reads everything.
 - **The summary.** Cells, ground per decade of grain (km², each cell less the painted cells below
   it), and an ESTIMATE of a height layer at that grain: area / grain² x 4 bytes, plus a third for
   the pyramid. Arithmetic, not what any source holds.
