@@ -159,6 +159,46 @@ public sealed class ComposeBed : IHarvester
         public SrcFile File = null!;
         public Box Box = null!;
         public string Name = "";
+        public int Part;
+    }
+
+    /// THE PARTS OF A TIER: its tiles grouped where they touch (an edge or a corner), each group one
+    /// folder. The engine takes a raster set's footprint as ONE box (compose/RasterFileSource.h), so a
+    /// tier whose regions lie 1,700 km apart, read as one set, claimed every tile between them, and its
+    /// trees repainted the coast from one region to the next (2026-10-13: the Merrimack still never
+    /// settled, 17,700 tiles pending). A part's box is its tiles' own. Returns the parts' boxes.
+    static List<Box> Parts(List<OutTile> ts)
+    {
+        var parent = Enumerable.Range(0, ts.Count).ToArray();
+        int Find(int i) { while (parent[i] != i) i = parent[i] = parent[parent[i]]; return i; }
+        const double eps = 1e-9;
+        // touching tiles share a corner of the tier's own grid: index them by corner
+        var byCorner = new Dictionary<(long, long), List<int>>();
+        for (int i = 0; i < ts.Count; ++i)
+        {
+            var b = ts[i].Box;
+            foreach (var lon in new[] { b.Lon0, b.Lon1 })
+                foreach (var lat in new[] { b.Lat0, b.Lat1 })
+                {
+                    var key = ((long)Math.Round(lon / eps / 1e3), (long)Math.Round(lat / eps / 1e3));
+                    if (!byCorner.TryGetValue(key, out var l)) byCorner[key] = l = new();
+                    l.Add(i);
+                }
+        }
+        foreach (var l in byCorner.Values)
+            for (int k = 1; k < l.Count; ++k) parent[Find(l[k])] = Find(l[0]);
+        var roots = new Dictionary<int, int>();
+        var boxes = new List<Box>();
+        for (int i = 0; i < ts.Count; ++i)
+        {
+            int r = Find(i);
+            if (!roots.TryGetValue(r, out int p)) { roots[r] = p = boxes.Count; boxes.Add(ts[i].Box); }
+            ts[i].Part = p;
+            var b = boxes[p];
+            var t = ts[i].Box;
+            boxes[p] = new Box(Math.Min(b.Lon0, t.Lon0), Math.Min(b.Lat0, t.Lat0), Math.Max(b.Lon1, t.Lon1), Math.Max(b.Lat1, t.Lat1));
+        }
+        return boxes;
     }
 
     /// The aligned tiles of edge `e` degrees meeting `box`, cut to `cell`.
@@ -264,14 +304,16 @@ public sealed class ComposeBed : IHarvester
         var tierDocs = new List<Dictionary<string, object?>>();
         var ordered = tiles.Keys.OrderBy(t => t.Grain).ToList();
         var tierStats = new Dictionary<TierKey, Dictionary<string, object?>>();
+        var tierParts = new Dictionary<TierKey, List<Box>>();
         double tRead = 0, tDecode = 0, tResample = 0, tWrite = 0;
         long decodedPx = 0;
         foreach (var tk in ordered)
         {
             var clock = Stopwatch.StartNew();
             var dir = Path.Combine(outDir, "bed", tk.Folder);
-            Directory.CreateDirectory(dir);
-            foreach (var old in Directory.GetFiles(dir, "*.tif")) File.Delete(old);
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);   // our own output folder, written whole below
+            var parts = Parts(tiles[tk].Values.ToList());
+            for (int p = 0; p < parts.Count; ++p) Directory.CreateDirectory(Path.Combine(dir, $"p{p}"));
             long bytesIn = 0, bytesOut = 0, written = 0, pixels = 0;
             var byFile = tiles[tk].Values.GroupBy(o => o.File.Dest).ToList();
             foreach (var grp in byFile)
@@ -299,7 +341,7 @@ public sealed class ComposeBed : IHarvester
                     if (cut is null) return;
                     var (vals, w, h, lon0, lat1, sx, sy) = cut.Value;
                     if (measure is not null) Separation(measure, vals, w, h, lon0, lat1, sx, sy, src.Key, sep);
-                    var path = Path.Combine(dir, ot.Name);
+                    var path = Path.Combine(dir, $"p{ot.Part}", ot.Name);
                     var n = GeoTiffWriter.Write(path, vals, w, h, lon0, lat1, sx, sy, tk.S.VEpsg, NoData);
                     var t3 = Stopwatch.GetTimestamp();
                     lock (lk)
@@ -313,8 +355,9 @@ public sealed class ComposeBed : IHarvester
                 tDecode += dDec; tResample += dRes; tWrite += dWr;
             }
             _run.WroteBytes(bytesOut);
-            var files = Directory.GetFiles(dir, "*.tif").Length;
-            if (files == 0) { Directory.Delete(dir); continue; }
+            var files = Directory.GetFiles(dir, "*.tif", SearchOption.AllDirectories).Length;
+            if (files == 0) { Directory.Delete(dir, recursive: true); continue; }
+            tierParts[tk] = parts;
             tierStats[tk] = D(("seconds", Round(clock.Elapsed.TotalSeconds, 2)), ("bytes_in", bytesIn), ("bytes_out", bytesOut), ("files", files), ("pixels", pixels));
             _run.Log($"tier {tk.Folder}: {files} file(s), {pixels / 1e6:0.0} Mpx, {bytesIn / 1e6:0.0} MB in, {bytesOut / 1e6:0.0} MB out, {clock.Elapsed.TotalSeconds:0.0} s");
         }
@@ -334,13 +377,20 @@ public sealed class ComposeBed : IHarvester
         foreach (var tk in ordered.Where(tierStats.ContainsKey))
         {
             var egm = tk.S.Datum != "NAVD88";
-            tierDocs.Add(D(("grain_m", Round(tk.Grain, 3)), ("step_deg", tk.S.StepDeg * Math.Pow(2, tk.K)), ("folder", $"bed/{tk.Folder}"), ("match", "*.tif"),
-                ("over", --over), ("inputs", new List<object?> { tk.S.Id }), ("decimation", 1 << tk.K),
+            --over;
+            for (int p = 0; p < tierParts[tk].Count; ++p)
+            {
+            if (!Directory.EnumerateFiles(Path.Combine(outDir, "bed", tk.Folder, $"p{p}"), "*.tif").Any()) continue;
+            var pb = tierParts[tk][p];
+            tierDocs.Add(D(("grain_m", Round(tk.Grain, 3)), ("step_deg", tk.S.StepDeg * Math.Pow(2, tk.K)), ("folder", $"bed/{tk.Folder}/p{p}"), ("match", "*.tif"),
+                ("box", new List<double> { pb.Lon0, pb.Lat0, pb.Lon1, pb.Lat1 }),
+                ("over", over), ("inputs", new List<object?> { tk.S.Id }), ("decimation", 1 << tk.K),
                 ("datum", tk.S.Datum), ("vertical_epsg", tk.S.VEpsg), ("unit", "m"), ("nodata", (double)NoData),
                 ("offset_m", egm ? Round(offset ?? 0.0, 3) : 0.0),
                 ("offset_measured", egm ? offset is not null : null),
                 ("source_files", tiles[tk].Values.Select(o => o.File.Dest).Distinct().Where(File.Exists).Select(_run.Rel).OrderBy(x => x, StringComparer.Ordinal).ToList()),
                 ("stats", tierStats[tk])));
+            }
         }
 
         foreach (var s in sources.Where(s => tierStats.Keys.Any(k => k.S == s)))

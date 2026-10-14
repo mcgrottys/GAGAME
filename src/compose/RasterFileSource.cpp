@@ -351,6 +351,73 @@ std::shared_ptr<const std::vector<uint8_t>> RasterFileSource::Window(size_t file
     return m_lru.front().second;
 }
 
+std::shared_ptr<const RasterFileSource::Sat> RasterFileSource::WindowSat(size_t file, uint32_t wx, uint32_t wy) {
+    const uint64_t key = (uint64_t(file) << 48) | (uint64_t(wy) << 24) | wx;
+    {
+        std::lock_guard<std::mutex> lk(m_cacheMx);
+        auto it = m_satIndex.find(key);
+        if (it != m_satIndex.end()) {
+            m_satLru.splice(m_satLru.begin(), m_satLru, it->second);
+            return it->second->second;
+        }
+    }
+    const auto px = Window(file, wx, wy);
+    auto s = std::make_shared<Sat>();
+    const size_t N = kWin + 1;
+    s->v.assign(N * N, 0.0);
+    s->n.assign(N * N, 0.0);
+    for (uint32_t j = 0; j < kWin; ++j) {
+        double rowV = 0.0, rowN = 0.0;
+        for (uint32_t i = 0; i < kWin; ++i) {
+            float t;
+            std::memcpy(&t, &(*px)[(size_t(j) * kWin + i) * 4], 4);
+            if (!std::isnan(t)) {
+                rowV += t;
+                rowN += 1.0;
+            }
+            s->v[(j + 1) * N + i + 1] = s->v[j * N + i + 1] + rowV;
+            s->n[(j + 1) * N + i + 1] = s->n[j * N + i + 1] + rowN;
+        }
+    }
+    std::lock_guard<std::mutex> lk(m_cacheMx);
+    auto it = m_satIndex.find(key);
+    if (it != m_satIndex.end()) return it->second->second;
+    m_satLru.emplace_front(key, s);
+    m_satIndex[key] = m_satLru.begin();
+    if (m_satLru.size() > kWindows / 4) {   // a table is four times a window's bytes
+        m_satIndex.erase(m_satLru.back().first);
+        m_satLru.pop_back();
+    }
+    return m_satLru.front().second;
+}
+
+void RasterFileSource::BoxIntegral(size_t file, double u0, double u1, double v0, double v1, double& value,
+                                   double& have) {
+    value = have = 0.0;
+    const size_t N = kWin + 1;
+    // The table's bilinear at a fractional corner (a, b) of the window, 0..kWin.
+    const auto at = [N](const std::vector<double>& t, double a, double b) {
+        const int i = (std::min)(static_cast<int>(a), int(kWin) - 1), j = (std::min)(static_cast<int>(b), int(kWin) - 1);
+        const double s = a - i, r = b - j;
+        const double t00 = t[j * N + i], t10 = t[j * N + i + 1], t01 = t[(j + 1) * N + i], t11 = t[(j + 1) * N + i + 1];
+        return t00 * (1 - s) * (1 - r) + t10 * s * (1 - r) + t01 * (1 - s) * r + t11 * s * r;
+    };
+    const uint32_t wx0 = uint32_t(u0 / kWin), wx1 = uint32_t((std::max)(u0, u1 - 1e-9) / kWin);
+    const uint32_t wy0 = uint32_t(v0 / kWin), wy1 = uint32_t((std::max)(v0, v1 - 1e-9) / kWin);
+    for (uint32_t wy = wy0; wy <= wy1; ++wy) {
+        const double b0 = std::clamp(v0 - double(wy) * kWin, 0.0, double(kWin));
+        const double b1 = std::clamp(v1 - double(wy) * kWin, 0.0, double(kWin));
+        for (uint32_t wx = wx0; wx <= wx1; ++wx) {
+            const double a0 = std::clamp(u0 - double(wx) * kWin, 0.0, double(kWin));
+            const double a1 = std::clamp(u1 - double(wx) * kWin, 0.0, double(kWin));
+            if (a1 <= a0 || b1 <= b0) continue;
+            const auto s = WindowSat(file, wx, wy);
+            value += at(s->v, a1, b1) - at(s->v, a0, b1) - at(s->v, a1, b0) + at(s->v, a0, b0);
+            have += at(s->n, a1, b1) - at(s->n, a0, b1) - at(s->n, a1, b0) + at(s->n, a0, b0);
+        }
+    }
+}
+
 const uint8_t* RasterFileSource::Texel(size_t file, int x, int y) {
     const uint64_t key = (uint64_t(file) << 48) | (uint64_t(y / kWin) << 24) | uint64_t(x / kWin);
     const size_t at = (size_t(y % kWin) * kWin + x % kWin) * 4;
@@ -475,6 +542,13 @@ float RasterFileSource::Sample(double latRad, double lonRad, double groundResM, 
         const double u0 = (std::max)(0.0, uc - 0.5 * su), u1 = (std::min)(double(f.w), uc + 0.5 * su);
         const double v0 = (std::max)(0.0, vc - 0.5 * sv), v1 = (std::min)(double(f.h), vc + 0.5 * sv);
         double acc = 0.0, have = 0.0, area = 0.0;
+        if (su > 2.0 || sv > 2.0) {   // past two texels a side, by the integral (WindowSat)
+            BoxIntegral(i, u0, u1, v0, v1, acc, have);
+            area = (u1 - u0) * (v1 - v0);
+            if (have <= 1e-9 || area <= 0.0) return 0.0f;
+            metres = static_cast<float>(acc / have * m_vScale + m_vOffset);
+            return Feathered(x, y) * static_cast<float>((std::min)(1.0, have / area));
+        }
         for (int j = static_cast<int>(v0); j < v1; ++j) {
             const double wy = (std::min)(v1, j + 1.0) - (std::max)(v0, double(j));
             for (int k = static_cast<int>(u0); k < u1; ++k) {

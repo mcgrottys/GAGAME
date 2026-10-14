@@ -112,8 +112,9 @@ std::vector<RasterEntry> CompositeTiers(const scene::SourceProps& s) {
         e.feather = s.feather;
         e.unit = t.Str("unit", root.Str("unit").c_str());
         e.datum = t.Str("datum", root.Str("datum").c_str());
-        e.hasOffset = t.Get("offset") != nullptr;
-        e.offset = t.Num("offset", 0);
+        // A tier off the engine's datum carries the separation it measured (offset_m); one on it, none.
+        e.hasOffset = t.Get("offset_m") != nullptr && e.datum != "NAVD88";
+        e.offset = e.hasOffset ? t.Num("offset_m", 0) : 0.0;
         out.push_back(std::move(e));
     }
     Log("[composite] %s: layer %s, %zu tiers", s.file.c_str(), layer.c_str(), out.size());
@@ -408,7 +409,18 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     renderer.AddLayer(std::move(tideOwned));
 
     // The open sea (M2) is optional until harvest_waves.py has run once.
-    if (seaState.Load(S.data.seastate)) {
+    // A file of many points (a composite) stands the point nearest the scene's place as the sea's
+    // own, and every other point as one more source (below).
+    const std::vector<std::pair<double, double>> seaPoints = SeaState::PointsOf(S.data.seastate);
+    int seaPoint = -1;
+    double seaBestD2 = 0.0;
+    for (size_t i = 0; i < seaPoints.size(); ++i) {
+        const double dLat = seaPoints[i].first - S.place.anchor[1];
+        const double dLon = (seaPoints[i].second - S.place.anchor[0]) * std::cos(S.place.anchor[1] * 3.14159265358979 / 180.0);
+        const double d2 = dLat * dLat + dLon * dLon;
+        if (seaPoint < 0 || d2 < seaBestD2) { seaPoint = int(i); seaBestD2 = d2; }
+    }
+    if (seaState.Load(S.data.seastate, seaPoint)) {
         // PHASE C2: THE SEA STATE IS A FIELD OF SOURCES. data.seastate's file stands where it says,
         // or where sea.box places a file that says nothing; every `sources` entry of kind "seastate"
         // is one more, a source by being a file.
@@ -427,6 +439,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 Log("[sea] source %s: %s unreadable -- not a source", s.name.c_str(), s.file.c_str());
                 continue;
             }
+            sea->AddSource(src.get());
+            A->seaSources.push_back(std::move(src));
+        }
+        for (int i = 0; i < int(seaPoints.size()); ++i) {
+            if (i == seaPoint) continue;
+            auto src = std::make_unique<SeaState>();
+            if (!src->Load(S.data.seastate, i)) continue;
             sea->AddSource(src.get());
             A->seaSources.push_back(std::move(src));
         }

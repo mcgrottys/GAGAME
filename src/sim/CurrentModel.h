@@ -37,6 +37,7 @@ struct CurrentField {
     double lon0 = 0, lat0 = 0, dlon = 0, dlat = 0;
     std::vector<float> u, v;               // row-major, y = latitude rows; <= -900 marks land
     std::string source;
+    double grainM = 0.0;                   // the model's own cell (the composite's grain_m); 0 = unsaid
     bool Valid() const { return nx > 0 && !u.empty(); }
     // Bilinear where all four corners are water; nearest otherwise. False on land/outside.
     bool Sample(double lon, double lat, float& outU, float& outV) const;
@@ -45,7 +46,7 @@ struct CurrentField {
 class CurrentModel {
 public:
     bool Load(const std::string& jsonPath);
-    bool Ready() const { return !m_stations.empty() || m_field.Valid(); }
+    bool Ready() const { return !m_stations.empty() || !m_fields.empty(); }
 
     size_t Count() const { return m_stations.size(); }
     const TidalCurrentStation& S(size_t i) const { return m_stations[i]; }
@@ -55,7 +56,12 @@ public:
     // Signed speed in m/s (+ flood, - ebb) at any time; 0 outside the fetched window.
     double SignedSpeed(size_t sta, double unixT) const;
 
-    const CurrentField& Field() const { return m_field; }
+    // THE FIELDS (a composite's `fields`, docs/FIDELITY.md; a file of one says `field`), finest
+    // first. Field() is the finest, for the readers that draw one grid (the gulf map); a point is
+    // answered by SampleAt: the finest field holding water there.
+    const CurrentField& Field() const { static const CurrentField none; return m_fields.empty() ? none : m_fields[0]; }
+    size_t FieldCount() const { return m_fields.size(); }
+    bool SampleAt(double lon, double lat, float& outU, float& outV) const;
 
     // NDBC ADCP ground truth (buoy 44029 / NERACOOS A01).
     bool adcpValid = false;
@@ -67,7 +73,7 @@ public:
 
 private:
     std::vector<TidalCurrentStation> m_stations;
-    CurrentField m_field;
+    std::vector<CurrentField> m_fields;
 };
 
 }  // namespace ga

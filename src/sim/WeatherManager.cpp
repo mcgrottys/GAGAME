@@ -416,9 +416,9 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
 
     // ---- currents: the scene's regional model field; the solver's solved current replaces it where the
     // solver has one (SolverRefine).
-    if (m_currents && m_currents->Field().Valid()) {
+    if (m_currents && m_currents->FieldCount()) {
         float u = 0, v = 0;
-        if (m_currents->Field().Sample(lonDeg, latDeg, u, v)) {
+        if (m_currents->SampleAt(lonDeg, latDeg, u, v)) {
             s.u = u;
             s.v = v;
             s.currentSrc = "current.field (surface)";

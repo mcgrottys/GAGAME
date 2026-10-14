@@ -12,6 +12,7 @@
 //  members went to the header with them.
 // ================================================================================================
 #include "app/FrameLoop.h"
+#include "compose/RasterFileSource.h"
 
 #include <sys/stat.h>
 
@@ -5419,6 +5420,11 @@ int FrameLoop::Finish() {
             "fetches a larger budget or day cap would have made",
             m_A.googleTiles.Refused(), m_A.googleTiles.Budget(), m_A.googleTiles.Fetched());
     }
+
+    // The rasters read by being files: the windows their reads decoded and the time in the decoder.
+    Log("[raster] %llu windows decoded this run, %.1f s in the decoder",
+        static_cast<unsigned long long>(RasterFileSource::s_decodes.load()),
+        double(RasterFileSource::s_decodeUs.load()) / 1.0e6);
 
     if (S.Tool("sea-verify") && sea) tools::RunSeaVerify(opt, gpu, sea);
     if (!S.dumpW.empty()) {
