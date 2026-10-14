@@ -17,7 +17,9 @@ public sealed class GlobeView : Control
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public double PixelsPerRadius { get; set; } = 300;   // the zoom
     public FidelityMap Map = new();
-    public string Layer = FidelityMap.AllLayers;
+    /// What is painted over the base: the fidelity map's cells, or the storage view's.
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public CellOverlay? Overlay { get; set; }
     public bool ShowGraticule = true, ShowLattice = true, ShowCoast = true, ShowCells = true;
     public double BrushRadiusM = 50_000;
     public (double lat, double lon)? Brush;
@@ -33,8 +35,7 @@ public sealed class GlobeView : Control
     Bitmap? _base;          // the base at the resolution it was rendered
     (Rotor, double, Size, int)? _baseKey;
     Bitmap? _cells;         // the painted cells, opaque, composited with alpha
-    (Rotor, double, Size, int, string)? _cellsKey;
-    int _mapVersion;
+    (Rotor, double, Size, CellOverlay, int, int)? _cellsKey;
     bool _interactive;
     readonly System.Windows.Forms.Timer _idle = new() { Interval = 220 };
 
@@ -52,7 +53,8 @@ public sealed class GlobeView : Control
     /// The ground width the view spans, metres (the globe's diameter when it all fits).
     public double ViewWidthM => Math.Min(2 * Map.PlanetRadiusM, Width / PixelsPerRadius * Map.PlanetRadiusM);
 
-    public void MapChanged() { _mapVersion++; Invalidate(); }
+    /// The level cells are shown at: about 64 across the view, no deeper than the storage index keeps.
+    public int DisplayLevel => Math.Min(StorageIndex.MaxLevel, FidelityRegions.LevelForExtent(Map, ViewWidthM) + 3);
 
     /// Marks the view as moving: the base renders coarse until the input rests.
     public void Moving()
@@ -235,13 +237,13 @@ public sealed class GlobeView : Control
         g.PixelOffsetMode = PixelOffsetMode.Default;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
-        if (ShowCells)
+        if (ShowCells && Overlay is not null)
         {
-            var ck = (View, PixelsPerRadius, Size, _mapVersion, Layer);
+            var ck = (View, PixelsPerRadius, Size, Overlay, Overlay.Version, DisplayLevel);
             if (_cellsKey != ck || _cells is null)
             {
                 _cells?.Dispose();
-                _cells = RenderCells();
+                _cells = RenderCells(Overlay);
                 _cellsKey = ck;
             }
             using var ia = new ImageAttributes();
@@ -251,8 +253,9 @@ public sealed class GlobeView : Control
         if (ShowCoast) DrawCoast(g);
         if (ShowGraticule) DrawGraticule(g);
         if (ShowLattice) DrawLattice(g);
+        if (Overlay is not null) DrawBoxes(g, Overlay);
         DrawBrush(g);
-        DrawLegend(g);
+        if (Overlay is not null) DrawLegend(g, Overlay);
     }
 
     Bitmap RenderBase(int w, int h, int div)
@@ -288,20 +291,7 @@ public sealed class GlobeView : Control
         return bmp;
     }
 
-    // ------------------------------------------------------------------ the painted cells
-
-    /// The grain's colour: inferno over the log of the grain, fine (1 mm) bright, coarse (100 km)
-    /// dark; perceptually ordered so a finer cell always reads lighter.
-    public static Color GrainColour(double grainM)
-    {
-        (double t, int r, int g, int b)[] k = [(0.0, 40, 11, 84), (0.14, 85, 15, 109), (0.29, 136, 34, 106), (0.43, 186, 54, 85),
-            (0.57, 227, 89, 51), (0.71, 249, 140, 10), (0.86, 249, 201, 50), (1.0, 252, 255, 164)];
-        double t = double.IsFinite(grainM) ? Math.Clamp(1 - (Math.Log10(Math.Max(grainM, 1e-9)) + 3) / 8, 0, 1) : 0;
-        int i = 0;
-        while (i < k.Length - 2 && t > k[i + 1].t) i++;
-        double f = (t - k[i].t) / (k[i + 1].t - k[i].t);
-        return Color.FromArgb((int)(k[i].r + f * (k[i + 1].r - k[i].r)), (int)(k[i].g + f * (k[i + 1].g - k[i].g)), (int)(k[i].b + f * (k[i + 1].b - k[i].b)));
-    }
+    // ------------------------------------------------------------------ the overlay's cells
 
     /// A cell's outline on screen, its edges cut into segments by how big it shows; null when it
     /// faces away or lies off screen. Points behind the limb are pulled onto it.
@@ -332,22 +322,51 @@ public sealed class GlobeView : Control
         return pts;
     }
 
-    Bitmap RenderCells()
+    Bitmap RenderCells(CellOverlay overlay)
     {
         var bmp = new Bitmap(Math.Max(1, Width), Math.Max(1, Height), PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(bmp);
         g.Clear(Color.Transparent);
-        // coarse first: a deeper cell overrides the cell above it, as GrainAt reads
-        foreach (var (k, grain) in Map.Get(Layer).Cells.OrderBy(kv => kv.Key.Level))
+        var d = new double[3];
+        // coarse first: a deeper cell lies over the cell above it (as GrainAt reads a map)
+        foreach (var (k, colour) in overlay.Cells(DisplayLevel))
         {
-            var pts = Outline(k, mustFace: true);
-            if (pts is null) continue;
-            using var b = new SolidBrush(GrainColour(grain));
-            float w = pts.Max(p => p.X) - pts.Min(p => p.X), h = pts.Max(p => p.Y) - pts.Min(p => p.Y);
-            if (w < 2 && h < 2) g.FillRectangle(b, pts[0].X - 1, pts[0].Y - 1, 2, 2);
-            else g.FillPolygon(b, pts);
+            // a cheap cull before the outline: the centre, and a radius no cell of the level exceeds
+            // (a cell is at most (pi/2) / 2^L across its face's centre, and smaller towards its corners)
+            double n = 1u << k.Level, r = 0.8 * Math.PI / n;
+            FidelityMap.DirOfFaceUv(k.Face, (k.X + 0.5) / n, (k.Y + 0.5) / n, d);
+            ToView(d, out double vx, out double vy, out double vz);
+            if (vz < -Math.Sin(r)) continue;
+            float cx = (float)(Cx + vx * PixelsPerRadius), cy = (float)(Cy - vy * PixelsPerRadius), rp = (float)(r * PixelsPerRadius);
+            if (cx + rp < 0 || cy + rp < 0 || cx - rp > Width || cy - rp > Height) continue;
+            using var b = new SolidBrush(colour);
+            if (rp < 1.5f) { if (vz >= 0) g.FillRectangle(b, cx - 1, cy - 1, 2, 2); continue; }
+            if (Outline(k, mustFace: true) is PointF[] pts) g.FillPolygon(b, pts);
         }
         return bmp;
+    }
+
+    /// Lat/lon boxes, their edges sampled (a parallel is not a great circle).
+    void DrawBoxes(Graphics g, CellOverlay overlay)
+    {
+        var d = new double[3];
+        var run = new List<PointF>();
+        foreach (var (lon0, lat0, lon1, lat1, colour) in overlay.Boxes)
+        {
+            using var pen = new Pen(colour, 1.5f);
+            run.Clear();
+            for (int i = 0; i <= 64; ++i)
+            {
+                double s = i / 16.0, lat, lon;
+                int side = Math.Min(3, (int)s);
+                double f = s - side;
+                (lat, lon) = side switch { 0 => (lat0, lon0 + f * (lon1 - lon0)), 1 => (lat0 + f * (lat1 - lat0), lon1), 2 => (lat1, lon1 - f * (lon1 - lon0)), _ => (lat1 - f * (lat1 - lat0), lon0) };
+                if (i == 64) (lat, lon) = (lat0, lon0);
+                FidelityMap.DirOfLatLon(lat, lon, d);
+                if (Project(d, out var p, out _)) run.Add(p); else { Flush(g, pen, run); run.Clear(); }
+            }
+            Flush(g, pen, run);
+        }
     }
 
     // ------------------------------------------------------------------ lines
@@ -462,21 +481,20 @@ public sealed class GlobeView : Control
         Flush(g, pen, run);
     }
 
-    void DrawLegend(Graphics g)
+    void DrawLegend(Graphics g, CellOverlay overlay)
     {
         int x = 12, y = Height - 44, w = 240, h = 12;
         using (var bg = new SolidBrush(Color.FromArgb(170, 0, 0, 0))) g.FillRectangle(bg, x - 6, y - 20, w + 12, 54);
         for (int i = 0; i < w; ++i)
         {
-            double grain = Math.Pow(10, -3 + 8.0 * i / (w - 1));
-            using var p = new Pen(GrainColour(grain));
+            using var p = new Pen(overlay.Ramp(i / (double)(w - 1)));
             g.DrawLine(p, x + i, y, x + i, y + h);
         }
         using var font = new Font("Segoe UI", 8f);
-        g.DrawString("grain wanted (log)", font, Brushes.White, x, y - 17);
-        foreach (var (grain, label) in new[] { (1e-3, "1 mm"), (1.0, "1 m"), (1e3, "1 km"), (1e5, "100 km") })
+        g.DrawString(overlay.LegendTitle, font, Brushes.White, x, y - 17);
+        foreach (var (t, label) in overlay.Ticks)
         {
-            float px = x + (float)((Math.Log10(grain) + 3) / 8 * (w - 1));
+            float px = x + (float)(t * (w - 1));
             g.DrawLine(Pens.White, px, y + h, px, y + h + 3);
             var sz = g.MeasureString(label, font);
             g.DrawString(label, font, Brushes.White, Math.Clamp(px - sz.Width / 2, x - 4, x + w - sz.Width + 4), y + h + 3);

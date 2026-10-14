@@ -275,3 +275,46 @@ node against a harbour gauge).
 **The first copy** (Mark, 2026-10-13): a time-varying source (a forecast cycle, a buoy's line, a
 prediction window, an OFS cycle, a gauge response) is read from the earliest copy the cache
 holds and fetched only when there is none; each input records `valid_utc` and `fetched_utc`.
+
+## 7. What is stored: the storage index and view
+
+`harvest storage` (and the painter's Storage tab) keeps an index of the bytes ON DISK, per
+source, parameter, store and cell of this lattice: `%LOCALAPPDATA%\GAGAME\storage-index.bin`
+(GASTOR03), `harvest/Gagame.Harvest/Core/StorageIndex.cs`. It reads names, sizes and
+directories, never a tile's payload, and a rescan reads only the folders whose own write time
+moved. `harvest storage check` is its gate (a planted tree, archive and composite of known
+sizes, cell for cell).
+
+**Read** (as the disk has them): each loose tile's size and name `f<face>_m<mip>_x<x>_y<y>[_<key>]`
+under `cache/trees/<name>.<id>/<tag>/` (TileTree.h) and `cache/composed/<channel>/<tag>/`; each
+archive's directory (`<tag>.gaa`, TileArchive.h: the 16-byte header and the 24-byte records,
+key = face << 61 | mip << 56 | y << 28 | x, and each record's size; `.gaa.stale` is the store
+`archive.stale`); the composites' tier tiles' sizes and corner names, their point files' sizes
+and points, and `coverage[]` as written; `.void` markers are counted, with no bytes. A source is
+a tree folder `<name>.<id>` (the id is the hash of the node's identity, name and structure; it is
+not invertible, so the folder name IS the identity), a composed channel, or a composite input;
+the parameter is the tree's node name, the channel, or the composite's layer.
+
+**Derived** (and how): a cube tile's cell is exact when its width is known -- the realization
+`cube<K>k` has a face of K x 1024 texels and a tile 128 high, so tile (f, m, x, y) IS the cell
+(f, log2(K x 1024) - 7 - m, x, y) -- but the width (128 for RGBA8 and Raw4, 256 for Half and FloatW)
+is the tenant's and is not written in the folder: a 256 KB tile is FloatW; a tile at an x or a
+mip a 256-wide tile cannot reach is 128; at the mip where one 256-wide tile spans a face, y = 1
+without x = 1 is 256; otherwise 128 is ASSUMED (a 256-wide tile then lands in a cell half its
+width). A 256-wide tile's bytes are split evenly over its two cells. A window tile
+(`window_z<z>_<orgX>_<orgY>`, Web-Mercator) goes to the cell holding its centre, at the level of
+its own ground size. A composite tier tile's size is the least spacing of its folder's corner
+names (one tile: the tier box). A point file's bytes are split evenly over its points (a JSON
+file has no size per point). Cells deeper than level 12 (~2.4 km) add to their level-12
+ancestor: on the owner's cache level 14 kept 1.47 M aggregates in 55 MB, level 12 keeps
+890 k in 33 MB.
+
+**Who answers here.** The only weights the stores record are presence: a tree tile exists where
+that source painted, and a composite's `coverage[]` says which input answers a box at what grain
+(and whether as a gap fill). The view shows those as they are -- the bytes per cell and the
+coverage boxes -- and computes no weight the engine does not store.
+
+**Measured** (2026-10-14, the owner's machine, cache on D:): 1,682 folders and archives, 13.2 M
+directory entries (7.2 M tiles, 3.6 M voids, 2.3 M other markers), 561.7 GB in cells and 9.5 MB
+(archive directories) outside them. The first scan took 14.5 s; a rebuild with the file system's
+cache warm 3.6 s; a rescan with nothing changed 0.1-0.2 s plus 0.3-0.5 s to load the 33 MB index.

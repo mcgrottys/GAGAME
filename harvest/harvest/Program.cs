@@ -56,6 +56,12 @@ static class Program
             if (root is null) { Console.Error.WriteLine("not inside a GAGAME checkout; name it with --root DIR"); return 2; }
             return LimitsCli.Run(root, args.Skip(1).ToArray(), Console.Out);
         }
+        if (args[0] == "storage")
+        {
+            root ??= FindRoot(AppContext.BaseDirectory) ?? FindRoot(Environment.CurrentDirectory);
+            if (root is null) { Console.Error.WriteLine("not inside a GAGAME checkout; name it with --root DIR"); return 2; }
+            return StorageCli.Run(root, args.Skip(1).ToArray(), Console.Out);
+        }
         var name = args[0];
         if (!HarvesterFactory.Has(name))
         {

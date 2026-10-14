@@ -9,6 +9,8 @@ namespace GagameDemo;
 /// the chosen grain; the cell says WHERE, the grain HOW FINE, so a 50 km brush can ask for 1 m
 /// data. Erase returns the ground under the brush to the layer's default. The summary under the
 /// controls is what the paint would cost a height layer: an estimate, not a source's holding.
+/// A layer is any data layer the file, a composite or a source config names; painting one writes
+/// that layer's cells. The Storage tab turns the same globe to what IS stored (StorageIndex).
 public sealed class FidelityForm : Form
 {
     const int UndoDepth = 32;
@@ -36,6 +38,24 @@ public sealed class FidelityForm : Form
     readonly ToolStripStatusLabel _hover = new("") { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     readonly ToolStripStatusLabel _note = new("");
     readonly ToolStripButton _undo = new("Undo") { Enabled = false, ToolTipText = "Undo the last stroke (Ctrl+Z)" };
+
+    // the storage view
+    readonly TabControl _tabs = new() { Dock = DockStyle.Left, Width = 340 };
+    readonly FidelityOverlay _fidelity = new();
+    readonly StorageOverlay _storage = new();
+    readonly Label _feeds = new() { AutoSize = true, MaximumSize = new Size(300, 0), ForeColor = SystemColors.GrayText };
+    readonly ComboBox _sSource = Combo(), _sParam = Combo(), _sStore = Combo(), _sLevel = Combo();
+    readonly CheckBox _sCoverage = new() { Text = "Coverage boxes (who answers: composites)", AutoSize = true, Checked = true };
+    readonly Label _sStatus = new() { AutoSize = true, MaximumSize = new Size(300, 0) };
+    readonly Label _sHere = new() { AutoSize = true, MaximumSize = new Size(300, 0), Font = new Font("Consolas", 8f) };
+    readonly ListView _sTotals = new() { View = View.Details, FullRowSelect = true, Height = 260, Width = 300, HideSelection = false };
+    readonly Button _sRescan = new() { Text = "Rescan", AutoSize = true };
+    bool _scanning;
+    string _layerName = FidelityMap.AllLayers;
+
+    static ComboBox Combo() => new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 290, DropDownWidth = 420 };
+
+    bool StorageMode => _tabs.SelectedIndex == 1;
 
     FidelityMap _map = new();
     string? _path;
@@ -77,7 +97,7 @@ public sealed class FidelityForm : Form
         status.Items.AddRange([_hover, _note]);
 
         Controls.Add(_globe);
-        Controls.Add(Panel());
+        Controls.Add(Tabs());
         Controls.Add(bar);
         Controls.Add(status);
 
@@ -119,6 +139,30 @@ public sealed class FidelityForm : Form
 
     // ------------------------------------------------------------------ the side panel
 
+    /// Two views of the one globe: the fidelity map to paint, and what is stored.
+    Control Tabs()
+    {
+        var paint = new TabPage("Fidelity");
+        var store = new TabPage("Storage");
+        var p = Panel();
+        p.Dock = DockStyle.Fill;
+        paint.Controls.Add(p);
+        var s = StoragePanel();
+        s.Dock = DockStyle.Fill;
+        store.Controls.Add(s);
+        _tabs.TabPages.AddRange([paint, store]);
+        _globe.Overlay = _fidelity;
+        _tabs.SelectedIndexChanged += (_, _) =>
+        {
+            _globe.Overlay = StorageMode ? _storage : _fidelity;
+            _globe.Brush = null;
+            if (StorageMode && _storage.Index.Folders.Count == 0 && !_scanning) Scan(rebuild: false);
+            _showCells.Text = StorageMode ? "Stored bytes" : "Painted cells";
+            _globe.Invalidate();
+        };
+        return _tabs;
+    }
+
     Control Panel()
     {
         var t = new TableLayoutPanel { Dock = DockStyle.Left, Width = 310, ColumnCount = 1, AutoScroll = true, Padding = new Padding(8, 6, 6, 6) };
@@ -136,7 +180,16 @@ public sealed class FidelityForm : Form
         applyDefault.Click += (_, _) => SetDefault();
         Add(Row(_layer));
         Add(Row(Note("default"), _default, applyDefault));
-        _layer.SelectedIndexChanged += (_, _) => { _globe.Layer = (string)_layer.SelectedItem!; _default.Text = FidelityRegions.FormatLength(_map.Get(_globe.Layer).DefaultGrainM); _globe.MapChanged(); Summarize(); };
+        Add(_feeds);
+        _layer.SelectedIndexChanged += (_, _) =>
+        {
+            _layerName = (string)_layer.SelectedItem!;
+            _default.Text = FidelityRegions.FormatLength(_map.Get(_layerName).DefaultGrainM);
+            _fidelity.Show(_map, _layerName);
+            ShowFeeds();
+            MapChanged();
+            Summarize();
+        };
 
         Add(Head("Grain wanted"));
         Add(_grainText);
@@ -184,7 +237,7 @@ public sealed class FidelityForm : Form
     void RefreshGrain()
     {
         _grainText.Text = FidelityRegions.FormatLength(Grain);
-        _grainText.ForeColor = GlobeView.GrainColour(Grain) is var c && c.GetBrightness() > 0.75 ? Color.FromArgb(150, 120, 0) : GlobeView.GrainColour(Grain);
+        _grainText.ForeColor = FidelityOverlay.GrainColour(Grain) is var c && c.GetBrightness() > 0.75 ? Color.FromArgb(150, 120, 0) : FidelityOverlay.GrainColour(Grain);
     }
 
     void SetRadius(double m)
@@ -206,7 +259,7 @@ public sealed class FidelityForm : Form
     {
         _globe.Focus();
         _dragFrom = e.Location;
-        _rotating = e.Button == MouseButtons.Right || (e.Button == MouseButtons.Left && _look.Checked);
+        _rotating = e.Button == MouseButtons.Right || (e.Button == MouseButtons.Left && (_look.Checked || StorageMode));
         if (!_rotating && e.Button == MouseButtons.Left)
         {
             Remember();
@@ -218,7 +271,7 @@ public sealed class FidelityForm : Form
     void GlobeMove(object? s, MouseEventArgs e)
     {
         var at = _globe.PickLatLon(e.X, e.Y);
-        _globe.Brush = _look.Checked ? null : at;
+        _globe.Brush = _look.Checked || StorageMode ? null : at;
         Hover(at);
         if (_dragFrom is Point from)
         {
@@ -278,15 +331,16 @@ public sealed class FidelityForm : Form
         }
         _lastDab = (lat, lon);
         var (cells, _) = FidelityRegions.Cap(_map, lat, lon, r, FidelityRegions.LevelForExtent(_map, 2 * r));
-        if (_erase.Checked) FidelityRegions.Clear(_map, _globe.Layer, cells);
-        else _map.PaintMany(_globe.Layer, cells, Grain);
+        if (_erase.Checked) FidelityRegions.Clear(_map, _layerName, cells);
+        else _map.PaintMany(_layerName, cells, Grain);
         Changed();
     }
 
     void Hover((double lat, double lon)? at)
     {
         if (at is not (double lat, double lon)) { _hover.Text = $"view {FidelityRegions.FormatLength(_globe.ViewWidthM)} across"; return; }
-        var cells = _map.Get(_globe.Layer).Cells;
+        if (StorageMode) { StorageHover(lat, lon); return; }
+        var cells = _map.Get(_layerName).Cells;
         string answer = "default";
         for (int L = FidelityMap.MaxLevel; L >= 0; --L)
         {
@@ -295,7 +349,7 @@ public sealed class FidelityForm : Form
         }
         var here = FidelityMap.CellOf(lat, lon, FidelityRegions.LevelForExtent(_map, 2 * _globe.BrushRadiusM));
         _hover.Text = string.Create(CultureInfo.InvariantCulture,
-            $"{lat:0.000000}, {lon:0.000000}   wants {FidelityRegions.FormatLength(_map.GrainAt(_globe.Layer, lat, lon))} ({answer})   brush cell {FidelityRegions.FormatKey(here)}   view {FidelityRegions.FormatLength(_globe.ViewWidthM)} across");
+            $"{lat:0.000000}, {lon:0.000000}   wants {FidelityRegions.FormatLength(_map.GrainAt(_layerName, lat, lon))} ({answer})   brush cell {FidelityRegions.FormatKey(here)}   view {FidelityRegions.FormatLength(_globe.ViewWidthM)} across");
     }
 
     // ------------------------------------------------------------------ boxes and the default
@@ -309,8 +363,8 @@ public sealed class FidelityForm : Form
         catch (FormatException) { MessageBox.Show(this, $"Not a grain: '{_boxGrain.Text}' (try 30 m, 5 cm, 2 km).", Text); return; }
         Remember();
         var (cells, level) = FidelityRegions.Box(_map, lon0, lat0, lon1, lat1);
-        if (erase) FidelityRegions.Clear(_map, _globe.Layer, cells);
-        else _map.PaintMany(_globe.Layer, cells, grain);
+        if (erase) FidelityRegions.Clear(_map, _layerName, cells);
+        else _map.PaintMany(_layerName, cells, grain);
         _note.Text = $"{(erase ? "cleared" : "painted")} {cells.Count} cells of level {level} ({FidelityRegions.FormatLength(_map.CellEdgeM(level))})";
         Changed();
         Summarize();
@@ -331,7 +385,7 @@ public sealed class FidelityForm : Form
         {
             float g = FidelityRegions.ParseGrain(_default.Text);
             Remember();
-            _map.Get(_globe.Layer, create: true).DefaultGrainM = g;
+            _map.Get(_layerName, create: true).DefaultGrainM = g;
             _default.Text = FidelityRegions.FormatLength(g);
             Changed();
             Summarize();
@@ -358,22 +412,35 @@ public sealed class FidelityForm : Form
         ShowMap();
     }
 
+    void MapChanged()
+    {
+        _fidelity.Changed();
+        _globe.Invalidate();
+    }
+
     void Changed()
     {
         _dirty = true;
-        _globe.MapChanged();
+        MapChanged();
         UpdateTitle();
     }
 
     void ShowMap()
     {
         _globe.Map = _map;
+        // the layers: "*", the file's own, and every data layer a composite or a source config names
+        _feedMap = LayerSources.Read(_repo.Root);
+        var names = new SortedSet<string>(StringComparer.Ordinal) { FidelityMap.AllLayers };
+        names.UnionWith(_map.Layers.Select(l => l.Name));
+        names.UnionWith(_feedMap.Keys);
         _layer.Items.Clear();
-        foreach (var l in _map.Layers) _layer.Items.Add(l.Name);
-        if (_layer.Items.Count == 0) _layer.Items.Add(FidelityMap.AllLayers);
-        _layer.SelectedItem = _layer.Items.Contains(_globe.Layer) ? _globe.Layer : _layer.Items[0];
-        _default.Text = FidelityRegions.FormatLength(_map.Get(_globe.Layer).DefaultGrainM);
-        _globe.MapChanged();
+        foreach (var n in names) _layer.Items.Add(n);
+        if (!names.Contains(_layerName)) _layerName = FidelityMap.AllLayers;
+        _layer.SelectedItem = _layerName;
+        _fidelity.Show(_map, _layerName);
+        ShowFeeds();
+        _default.Text = FidelityRegions.FormatLength(_map.Get(_layerName).DefaultGrainM);
+        MapChanged();
         UpdateTitle();
         Summarize();
     }
@@ -383,8 +450,8 @@ public sealed class FidelityForm : Form
     /// Cells, the ground per grain band, and the height-layer estimate.
     void Summarize()
     {
-        var l = _map.Get(_globe.Layer);
-        var (bands, painted, rest, restBytes) = FidelityRegions.Stats(_map, _globe.Layer);
+        var l = _map.Get(_layerName);
+        var (bands, painted, rest, restBytes) = FidelityRegions.Stats(_map, _layerName);
         var lines = new List<string> { $"{l.Cells.Count:#,0} cells, {painted / 1e6:#,0.##} km² painted" };
         foreach (var b in bands)
             lines.Add($"{(double.IsFinite(b.FromM) ? FidelityRegions.FormatLength(b.FromM) + "+" : "coarsest"),-8} {b.AreaM2 / 1e6,14:#,0.##} km²");
@@ -395,6 +462,164 @@ public sealed class FidelityForm : Form
         lines.Add("  (area / grain² x 4 B, +1/3 pyramid;");
         lines.Add("   no source's actual holding)");
         _summary.Text = string.Join(Environment.NewLine, lines);
+    }
+
+    // ------------------------------------------------------------------ layers and their sources
+
+    SortedDictionary<string, List<LayerSources.Feed>> _feedMap = new();
+
+    /// Which sources feed the layer, as the composites and the source configs name them.
+    void ShowFeeds()
+    {
+        var lines = new List<string>();
+        if (_layerName != FidelityMap.AllLayers && !_map.Layers.Any(l => l.Name == _layerName))
+            lines.Add("Not in the file yet: its readers take '*' until it is painted (painting it starts it empty).");
+        var feeds = _layerName == FidelityMap.AllLayers ? _feedMap.SelectMany(kv => kv.Value.Select(f => (layer: kv.Key, f))).ToList()
+            : _feedMap.GetValueOrDefault(_layerName, new()).Select(f => (layer: _layerName, f)).ToList();
+        lines.Add(feeds.Count == 0 ? "No composite or source config names this layer." : "Fed by:");
+        foreach (var g in feeds.GroupBy(x => (x.layer, x.f.Id)).Take(16))
+            lines.Add($"  {(_layerName == FidelityMap.AllLayers ? g.Key.layer + ": " : "")}{g.Key.Id} ({string.Join(", ", g.Select(x => x.f.From).Distinct())})");
+        _feeds.Text = string.Join(Environment.NewLine, lines);
+    }
+
+    // ------------------------------------------------------------------ the storage view
+
+    Control StoragePanel()
+    {
+        var t = new TableLayoutPanel { ColumnCount = 1, AutoScroll = true, Padding = new Padding(8, 6, 6, 6) };
+        void Add(Control c) { t.RowStyles.Add(new RowStyle(SizeType.AutoSize)); t.Controls.Add(c); }
+        Label Head(string s) => new() { Text = s, AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Margin = new Padding(0, 10, 0, 2) };
+        Add(new Label
+        {
+            Text = "Bytes on disk, read by name and size (never a tile's payload): the tile trees and their archives, " +
+                   "the composed cache, the composites' tiers and point files. Each in the lattice cell of its tile.",
+            AutoSize = true, MaximumSize = new Size(300, 0), ForeColor = SystemColors.GrayText,
+        });
+        var rebuild = new Button { Text = "Rebuild", AutoSize = true };
+        _sRescan.Click += (_, _) => Scan(rebuild: false);
+        rebuild.Click += (_, _) => Scan(rebuild: true);
+        var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        row.Controls.AddRange([_sRescan, rebuild]);
+        Add(row);
+        Add(_sStatus);
+        Add(Head("Source")); Add(_sSource);
+        Add(Head("Parameter")); Add(_sParam);
+        Add(Head("Store")); Add(_sStore);
+        Add(Head("Cell level")); Add(_sLevel);
+        Add(_sCoverage);
+        foreach (var c in new[] { _sSource, _sParam, _sStore, _sLevel }) c.SelectedIndexChanged += (_, _) => Refilter();
+        _sCoverage.CheckedChanged += (_, _) => { _storage.ShowCoverage = _sCoverage.Checked; _globe.Invalidate(); };
+        Add(Head("Totals (filtered)"));
+        _sTotals.Columns.Add("parameter", 104);
+        _sTotals.Columns.Add("store", 62);
+        _sTotals.Columns.Add("bytes", 74, HorizontalAlignment.Right);
+        _sTotals.Columns.Add("srcs", 38, HorizontalAlignment.Right);
+        _sTotals.DoubleClick += (_, _) =>
+        {
+            // a row narrows the filters to its parameter and store
+            if (_sTotals.SelectedItems.Count == 0 || _sTotals.SelectedItems[0].Tag is not (string p, string s)) return;
+            Select(_sParam, p); Select(_sStore, s);
+        };
+        Add(_sTotals);
+        Add(Head("Here"));
+        Add(_sHere);
+        return t;
+    }
+
+    static void Select(ComboBox c, string value)
+    {
+        foreach (var i in c.Items) if (i is Choice ch && ch.Value == value) { c.SelectedItem = i; return; }
+    }
+
+    /// A filter choice: the value it filters by (null = all) and its text with the bytes it holds.
+    sealed record Choice(string? Value, string Text) { public override string ToString() => Text; }
+
+    /// Brings the index up to date on a worker (the first scan of a cache reads every folder; a
+    /// rescan, only the folders whose stamp moved), saves it, and shows it.
+    void Scan(bool rebuild)
+    {
+        if (_scanning) return;
+        _scanning = true;
+        _sRescan.Enabled = false;
+        _sStatus.Text = rebuild ? "rebuilding the index ..." : "scanning ...";
+        var root = _repo.Root;
+        Task.Run(() =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var x = rebuild ? new StorageIndex() : StorageIndex.Load(StorageIndex.DefaultPath, root);
+            double load = sw.Elapsed.TotalSeconds;
+            x.Update(root);
+            if (x.Changed) x.Save(StorageIndex.DefaultPath);
+            return (x, load);
+        }).ContinueWith(t =>
+        {
+            _scanning = false;
+            _sRescan.Enabled = true;
+            if (t.Exception is { } e) { _sStatus.Text = "scan failed: " + e.GetBaseException().Message; return; }
+            var (x, load) = t.Result;
+            long size = File.Exists(StorageIndex.DefaultPath) ? new FileInfo(StorageIndex.DefaultPath).Length : 0;
+            _sStatus.Text = $"{x.Folders.Count:#,0} folders: {x.FoldersRead:#,0} read, {x.FoldersReused:#,0} unchanged, in {x.ScanSeconds:0.0} s " +
+                            $"(index loaded in {load:0.0} s, {size / 1e6:0.0} MB at {StorageIndex.DefaultPath}); " +
+                            $"{FidelityRegions.FormatBytes(x.Entries.Sum(e => e.Bytes))} in cells, {FidelityRegions.FormatBytes(x.AllUnmapped.Sum(u => u.Bytes))} not in a cell";
+            _storage.Show(x);
+            FillFilters(x);
+            Refilter();
+        }, TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    void FillFilters(StorageIndex x)
+    {
+        void Fill(ComboBox c, IEnumerable<(string key, long bytes)> items, Func<string, string>? label = null)
+        {
+            var keep = (c.SelectedItem as Choice)?.Value;
+            c.Items.Clear();
+            c.Items.Add(new Choice(null, "(all)"));
+            foreach (var (k, b) in items.OrderByDescending(i => i.bytes)) c.Items.Add(new Choice(k, $"{(label?.Invoke(k) ?? k)}  ({FidelityRegions.FormatBytes(b)})"));
+            c.SelectedIndex = 0;
+            if (keep is not null) Select(c, keep);
+        }
+        var all = x.Entries.ToList();
+        Fill(_sSource, all.GroupBy(e => e.Source).Select(g => (g.Key, g.Sum(e => e.Bytes))));
+        Fill(_sParam, all.GroupBy(e => e.Param).Select(g => (g.Key, g.Sum(e => e.Bytes))));
+        Fill(_sStore, all.GroupBy(e => e.Store).Select(g => (g.Key, g.Sum(e => e.Bytes))));
+        Fill(_sLevel, all.GroupBy(e => StorageIndex.Unpack(e.Cell).Level).Select(g => (g.Key.ToString(CultureInfo.InvariantCulture), g.Sum(e => e.Bytes))),
+            k => $"level {k}, cells ~{FidelityRegions.FormatLength(_map.CellEdgeM(int.Parse(k, CultureInfo.InvariantCulture)))}");
+    }
+
+    void Refilter()
+    {
+        _storage.Source = (_sSource.SelectedItem as Choice)?.Value;
+        _storage.Param = (_sParam.SelectedItem as Choice)?.Value;
+        _storage.Store = (_sStore.SelectedItem as Choice)?.Value;
+        _storage.Level = (_sLevel.SelectedItem as Choice)?.Value is string l ? int.Parse(l, CultureInfo.InvariantCulture) : null;
+        _storage.Refilter();
+        _sTotals.BeginUpdate();
+        _sTotals.Items.Clear();
+        foreach (var g in _storage.Filtered.GroupBy(e => (e.Param, e.Store)).OrderByDescending(g => g.Sum(e => e.Bytes)).Take(200))
+        {
+            var it = new ListViewItem([g.Key.Param, g.Key.Store, FidelityRegions.FormatBytes(g.Sum(e => e.Bytes)), g.Select(e => e.Source).Distinct().Count().ToString(CultureInfo.InvariantCulture)])
+            { Tag = (g.Key.Param, g.Key.Store), ToolTipText = $"{g.Sum(e => (long)e.Tiles):#,0} tiles" };
+            _sTotals.Items.Add(it);
+        }
+        _sTotals.EndUpdate();
+        _globe.Invalidate();
+    }
+
+    void StorageHover(double lat, double lon)
+    {
+        var (here, answers) = _storage.At(lat, lon);
+        var lines = new List<string> { string.Create(CultureInfo.InvariantCulture, $"{lat:0.0000}, {lon:0.0000}: {FidelityRegions.FormatBytes(here.Sum(h => h.bytes))} stored here") };
+        foreach (var (source, store, bytes, tiles) in here.Take(12))
+            lines.Add($" {FidelityRegions.FormatBytes(bytes),9}  {store,-8} {source}");
+        if (here.Count > 12) lines.Add($"  ... {here.Count - 12} more");
+        if (answers.Count > 0)
+        {
+            lines.Add("Who answers here (coverage[]):");
+            foreach (var c in answers.Take(8))
+                lines.Add($"  {c.Layer} {FidelityRegions.FormatLength(c.GrainM)} {c.Input}{(c.GapFill ? " (gap fill)" : "")}  [{c.Product}]");
+        }
+        _sHere.Text = string.Join(Environment.NewLine, lines);
+        _hover.Text = lines[0] + $"   cells at level {_globe.DisplayLevel}   view {FidelityRegions.FormatLength(_globe.ViewWidthM)} across";
     }
 
     // ------------------------------------------------------------------ files

@@ -25,7 +25,16 @@ harvest fidelity erase-box data\fidelity\world.gafid 5,45,10,48
 harvest fidelity at|finest|dump|stats FILE ...
 harvest fidelity check
 harvest limits --check
+harvest storage [--rebuild] [--index FILE]
+harvest storage check
 ```
+
+`harvest storage` brings the storage index (`Core/StorageIndex.cs`, docs/FIDELITY.md section 7)
+up to date and prints what is stored per parameter and store: every tile tree, archive
+directory, composed cache and composite read by name and size into the fidelity lattice's cells,
+never a payload. The index is `%LOCALAPPDATA%\GAGAME\storage-index.bin`; a rescan reads only
+the folders whose own write time moved. `storage check` plants a tree, an archive and a
+composite of known sizes and holds the index to them cell for cell.
 
 `Core/Fidelity.cs` is the GAFID01 reader and writer; `Core/FidelityRegions.cs` turns boxes and
 brush circles into lattice cells (cells an eighth of the region's extent, at most 4096 a region,
