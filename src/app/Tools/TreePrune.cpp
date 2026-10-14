@@ -15,6 +15,7 @@ int RunTreePrune(const scene::PruneSection& p) {
     q.ageDays = p.ageDays;
     q.purgeDays = p.purgeDays;
     q.confirm = p.confirm;
+    q.node = p.node;
     return prune::ExitCode(prune::Run(q).status);
 }
 

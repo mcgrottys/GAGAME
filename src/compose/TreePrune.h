@@ -145,6 +145,7 @@ struct Request {
     double ageDays = 30.0;
     double purgeDays = 7.0;
     std::string confirm;
+    std::string node;             // retire: only this node's folders ("wave.field"); "" = every node
     uint64_t now = 0;             // FILETIME ticks; 0 = the system clock
     std::function<bool(std::vector<Process>&)> processes;   // empty = the real table
     std::function<void(const std::string&)> say;            // empty = Log("[prune] ...")

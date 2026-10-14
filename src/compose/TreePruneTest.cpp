@@ -571,6 +571,29 @@ bool RunPruneSelfTest() {
                "the root is read");
     }
 
+    // ---- retire by node: the would-move list (no confirm, nothing moves) is that node's alone ----
+    {
+        const auto wouldMove = [&](const std::string& node) {
+            Request r = q;
+            r.mode = Mode::Retire;
+            r.node = node;
+            said.clear();
+            Run(r);
+            std::vector<std::string> out;
+            for (const std::string& s : said) {
+                if (s.rfind("  would move ", 0) == 0) out.push_back(s);
+            }
+            return out;
+        };
+        const std::vector<std::string> all = wouldMove(""), beta = wouldMove("beta"), none = wouldMove("gamma");
+        const bool onlyBeta = beta.size() == 1 && beta[0].find("beta.0000000b") != std::string::npos;
+        Check(all.size() == 2 && onlyBeta && none.empty() && Same(before, SnapAll(root), true, &first),
+              "retire with prune.node lists that node's stale folders alone (beta: 1 of the 2), a node "
+              "naming none lists nothing, and nothing moved");
+        Log("[prunetest] retire by node: every node %zu would move, node beta %zu (%s), node gamma %zu",
+            all.size(), beta.size(), onlyBeta ? "its own" : "NOT ITS OWN", none.size());
+    }
+
     // ---- 3. retire: the two stale folders move whole, with their .gaa; nothing else moves ------
     Result R;
     {

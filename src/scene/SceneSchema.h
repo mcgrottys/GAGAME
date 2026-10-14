@@ -481,6 +481,7 @@ struct PruneSection {
     double ageDays = 30.0;            // a stamp older than this is STALE (unstamped: twice it)
     double purgeDays = 7.0;           // a retired batch older than this is deleted by purge
     std::string confirm;
+    std::string node;                 // retire: only this node's folders; "" = every node
 };
 
 // THE RENDER section: the kept frame (scene/GlobeLayer.h keepOn) and the grains the picture is

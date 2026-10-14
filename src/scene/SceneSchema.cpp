@@ -863,7 +863,8 @@ const Schema& PruneSchema() {
                   "purge deletes the retired batches older than this", R)
             .BindPath("confirm", p.confirm,
                       "retire and purge act only when this is the root's full path as the "
-                      "listing printed it", R);
+                      "listing printed it", R)
+            .Bind("node", p.node, "retire only this node's stale folders (wave.field, earth.color ...); \"\" = every node", R);
         return sc;
     }();
     return *s;
