@@ -3,8 +3,8 @@
 The monastery where the manuscripts are kept: a .NET 10 MCP server (stdio) over SQLite that
 keeps a growing GAGAME navigable for Claude and any other MCP client.
 
-**What it stores** (v1 — a symbol graph, honestly not yet a full AST; libclang is the named
-upgrade path):
+**What it stores** (v1 — a symbol graph from a regex scan; the AST tables beside it come from
+`tools/astindex`, below):
 
 - every type, method, HLSL function, cbuffer, and Python def across `src/`, `shaders/`,
   `harvester/`, with file:line and the doc comment above it;
@@ -38,6 +38,13 @@ record. No arg lists the documents and their sections; `plan 4.6` (or `hierarchy
 `review 1`) prints a section, `plan finding 7` prints that row of a review's tables
 under its section and the table's header row, and any other text matches section
 titles, then lines of the text. The documents are chosen by `PlanDocs` in `Program.cs`.
+
+**The AST index** (`tools/astindex`, libclang for the C++ and `dxc -ast-dump` for the HLSL,
+kept current by a post-build step) adds `refs(symbol)`, `callers(fn)`, `callees(fn)`,
+`layout(type)` (a C++ record beside the HLSL cbuffer or struct that mirrors it, every offset
+compared), `cbuffer_reads(field | field.component | cbuffer | fn)` and `includes(file)`. They
+read `ast_*` tables in this same database; `--index` drops and recreates only its own tables, so
+the two indexers never erase each other. See `tools/astindex/README.md`.
 
 SQLite over MySQL on purpose: one file, zero administration, transactional; the schema is
 plain SQL and ports to MySQL unchanged the day this becomes multi-user.
