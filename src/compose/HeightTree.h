@@ -161,8 +161,10 @@ public:
     // the walk crosses blocks first; a block whose maximum cannot raise the running one is passed over
     // whole (the maximum mipmap's skip, Tevs et al. 2008, at one level). The answer is exactly the
     // maximum over every texel the line crosses: a skipped block holds none above it.
+    // `stopArcM`, when given: where the walk stopped at `stopAtM` -- the arc to the first texel that
+    // reached it, metres -- left untouched where none did (Fetch, below).
     float MaxAlongRay(double latRad, double lonRad, double towardE, double towardN, double rangeM, double groundM,
-                      float floorM, float stopAtM) {
+                      float floorM, float stopAtM, double* stopArcM = nullptr) {
         const double R = Lattice::kMercCirc / (2.0 * 3.14159265358979323846);
         const double cl = std::cos(latRad), sl = std::sin(latRad), co = std::cos(lonRad), so = std::sin(lonRad);
         double p[3] = {cl * co, sl, cl * so};
@@ -194,7 +196,18 @@ public:
                 at(s, q);
                 FaceUv(face, q, uvq);   // the face's own coordinates of the last point on it
             }
-            best = (std::max)(best, WalkFace(face, mip0, uv0, uvq, best, stopAtM));
+            double tStop = -1.0;
+            best = (std::max)(best, WalkFace(face, mip0, uv0, uvq, best, stopAtM, stopArcM ? &tStop : nullptr));
+            if (stopArcM && tStop >= 0.0) {
+                // the arc from this piece's start to the stopping texel's entry, on the sphere
+                const double su[2] = {uv0[0] + (uvq[0] - uv0[0]) * tStop, uv0[1] + (uvq[1] - uv0[1]) * tStop};
+                double d[3];
+                ComposeCubeDir(face, su[0], su[1], d);
+                const double cx = p[1] * d[2] - p[2] * d[1], cy = p[2] * d[0] - p[0] * d[2], cz = p[0] * d[1] - p[1] * d[0];
+                const double arc = std::atan2(std::sqrt(cx * cx + cy * cy + cz * cz), p[0] * d[0] + p[1] * d[1] + p[2] * d[2]);
+                *stopArcM = (rangeM / R - left + arc) * R;
+                return best;
+            }
             // on into the next face: the point past the crossing and the direction the arc has there
             const double a = (std::min)(left, s + 1e-9);
             double p2[3], t2[3];
@@ -206,6 +219,17 @@ public:
             left -= a;
         }
         return best;
+    }
+
+    // THE FETCH: how far the water runs from a point toward (towardE, towardN) before the first ground
+    // above `levelM` -- the input of fetch-limited wind-sea growth -- or `rangeM` where none comes. The
+    // swell shadow's walk, stopped at the first texel above the line (blocks below it passed over), at
+    // the grain `groundM`; --tool fetch-probe holds it against a brute march.
+    double Fetch(double latRad, double lonRad, double towardE, double towardN, double rangeM, double groundM,
+                 float levelM) {
+        double arc = -1.0;
+        MaxAlongRay(latRad, lonRad, towardE, towardN, rangeM, groundM, levelM, levelM + 1e-4f, &arc);
+        return arc >= 0.0 ? (std::min)(arc, rangeM) : rangeM;
     }
 
     // The instrument: tiles read from the tree (misses) and the time inside those reads. Counted per
@@ -263,7 +287,8 @@ private:
 
     // The highest texel the segment uv0 -> uv1 crosses on one face, at `mip` (climbing where the level is
     // magnified at the start), above `running`; blocks whose maximum cannot raise it are passed over.
-    float WalkFace(uint32_t face, uint32_t mip, const double uv0[2], const double uv1[2], float running, float stopAtM) {
+    float WalkFace(uint32_t face, uint32_t mip, const double uv0[2], const double uv1[2], float running, float stopAtM,
+                   double* stopT = nullptr) {
         while (mip + 1 < m_mips) {
             const uint32_t dim = m_lat.faceDim >> mip;
             const TileRequest r{face, mip, uint32_t((std::min)(uv0[0] * dim, dim - 1.0)) / m_lat.texW,
@@ -290,15 +315,17 @@ private:
                 } else {
                     running = (std::max)(running, 0.0f);
                 }
+                if (running >= stopAtM && stopT) *stopT = ta;
                 return running < stopAtM;
             }
             const uint32_t lbx = uint32_t(ux % m_lat.texW) / kBlock, lby = uint32_t(uy % m_lat.texH) / kBlock;
             if (c.blockMax[size_t(lby) * bw + lbx] <= running) return true;   // nothing here can raise it
-            Traverse(x0, y0, x1, y1, 1.0, ta, tb, [&](long long ix, long long iy, double, double) {
+            Traverse(x0, y0, x1, y1, 1.0, ta, tb, [&](long long ix, long long iy, double tIn, double) {
                 if (ix < 0 || iy < 0 || ix > last || iy > last) return true;
                 uint16_t h;
                 std::memcpy(&h, c.bytes.data() + (size_t(uint64_t(iy) % m_lat.texH) * m_lat.texW + size_t(uint64_t(ix) % m_lat.texW)) * 2, 2);
                 running = (std::max)(running, HalfToFloat(h));
+                if (running >= stopAtM && stopT) *stopT = tIn;
                 return running < stopAtM;
             });
             return running < stopAtM;
