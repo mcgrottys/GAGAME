@@ -62,6 +62,7 @@ using Pso = Com<ID3D12PipelineState>;                // a pipeline a layer built
 using PsoPtr = ID3D12PipelineState*;                 // a pipeline handed to a helper that binds it
 using Resource = ID3D12Resource*;                    // a resource borrowed for a view or a barrier
 using ResourceRef = Com<ID3D12Resource>;             // ...and one a layer created and owns
+using CommandSignatureRef = Com<ID3D12CommandSignature>;   // an indirect draw's argument layout a layer built
 }  // namespace hal
 
 // ------------------------------------------------------------------ descriptor heap
@@ -176,7 +177,7 @@ public:
     GpuBuffer CreateReadbackBuffer(uint64_t bytes, const wchar_t* name);
     // A command signature of ONE argument (a draw, a dispatch or a mesh dispatch) and no root
     // changes, so ExecuteIndirect reads its counts from a buffer the GPU filled.
-    Com<ID3D12CommandSignature> CreateCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, uint32_t strideBytes);
+    hal::CommandSignatureRef CreateCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, uint32_t strideBytes);
     GpuTexture CreateTexture2D(uint32_t w, uint32_t h, DXGI_FORMAT fmt,
                                D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES initialState,
                                const wchar_t* name, const D3D12_CLEAR_VALUE* clear = nullptr,

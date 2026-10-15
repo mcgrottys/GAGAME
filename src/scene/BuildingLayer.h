@@ -522,7 +522,7 @@ private:
     // signatures the forms are drawn through (a mesh dispatch, a draw) from the buffer's header.
     hal::RootSignatureRef m_clsRs;
     hal::Pso m_clsPso;
-    Com<ID3D12CommandSignature> m_sigMesh, m_sigDraw;
+    hal::CommandSignatureRef m_sigMesh, m_sigDraw;
     void Classify(const FrameContext& ctx, Walked& w);
     // THE COUNTS, BROUGHT BACK: the header's first row copied to a ring the CPU reads kCountsLag
     // frames on, so the walk's log line can say what the GPU drew of what it sent.
@@ -593,6 +593,10 @@ private:
     static constexpr size_t kStandAskMax = 4096;
     std::set<std::pair<PageKey, uint32_t>> m_standPending;
     uint64_t m_lastStandWalk = 0;
+    // The stream's order: every eye's asks merged and sorted when a walk lands, sent from the cursor.
+    std::vector<StandAsk> m_standQueue;
+    size_t m_standNext = 0;
+    bool m_standQueueStale = false;
     void StandBatch(std::vector<std::pair<std::shared_ptr<const Page>, StandAsk>> batch);
     // A box stood on the composed ground at its centroid, on the prisms' own axes; the shape's own
     // frame (the ground under the centroid, east, north, up) beside it when asked.
@@ -603,7 +607,7 @@ private:
     static void RecordOf(const RtBox& b, const double c[3], float rho, uint32_t addr, float heading, uint32_t cell,
                          float landed, float zc, StoodRec& r);
     uint64_t m_stands = 0;
-    double m_standMs = 0.0;
+    double m_standMs = 0.0, m_streamMs = 0.0;   // the jobs' time on the pool; the stream's on the frame thread (the instrument)
     // Every eye's wants as one list, each page once at the most it is worth to any eye.
     std::vector<std::pair<double, PageKey>> Wants() const;
     bool DrawnUses(const PageKey& k) const;

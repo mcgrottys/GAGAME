@@ -18,7 +18,6 @@
 #include "render/Camera.h"
 
 #include <algorithm>
-#include <execution>
 #include <thread>
 #include <array>
 #include <cmath>
@@ -32,7 +31,10 @@ namespace ga {
 BuildingLayer::~BuildingLayer() {
     // A job holds the stack and the ground's sources: none may outlive the layer's owner. Ask them
     // to stop and wait for the ones already running (a cell is tens of milliseconds).
-    if (m_stands) Log("[buildings] at the end: %llu stands made, %.1f ms each on the pool", static_cast<unsigned long long>(m_stands), m_standMs / double(m_stands));
+    if (m_stands) {
+        Log("[buildings] at the end: %llu stands made, %.1f ms each on the pool; the stands' stream took %.3f ms a frame on the frame thread",
+            static_cast<unsigned long long>(m_stands), m_standMs / double(m_stands), m_frame ? m_streamMs / double(m_frame) : 0.0);
+    }
     for (uint32_t k = 0; k < kEyes * kWorlds; ++k) {   // the instrument: what each walker's last walk drew
         const Eye& e = m_eyes[k];
         if (e.walks) {
@@ -863,17 +865,8 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             }
         }
         if (st.Valid()) m_retired.push_back({std::move(st), m_frame});
-        auto toRead = [&](ID3D12Resource* res, D3D12_RESOURCE_STATES to) {
-            D3D12_RESOURCE_BARRIER br{};
-            br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            br.Transition.pResource = res;
-            br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-            br.Transition.StateAfter = to;
-            ctx.cmd->Native()->ResourceBarrier(1, &br);
-        };
-        if (zCopied) toRead(m_pool.res.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-        if (rCopied) toRead(m_stood.res.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (zCopied) ctx.cmd->Barrier(m_pool.res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        if (rCopied) ctx.cmd->Barrier(m_stood.res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
     for (auto it = m_stoodRetired.begin(); it != m_stoodRetired.end();) {   // a replaced stand's records, freed once nothing reads them
         if (!it->stood.expired()) {
@@ -996,6 +989,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         // The pages the walk wanted, the largest on screen first; the stands likewise.
         e.wants = std::move(w.wants);
         e.stands = std::move(w.asks);
+        m_standQueueStale = true;   // the stream's order is remade from every eye's asks
         ++e.walks;
         if (e.walks <= 3 || e.walks % 50 == 0) {
             Log("[buildings] frame %llu eye %u world %u walk %llu: %u nodes named, %u records sent (%llu buildings) over %llu nodes visited, %llu hidden, %llu cut by the air, in %.1f ms (visit %.1f: "
@@ -1077,38 +1071,46 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     }
     // THE STANDS' STREAM: every eye's asks merged (a node once: the finest grain, buildings if any
     // eye wants them), the largest on screen first, up to kStandInFlight on the pool at a time.
+    // The merged order is made ONCE when a walk lands and consumed from a cursor frame by frame:
+    // remade every frame it was a map of 4,096 asks an eye, 1.0 ms a frame on the frame thread
+    // (measured at Tokyo city).
     {
-        std::map<std::pair<PageKey, uint32_t>, StandAsk> asks;
-        for (const Eye& e : m_eyes) {
-            for (const StandAsk& s : e.stands) {
-                StandAsk& t = asks[{s.page, s.node}];
-                if (t.px <= 0.0) {
-                    t = s;
-                } else {
-                    t.blds = t.blds || s.blds;
-                    t.grainM = (std::min)(t.grainM, s.grainM);
-                    t.px = (std::max)(t.px, s.px);
+        const auto tStream = std::chrono::steady_clock::now();
+        if (m_standQueueStale) {
+            m_standQueueStale = false;
+            std::map<std::pair<PageKey, uint32_t>, StandAsk> asks;
+            for (const Eye& e : m_eyes) {
+                for (const StandAsk& s : e.stands) {
+                    StandAsk& t = asks[{s.page, s.node}];
+                    if (t.px <= 0.0) {
+                        t = s;
+                    } else {
+                        t.blds = t.blds || s.blds;
+                        t.grainM = (std::min)(t.grainM, s.grainM);
+                        t.px = (std::max)(t.px, s.px);
+                    }
                 }
             }
+            m_standQueue.clear();
+            m_standQueue.reserve(asks.size());
+            for (const auto& [k, s] : asks) m_standQueue.push_back(s);
+            std::sort(m_standQueue.begin(), m_standQueue.end(), [](const StandAsk& a, const StandAsk& b) { return a.px > b.px; });
+            m_standNext = 0;
         }
-        std::vector<const StandAsk*> order;
-        order.reserve(asks.size());
-        for (const auto& [k, s] : asks) order.push_back(&s);
-        std::sort(order.begin(), order.end(), [](const StandAsk* a, const StandAsk* b) { return a->px > b->px; });
         std::vector<std::pair<std::shared_ptr<const Page>, StandAsk>> batch;
         int jobs = m_shared->standInflight.load();
-        for (const StandAsk* s : order) {
-            if (jobs >= kStandInFlight) break;
-            if (m_standPending.count({s->page, s->node})) continue;
-            auto it = m_pages.find(s->page);
-            if (it == m_pages.end() || !it->second->stood || s->node >= it->second->nodes.size()) continue;
+        for (; m_standNext < m_standQueue.size() && jobs < kStandInFlight; ++m_standNext) {
+            const StandAsk& s = m_standQueue[m_standNext];
+            if (m_standPending.count({s.page, s.node})) continue;
+            auto it = m_pages.find(s.page);
+            if (it == m_pages.end() || !it->second->stood || s.node >= it->second->nodes.size()) continue;
             // ITS RANGE IN THE STANDS' POOL: one record a building (the job writes exactly these); a
             // stand without its buildings takes none. No room: it is not asked now and the next walk asks again.
-            StandAsk ask = *s;
+            StandAsk ask = s;
             const Page& pg = *it->second;
-            const RtNode& n = pg.nodes[s->node];
+            const RtNode& n = pg.nodes[s.node];
             uint32_t nb = 0;
-            if (s->blds && n.own0 < pg.blds.size() && n.own0 < pg.raw.size()) {
+            if (s.blds && n.own0 < pg.blds.size() && n.own0 < pg.raw.size()) {
                 nb = static_cast<uint32_t>((std::min)(size_t(n.ownN), (std::min)(pg.blds.size() - n.own0, pg.raw.size() - n.own0)));
             }
             ask.gpuN = m_stood.Valid() ? nb : 0u;
@@ -1124,6 +1126,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             }
         }
         if (!batch.empty() && jobs < kStandInFlight) StandBatch(std::move(batch));
+        m_streamMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStream).count();
         if (m_stoodFull && m_frame % 300 == 0) {
             uint32_t retiring = 0;
             for (const StoodRetired& r : m_stoodRetired) retiring += r.n;
@@ -1298,7 +1301,6 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         };
         std::unordered_map<PageKey, const Page*, KeyHash> pages;
         std::vector<std::shared_ptr<const Page>> hold;   // the walk's references
-        bool shapes = false;                             // the shape pool and its pipeline stand
         bool pool = false;                               // the stands' pool stands: nodes can be named
         std::set<Key> cells;
         uint64_t cellsVersion;
@@ -1339,7 +1341,6 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             in.pulled = true;
         }
     }
-    in.shapes = m_psoShape && m_pool.Valid();
     in.pool = m_stood.Valid() && m_clsPso != nullptr;
     in.cosHalf = std::cos(in.halfDiag);
     in.sinHalf = std::sin(in.halfDiag);
@@ -2001,7 +2002,7 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
 void BuildingLayer::Classify(const FrameContext& ctx, Walked& w) {
     GpuScope scope(ctx.prof, ctx.cmd->Native(), "buildings.classify");
     hal::CommandContext& cmd = *ctx.cmd;
-    ID3D12Resource* out = w.out.b.res.Get();
+    hal::Resource out = w.out.b.res.Get();
     cmd.Barrier(out, w.out.fresh ? D3D12_RESOURCE_STATE_COMMON : kListRead, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     w.out.fresh = false;
     struct {   // mirrors ClassifyCb
@@ -2105,7 +2106,7 @@ void BuildingLayer::DrawSolids(const FrameContext& ctx, uint32_t eyeIndex, uint3
     cb.mesh[3] = m_poolSrv;
     ctx.cmd->GraphicsConstants(1, cb);
     ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-    ID3D12Resource* args = m_drawn.vb.res.Get();
+    hal::Resource args = m_drawn.vb.res.Get();
     if (p.boxMesh || p.box) {
         // THE TREE'S BOXES: 8 vertices a box through the mesh stage (16 a group; the groups in two
         // dimensions past 65535), or 36 through the vertex stage.

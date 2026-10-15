@@ -296,6 +296,16 @@ against the build with the stand-ins: the orbit view's 50th walk sends 0 records
 far edge), its settled set 62,838 boxes + 3,062 shapes + 215,686 points; the market bit-identical.
 Lines: -82 / +46 more.
 
+**The stream's order, once per walk (the loose end, the same evening).** The stands' stream merged every
+eye's asks into a map and sorted them EVERY FRAME, then sent whatever was not pending -- so once a
+batch had landed, the same asks (still the eyes' lists until the next walk replaced them) were sent
+again, and again: 195,774 stands made in a 300-frame run at the city, three times the 62,549 the
+walks had asked for, each one a duplicate of a stand already made. The instrument this adds (the
+stream's ms on the frame thread, on the end-of-run line) measured it at 1.015 ms a frame. Now the
+merged order is made once when a walk lands and consumed from a cursor: 0.252 ms a frame, 62,549
+stands made, the settled set the same (63,156 boxes + 3,062 shapes + 217,190 points against 62,819
++ 3,062 + 215,636), the still within the stream's noise (0.081 % of pixels against the run before, the after binary's own A/A being 1.29 %).
+
 **The stand's lifetime.** A stand is published (its node's atomic pointer set) by Simulate when
 its records are recorded for the GPU, not by the job that made it, so a walk that reads a stand
 names records the pass will find. The stand it replaces, and every stand of a dropped page, gives

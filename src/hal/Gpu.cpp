@@ -613,14 +613,14 @@ GpuBuffer Gpu::CreateReadbackBuffer(uint64_t bytes, const wchar_t* name) {
     return b;
 }
 
-Com<ID3D12CommandSignature> Gpu::CreateCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, uint32_t strideBytes) {
+hal::CommandSignatureRef Gpu::CreateCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, uint32_t strideBytes) {
     D3D12_INDIRECT_ARGUMENT_DESC arg{};
     arg.Type = type;
     D3D12_COMMAND_SIGNATURE_DESC d{};
     d.ByteStride = strideBytes;
     d.NumArgumentDescs = 1;
     d.pArgumentDescs = &arg;
-    Com<ID3D12CommandSignature> sig;
+    hal::CommandSignatureRef sig;
     GA_CHECK(m_device->CreateCommandSignature(&d, nullptr, IID_PPV_ARGS(&sig)));   // no root arguments: no root signature
     return sig;
 }
