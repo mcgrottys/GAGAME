@@ -471,6 +471,13 @@ private:
     uint32_t m_followCarries = 0;   // the subject's carry count as of the last frame
     uint64_t m_minimapMask = 0;     // the layers the second eye draws (hud.minimap.layers)
     bool m_minimapMaskSet = false;
+    // THE CACHE LENS (Minimap::Cache, compose/CacheIndex.h): the harvest's storage index reduced to a
+    // face-stacked level-10 map and uploaded the first time the toggle turns on (each later turn-on
+    // reuses it); kCacheLensNone stands for "asked, and there was no index": the lens paints grey.
+    static constexpr uint32_t kCacheLensNone = 0xFFFFFFFEu;
+    GpuTexture m_cacheLensTex;
+    uint32_t m_cacheLensSrv = UINT32_MAX;   // UINT32_MAX = not read yet
+    bool m_cacheLensEnvRead = false;        // GAGAME_MINIMAP_CACHE, the headless gate's hook
     const scene::Gateway* m_followedGate = nullptr;   // the gate that last carried the subject (StepEntities)
     // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
     // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles

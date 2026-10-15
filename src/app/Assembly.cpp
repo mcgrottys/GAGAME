@@ -821,6 +821,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->debugLens = opt.lens;
         // ...and the scene's debug view, before Init for the same reason.
         globe->SetDebug(S.debug);
+        // ...and the cache lens's, only for a scene whose minimap can turn it on (Minimap::Cache).
+        globe->cacheLensBuild = S.hud.minimap.enabled;
         if (!opt.groundProbe.empty()) {   // Phase A0: lat,lon in degrees -> the planet direction
             double lat = 0.0, lon = 0.0;
             if (sscanf_s(opt.groundProbe.c_str(), " %lf , %lf", &lat, &lon) == 2) {

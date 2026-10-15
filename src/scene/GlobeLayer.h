@@ -285,6 +285,19 @@ public:
     // exposure tenant's views, and each tenant's window floor (~0 = no windows), set by the frame
     // loop.
     uint32_t probeX[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    // THE CACHE LENS (shaders/CacheLens.hlsl, the minimap's Cache toggle, docs/FIDELITY.md 7): an
+    // eye other than the first may be painted with the heat map of what the harvest holds offline
+    // instead of the picture. Its pipelines are built only for a scene with a minimap (set before
+    // Init); the map is the compositor's CacheIndex, a face-stacked 2-D texture whose SRV the eye's
+    // own rows carry (gLensU.z), so the first eye's rows and pipeline never change. UINT32_MAX = off.
+    // The eye's rectangle's top-left on the target rides gLensU.w (x | y << 16): SV_Position is the
+    // target's pixel, and the lens's key stands in the rectangle's corner.
+    bool cacheLensBuild = false;
+    void SetCacheLens(uint32_t view, uint32_t srv, uint32_t x0 = 0, uint32_t y0 = 0) {
+        if (view == 0 || view > kMaxOtherEyes) return;
+        m_other[view - 1].cacheLens = srv;
+        m_other[view - 1].cacheOrg = (x0 & 0xFFFFu) | (y0 << 16);
+    }
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
                                     // 7 velgrad -- the derived div/curl bank)
     // M9h: the grad(flow) bank and the grid it lives on, for lens 7.
@@ -949,6 +962,7 @@ private:
     // (14 was the address lens, --lens addr: deleted with the Mercator pages, B3.)
     hal::Pso m_msPsoLens, m_psoLens;
     hal::Pso m_msPsoDebug, m_psoDebug;   // the debug views (DebugView.hlsl), built only while one is on
+    hal::Pso m_msPsoCache, m_psoCache;   // the cache lens (CacheLens.hlsl), built only with a minimap
     bool ResidencyLensOn() const { return (debugLens >= 9 && debugLens <= 11) || debugLens >= 14; }
     std::vector<MeshletRec> m_meshlets;
     // THE WALK KEPT (2026-10-11, the owner: "the math gives us things for free"). The walk is a
@@ -1018,6 +1032,8 @@ private:
         bool skyPass = true;
         float skyWeight = 1.0f;
         int sampler = -1;
+        uint32_t cacheLens = UINT32_MAX;   // the cache lens's map SRV while that eye's toggle is on
+        uint32_t cacheOrg = 0;             // its rectangle's top-left, x | y << 16
         bool valid = false;
         GpuBuffer recBuf[Gpu::kFrameCount];
     };
