@@ -1225,7 +1225,10 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     if (gShadowA.z > 0.5f) {
         TerrainHit mh;
         TerrainRay(upT, lvlW + dispW, geo, lvl, rDir, footPx, lod, true, mh);
-        if (mh.s > 0.0f) {
+        // Only ground that stands ABOVE the water is a mirror's land: a facet whose ray dips below
+        // the surface meets the bed, and what that ray sees is the sea (the seaward share above),
+        // never the bed through the back of the surface.
+        if (mh.s > 0.0f && mh.alt > lvlW) {
             const float3 hitP = own ? pA + upT * (lvlW + dispW) + mh.s * rDir : CsPointOfDir(mh.dirP);
             const float3 landAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
                                        ? ComposedColor(mh.dirP, hitP CS_WALK_AT(mh.pL, lvl))
