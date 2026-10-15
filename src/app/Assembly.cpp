@@ -1711,7 +1711,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 [comp, ch, g0 = surface.cube.GroundRes(0)](double resM) -> std::unique_ptr<PlaceField> {
                     if (ch < 0) return nullptr;
                     const uint32_t rung = uint32_t(std::clamp(int(std::ceil(std::log2(g0 / (std::max)(resM, 1e-3)))), 0, 15));
-                    return std::make_unique<HeightPage>(comp, ch, rung);
+                    return std::make_unique<HeightPage>(comp, ch, rung, true);   // the stack: never a paint on Io
                 });
             if (!bl->lod.empty()) {   // the folded tree (docs/BUILDING_LOD.md): a missing one is named, not fatal
                 auto lodf = std::make_shared<BuildingLodFile>();
