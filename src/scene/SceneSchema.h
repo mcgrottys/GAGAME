@@ -444,6 +444,7 @@ struct BuildingsLayerProps {
     double boxPixels = 2.0;
     double shapePixels = 8.0;
     double pageMB = 1024.0;          // the loaded pages' budget (CPU); the shape pool on the GPU is fixed
+    double standMB = 256.0;          // the stands' record pool on the GPU (64 B a building stood): what the walks can name
     double marginDeg = 5.0;          // the walk's cone past the view's edge: what a turn finds already asked
     bool field = true;               // the buildings under a pixel as scalars (compose/BuildingField.h)
     // THE ROADS IN THE SAME TREE (compose/BuildingLod.h RoadRibbonDefaults): the scene's assumptions

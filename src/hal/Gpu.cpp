@@ -584,6 +584,47 @@ GpuBuffer Gpu::CreateDefaultBuffer(const void* data, uint64_t bytes, const wchar
     return b;
 }
 
+GpuBuffer Gpu::CreateUavBuffer(uint64_t bytes, const wchar_t* name) {
+    GpuBuffer b;
+    b.size = bytes;
+    const auto hp = HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto rd = BufferDesc(bytes);
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    GA_CHECK(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                              D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                              IID_PPV_ARGS(&b.res)));
+    if (name) b.res->SetName(name);
+    b.gpu = b.res->GetGPUVirtualAddress();
+    return b;
+}
+
+GpuBuffer Gpu::CreateReadbackBuffer(uint64_t bytes, const wchar_t* name) {
+    GpuBuffer b;
+    b.size = bytes;
+    const auto hp = HeapProps(D3D12_HEAP_TYPE_READBACK);
+    const auto rd = BufferDesc(bytes);
+    GA_CHECK(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                              IID_PPV_ARGS(&b.res)));
+    if (name) b.res->SetName(name);
+    D3D12_RANGE whole{0, SIZE_T(bytes)};   // the CPU reads it; a readback heap is never written by the CPU
+    GA_CHECK(b.res->Map(0, &whole, reinterpret_cast<void**>(&b.cpu)));
+    b.gpu = b.res->GetGPUVirtualAddress();
+    return b;
+}
+
+Com<ID3D12CommandSignature> Gpu::CreateCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, uint32_t strideBytes) {
+    D3D12_INDIRECT_ARGUMENT_DESC arg{};
+    arg.Type = type;
+    D3D12_COMMAND_SIGNATURE_DESC d{};
+    d.ByteStride = strideBytes;
+    d.NumArgumentDescs = 1;
+    d.pArgumentDescs = &arg;
+    Com<ID3D12CommandSignature> sig;
+    GA_CHECK(m_device->CreateCommandSignature(&d, nullptr, IID_PPV_ARGS(&sig)));   // no root arguments: no root signature
+    return sig;
+}
+
 GpuTexture Gpu::CreateTexture2D(uint32_t w, uint32_t h, DXGI_FORMAT fmt,
                                 D3D12_RESOURCE_FLAGS flags,
                                 D3D12_RESOURCE_STATES initialState, const wchar_t* name,

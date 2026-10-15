@@ -29,9 +29,9 @@ static float sLvlSkyEyeR = 6371000.0f;
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
     float4 gBdTime;     // x = the layer's now (s), y = a page's fade-in (s), z = a pixel's angle (rad)
-    uint4 gBdMesh;      // ...z the depth of the world this draw is in (0 the eye's own: the hulls' rule);
-                        // a draw of the walk's instances: x the first instance's row (three float4
-                        // rows each), y how many, w the shape pool's heap slot (compose/BuildingShape.h)
+    uint4 gBdMesh;      // z the depth of the world this draw is in (0 the eye's own: the hulls' rule);
+                        // w the shape pool's heap slot (compose/BuildingShape.h); x, y unused -- a form's
+                        // first row and count are the walk buffer's own header (FormBase, FormCount)
     float4 gBdWorld;    // THE WORLD'S TURN in the true frame (a rotor, identity for the eye's own): a window
                         // world's instances are composed with it, their centres turned by it, about gBdOrigin
 };
@@ -77,9 +77,21 @@ VsOut VsMain(uint vid : SV_VertexID) {
     return o;
 }
 
-// THE WALK'S INSTANCES (scene/BuildingLayer.h BuildingLayer::Inst, 48 bytes, three float4 rows):
+// THE WALK'S INSTANCES (scene/BuildingLayer.h BuildingLayer::Box, 48 bytes, three float4 rows),
+// WRITTEN BY THE GPU (BuildingsClassify.hlsl, 2026-10-15): the walk names its nodes, the classify
+// pass expands each node's stand into the three forms' lists -- boxes, then shapes, then points,
+// packed -- and writes their counts and the draws' indirect arguments into the buffer's own
+// HEADER (kWalkHeader rows), so a draw reads its first row and its count from here and the CPU
+// never knows how many:
+//   row 0  nBoxes, nShapes, nPoints, cap     the counts (cap: the records the walk sent)
+//   row 1  the boxes' mesh dispatch (x, y, 1)     ExecuteIndirect's arguments
+//   row 2  the shapes' mesh dispatch (x, 1, 1)
+//   row 3  the points' draw (n, 1, 0, 0)
+//   row 4  the boxes' vertex draw (36 n, 1, 0, 0)   (a device without mesh shaders)
+//   row 5  the write pass's running cursors
+// A record:
 //   row 0  c.xyz, alpha      the centre (a box) or the ground under the centroid (a shape), metres
-//                            from the walk's origin; the fade-in alpha
+//                            from the walk's origin; alpha 1 (opaque)
 //   row 1  q                 THE ATTITUDE AS ONE ROTOR: east, up and north are q acting on the flat
 //                            frame's x, y and z (a right-handed triple) -- one object in place of
 //                            three unit vectors
@@ -89,6 +101,10 @@ VsOut VsMain(uint vid : SV_VertexID) {
 // flush it to zero) and reinterpreted where a float is meant.
 StructuredBuffer<uint4> gWalk : register(t0, space0);
 StructuredBuffer<uint4> gShapePool[] : register(t0, space7);   // the heap's buffers (gWorlds' range)
+static const uint kWalkHeader = 8u;
+// A form's count and its first row: 0 the boxes, 1 the shapes, 2 the points.
+uint FormCount(uint f) { const uint3 n = gWalk[0].xyz; return f == 0u ? n.x : (f == 1u ? n.y : n.z); }
+uint FormBase(uint f) { const uint3 n = gWalk[0].xyz; return kWalkHeader + (f == 0u ? 0u : (f == 1u ? n.x : n.x + n.y)) * 3u; }
 
 struct Inst {
     float3 c; float alpha;
@@ -121,11 +137,12 @@ static const uint3 kBoxTris[12] = {
 [numthreads(128, 1, 1)]
 void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut verts[128], out indices uint3 tris[192]) {
     const uint b0 = (gid.x + gid.y * 65535u) * 16u;   // past 65535 groups the dispatch takes a second row
-    const uint n = b0 < gBdMesh.y ? min(16u, gBdMesh.y - b0) : 0u;
+    const uint nB = FormCount(0u);
+    const uint n = b0 < nB ? min(16u, nB - b0) : 0u;
     SetMeshOutputCounts(n * 8u, n * 12u);
     const uint bi = gi >> 3, corner = gi & 7u;
     if (bi >= n) return;
-    Inst b = ReadInst(gBdMesh.x + (b0 + bi) * 3u);
+    Inst b = ReadInst(FormBase(0u) + (b0 + bi) * 3u);
     b.c = Rotate(gBdWorld, b.c);
     b.q = QMul(gBdWorld, b.q);
     const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
@@ -146,7 +163,7 @@ void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut v
 
 // ...and the same boxes through the vertex stage where there are no mesh shaders (36 vertices a box).
 VsOut VsBox(uint vid : SV_VertexID) {
-    Inst b = ReadInst(gBdMesh.x + (vid / 36u) * 3u);
+    Inst b = ReadInst(FormBase(0u) + (vid / 36u) * 3u);
     b.c = Rotate(gBdWorld, b.c);
     b.q = QMul(gBdWorld, b.q);
     const float3 E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));
@@ -176,7 +193,7 @@ VsOut VsBox(uint vid : SV_VertexID) {
 // gives the walls it does not draw (Globe.hlsl PsSurface), so a suburb is lit the same whether it
 // stands as points, as boxes or as the field. PsMain lights it as any face.
 VsOut VsPoint(uint vid : SV_VertexID) {
-    Inst b = ReadInst(gBdMesh.x + vid * 3u);
+    Inst b = ReadInst(FormBase(2u) + vid * 3u);
     b.c = Rotate(gBdWorld, b.c);
     b.q = QMul(gBdWorld, b.q);
     const float3 U = Rotate(b.q, float3(0, 1, 0));
@@ -224,8 +241,8 @@ groupshared uint sScanE[64], sScanT[64];
 void AsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
     const uint inst = gid.x * 64u + gi;
     uint edges = 0u, tris = 0u;
-    if (inst < gBdMesh.y) {
-        const uint addr = gWalk[gBdMesh.x + inst * 3u + 2u].x;
+    if (inst < FormCount(1u)) {
+        const uint addr = gWalk[FormBase(1u) + inst * 3u + 2u].x;
         const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
         const uint nV = w0 & 0xFFFFu, flags = (w1 >> 8) & 0xFFu;
         edges = (flags & 4u) ? 4u * (max(nV, 1u) - 1u) : nV;   // a ribbon of n points: n - 1 segments, four faces each
@@ -282,7 +299,7 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
     const uint s = s0 + gi;
     const uint k = InstanceOf(pay, roof, s);
     const uint local = s - (roof ? pay.triStart[k] : pay.edgeStart[k]);
-    Inst b = ReadInst(gBdMesh.x + (pay.instBase + k) * 3u);
+    Inst b = ReadInst(FormBase(1u) + (pay.instBase + k) * 3u);
     b.c = Rotate(gBdWorld, b.c);
     b.q = QMul(gBdWorld, b.q);
     const float3 c = b.c, E = Rotate(b.q, float3(1, 0, 0)), U = Rotate(b.q, float3(0, 1, 0)), N = Rotate(b.q, float3(0, 0, 1));

@@ -781,6 +781,9 @@ const Schema& BuildingsLayerSchema() {
             .Bind("pageMB", kBuildings.pageMB, Q::Dimensionless, "1",
                   "the tree's loaded pages' budget on the CPU; over it, the page worth the fewest pixels on screen "
                   "goes first, and never to make room for one worth fewer (the coarse levels are so the floor)", R)
+            .Bind("standMB", kBuildings.standMB, Q::Dimensionless, "1",
+                  "the stands' record pool on the GPU: every building a landed stand holds, 64 bytes each, written once; "
+                  "a walk names ranges of it and the GPU decides each record's form. Full: a stand waits for room", R)
             .Bind("marginDeg", kBuildings.marginDeg, Q::Angle, "deg",
                   "the walk's cone reaches this far past the view's edge, so what a turn brings into view has been "
                   "asked for and stood already", R)

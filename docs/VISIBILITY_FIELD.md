@@ -120,6 +120,8 @@ FORMS (section 7): the same buildings, each as the cheapest form its size on scr
 1. **The air term in the walk** (built): section 5.
 2. **The three forms** (built; the lift of section 6 tried and set aside): section 7 -- a point
    under boxPixels, the box to shapePixels (8), the mesh above; opaque at every size.
+   The walk's per-building work moved to the GPU and its stand asks made a list (built): section 8
+   -- the walk 84 -> 16 ms at the city, O(nodes visited).
 3. **A height lane in the building tree** (the planet tree rebuilt with each node's tallest
    building; hours, every core): then the lift closes SUBTREES, not just emits, and the walk's
    visits fall with the boxes. The gate: nodes visited and the walk's ms at the city and 30 km,
@@ -231,3 +233,113 @@ showing, the walk unchanged. What it changed: the still on 17 % of the city's pi
 suburbs stand as single lit points where they stood as one- and two-pixel boxes, and nothing
 fades: a building is there or not. The walk's own cost (85-125 ms a walk on the pool) is
 untouched by the form; that is the height lane's and the field's (section 4).
+
+## 8. The walk O(nodes): the per-building work moved to the GPU (2026-10-15)
+
+The owner, after the three forms: does "simple" fit the structure, or is it O(N) where it should
+be O(log n)? It was O(N): the walk's `visit` looped over every building of every stand it reached,
+decided each one's form in doubles, copied a fresh 48-byte record per building per walk, sorted
+the lot far to near and filled an upload buffer -- 85-125 ms a walk at Tokyo city on the pool --
+while the GPU did the same N in under a millisecond. The structural form is CPU work bounded by
+what the walk VISITS (nodes) and per-instance work on the GPU. This section builds it, and finds
+on the way that the walk's time was somewhere else.
+
+**The objects.** A stand's buildings are written ONCE, when the stand lands, as 64-byte records
+into a persistent pool on the GPU (`BuildingLayer::StoodRec`; `layers.buildings.standMB`, 256 MB
+= 4.2 M records; free runs taken best-fit and given back coalesced -- `Ranges` -- so a stand of
+three records sits beside one of three thousand with no slot size to waste). A record is the Box
+the draw stages read plus what the per-building law needs: its radius rho, the centroid's height
+over the ground zc, its shape's pool address, its heading and its detail cell. It is stated about
+the STAND'S OWN CENTRE -- a translator per node -- so it is small floats wherever the node stands,
+and the walk's origin can move without touching it; the walk's node entry carries the stand's
+centre about the walk's origin, the difference taken in doubles and cast once, and the pass
+composes the two. A fold is a record that claims the size of its node (rho = +inf); a box that
+stands nothing claims none (rho = 0): one law, no special case for either. The shape's ground
+frame is the box's rotor with the heading taken back out (a rotor about up by -heading, applied
+first: `QMul(q, (0, sin h/2, 0, cos h/2))`); the stand checks that product against the ground
+frame on the first 32 shaped buildings of a run and logs a disagreement over 1e-3 (none seen).
+
+**The walk** (`Walk`): per visited node that has something to draw it emits ONE entry of 32 bytes
+(`NodeEntry`): the stand's centre about the origin, its first record in the pool, which parts are
+drawn (the own fold until the buildings stand, the descendants' fold while their page is on its
+way, the buildings), how many buildings lie within the node's size bound -- the page ranks a
+node's buildings largest first, so that bound is one `partition_point`, the walk's O(log) share
+of the per-building law -- and the air's factor 1/T at the node. No per-building loop, no copy,
+no sort: every form is opaque and depth tested, so the order the pass writes is as good as any.
+
+**The pass** (`shaders/BuildingsClassify.hlsl`, `BuildingLayer::Classify`), recorded once when a
+walk lands, never per frame: one thread a record, its node found by a binary search over the
+list's running counts, the law the walk applied before moved unchanged -- drawn when its diameter
+through the air covers lodPixels; its own shape from shapePixels, else its box, a point under
+boxPixels; not drawn when its detail cell's prisms are -- and the 48-byte instance appended to
+that form's list. Four dispatches on the walk's one buffer: clear the header, count each form,
+write the lists' bases and the draws' indirect arguments, write the records (the two classifying
+passes are one pure function of the same inputs, so they agree record for record). The draw
+stages (`MsBox`, `AsShape`/`MsShape`, `VsPoint`, `VsBox`) read their first row and their count
+from the buffer's own header (`FormBase`, `FormCount`); `DrawSolids` binds the buffer and calls
+`ExecuteIndirect` through two command signatures (a mesh dispatch, a draw) and never knows how
+many. The buffer's first row is copied to a readback ring and read three frames on, so the walk's
+log line still says what the GPU drew of what it sent, and the end-of-run line the settled set.
+
+**The stand's lifetime.** A stand is published (its node's atomic pointer set) by Simulate when
+its records are recorded for the GPU, not by the job that made it, so a walk that reads a stand
+names records the pass will find. The stand it replaces, and every stand of a dropped page, gives
+its range back once nothing holds it (a walk holds the stands it named until its pass is
+recorded) and kRetireFrames on. `Stood` no longer carries its buildings on the CPU at all.
+
+**Where the walk's time was** (found with the instrument this adds to the walk's line: the visit
+split into the coarse levels, the subtrees' drain on its threads, and the merge). With the
+per-building work gone the walk was NOT faster: 83.9 -> 88.7 ms at the city. The visit's 79 ms
+were 1 ms of roots, 18 ms of draining 205k nodes on 8 threads, and 60 ms of MERGE -- the stand
+asks, keyed per node in a `std::map` and merged map into map, ~100k entries a walk while the
+stands' stream is saturated (it makes 512 a frame; the walk asks for every visited node without a
+stand). A node is visited once per walk, so the map was needless: the asks are a list, appended.
+That was the cost; the per-building loop was never where the time went. Both changes stand.
+
+**Lines.** +877 / -369 outside docs (the kernel 148 of them; the HAL's additions -- a UAV
+buffer, a mapped readback buffer, a command signature, ExecuteIndirect, a root UAV -- and the
+profiler's `LastMs`); the walk's emit lambdas, the sort, the upload copy, the CPU copy of the
+instances for a lost device's report and `Stood::blds` are gone.
+
+**Measured.** Before = fbccee7 (the sibling worktree's binary and its shaders); after = this
+branch. Stills `--set capture.headless=true --set capture.frames=300 --set hud.fps=false
+--scale 0 --settle-exact`, Tokyo's clock pinned at 2026-08-28T07:30Z; `--gpu-time` over 600
+frames at the city, unheld. The walk's line is the settled one (202k nodes visited at the city:
+before's 50th walk at frame 185, after's 100th at frame 227 -- the walks come faster now); the
+harbour's is the 50th walk of each (125k / 128k nodes).
+
+| | Tokyo city | | harbour | | Newburyport market | |
+|---|---|---|---|---|---|---|
+| | before | after | before | after | before | after |
+| the walk, settled | 83.9 ms (visit 71.0, sort 0.9, buffers 0.9) | **15.8** (visit 14.7: roots 1.5, drain 8.0, merge 5.2; buffers 0.1) | 45.4 | **12.7** | | |
+| the walk, instrumented before the ask list | | 98.8 (visit 79.1: roots 1.2, drain 18.3, merge 59.6) | | | | |
+| nodes named / records sent, settled | | 20,311 / 270,068 | | 18,416 / 117,505 | | 117 / 440 |
+| drawn, settled (the GPU's count) | 64,300 boxes + 3,062 shapes (points not counted) | 64,917 + 3,062 + 229,024 points | 21,200 + 2,720 | 21,189 + 2,720 + 90,963 | 0 + 0 | 0 + 0 + 0 |
+| buildings.classify (GPU, on landing frames) | | 0.11 ms mean, 0.31 max | | | | |
+| buildings on the GPU (mean) | 3.69 ms (boxes 1.12, shapes 0.35, points 0.55) | 4.26 (1.20, 0.35, 0.77) | | | | |
+| mean frame (unheld, 590 frames) | 20.28 ms (GPU p95 26.3) | 20.54 (GPU p95 19.9) | 24.66 (section 7) | 23.87 | | 12.78 |
+| the still vs before | | 0.82 % px (d over 1); A/A of the after binary 1.29 % | | 0.008 % px | | bit-identical |
+
+What it bought: the walk at the city 84 -> 16 ms and at the harbour 45 -> 13, with the CPU's
+per-building work gone and the stand asks a list; the walk's buffers 0.9 -> 0.1 ms; the sort
+gone. The pass costs 0.1 ms on the frames a walk lands. The settled set is the same: the shapes
+equal (3,062 and 2,720), the boxes within 1 % (the stream lands its pages in a different order
+each run, and the forms' counts follow). The frame's mean is within the stream's noise: the
+buildings' GPU row at the city is 0.6 ms more because the walks come three times as often now
+(111 against 64 in 300 frames: a landing re-walks the eye every 15 frames, and a 16 ms walk is
+always done by then) and the drawn set reaches its settled size sooner -- 229k points drawn at the
+end against a run that counted none; the points row is where the 0.2 ms are.
+
+What it changed: the city's still on 0.8 % of its pixels, scattered single pixels in the far
+field where a building sits at a form's threshold (the pass decides in floats where the walk
+decided in doubles) -- and the same binary differs from itself by 1.3 % there, the stream's own
+order (the sibling note measured 0.3-6 % at Tokyo); the harbour on 115 pixels; the Newburyport
+market bit-identical.
+
+Open: the drain is 8 ms for 202k nodes visited -- the visit itself is now the walk, and that is the
+height lane's and the field's (section 4, steps 3-4), unchanged by this. The records a walk sends
+(270k at the city for 268k drawn) are bounded by the node's nearest distance, looser than each
+building's own; the buffer is cap x 48 bytes a walk. A lost device's report (`DumpChunk`) now
+says what each walker sent, not which instance the GPU stopped in. The stands' stream is
+saturated for the whole of a 300-frame run at the city (512 a frame, 196k made): its order and
+its rate are the next cost on the pool.
