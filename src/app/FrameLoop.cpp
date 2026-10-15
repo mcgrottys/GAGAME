@@ -3523,7 +3523,8 @@ bool FrameLoop::Frame() {
                     resMgr.Reload(waveT);   // F13: the held tiles hold until their replacements land
                     m_waveStaleSince = frame;   // the instrument: how long old pages stay drawn
                     m_waveStaleAt = simUnix;
-                    waveField->Publish();   // ONE SWAP: the twin and the bank's table flip with the pages
+                    waveField->PublishKey(wavePendingKey);   // ONE SWAP: the twin and the bank's table flip with
+                                                             // the pages -- the field they were painted from
                     Log("[wave] bucket %016llx -> tree %s: %u tiles prefilled (%u planes, "
                         "every mip) in %.2f s on a worker -- the frame did not wait",
                         static_cast<unsigned long long>(wavePendingKey),
@@ -3548,11 +3549,17 @@ bool FrameLoop::Frame() {
                     const ColorFrame wf = waveFrame.color;
                     WaveFieldSource* wsrc = waveSrc.get();
                     const uint32_t planes = wavePendingPlanes;
+                    // A BLEND's pages live in memory only (sim/WaveField.h): a root of its own under mem:,
+                    // given back when the tree is replaced; a bucket's solve keeps its tree on disk.
+                    static std::atomic<uint32_t> s_memTree{0};
+                    const std::string root = waveField->Next()->transient
+                                                 ? "mem:\\wave." + std::to_string(s_memTree.fetch_add(1))
+                                                 : std::string();
                     Threads().Submit(Lane::Long, "wave.prefill",
                                      [&wavePending, &wavePrefillDone, &wavePendingTiles,
-                                      &wavePendingSec, wf, wsrc, planes, tx0, ty0, tx1, ty1]() {
+                                      &wavePendingSec, wf, wsrc, planes, tx0, ty0, tx1, ty1, root]() {
                         const auto tp0 = Clock::now();
-                        auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4);
+                        auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4, nullptr, root);
                         wavePendingTiles = fresh->Prefill(wf, 0u, planes, 0u, tx0, ty0, tx1, ty1);
                         wavePendingSec =
                             std::chrono::duration<double>(Clock::now() - tp0).count();
@@ -5436,6 +5443,9 @@ int FrameLoop::Finish() {
             static_cast<unsigned long long>(ht->tileReads.load()), double(ht->readUs.load()) / 1.0e6,
             static_cast<unsigned long long>(ht->transient.load()), ht->Held());
     }
+    // The trees in memory (tree_detail::MemStore: the wave field's blends), what they hold at the end.
+    Log("[tiletree] in memory at the end: %.1f MB (the wave field's blends between tide buckets; never on disk)",
+        double(tree_detail::MemBytes()) / 1048576.0);
     // The rasters read by being files: the windows their reads decoded and the time in the decoder.
     Log("[raster] %llu windows decoded this run, %.1f s in the decoder",
         static_cast<unsigned long long>(RasterFileSource::s_decodes.load()),

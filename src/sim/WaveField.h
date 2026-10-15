@@ -27,7 +27,9 @@
 
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -170,6 +172,14 @@ public:
         std::vector<uint8_t> atlas;       // packed RGBA8, (2*nx) x (rows*ny)
         GpuTable table{};
         uint64_t key = 0;
+        // THE EIKONAL PHASE, the real number the spinor was packed from (nComp planes of nx*ny,
+        // component-major): what a blend between two tide buckets interpolates (the stored spinor
+        // has lost its winding -- `wavefield`, the midpoint test). Empty for a blend, and for a
+        // cache entry written before 2026-10-14.
+        std::vector<float> phi;
+        // A BLEND between two buckets: kept in memory only, never cached -- its pages too
+        // (the frame loop builds its tree under a mem: root, compose/TileTree.h).
+        bool transient = false;
     };
     std::shared_ptr<const Solved> Live() const { return std::atomic_load(&m_live); }
     uint64_t LiveKey() const { return m_liveKey; }
@@ -182,13 +192,23 @@ public:
     // new table (+4 m readings), the hull on a sea the screen did not show.
     std::shared_ptr<const Solved> Next() const { return std::atomic_load(&m_next); }
     uint64_t NextKey() const { return Next() ? m_nextKey : m_liveKey; }   // the newest solve's key
+    // The field of a key the pages are painted from: next, live, or one offered before next (a prefill
+    // in flight when a newer field was offered -- the blend follows its nearer bucket by seconds).
     std::shared_ptr<const Solved> SolvedFor(uint64_t key) const {
         std::shared_ptr<const Solved> n = Next();
         if (n && n->key == key) return n;
         std::shared_ptr<const Solved> l = Live();
-        return (l && l->key == key) ? l : nullptr;
+        if (l && l->key == key) return l;
+        std::lock_guard<std::mutex> lk(m_offeredMx);
+        for (const auto& o : m_offered) {
+            if (o->key == key) return o;
+        }
+        return nullptr;
     }
     void Publish();   // next -> live (the table adopted), the frame the pages are swapped in
+    // THE ONE SWAP, BY NAME: the field whose pages were just swapped in goes live -- not whatever was
+    // offered since. A newer next stays next (the frame loop prefills it in turn).
+    void PublishKey(uint64_t key);
 
     // The hypervisor's step 9c AND the water a hull floats in: evaluate the SOLVED field at
     // a world point on the CPU (bilinear on the packed planes, spinor advanced by the same
@@ -311,15 +331,37 @@ public:
 
 private:
 
-    uint64_t BucketKey(double simUnix, const PartParam* parts, int nParts) const;
+    // `levelAt` (NAVD m): the key of the solve AT that level, the rest of the question the instant's;
+    // NaN, the instant's own level, bucketed.
+    uint64_t BucketKey(double simUnix, const PartParam* parts, int nParts,
+                       double levelAt = std::numeric_limits<double>::quiet_NaN()) const;
+    double LevelRaw(double simUnix) const;   // the still-water level at the window's centre, NAVD m
     void AdoptTable(const GpuTable& t);   // m_table = t with the display closure applied
     // The closure ITSELF, so the two readers of a solve cannot drift: AdoptTable bakes it
     // into m_table for the upload path, ProbeAt applies it to its own snapshot's table.
     GpuTable DisplayTable(const GpuTable& raw) const;
     void RefreshSweCurrent(Gpu& gpu, double simUnix, bool block);
-    void SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts);
-    Solved SolveNow(uint64_t key, double simUnix, const std::vector<PartParam>& parts) const;
-    void BuildInputs(double simUnix, const std::vector<PartParam>& parts, wavecore::Inputs& in) const;
+    Solved SolveNow(uint64_t key, double simUnix, const std::vector<PartParam>& parts,
+                    double levelAt = std::numeric_limits<double>::quiet_NaN()) const;
+    void BuildInputs(double simUnix, const std::vector<PartParam>& parts, wavecore::Inputs& in,
+                     double levelAt = std::numeric_limits<double>::quiet_NaN()) const;
+    // THE TIDE BETWEEN TWO BUCKETS (2026-10-14, Mark: 0.25 m, blends in memory only). The field
+    // drawn is the blend of the solves at the buckets either side of the live level, by its place
+    // between them in kBlendSteps steps; the two real solves are held here (with their phase), and
+    // a blend is made on a worker and never cached.
+    static constexpr int kBlendSteps = 8;            // 0.25 m / 8 = 3.1 cm of tide a step
+    static constexpr size_t kHeldMax = 3;            // real solves kept in memory (577 MB each)
+    std::shared_ptr<const Solved> Held(uint64_t key, bool needPhi) const;
+    void Hold(const std::shared_ptr<const Solved>& s);
+    // A real solve of `key` at `levelAt`, from the cache (with its phase) or solved.
+    std::shared_ptr<const Solved> Fetch(uint64_t key, double simUnix, const std::vector<PartParam>& parts,
+                                        double levelAt, bool needPhi) const;
+    // The blend of two real solves at weight w (0: a, 1: b): amplitude, wavenumber and the eikonal
+    // phase linear, the envelope linear; false where their fans differ (no blend has a meaning).
+    static bool BlendSolves(const Solved& a, const Solved& b, double w, uint64_t key, int nComp, Solved& out);
+    static uint64_t BlendKey(uint64_t k0, uint64_t k1, int step);
+    mutable std::mutex m_heldMx;
+    std::vector<std::shared_ptr<const Solved>> m_held;
     bool LoadCache(uint64_t key, Solved& out) const;
     void StoreCache(const Solved& s) const;
 
@@ -377,6 +419,9 @@ private:
     std::shared_ptr<const Solved> m_next;   // a finished solve whose pages are not yet on the GPU
     uint64_t m_nextKey = 0;
     void Offer(Solved&& s, const char* how);   // s -> next
+    void OfferShared(std::shared_ptr<const Solved> s, const char* how);
+    mutable std::mutex m_offeredMx;
+    std::vector<std::shared_ptr<const Solved>> m_offered;   // the last few offered, for SolvedFor / PublishKey
 
     // background solve plumbing: one worker at a time, result handed over by flag
     std::atomic<bool> m_solveRunning{false};   // the pool job is live (replaces joining m_worker)
@@ -388,7 +433,8 @@ public:
 private:
     std::atomic<bool> m_inFlight{false};
     std::atomic<bool> m_resultReady{false};
-    Solved m_result;                     // written by worker, read by main after the flag
+    std::shared_ptr<const Solved> m_result;   // written by worker, read by main after the flag
+    bool m_resultOffer = true, m_resultHold = false;   // what the main thread does with it
     // CPU copies for ProbeAt (the live field's planes)
 
 
