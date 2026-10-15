@@ -976,7 +976,7 @@ private:
     hal::Pso m_msPsoKeep;   // the mesh pipeline with the cache's two targets beside the frame's (PsMainKeep)
     hal::RootSignatureRef m_classRs;   // GlobeClass.hlsl: the classes from the pixels, its own root
     hal::Pso m_classPso;
-    Com<ID3D12Resource> m_classBuf;   // a uint a meshlet: 1 where a pixel of it had water
+    Com<ID3D12Resource> m_classBuf;   // a uint a meshlet, a range a view: GlobeClass.hlsl's two bits
     GpuBuffer m_classZero;
     uint32_t m_classUav = UINT32_MAX, m_classSrv = UINT32_MAX;
     D3D12_RESOURCE_STATES m_classState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;

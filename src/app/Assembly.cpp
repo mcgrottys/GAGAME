@@ -108,7 +108,11 @@ std::vector<RasterEntry> CompositeTiers(const scene::SourceProps& s) {
         snprintf(g, sizeof(g), ".t%g", t.Num("grain_m", 0));
         e.name = layer + g;
         e.kind = root.Str("kind") == "height" ? "height" : t.Str("kind");
-        e.over = s.over + t.Num("over", 0);
+        // The scene's `over` alone: a tier stacks by its grain among every height the scene reads
+        // (StackOrder, the coarser under the finer). A tier's own rank (`over`, which files made before
+        // 2026-10-14 carry) put the composite's 463 m gap fill over the scene's 13.7 m survey, and the
+        // river showed ETOPO's 15" blocks wherever the 3.4 m tier had no data (Mark's flats and wall).
+        e.over = s.over;
         e.feather = s.feather;
         e.unit = t.Str("unit", root.Str("unit").c_str());
         e.datum = t.Str("datum", root.Str("datum").c_str());
@@ -206,6 +210,7 @@ namespace ga::app {
 
 std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exitCode) {
     auto A = std::make_unique<Assembly>();
+    Compositor::s_tilePaint = S.streaming.tilePaint;   // tile at a time where a source can (the A/B key)
     // ---- The aliases: one reference per member, in order, under main()'s names, so the body
     // below is main()'s code unchanged. A closure that captures one of these by reference
     // captures the member it is bound to (CWG 2011) and stays valid after this returns.
@@ -524,6 +529,45 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             hstack.push_back(&srcEdits);
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
+        // THE HEIGHT TREE (M9as), built as soon as the channel stands: every CPU reader after this line --
+        // the solver's bed first -- reads it through Compositor::SampleHeight (compose/HeightTree.h), and
+        // the GPU's tenant below is fed from it. Before 2026-10-14 it stood after the solver's bed was
+        // realized, so that bed alone still read the stack.
+        if (S.streaming.colorTrees || S.Tool("tree-audit") || S.Tool("warm-trees") || S.Tool("pack-trees")) {
+            // The channel's own order, the one the CPU's stack reads (the height stack above:
+            // StackOrder, the hand edits last), so the GPU's bed and the CPU's are one over.
+            auto layers = BuildHeightStack(compositor, hgtCh);
+            const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
+            auto dc = std::make_shared<DomainCompositor>();
+            dc->SetBlend(DomainCompositor::Blend::LayeredOver);
+            std::string order;
+            for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
+                if (dc->Add(layers[i])) order += " " + std::string(layers[i]->Name()) + "(" +
+                                                 std::to_string(int(hch.height[i]->Info().cmPerPixel)) + "cm)";
+            }
+            heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
+            for (auto& l : layers) megaKeep.push_back(l);
+            Log("[height-tree] compose order, bottom to top (the channel's: `over`, the coarser "
+                "under the finer, the hand edits last):%s",
+                order.c_str());
+            heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
+            heightTree->Print();
+            // THE CPU'S READ OF IT (compose/HeightTree.h): the composed root on the pyramid, bound
+            // to the channel; Compositor::SampleHeight answers from it.
+            {
+                const Lattice pyr = hal::BlockBinding::Pyramid(256, 128);
+                compositor.BindHeightTree(hgtCh, std::make_shared<HeightTree>(heightTree->Reader(pyr),
+                                                                              heightTree->MagnifiedQuery(pyr), pyr));
+            }
+            if (S.Tool("fetch-probe")) {
+                exitCode = tools::RunFetchProbe(*compositor.HeightTreeOf(hgtCh), S.place.anchor[1], S.place.anchor[0]);
+                return nullptr;
+            }
+            if (S.Tool("height-tree-probe")) {
+                exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1]);
+                return nullptr;
+            }
+        }
     }
 
     // M6v/M8i: THE WATER ATLAS -- water parameters through the same registry. 18 phasor
@@ -573,7 +617,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
                 sweDomain.Place(lat0, lon0, lat1, lon1, cx, cy, planetR);
                 sweDomain.FillBed([&](double la, double lo, double resM) {
-                    return compositor.SampleHeightStack(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
+                    return compositor.SampleHeight(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
                 });
                 surface.StandAbout(sweDomain.latC, sweDomain.lonC, 2u);
             } else {
@@ -707,10 +751,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                                               S.water.swe.riverQFallback);
         sea->SetSwe(&swe);
     }
-    if (haveCurrents && currents.Field().Valid()) {
+    if (haveCurrents && currents.FieldAt(S.place.anchor[0], S.place.anchor[1]).Valid()) {
         auto gulfOwned = std::make_unique<GulfLayer>();
         gulf = gulfOwned.get();
-        gulf->Configure(shaderDir, &currents);
+        gulf->Configure(shaderDir, &currents, &currents.FieldAt(S.place.anchor[0], S.place.anchor[1]));
         gulf->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(gulfOwned));
     }
@@ -752,7 +796,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // the world.flat chart: the rings' places (PHASE C5)
-        waterBank->SetMask(&gisMask);      // the coast's water makes a ring tile wet
+        waterBank->SetMask(&gisMask);
+        A->bankMaskClose.jobs.push_back(waterBank->MaskJobsOf());      // the coast's water makes a ring tile wet
         waterBank->flatBed = S.water.bank.flatBed;
         waterBank->flatBedNavd = S.water.bank.flatBedNavd;
         if (S.water.bank.flatBed) {
@@ -778,6 +823,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
             waterBankB->SetMask(&gisMask);
+            A->bankMaskClose.jobs.push_back(waterBankB->MaskJobsOf());
             waterBankB->flatBed = S.water.bank.flatBed;
             waterBankB->flatBedNavd = S.water.bank.flatBedNavd;
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -794,6 +840,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankEye->SetBaseTexel(waterScene.bankTexelM);
             waterBankEye->SetSurface(&surface);
             waterBankEye->SetMask(&gisMask);
+            A->bankMaskClose.jobs.push_back(waterBankEye->MaskJobsOf());
             waterBankEye->flatBed = S.water.bank.flatBed;
             waterBankEye->flatBedNavd = S.water.bank.flatBedNavd;
             waterBankEye->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -890,26 +937,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // (the colour's slices, so the near-field land/sea gate and the normals ride
             // CUDEM truth).
             // M9as: fed by the height TileTree when --color-trees is on.
-            if (S.streaming.colorTrees || treeTool) {
-                // The channel's own order, the one the CPU's stack reads (the height stack above:
-                // StackOrder, the hand edits last), so the GPU's bed and the CPU's are one over.
-                auto layers = BuildHeightStack(compositor, hgtCh);
-                const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
-                auto dc = std::make_shared<DomainCompositor>();
-                dc->SetBlend(DomainCompositor::Blend::LayeredOver);
-                std::string order;
-                for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
-                    if (dc->Add(layers[i])) order += " " + std::string(layers[i]->Name()) + "(" +
-                                                     std::to_string(int(hch.height[i]->Info().cmPerPixel)) + "cm)";
-                }
-                heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
-                for (auto& l : layers) megaKeep.push_back(l);
-                Log("[height-tree] compose order, bottom to top (the channel's: `over`, the coarser "
-                    "under the finer, the hand edits last):%s",
-                    order.c_str());
-                heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
-                heightTree->Print();
-            }
             {
                 // M12 step 3e: THE DECLARATION (hal/Tenant.h). Slices 0..5 the cube faces on
                 // the 16k quad-sphere, then the eye's windows; R16F metres NAVD88 in 256x128
@@ -1024,8 +1051,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             DayCaps dayCaps;   // the scene's day caps (streaming.dayTiles / dayBytes)
             dayCaps.tiles = S.streaming.dayTiles;
             dayCaps.bytes = DayCaps::FromScene(S.streaming.dayBytes);
-            if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps)) {
+            if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps, S.streaming.offline)) {
                 googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
+                // THE NETWORK OFF THE LOADERS (core/TileProviders.h StartNetwork): a window's paints
+                // never wait on a fetch. A headless still keeps the fetch in the paint: its frames
+                // must see the tiles they ask for.
+                const int fetchThreads = S.streaming.fetchThreads >= 0 ? S.streaming.fetchThreads
+                                                                       : (S.capture.headless ? 0 : 4);
+                googleTiles.StartNetwork(fetchThreads, [&resMgr](int t, const TileRequest& r) { resMgr.Again(t, r); });
                 std::vector<ColorSource*> colorStack{&srcGoogle};
                 size_t bedLayer = SIZE_MAX, maskLayer = SIZE_MAX;
                 // M7x (user catch): the ortho was painting its capture-day WATER over the
@@ -1054,6 +1087,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
                     colorStack.push_back(&srcBed);
                     bedLayer = colorStack.size() - 1;
+                }
+                if (S.Tool("paint-ab")) {   // every colour source's two paints, byte for byte
+                    int bad = 0;
+                    for (ColorSource* c : colorStack) bad |= tools::RunPaintAB(*c, S.place.anchor[1], S.place.anchor[0]);
+                    exitCode = bad;
+                    return nullptr;
                 }
                 // M9ak: THE GATE. The user's rule: "the GIS mask gates, the height band
                 // refines". srcBed is the WATER authority and its alpha is a height band,
@@ -1344,15 +1383,20 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // divergence and vorticity are properties of the COMPOSITE -- taking them
             // per-source and blending afterwards would average two different derivatives.
             if (swe.Ready() && bathy.Ready()) {
-                LoaderRegistry freg;
-                freg.Register("json", CurrentFieldLoader::Open);
-                if (auto cld = freg.Open(S.data.currents)) {   // the scene's currents, as the model reads them
-                    auto ras = std::make_shared<RasterSource>(std::move(cld), 0);
+                // EVERY field of the scene's currents, coarsest first, so the finer stand over the coarser
+                // where they overlap and a page no field reaches composes nothing (CurrentFieldLoader::
+                // OpenAll). A composite holds many regions' fields; one of them -- its finest anywhere, or
+                // the one holding the solver's anchor -- is not the solver's whole box.
+                if (auto fieldLoaders = CurrentFieldLoader::OpenAll(S.data.currents); !fieldLoaders.empty()) {
                     DomainCompositor fc;
                     LevelLadder lad;
                     lad.level0MetersPerTexel = swe.CellM();
                     fc.SetLadder(lad);
-                    fc.Add(ras);
+                    std::vector<std::shared_ptr<RasterSource>> rasters;
+                    for (auto& cld : fieldLoaders) {
+                        rasters.push_back(std::make_shared<RasterSource>(std::move(cld), 0));
+                        fc.Add(rasters.back());
+                    }
 
                     GradeBank& vb = swe.VelGradBank();
                     uint32_t wrote = 0;
@@ -1408,20 +1452,39 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         vb.UploadLevel(gpu, lvl, rgba.data(), w * 4 * sizeof(float), w, h);
                         ++wrote;
                     }
-                    Log("[compose] grad(GoMOFS) -> swe.velgrad slice 0 levels 3..%u: %u "
+                    Log("[compose] grad(current, %zu fields) -> swe.velgrad slice 0 levels 3..%u: %u "
                         "composed (loader -> source -> page -> bank)",
-                        vb.MipCount() - 1, wrote);
+                        rasters.size(), vb.MipCount() - 1, wrote);
 
                     // ---- SLICE 1: THE REGION. Same sources, same compositor, a page over
                     // the REGION's own ground instead of the window's. This is what makes
                     // the wind fallback unnecessary: outside the solve there is now a page
                     // of the SAME quantity in the SAME units, so the consumer composites
                     // two pages of one bank instead of blending in a foreign field.
-                    if (vb.Slices() > 1) {
+                    // The region is the union of the fields that reach the solver's box -- not every
+                    // field of a composite, whose union may span a coast -- and none reaching it is
+                    // no region.
+                    const SweDomain& sdr = swe.Domain();
+                    double rl0 = 1e9, ra0 = 1e9, rl1 = -1e9, ra1 = -1e9;
+                    for (const auto& r : rasters) {
+                        const GeoRef& g = r->Ref();
+                        const double l0 = g.originX, l1 = g.originX + g.scaleX * g.width;
+                        const double a0 = (std::min)(g.originY, g.originY + g.scaleY * g.height);
+                        const double a1 = (std::max)(g.originY, g.originY + g.scaleY * g.height);
+                        if (l1 < sdr.lon0 || l0 > sdr.lon1 || a1 < sdr.lat0 || a0 > sdr.lat1) continue;
+                        rl0 = (std::min)(rl0, l0); rl1 = (std::max)(rl1, l1);
+                        ra0 = (std::min)(ra0, a0); ra1 = (std::max)(ra1, a1);
+                    }
+                    if (vb.Slices() > 1 && rl1 > rl0 && ra1 > ra0) {
                         // Every level, not just the floor: an upload into an unmapped tile
                         // is discarded and the page would simply not be there.
                         vb.MapAllLevels(gpu, 1);
-                        const GeoRef& rg = ras->Ref();
+                        GeoRef rg;
+                        rg.originX = rl0;
+                        rg.originY = ra0;
+                        rg.width = rg.height = 1;
+                        rg.scaleX = rl1 - rl0;
+                        rg.scaleY = ra1 - ra0;
                         uint32_t rwrote = 0;
                         // Start where the bank's texels approach the source's own scale.
                         // Differentiating a field upsampled 8x invents structure that is
@@ -1479,7 +1542,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         globe->SetVelGradRegion(
                             rg.originX, rg.originY, rg.scaleX * double(rg.width),
                             rg.scaleY * double(rg.height));
-                        Log("[compose] grad(GoMOFS) -> swe.velgrad slice 1 (REGION): %u "
+                        Log("[compose] grad(current) -> swe.velgrad slice 1 (REGION): %u "
                             "levels over %.2f x %.2f deg -- the wind fallback is now "
                             "unnecessary",
                             rwrote, std::abs(rg.scaleX) * rg.width,
@@ -1559,11 +1622,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
-                              "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles",
+                              "gis-dump", "gis-sweep-test", "height-tree-probe", "fetch-probe", "ingest", "paint-ab", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "roads-probe", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
-                              "water-map", "wave-converge", "wave-map", "wave-recheck"}});
+                              "water-map", "wave-blend-test", "wave-converge", "wave-map", "wave-recheck"}});
             scene::WriteRegistries("docs/registries.json", extra);
         }
         // The survey pack loads whenever it exists: the land MASKS are the default
@@ -1648,7 +1711,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 [comp, ch, g0 = surface.cube.GroundRes(0)](double resM) -> std::unique_ptr<PlaceField> {
                     if (ch < 0) return nullptr;
                     const uint32_t rung = uint32_t(std::clamp(int(std::ceil(std::log2(g0 / (std::max)(resM, 1e-3)))), 0, 15));
-                    return std::make_unique<HeightPage>(comp, ch, rung);
+                    return std::make_unique<HeightPage>(comp, ch, rung, true);   // the stack: never a paint on Io
                 });
             if (!bl->lod.empty()) {   // the folded tree (docs/BUILDING_LOD.md): a missing one is named, not fatal
                 auto lodf = std::make_shared<BuildingLodFile>();

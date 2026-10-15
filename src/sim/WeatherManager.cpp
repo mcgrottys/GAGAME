@@ -83,7 +83,7 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         SweDomain dom;
         dom.Place(w.box[0], w.box[1], w.box[2], w.box[3], w.nx, w.ny, m_planetR);
         dom.FillBed([&](double la, double lo, double resM) {
-            return m_comp->SampleHeightStack(m_hgtCh, la * kD2R, lo * kD2R, resM);
+            return m_comp->SampleHeight(m_hgtCh, la * kD2R, lo * kD2R, resM);
         });
         // M9ar: NO per-window bed texture. The owned solver reads the height megatexture --
         // the same page slice the Merrimack solver, the sea shader and the water bank read.
@@ -389,7 +389,10 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
 
     // ---- the bed: the one composed stack, provenance = the topmost covering source.
     if (m_comp && m_hgtCh >= 0) {
-        s.bedNavd = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad, groundResM);
+        // RESIDENT: a hull asks this on the frame thread every step (TreeWater::SlowAt, at 1 m); the tree's
+        // blocking read painted each cold tile there -- 2.8 s of the frame's waits over four travels
+        // (2026-10-15). The finest level held answers now; the step after a landing reads the finer one.
+        s.bedNavd = m_comp->SampleHeightResident(m_hgtCh, latRad, lonRad, groundResM);
         s.bedSrc = "earth.height base";
         const auto& ch = m_comp->ChannelAt(m_hgtCh);
         for (const auto* src : ch.height) {

@@ -40,6 +40,8 @@ public:
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                  uint8_t rgba[4]) override;
     bool Refusals(uint32_t& refused) const override;
+    bool PaintTile(const ColorFrame& frame, const TileRequest& r, double groundResM, PaintCtx& ctx,
+                   std::vector<uint8_t>& out, bool& complete, bool& anyCover, bool& fullCover) override;
     // A4: its finest, the cap's pixel on the ground at the box's centre (Pixel reads that zoom
     // below it, and a finer tile is the level above magnified). Its coarser levels stay its own
     // zooms, folded as M9bb folds them (HIERARCHY 4.20: a source with levels of its own keeps them).

@@ -304,6 +304,7 @@ void Compositor::PaintSourceTile(ColorSource* src, const ColorFrame& frame, cons
     const double groundRes = frame.GroundRes(r.mip);
     PaintCtx ctx;
     src->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax, groundRes, ctx);
+    if (s_tilePaint && src->PaintTile(frame, r, groundRes, ctx, out, complete, anyCover, fullCover)) return;
     out.assign(65536, 0);
     complete = true;
     anyCover = false;
@@ -564,6 +565,22 @@ float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,
         h += (m - h) * w;
     }
     return h;
+}
+
+float Compositor::SampleHeight(int channel, double latRad, double lonRad, double groundResM) const {
+    if (HeightTree* t = m_channels[channel].heightTree.get()) return t->Sample(latRad, lonRad, groundResM);
+    return SampleHeightStack(channel, latRad, lonRad, groundResM);
+}
+
+float Compositor::SampleHeightResident(int channel, double latRad, double lonRad, double groundResM,
+                                       bool* provisional) const {
+    if (HeightTree* t = m_channels[channel].heightTree.get()) return t->SampleResident(latRad, lonRad, groundResM, provisional);
+    return SampleHeightStack(channel, latRad, lonRad, groundResM);
+}
+
+uint64_t Compositor::HeightLanded(int channel) const {
+    const HeightTree* t = m_channels[channel].heightTree.get();
+    return t ? t->Landed() : 0u;
 }
 
 void Compositor::SampleFieldStack(int channel, double latRad, double lonRad,

@@ -119,6 +119,10 @@ public:
         const double ang0 = dirB * kDirBucketDeg * 3.14159265358979 / 180.0;
         constexpr double kD2R = 3.14159265358979 / 180.0;
         const double lat0 = q.lat * kD2R, lon0 = q.lon * kD2R;
+        // THE STACK, NOT THE TREE (2026-10-15): the tree's ray (HeightTree::MaxAlongRay) was 1.5x faster
+        // where the tree was warm, but a node read on the frame thread (ExposurePage, a hull) and on the
+        // loaders paints every cold tile its five 50 km rays cross -- at each place a travel reached, 3.2 s
+        // a page on the loaders and 7.3 s of the frame thread's waits.
         const float e0 = m_comp->SampleHeightStack(m_hgtCh, lat0, lon0, q.groundM);
         out.c[0] = 1.0f;
         out.weight = 1.0f;

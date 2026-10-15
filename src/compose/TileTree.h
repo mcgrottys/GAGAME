@@ -68,6 +68,7 @@
 
 #include <map>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "compose/ColorStackSource.h"
@@ -106,6 +107,64 @@ inline IoTally& Io() {
     return t;
 }
 
+// A TREE IN MEMORY (2026-10-14): a root under "mem:" keeps its tiles and markers in this process --
+// the same paths, the same reads and writes, nothing on disk. The wave field's blends between two
+// tide buckets live there (sim/WaveField.h: Mark, "keep blends in memory only"); a tree under one
+// drops its own entries when it is destroyed (TileTree::~TileTree).
+struct MemStore {
+    std::mutex mx;
+    std::unordered_map<std::string, std::shared_ptr<const std::vector<uint8_t>>> files;
+    size_t bytes = 0;
+};
+inline MemStore& Mem() {
+    static MemStore m;
+    return m;
+}
+inline bool IsMem(const std::string& path) { return path.size() >= 4 && path.compare(0, 4, "mem:") == 0; }
+inline void MemPut(const std::string& path, std::vector<uint8_t> data) {
+    MemStore& m = Mem();
+    auto p = std::make_shared<const std::vector<uint8_t>>(std::move(data));
+    std::lock_guard<std::mutex> lk(m.mx);
+    auto& slot = m.files[path];
+    if (slot) m.bytes -= slot->size();
+    m.bytes += p->size();
+    slot = std::move(p);
+}
+inline std::shared_ptr<const std::vector<uint8_t>> MemGet(const std::string& path) {
+    MemStore& m = Mem();
+    std::lock_guard<std::mutex> lk(m.mx);
+    auto it = m.files.find(path);
+    return it == m.files.end() ? nullptr : it->second;
+}
+inline void MemErase(const std::string& path) {
+    MemStore& m = Mem();
+    std::lock_guard<std::mutex> lk(m.mx);
+    auto it = m.files.find(path);
+    if (it == m.files.end()) return;
+    m.bytes -= it->second->size();
+    m.files.erase(it);
+}
+// Every entry under `prefix` (a tree's folder): what a destroyed memory tree gives back.
+inline size_t MemDropPrefix(const std::string& prefix) {
+    MemStore& m = Mem();
+    std::lock_guard<std::mutex> lk(m.mx);
+    size_t n = 0;
+    for (auto it = m.files.begin(); it != m.files.end();) {
+        if (it->first.compare(0, prefix.size(), prefix) == 0) {
+            m.bytes -= it->second->size();
+            it = m.files.erase(it);
+            ++n;
+        } else {
+            ++it;
+        }
+    }
+    return n;
+}
+inline size_t MemBytes() {
+    std::lock_guard<std::mutex> lk(Mem().mx);
+    return Mem().bytes;
+}
+
 inline uint64_t Fnv1a(uint64_t h, const std::string& s) {
     for (const char c : s) {
         h ^= static_cast<uint8_t>(c);
@@ -136,6 +195,13 @@ inline std::string Sanitize(const std::string& s) {
 // the tile it opened, and the reader gets a WHOLE OLD tile instead of a torn new one. It also
 // makes DropCachedAddress's deletes stop failing against a reader, which they could before.
 inline bool ReadTile(const std::string& path, std::vector<uint8_t>& out, size_t bytes = 65536) {
+    if (IsMem(path)) {
+        const auto p = MemGet(path);
+        if (!p || p->size() != bytes) { out.clear(); return false; }
+        out = *p;
+        ++Io().reads;
+        return true;
+    }
     threadaudit::ReadScope audit(path);
     const HANDLE h =
         CreateFileA(path.c_str(), GENERIC_READ,
@@ -200,6 +266,11 @@ inline float H2F(uint16_t h) {
 // TILES, and the first failure of the run is the only one they ever print.
 inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data,
                       bool loud = true) {
+    if (IsMem(path)) {
+        MemPut(path, data);
+        ++Io().writes;
+        return true;
+    }
     threadaudit::WriteScope audit(path);
     static std::atomic<uint32_t> seq{0};
     char stem[24];
@@ -281,6 +352,10 @@ inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data,
 // Touch(.fold) in FoldUp, where a reader between them sees neither -- is an ordering problem
 // and no atomic write fixes it.)
 inline void Touch(const std::string& path) {
+    if (IsMem(path)) {
+        MemPut(path, {});
+        return;
+    }
     threadaudit::WriteScope audit(path);
     std::ofstream f(path, std::ios::binary);   // zero bytes: the entry IS the record
     if (!f) {
@@ -290,12 +365,16 @@ inline void Touch(const std::string& path) {
 }
 inline bool Exists(const std::string& path) {
     ++Io().probes;
+    if (IsMem(path)) return MemGet(path) != nullptr;
     return GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
-inline void MakeDir(const std::string& path) { CreateDirectoryA(path.c_str(), nullptr); }
+inline void MakeDir(const std::string& path) {
+    if (!IsMem(path)) CreateDirectoryA(path.c_str(), nullptr);   // a memory tree has no folders
+}
 // Every folder on the way down to `path`, then `path` itself: a tree rooted outside
 // cache\trees (a scratch root) may name folders that do not exist yet.
 inline void MakeDirs(const std::string& path) {
+    if (IsMem(path)) return;
     for (size_t i = path.find('\\'); i != std::string::npos; i = path.find('\\', i + 1)) {
         if (i > 0 && path[i - 1] != ':') MakeDir(path.substr(0, i));
     }
@@ -313,12 +392,27 @@ inline std::string Backslashes(std::string s) {
 // Every unlink goes through here: DropCachedAddress deletes tiles on the PARENT node under no
 // lock, and a delete inside someone else's read is the same collision a torn write is.
 inline void Delete(const std::string& path) {
+    if (IsMem(path)) {
+        MemErase(path);
+        return;
+    }
     threadaudit::Deleted(path);
     DeleteFileA(path.c_str());
 }
 // The one wildcard lookup a stored reference costs: "<base>.ref-*" -> the suffix.
 inline bool FindRef(const std::string& base, std::string& childId) {
     ++Io().probes;
+    if (IsMem(base)) {
+        const std::string pre = base + ".ref-";
+        std::lock_guard<std::mutex> lk(Mem().mx);
+        for (const auto& [k, v] : Mem().files) {
+            if (k.compare(0, pre.size(), pre) == 0 && k.size() > pre.size()) {
+                childId = k.substr(pre.size());
+                return true;
+            }
+        }
+        return false;
+    }
     WIN32_FIND_DATAA fd{};
     HANDLE h = FindFirstFileA((base + ".ref-*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -518,6 +612,11 @@ public:
         tree_detail::MakeDir(m_root);
     }
 
+    // A tree in memory (a root under "mem:", tree_detail::MemStore) gives its tiles back when it goes.
+    ~TileTree() {
+        if (!m_parent && tree_detail::IsMem(m_root)) tree_detail::MemDropPrefix(m_root + "\\");
+    }
+
     // WHERE THE TREES LIVE when a root is built without a folder of its own. Set once, by the
     // Assembly from the scene's streaming.treeRoot, before the first tree exists; the loader
     // threads that build trees later only read it.
@@ -609,6 +708,19 @@ public:
         if (m_kids.empty()) return LeafTile(frame, tag, r, box, out, loc);
         return std::string(m_node->NodeKind()) == "gate" ? GateTile(frame, tag, r, box, out, loc)
                                                          : ComposeTile(frame, tag, r, box, out, loc);
+    }
+
+    // THE CPU'S READ (compose/HeightTree.h): a tile's bytes -- never a place, since the bytes are
+    // wanted in this process -- and which answer it is: 1 bytes, 0 nothing covers, 2 not now (a read
+    // that failed or could not be made yet; the reader must not keep it as an answer).
+    std::function<int(const TileRequest&, std::vector<uint8_t>&)> Reader(const ColorFrame& inherited) {
+        const ColorFrame frame = Resolve(inherited);
+        const std::string tag = frame.Tag();
+        EnsureFrame(tag);
+        return [this, frame, tag](const TileRequest& r, std::vector<uint8_t>& out) {
+            const Status st = Tile(frame, tag, r, out, nullptr);
+            return st == Status::Content ? 1 : st == Status::Void ? 0 : 2;
+        };
     }
 
     // The residency manager's view of this tree: a place if it can take one, else bytes, else
