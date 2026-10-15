@@ -490,6 +490,15 @@ struct RenderSection {
     bool keep = true;
     double keepSunGrainDeg = 0.01;
     double keepTideGrainM = 0.001;
+    // THE SUN'S RAY OVER THE GROUND (Globe.hlsl TerrainRay): the composed height field marched
+    // toward the sun from every lit point, so a hillside, a dune or a jetty shades what stands
+    // behind it. `shadowSteps` is the march's length in samples (0 = no terrain shadow),
+    // log-spaced from the pixel's own footprint to `shadowRangeM`.
+    int shadowSteps = 12;
+    double shadowRangeM = 8000.0;
+    // The water's mirror ray marched over the same field: where it meets land the reflection
+    // is that land, not the sky behind it. A test (2026-10-15), off until the owner's eye says.
+    bool reflectLand = false;
 };
 
 // THE DEBUG VIEWS of the globe's surface (shaders/DebugView.hlsl, GlobeLayer.h DebugView): the

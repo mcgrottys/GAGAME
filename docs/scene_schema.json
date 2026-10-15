@@ -231,7 +231,10 @@
     { "type": "render", "keys": [
       { "key": "keep", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "the globe's picture kept while its inputs stand: a kept frame composites the cached land and draws only the meshlets that had water (GlobeLayer.h keepOn)" },
       { "key": "keepSunGrainDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0.01, "reload": "hot", "doc": "the sun's grain for the kept frame: the globe is redrawn when the sun has moved by more" },
-      { "key": "keepTideGrainM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.001, "reload": "hot", "doc": "the tide's grain for the kept frame: the globe is redrawn when the water level has moved by more" }
+      { "key": "keepTideGrainM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.001, "reload": "hot", "doc": "the tide's grain for the kept frame: the globe is redrawn when the water level has moved by more" },
+      { "key": "shadowSteps", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 12, "reload": "hot", "doc": "the terrain shadow's march toward the sun, in samples over the composed height field (0 = none)" },
+      { "key": "shadowRangeM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 8000, "reload": "hot", "doc": "how far the terrain shadow's march reaches from the lit point" },
+      { "key": "reflectLand", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "hot", "doc": "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky" }
     ] },
     { "type": "debug", "keys": [
       { "key": "view", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "none", "names": ["none", "flat", "edges", "normals", "height", "depth", "meshlets", "albedo", "residency", "residency.height", "residency.landsea"], "reload": "restart", "doc": "the surface drawn as: the picture (none), flat grey, its triangles' size (one hue an octave about edgeRefM), its geometric normal in east/north/up, its height (hypsometric, a line every contourM), its distance (a log ramp), the meshlets, the raw colour, or what the residency lets the colour / height / land-sea mask read (shaders/ResidencyLens.hlsl)" },
@@ -422,7 +425,8 @@
       { "key": "root", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the trees folder (\"\" = cache\\trees)" },
       { "key": "ageDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 30, "reload": "restart", "doc": "a stamp older than this is STALE; an unstamped folder gets twice it" },
       { "key": "purgeDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 7, "reload": "restart", "doc": "purge deletes the retired batches older than this" },
-      { "key": "confirm", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "retire and purge act only when this is the root's full path as the listing printed it" }
+      { "key": "confirm", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "retire and purge act only when this is the root's full path as the listing printed it" },
+      { "key": "node", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "retire only this node's stale folders (wave.field, earth.color ...); \"\" = every node" }
     ] },
     { "type": "tool", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the one-shot mode (--tool name[:args])" },
