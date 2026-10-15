@@ -499,6 +499,11 @@ struct RenderSection {
     // The water's mirror ray marched over the same field: where it meets land the reflection
     // is that land, not the sky behind it. A test (2026-10-15), off until the owner's eye says.
     bool reflectLand = false;
+    // THE DRAWN BUILDINGS' SHADOW (shaders/TerrainRay.hlsli SunMapClear; BuildingLayer::RenderSunMap):
+    // the solids drawn about the eye, seen once more from the sun over a square this many metres a
+    // side about the view's ground focus, so a tower shades the street, the quay and the tower
+    // beside it with the sun's own penumbra. 0 = no map, and the buildings cast nothing.
+    double buildingShadowM = 2000.0;
 };
 
 // THE DEBUG VIEWS of the globe's surface (shaders/DebugView.hlsl, GlobeLayer.h DebugView): the

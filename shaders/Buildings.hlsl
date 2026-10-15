@@ -20,6 +20,11 @@ static float sLvlSkyEyeR = 6371000.0f;
 #define GA_SUN_DIR (sLvlSun)
 #define GA_SKY_UP (sLvlSkyUp)
 #include "Common.hlsli"
+// THE GROUND UNDER THE SUN (Compose.hlsli, TerrainRay.hlsli): a face asks the composed height field
+// whether a hill stands between it and the sun, and the sun map whether another building does --
+// the same two questions the globe's surface asks of the same rows (b2 is bound for every layer).
+#include "Compose.hlsli"
+#include "TerrainRay.hlsli"
 
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
@@ -404,7 +409,20 @@ float4 PsMain(VsOut i) : SV_Target {
         if (dot(n, i.rel) > 0.0f) n = -n;
         if (dot(n, up) > 0.9f) col *= 0.65f;   // kPalette[1] / kPalette[0]: the roof's shade of the wall's
     }
-    const float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
+    float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
+    // THE GROUND AND THE OTHER BUILDINGS between this face and the sun, by the globe's own law
+    // (Globe.hlsl PsSurface): the terrain march from the face's point at its pixel's grain, and the
+    // sun map of the drawn solids. Asked where the sun still reaches (a set sun or a face turned
+    // away needs no march), and of the eye's own world only: a window world's point is here in the
+    // true frame, pulled through its window, and its ground is addressed in its own -- the step that
+    // carries the march through a window is not taken yet.
+    if (depth == 0u && ndl > 0.0f) {
+        const float range = length(i.rel);
+        const float footM = range * gBdTime.z;   // a pixel's metres at this face
+        TerrainHit hit;
+        ndl *= TerrainRay(up, h, i.rel, 0u, GA_SUN_DIR, footM, ComposedHeightLod(range, gBdTime.z), Rb, false, hit) *
+               SunMapClear(i.rel, n);
+    }
     const float3 lit = col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f);
     // ...and seen through THE AIR IN FRONT OF IT, the ground's own law: a box 60 km off fades into
     // the same haze as the land under it, where it stood out at full contrast.

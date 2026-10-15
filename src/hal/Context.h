@@ -167,6 +167,8 @@ public:
     void Targets(D3D12_CPU_DESCRIPTOR_HANDLE rtv, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
         m_cl->OMSetRenderTargets(1, &rtv, FALSE, dsv);
     }
+    // A depth alone (a shadow map: BuildingLayer::RenderSunMap): no colour is written.
+    void DepthTarget(D3D12_CPU_DESCRIPTOR_HANDLE dsv) { m_cl->OMSetRenderTargets(0, nullptr, FALSE, &dsv); }
     void ClearColor(D3D12_CPU_DESCRIPTOR_HANDLE rtv, const float rgba[4]) {
         m_cl->ClearRenderTargetView(rtv, rgba, 0, nullptr);
     }

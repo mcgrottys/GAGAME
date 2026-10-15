@@ -508,6 +508,27 @@ already owns (no BLAS — the scene descriptions are our own quadtrees):
   air along the ray -- replaces the sky the mirror would have shown. The buildings' Boolean field
   (ALGEBRA bedalbedo: walls met per tan z) is asked of the sun's ray exactly as of the eye's, so
   the ground between the roofs is in the shade the roofs are not.
+- **The drawn buildings are the fourth occluder, by the same ramp** (`SunMapClear`,
+  TerrainRay.hlsli; `BuildingLayer::RenderSunMap`, 2026-10-15). The solids the buildings layer
+  draws for the eye's own world are drawn once more each frame, depth only, as the sun sees them:
+  an orthographic cast along the sun over a cube `render.buildingShadowM` on a side about the
+  eye's ground focus (the occluder grid's centre cell), 2048 texels a side, depth 1 at the sun's
+  face so the frame's GREATER test keeps what the sun meets first. The map's matrix rides on b2
+  (`gCsSunVP`), so the cast and every lookup read one set of bytes. A lit point's own ray is the
+  map's texel at its place: the sun's disc of half-angle kSunDiscR seen from the point is, on the
+  map, a disc of radius (depth difference) x kSunDiscR -- the map's side is its depth range, so
+  the two units are one -- and the share of the disc left clear is the share of taps over that
+  disc (Vogel's spiral, turned by a hash of the ground texel so it stands still under a moving eye)
+  that find nothing nearer the sun; the disc's radius comes from the mean depth of the blockers
+  found over the widest disc the map can hold an occluder in (PCSS: Fernando 2005). The receiver
+  is a PLANE: its slope on the map is its normal through the matrix's own columns, and every tap
+  is compared against the plane extrapolated to it, so a lit wall in the map does not shade itself
+  and no bias has to guess the slope. Land, the water at the quay and the buildings' own faces
+  ask it, each multiplying its sun term as it multiplies `TerrainRay`'s: one penumbra, the sun's,
+  for the planet, the ground and the towers. The knobs moved to b2 with it (`gCsShadow`), because
+  the buildings' faces now ask the terrain march too (Buildings.hlsl PsMain) and one buffer must
+  answer both askers; a window world's faces take the planet's shadow alone until the march is
+  carried through a window.
 - Foam whitens albedo (bank foam channel + churn memory); land takes imagery with the
   hand-edit rock override; sRGB pixels ship as captured (no re-grading — see priors).
 

@@ -48,6 +48,7 @@
 #include "sim/PlaceField.h"
 #include "compose/BuildingSolids.h"
 #include "scene/Layer.h"
+#include "compose/Compositor.h"   // ComposedSurfaceCb: the sun map's rows on b2
 
 #include <atomic>
 #include <chrono>
@@ -129,6 +130,21 @@ public:
     double m_marginDeg = 5.0;
 
     size_t ResidentCells() const { return m_cells.size(); }
+
+    // THE SUN MAP (scene render.buildingShadowM; shaders/TerrainRay.hlsli SunMapClear). The solids
+    // this layer draws for the eye's own world are drawn once more each frame, depth only, as the
+    // SUN sees them: an orthographic cast along the sun over a square `sideM` wide about `focus`
+    // (the eye's ground focus, flat frame), its depth the distance toward the sun over the same
+    // span, so a 2048-texel map a side holds the city at a metre. PlanSunMap (the frame loop, after
+    // the surface rows are filled) makes the cast from the camera and the sun and writes b2's rows
+    // (ComposedSurfaceCb::shadow.w, sunMapU, sunVP); Simulate records the pass. The map's centre is
+    // snapped to its own texel grid, so an eye moving within a texel moves no shadow edge. sideM
+    // <= 0: no map, the rows say none, and nothing is drawn.
+    void PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, const double focus[3], ComposedSurfaceCb& cb);
+    static constexpr uint32_t kSunTexels = 2048;
+    // The map as a picture (--dump writes it beside the still): depth toward the sun as grey,
+    // 0 where the sun meets nothing. An instrument; it waits for the GPU.
+    void DumpSunMap(const std::wstring& path);
 
     // THE DECKS THE PHYSICS READS (2026-10-12): every bridge deck and ramp ribbon (compose/
     // BuildingShape.h kDeck) in the pages resident about the eye whose polyline comes within rM of
@@ -355,6 +371,28 @@ private:
     Ground m_ground;
     hal::RootSignature m_rootSig = nullptr;
     hal::Pso m_pso, m_psoBox;
+    // THE SUN MAP's pass: the same four pipelines depth-only, the texture, its views, the cast.
+    hal::Pso m_psoSun, m_psoSunBox, m_psoSunBoxMesh, m_psoSunShape;
+    GpuTexture m_sunTex;
+    uint32_t m_sunDsv = UINT32_MAX, m_sunSrv = UINT32_MAX;
+    struct SunMap {
+        bool on = false;
+        float vp[16] = {};
+        float side = 0.0f;
+    } m_sun;
+    bool m_sunSaid = false, m_sunPlanSaid = false;
+    void RenderSunMap(const FrameContext& ctx);
+    // THE SOLIDS OF ONE EYE, drawn through the pipelines given: the resident cells (and the ones
+    // leaving whose boxes the drawn walk does not hold yet), then each of `worlds` worlds' boxes
+    // and shapes -- the frame's draw (Render, three worlds, lit) and the sun's (RenderSunMap, the
+    // eye's own world, depth only) are the one walk over the one set of buffers.
+    struct Pipes {
+        ID3D12PipelineState* cells = nullptr;
+        ID3D12PipelineState* box = nullptr;
+        ID3D12PipelineState* boxMesh = nullptr;
+        ID3D12PipelineState* shape = nullptr;
+    };
+    void DrawSolids(const FrameContext& ctx, uint32_t eyeIndex, uint32_t worlds, const Pipes& p, const char* tag);
     std::shared_ptr<Shared> m_shared = std::make_shared<Shared>();
     std::map<Key, Cell> m_cells;
     struct Warm {

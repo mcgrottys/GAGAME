@@ -354,7 +354,10 @@ const Schema& RenderSchema() {
             .Bind("shadowRangeM", p.shadowRangeM, Q::Length, "m",
                   "how far the terrain shadow's march reaches from the lit point", H)
             .Bind("reflectLand", p.reflectLand,
-                  "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H);
+                  "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H)
+            .Bind("buildingShadowM", p.buildingShadowM, Q::Length, "m",
+                  "the drawn buildings' shadow map: a square this wide about the view's ground focus, seen from the sun "
+                  "(0 = the buildings cast no shadow)", H);
         return sc;
     }();
     return *s;

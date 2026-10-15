@@ -11,6 +11,10 @@
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
 #include "hal/Shader.h"
+#include "hal/Views.h"
+#include "core/Image.h"
+#include "render/Renderer.h"   // SceneConstants: the sun pass's b0 carries the sun's own cast
+#include <DirectXMath.h>
 #include "render/Camera.h"
 
 #include <algorithm>
@@ -66,6 +70,15 @@ void BuildingLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSigna
     m_gpu = &gpu;
     if (!BuildPso(gpu, sc)) throw std::runtime_error("building PSO failed");
     gpu.onLostDispatch = [this](uint32_t k) { DumpChunk(k); };
+    // THE SUN MAP: a depth kSunTexels a side, cleared to 0 (nothing: the far face of the cast) and
+    // tested GREATER as the frame's depth is, so it keeps what stands nearest the sun.
+    D3D12_CLEAR_VALUE dcv{};
+    dcv.Format = DXGI_FORMAT_D32_FLOAT;
+    dcv.DepthStencil.Depth = 0.0f;
+    m_sunTex = gpu.CreateTexture2D(kSunTexels, kSunTexels, DXGI_FORMAT_D32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                                   D3D12_RESOURCE_STATE_DEPTH_WRITE, L"buildings.sunmap", &dcv);
+    m_sunDsv = hal::Dsv(gpu, m_sunTex.res.Get(), DXGI_FORMAT_D32_FLOAT);
+    m_sunSrv = gpu.CreateSrv(m_sunTex.res.Get(), DXGI_FORMAT_R32_FLOAT);
 }
 
 bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
@@ -90,6 +103,21 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     d.srcBlend = D3D12_BLEND_SRC_ALPHA;
     d.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
     const bool okBox = hal::Reload(m_psoBox, [&] { return hal::BuildGraphics(gpu, d, "buildings.boxes"); }, "buildings.boxes");
+    // THE SUN'S PIPELINES (RenderSunMap): the same stages with no pixel stage and no colour target
+    // -- the depth the sun sees is the whole picture -- and the same cull as the frame's, so the
+    // solid the sun meets is the solid the eye sees, winding and all, and the map and the drawn
+    // faces agree about what is a surface (a face the sun lights is in the map at its own depth;
+    // the receiver's plane absorbs that in SunMapClear).
+    hal::GraphicsPipelineDesc sd = d;
+    sd.ps = ShaderBlob{};
+    sd.blend = false;
+    sd.numRenderTargets = 0;
+    sd.rtvFormat = DXGI_FORMAT_UNKNOWN;
+    hal::Reload(m_psoSunBox, [&] { return hal::BuildGraphics(gpu, sd, "buildings.sun.boxes"); }, "buildings.sun.boxes");
+    sd.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+    sd.cull = D3D12_CULL_MODE_NONE;
+    sd.frontCcw = FALSE;
+    hal::Reload(m_psoSun, [&] { return hal::BuildGraphics(gpu, sd, "buildings.sun.cells"); }, "buildings.sun.cells");
     // THE SHAPES' PIPELINE: MsShape extrudes a building's own footprint (needs mesh shaders; without
     // them the walk draws boxes, as before).
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
@@ -110,6 +138,12 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         md.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
         if (md.as.Valid() && md.ms.Valid() && md.ps.Valid()) {
             hal::Reload(m_psoShape, [&] { return hal::BuildMesh(gpu, md, "buildings.shapes"); }, "buildings.shapes");
+            hal::MeshPipelineDesc sm = md;   // ...and the sun's: depth only (above)
+            sm.ps = ShaderBlob{};
+            sm.blend = false;
+            sm.numRenderTargets = 0;
+            sm.rtvFormat = DXGI_FORMAT_UNKNOWN;
+            hal::Reload(m_psoSunShape, [&] { return hal::BuildMesh(gpu, sm, "buildings.sun.shapes"); }, "buildings.sun.shapes");
         }
         // The boxes by mesh shader too: 8 vertices and 12 triangles a box, 16 a group, no amplification.
         hal::MeshPipelineDesc mb = md;
@@ -117,6 +151,12 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         mb.ms = sc.Compile(path, L"MsBox", L"ms_6_5");
         if (mb.ms.Valid() && mb.ps.Valid()) {
             hal::Reload(m_psoBoxMesh, [&] { return hal::BuildMesh(gpu, mb, "buildings.boxes.mesh"); }, "buildings.boxes.mesh");
+            hal::MeshPipelineDesc sb = mb;
+            sb.ps = ShaderBlob{};
+            sb.blend = false;
+            sb.numRenderTargets = 0;
+            sb.rtvFormat = DXGI_FORMAT_UNKNOWN;
+            hal::Reload(m_psoSunBoxMesh, [&] { return hal::BuildMesh(gpu, sb, "buildings.sun.boxes.mesh"); }, "buildings.sun.boxes.mesh");
         }
     }
     return okBox && ok;
@@ -1742,6 +1782,9 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
     Upload(ctx);
     if (!treeDrawsAll) Want(ctx.gpu, lat, lon, h);
     if (m_lod && m_lod->Valid() && ctx.height > 0) TreeFrame(ctx, lat, lon, h);
+    // THE SUN MAP, after this frame's cells and walk have landed: what the eye draws this frame is
+    // what casts this frame; recorded here, before any view, so the globe's surface reads it.
+    RenderSunMap(ctx);
 }
 
 void BuildingLayer::DumpChunk(uint32_t k) const {
@@ -1814,16 +1857,9 @@ void BuildingLayer::DumpChunk(uint32_t k) const {
     }
 }
 
-void BuildingLayer::Render(const FrameContext& ctx) {
-    // THIS VIEW'S EYE: its own walk's boxes (the minimap's from its camera), the near cells the first's,
-    // and each window world it reaches, drawn pulled through the window.
-    const uint32_t eyeIndex = ctx.viewIndex < kEyes ? ctx.viewIndex : 0;
-    bool any = !m_cells.empty() || !m_warm.empty();
-    for (uint32_t k = 0; k < kWorlds; ++k) any = any || m_eyes[WalkerOf(eyeIndex, k)].drawn.count || m_eyes[WalkerOf(eyeIndex, k)].drawn.insts;
-    if (!m_pso || !any || !ctx.camera) return;
-    PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
-    GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
-    ctx.cmd->Pipeline(m_pso.Get());
+void BuildingLayer::DrawSolids(const FrameContext& ctx, uint32_t eyeIndex, uint32_t worlds, const Pipes& p, const char* tag) {
+    GpuScope gscope(ctx.prof, ctx.cmd->Native(), tag);
+    ctx.cmd->Pipeline(p.cells);
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     // Mirrors Buildings.hlsl's cbuffer (priors 22).
     struct {
@@ -1854,7 +1890,7 @@ void BuildingLayer::Render(const FrameContext& ctx) {
         ctx.cmd->Draw(c.count, 1, 0, 0);
     }
     }
-    for (uint32_t world = 0; world < kWorlds; ++world) {
+    for (uint32_t world = 0; world < worlds; ++world) {
     const Eye& e = m_eyes[WalkerOf(eyeIndex, world)];
     const Drawn& m_drawn = e.drawn;
     if (!m_drawn.vb.Valid()) continue;
@@ -1883,7 +1919,7 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     // z: a pixel's angle (rad), the walk's own -- the ribbons' width on screen (Buildings.hlsl MsShape).
     cb.time[2] = static_cast<float>(double(ctx.camera->fovY) / double(ctx.height));
     cb.mesh[2] = world;   // the depth the pixels must reach through the windows
-    if (m_drawn.count && (m_psoBoxMesh || m_psoBox)) {
+    if (m_drawn.count && (p.boxMesh || p.box)) {
         // THE TREE'S BOXES, one buffer about the walk's eye: 8 vertices a box through the mesh stage
         // (16 a group; the groups in two dimensions past 65535), or 36 through the vertex stage.
         GpuScope boxScope(ctx.prof, ctx.cmd->Native(), "buildings.boxes");
@@ -1892,30 +1928,169 @@ void BuildingLayer::Render(const FrameContext& ctx) {
         cb.mesh[3] = m_poolSrv;
         ctx.cmd->GraphicsConstants(1, cb);
         ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-        if (m_psoBoxMesh) {
-            ctx.cmd->Pipeline(m_psoBoxMesh.Get());
+        if (p.boxMesh) {
+            ctx.cmd->Pipeline(p.boxMesh);
             const uint32_t groups = (m_drawn.count + kBoxesPerGroup - 1) / kBoxesPerGroup;
             ctx.cmd->DispatchMesh((std::min)(groups, 65535u), (groups + 65534u) / 65535u, 1);
         } else {
-            ctx.cmd->Pipeline(m_psoBox.Get());
+            ctx.cmd->Pipeline(p.box);
             ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             ctx.cmd->Draw(m_drawn.count * 36u, 1, 0, 0);
         }
     }
-    if (m_psoShape && m_drawn.insts && m_pool.Valid()) {
+    if (p.shape && m_drawn.insts && m_pool.Valid()) {
         // THE SHAPES: an amplification group a kAsInsts instances (Buildings.hlsl AsShape) cuts their
         // edges and roofs into full mesh groups; the groups keep the walk's order (far to near).
         GpuScope shapeScope(ctx.prof, ctx.cmd->Native(), "buildings.shapes");
-        ctx.cmd->Pipeline(m_psoShape.Get());
+        ctx.cmd->Pipeline(p.shape);
         cb.mesh[0] = m_drawn.count * 3u;   // the first shaped instance's row
         cb.mesh[1] = m_drawn.insts;
         cb.mesh[3] = m_poolSrv;
         ctx.cmd->GraphicsConstants(1, cb);
         ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
-        if (ctx.viewIndex == 0 && world == 0) m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
+        if (ctx.viewIndex == 0 && world == 0 && p.shape == m_psoShape.Get()) m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
         ctx.cmd->DispatchMesh((m_drawn.insts + kAsInsts - 1) / kAsInsts, 1, 1);   // kMaxBoxes / 64 < 65535
     }
     }
+}
+
+void BuildingLayer::Render(const FrameContext& ctx) {
+    // THIS VIEW'S EYE: its own walk's boxes (the minimap's from its camera), the near cells the first's,
+    // and each window world it reaches, drawn pulled through the window.
+    const uint32_t eyeIndex = ctx.viewIndex < kEyes ? ctx.viewIndex : 0;
+    bool any = !m_cells.empty() || !m_warm.empty();
+    for (uint32_t k = 0; k < kWorlds; ++k) any = any || m_eyes[WalkerOf(eyeIndex, k)].drawn.count || m_eyes[WalkerOf(eyeIndex, k)].drawn.insts;
+    if (!m_pso || !any || !ctx.camera) return;
+    PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
+    Pipes p;
+    p.cells = m_pso.Get();
+    p.box = m_psoBox.Get();
+    p.boxMesh = m_psoBoxMesh.Get();
+    p.shape = m_psoShape.Get();
+    DrawSolids(ctx, eyeIndex, kWorlds, p, "buildings");
+}
+
+// ================================================================================================
+//  THE SUN MAP (scene render.buildingShadowM; shaders/TerrainRay.hlsli SunMapClear).
+//
+//  The cast is an orthographic camera standing on the sun's side of the focus, looking down the
+//  sun: its view the sun's own axes (right = up-hint x down-sun, as the frame's camera builds its
+//  basis), its projection a cube `side` metres on every edge, depth 1 at the sun's face and 0 at the
+//  far face -- the frame's reversed convention, so the buildings' pipelines test GREATER unchanged
+//  and the clear (0) is "nothing". One matrix, DirectXMath's as the frame's gViewProj is, stored
+//  row-major as Common.hlsli reads it; the receivers read their place on the map from the same
+//  bytes, so the cast and the lookup cannot disagree about where a texel is. The centre is snapped
+//  to the texel grid in the sun's own axes: an eye that drifts within a texel moves no shadow.
+// ================================================================================================
+void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, const double focus[3], ComposedSurfaceCb& cb) {
+    using namespace DirectX;
+    m_sun.on = false;
+    cb.sunMapU[0] = UINT32_MAX;
+    cb.sunMapU[1] = kSunTexels;
+    cb.sunMapU[2] = cb.sunMapU[3] = 0;
+    cb.shadow[3] = 0.0f;
+    memset(cb.sunVP, 0, sizeof(cb.sunVP));
+    if (!m_sunPlanSaid) {   // the instrument: once, why the map stands or does not
+        m_sunPlanSaid = true;
+        Log("[buildings] sun map planned: side %.0f m, srv %u, pipeline %d, focus %.0f %.0f %.0f (eye-relative), sun %.3f %.3f %.3f",
+            sideM, m_sunSrv, m_psoSun ? 1 : 0, focus[0] - cam.px, focus[1] - cam.py, focus[2] - cam.pz, sunDir[0], sunDir[1], sunDir[2]);
+    }
+    if (sideM <= 0.0 || m_sunSrv == UINT32_MAX || !m_psoSun) return;
+    // The sun's axes, in doubles: down-sun forward, the world up as the hint (north where the sun
+    // stands near the zenith), right = hint x forward (DirectXMath's LookToLH law), up = forward x right.
+    double S[3] = {sunDir[0], sunDir[1], sunDir[2]};
+    const double sl = std::sqrt(S[0] * S[0] + S[1] * S[1] + S[2] * S[2]);
+    if (sl < 1e-9) return;
+    for (double& v : S) v /= sl;
+    const double F[3] = {-S[0], -S[1], -S[2]};
+    const bool steep = std::abs(F[1]) > 0.99;
+    const double hint[3] = {0.0, steep ? 0.0 : 1.0, steep ? 1.0 : 0.0};
+    double R[3] = {hint[1] * F[2] - hint[2] * F[1], hint[2] * F[0] - hint[0] * F[2], hint[0] * F[1] - hint[1] * F[0]};
+    const double rl = std::sqrt(R[0] * R[0] + R[1] * R[1] + R[2] * R[2]);
+    for (double& v : R) v /= rl;
+    const double U[3] = {F[1] * R[2] - F[2] * R[1], F[2] * R[0] - F[0] * R[2], F[0] * R[1] - F[1] * R[0]};
+    // The centre: the focus relative to the eye, snapped to the texel grid across the sun.
+    const double texel = sideM / double(kSunTexels);
+    double c[3] = {focus[0] - cam.px, focus[1] - cam.py, focus[2] - cam.pz};
+    const double cR = std::round((c[0] * R[0] + c[1] * R[1] + c[2] * R[2]) / texel) * texel;
+    const double cU = std::round((c[0] * U[0] + c[1] * U[1] + c[2] * U[2]) / texel) * texel;
+    const double cS = c[0] * S[0] + c[1] * S[1] + c[2] * S[2];
+    for (int i = 0; i < 3; ++i) c[i] = cR * R[i] + cU * U[i] + cS * S[i];
+    // The camera on the sun's side, half a side out, looking down the sun; near = side (the far
+    // face -> 0), far = 0 (the sun's face -> 1): reversed, as the frame's depth is.
+    const XMVECTOR pos = XMVectorSet(float(c[0] + S[0] * 0.5 * sideM), float(c[1] + S[1] * 0.5 * sideM), float(c[2] + S[2] * 0.5 * sideM), 1.0f);
+    const XMVECTOR fwd = XMVectorSet(float(F[0]), float(F[1]), float(F[2]), 0.0f);
+    const XMVECTOR upv = XMVectorSet(float(U[0]), float(U[1]), float(U[2]), 0.0f);
+    const XMMATRIX view = XMMatrixLookToLH(pos, fwd, upv);
+    const XMMATRIX proj = XMMatrixOrthographicLH(float(sideM), float(sideM), float(sideM), 0.0f);
+    XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4*>(m_sun.vp), XMMatrixMultiply(view, proj));
+    memcpy(cb.sunVP, m_sun.vp, sizeof(m_sun.vp));
+    m_sun.side = static_cast<float>(sideM);
+    cb.sunMapU[0] = m_sunSrv;
+    cb.shadow[3] = static_cast<float>(sideM);
+    m_sun.on = true;
+}
+
+void BuildingLayer::DumpSunMap(const std::wstring& path) {
+    if (!m_sun.on || !m_gpu || !m_sunTex.res) return;
+    m_gpu->WaitIdle();
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> px = m_gpu->ReadbackTexture(m_sunTex, &pitch);
+    if (px.empty()) return;
+    std::vector<uint8_t> rgba(size_t(kSunTexels) * kSunTexels * 4);
+    uint32_t hit = 0;
+    for (uint32_t y = 0; y < kSunTexels; ++y) {
+        const float* row = reinterpret_cast<const float*>(px.data() + size_t(y) * pitch);
+        for (uint32_t x = 0; x < kSunTexels; ++x) {
+            const float z = row[x];
+            const uint8_t g = static_cast<uint8_t>((std::min)((std::max)(z, 0.0f), 1.0f) * 255.0f);
+            uint8_t* o = &rgba[(size_t(y) * kSunTexels + x) * 4];
+            o[0] = o[1] = o[2] = g;
+            o[3] = 255;
+            hit += z > 0.0f ? 1u : 0u;
+        }
+    }
+    const bool ok = SavePng(path, rgba.data(), kSunTexels, kSunTexels, kSunTexels * 4, rgba.size());
+    Log("[buildings] sun map dump %S: %s, %u of %u texels hold a solid (%.1f %%), side %.0f m",
+        path.c_str(), ok ? "ok" : "FAILED", hit, kSunTexels * kSunTexels, 100.0 * double(hit) / (double(kSunTexels) * double(kSunTexels)), double(m_sun.side));
+}
+
+void BuildingLayer::RenderSunMap(const FrameContext& ctx) {
+    if (!m_sun.on || !ctx.cmd || !ctx.camera || !ctx.gpu || m_sunDsv == UINT32_MAX) return;
+    const Eye& e = m_eyes[WalkerOf(0, 0)];
+    const bool any = !m_cells.empty() || !m_warm.empty() || e.drawn.count || e.drawn.insts;
+    PixScope scope(ctx.cmd->Native(), "buildings.sun (the solids as the sun sees them)");
+    GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings.sun");
+    // The map is the pass's own target; the frame's targets, root and viewport are set by the
+    // renderer after every layer's Simulate (Renderer::RenderFrame), so nothing is put back here.
+    ctx.cmd->Barrier(m_sunTex, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.gpu->DsvHeap().Cpu(m_sunDsv);
+    ctx.cmd->DepthTarget(dsv);
+    ctx.cmd->ClearDepth(dsv, 0.0f);
+    ctx.cmd->Viewport(kSunTexels, kSunTexels);
+    if (!m_sunSaid) {   // the instrument: once, what the pass draws and where the map stands
+        m_sunSaid = true;
+        Log("[buildings] sun map: %u texels a side, drawn %s: %zu cells, %u boxes + %u shapes of eye 0's own world; "
+            "pipelines cells %d boxes %d boxes.mesh %d shapes %d; srv %u dsv %u",
+            kSunTexels, any ? "yes" : "nothing yet", m_cells.size(), e.drawn.count, e.drawn.insts,
+            m_psoSun ? 1 : 0, m_psoSunBox ? 1 : 0, m_psoSunBoxMesh ? 1 : 0, m_psoSunShape ? 1 : 0, m_sunSrv, m_sunDsv);
+    }
+    if (any) {
+        // b0 for the cast: the vertex and mesh stages read gViewProj and nothing else of the scene's
+        // rows (the light is the pixel stage's, and this pass has none).
+        SceneConstants sc{};
+        memcpy(sc.viewProj, m_sun.vp, sizeof(sc.viewProj));
+        ctx.cmd->GraphicsRoot(m_rootSig);
+        ctx.cmd->GraphicsConstantsAt(0, ctx.cmd->Push(sc));
+        ctx.cmd->GraphicsBindless(3);   // the shape pool (space7) through the heap's table
+        Pipes p;
+        p.cells = m_psoSun.Get();
+        p.box = m_psoSunBox.Get();
+        p.boxMesh = m_psoSunBoxMesh.Get();
+        p.shape = m_psoSunShape.Get();
+        DrawSolids(ctx, 0, 1, p, "buildings.sun.draw");
+    }
+    ctx.cmd->Barrier(m_sunTex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
 
 }  // namespace ga

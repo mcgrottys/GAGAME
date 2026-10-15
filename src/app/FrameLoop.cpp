@@ -2395,6 +2395,40 @@ std::vector<const scene::Gateway*> FrameLoop::GateList() const {
 // THE WORLDS EACH EYE'S BUILDINGS ARE WALKED IN (scene/BuildingLayer.h WorldEye): its own, then
 // each window world its chain reaches, the eye carried through the window (WindowLink::carry) and
 // the world drawn back by its pull -- the hulls' law (PublishHulls), for the walks.
+// THE SUN'S ROWS ON b2. The terrain shadow's knobs (scene render.shadowSteps / shadowRangeM /
+// reflectLand) are every view's: the globe's surface asks TerrainRay from every eye. The sun MAP is
+// the first eye's own (its solids, seen from its sun, about its focus): the minimap's rows say none.
+// THE FOCUS is where the eye's central ray met the frame two frames back (the occluder's grid, its
+// centre cell: the farthest surface drawn there), or 1.5 km ahead until a frame has been read back
+// -- the map stands about what the eye looks at, not under the eye, so a city 9 km off is on it.
+void FrameLoop::ShadowRows() {
+    Renderer& renderer = m_A.renderer;
+    auto knobs = [this](ComposedSurfaceCb& cb) {
+        cb.shadow[0] = static_cast<float>((std::max)(m_S.render.shadowSteps, 0));
+        cb.shadow[1] = static_cast<float>((std::max)(m_S.render.shadowRangeM, 1.0));
+        cb.shadow[2] = m_S.render.reflectLand ? 1.0f : 0.0f;
+        cb.shadow[3] = 0.0f;
+        cb.sunMapU[0] = UINT32_MAX;
+        cb.sunMapU[1] = BuildingLayer::kSunTexels;
+        cb.sunMapU[2] = cb.sunMapU[3] = 0;
+        memset(cb.sunVP, 0, sizeof(cb.sunVP));
+    };
+    knobs(renderer.surfaceCb);
+    knobs(m_minimapSurface);
+    BuildingLayer* bl = m_A.buildingLayer;
+    if (!bl || !bl->declared) return;
+    const DirectX::XMFLOAT3 f3 = m_cam.Forward();
+    double d = 1500.0;
+    if (const Renderer::Occluder* ro = renderer.OccluderOf(0); ro && ro->w && ro->h) {
+        const float c = ro->dist[size_t(ro->h / 2) * ro->w + ro->w / 2];
+        if (c > 0.0f && c < 1e29f) d = (std::min)(double(c), 50000.0);
+    }
+    const double focus[3] = {m_cam.px + f3.x * d, m_cam.py + f3.y * d, m_cam.pz + f3.z * d};
+    float sun[3];
+    renderer.SunDir(sun);
+    bl->PlanSunMap(m_cam, sun, bl->enabled ? m_S.render.buildingShadowM : 0.0, focus, renderer.surfaceCb);
+}
+
 void FrameLoop::PublishBuildingWorlds() {
     BuildingLayer* bl = m_A.buildingLayer;
     if (!bl) return;
@@ -4331,6 +4365,7 @@ bool FrameLoop::Frame() {
     PublishBuildingWorlds();   // ...and the worlds the buildings' walks run in, eye by eye
     MinimapFrame(dt);   // the second eye, walked after the first has settled
     DrawGlass(dt);    // the windshield's readouts, rebuilt for this frame
+    ShadowRows();     // the sun's rows on every surface, the sun map planned about the focus
     scene::ViewSet viewSet =
         renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
     if (m_minimapDrawn) {
@@ -5440,6 +5475,13 @@ int FrameLoop::Finish() {
                 S.dumpW.c_str(), wp.c_str());
         } else {
             renderer.DumpPng(S.dumpW);
+            // THE SUN MAP beside the still (the instrument that sees it): X.sunmap.png.
+            if (BuildingLayer* bl = m_A.buildingLayer) {
+                std::wstring sp = S.dumpW;
+                const size_t dot = sp.find_last_of(L'.');
+                sp.insert(dot == std::wstring::npos ? sp.size() : dot, L".sunmap");
+                bl->DumpSunMap(sp);
+            }
         }
     }
     // The same frame's radiance before the tonemap (tools/imgdiff.py --hdr).
@@ -5535,9 +5577,6 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
         globe->keepOn = m_S.render.keep;
         globe->keepSunGrainDeg = static_cast<float>(m_S.render.keepSunGrainDeg);
         globe->keepTideGrainM = static_cast<float>(m_S.render.keepTideGrainM);
-        globe->shadowSteps = m_S.render.shadowSteps;
-        globe->shadowRangeM = static_cast<float>(m_S.render.shadowRangeM);
-        globe->reflectLand = m_S.render.reflectLand;
         globe->SetView(*e.cam, aspect, e.viewH, t);
     } else {
         const bool w = win && win->n > 0;

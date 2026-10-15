@@ -341,6 +341,10 @@ private:
     // its place, its own reflection down the corridor included.
     void PublishHulls();
     void PublishBuildingWorlds();
+    // THE SUN'S ROWS ON b2 (ComposedSurfaceCb::shadow, sunMapU, sunVP): the scene's terrain-shadow
+    // knobs for every view's surface, and the eye's own sun map planned about its ground focus
+    // (BuildingLayer::PlanSunMap). After every surface is filled, before the frame is recorded.
+    void ShadowRows();
     // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
     void DrawGlass(float dt);
     // ---- AN EYE (step 3 of the HUD pass): one view of the frame -- the session's camera (view 0),

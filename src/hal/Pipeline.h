@@ -135,7 +135,10 @@ inline Com<ID3D12PipelineState> BuildGraphicsRaw(Gpu& gpu,
 }
 inline Com<ID3D12PipelineState> BuildGraphics(Gpu& gpu, const GraphicsPipelineDesc& desc,
                                               const char* tag) {
-    if (!desc.vs.Valid() || !desc.ps.Valid()) return nullptr;   // the compiler already logged
+    // A pixel stage is needed where there is a colour target; a depth-only pipeline (a shadow
+    // map: BuildingLayer::RenderSunMap) has none and asks for none. The compiler already logged
+    // a stage that was asked for and failed.
+    if (!desc.vs.Valid() || (!desc.ps.Valid() && desc.numRenderTargets > 0)) return nullptr;
     // A patch list needs both tessellation stages: the sea's block refused to build without
     // them, and so does this -- the same failure at the same point, not a device error.
     if (desc.topology == D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH &&
@@ -272,7 +275,8 @@ inline Com<ID3D12PipelineState> BuildMeshRaw(Gpu& gpu, MeshStream stream, const 
 }
 inline Com<ID3D12PipelineState> BuildMesh(Gpu& gpu, const MeshPipelineDesc& desc,
                                           const char* tag) {
-    if (!desc.ms.Valid() || !desc.ps.Valid()) return nullptr;   // the compiler already logged
+    // As BuildGraphics: the pixel stage is owed only where a colour target is.
+    if (!desc.ms.Valid() || (!desc.ps.Valid() && desc.numRenderTargets > 0)) return nullptr;
     return BuildMeshRaw(gpu, desc.ToStream(), tag);
 }
 
