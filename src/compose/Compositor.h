@@ -91,6 +91,16 @@ public:
     // (latMin, latMax, lonMin, lonMax radians, groundResM)
     virtual float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                          uint8_t rgba[4]) = 0;
+    // TILE AT A TIME (2026-10-14): a source that can paint a frame's whole tile faster than texel by
+    // texel -- the work a texel repeats done once a tile -- paints it here, into `out` (texW x texH
+    // RGBA8, alpha the weight quantized) with the per-texel loop's flags. Its bytes must be the
+    // per-texel loop's exactly (the gate is byte identity, Compositor::PaintSourceTile's two
+    // paths). False: not offered, and the per-texel loop paints, as every source did before.
+    virtual bool PaintTile(const Lattice& /*frame*/, const TileRequest&, double /*groundResM*/, PaintCtx&,
+                           std::vector<uint8_t>& /*out*/, bool& /*complete*/, bool& /*anyCover*/,
+                           bool& /*fullCover*/) {
+        return false;
+    }
     // The level it paints on a lattice (DomainSource::OwnMip); -1, every grain.
     virtual int OwnMip(const Lattice&) const { return -1; }
     // The finest level it has anything of its own for, over a box (radians; DomainSource::FinestMip).
@@ -248,6 +258,8 @@ public:
     static void PaintSourceTile(ColorSource* src, const ColorFrame& frame, const TileRequest& r,
                                 const TileBox& box, std::vector<uint8_t>& out, bool& complete,
                                 bool& anyCover, bool& fullCover);
+    // The A/B of the two paths (ColorSource::PaintTile): false paints every source texel by texel.
+    static inline bool s_tilePaint = true;
     uint64_t HeightSubset(const Channel& ch, const TileBox& box,
                           std::vector<size_t>& included) const;
     uint64_t FieldSubset(const Channel& ch, const TileBox& box,

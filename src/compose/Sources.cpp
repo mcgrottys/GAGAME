@@ -85,6 +85,60 @@ bool GoogleColorSource::Pixel(int z, double latRad, double lonRad, uint8_t rgb[3
     return true;
 }
 
+// TILE AT A TIME: Pixel's arithmetic texel for texel, but each Google tile the paint meets is asked
+// of the provider once -- a texel at a time, every one took the provider's lock, a map lookup and a
+// shared count, for the one to four tiles a paint reads. A tile not ready answers its texels as
+// Sample does (not whole, nothing written).
+bool GoogleColorSource::PaintTile(const ColorFrame& frame, const TileRequest& r, double groundResM, PaintCtx&,
+                                  std::vector<uint8_t>& out, bool& complete, bool& anyCover, bool& fullCover) {
+    if (!m_prov || !m_prov->Ready()) return false;
+    const int z = ZoomFor(groundResM);
+    const double n = static_cast<double>(1u << z) * 256.0;
+    struct Held {
+        int tx, ty;
+        std::shared_ptr<std::vector<uint8_t>> tile;
+    };
+    std::vector<Held> held;
+    size_t last = 0;
+    out.assign(65536, 0);
+    complete = true;
+    anyCover = false;
+    fullCover = true;
+    for (uint32_t py = 0; py < frame.texH; ++py) {
+        for (uint32_t px = 0; px < frame.texW; ++px) {
+            double latRad = 0, lonRad = 0;
+            frame.Texel(r, px, py, latRad, lonRad);
+            const double latC = std::clamp(latRad, -1.4844, 1.4844);   // as Pixel
+            const double mx = (lonRad / kPi * 0.5 + 0.5) * n;
+            const double my = (0.5 - std::log(std::tan(kPi * 0.25 + latC * 0.5)) / (2.0 * kPi)) * n;
+            const int gx = std::clamp(static_cast<int>(mx), 0, static_cast<int>(n) - 1);
+            const int gy = std::clamp(static_cast<int>(my), 0, static_cast<int>(n) - 1);
+            const int tx = gx / 256, ty = gy / 256;
+            if (last >= held.size() || held[last].tx != tx || held[last].ty != ty) {
+                last = held.size();
+                for (size_t k = 0; k < held.size(); ++k) {
+                    if (held[k].tx == tx && held[k].ty == ty) { last = k; break; }
+                }
+                if (last == held.size()) held.push_back({tx, ty, m_prov->Decoded(z, tx, ty)});
+            }
+            const std::vector<uint8_t>* tile = held[last].tile.get();
+            if (!tile) {   // TRANSIENT, as Sample's -1: coverage exists, the fetch is not here
+                complete = false;
+                fullCover = false;
+                continue;
+            }
+            const uint8_t* s = &(*tile)[((gy & 255) * 256 + (gx & 255)) * 4];
+            uint8_t* d = &out[(size_t(py) * frame.texW + px) * 4];
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = 255;   // weight 1, quantized as the per-texel loop does
+            anyCover = true;
+        }
+    }
+    return true;
+}
+
 void GoogleColorSource::BeginTile(double, double, double, double, double, PaintCtx&) {
     // M6j postmortem: a cross-zoom "grade normalization" lived here for one day. Measured
     // same-footprint deltas are ~2.5% (the loud banding had been our OWN lighting bugs), but

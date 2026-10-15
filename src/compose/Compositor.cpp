@@ -304,6 +304,7 @@ void Compositor::PaintSourceTile(ColorSource* src, const ColorFrame& frame, cons
     const double groundRes = frame.GroundRes(r.mip);
     PaintCtx ctx;
     src->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax, groundRes, ctx);
+    if (s_tilePaint && src->PaintTile(frame, r, groundRes, ctx, out, complete, anyCover, fullCover)) return;
     out.assign(65536, 0);
     complete = true;
     anyCover = false;

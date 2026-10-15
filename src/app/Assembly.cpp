@@ -210,6 +210,7 @@ namespace ga::app {
 
 std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exitCode) {
     auto A = std::make_unique<Assembly>();
+    Compositor::s_tilePaint = S.streaming.tilePaint;   // tile at a time where a source can (the A/B key)
     // ---- The aliases: one reference per member, in order, under main()'s names, so the body
     // below is main()'s code unchanged. A closure that captures one of these by reference
     // captures the member it is bound to (CWG 2011) and stays valid after this returns.
@@ -1083,6 +1084,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     colorStack.push_back(&srcBed);
                     bedLayer = colorStack.size() - 1;
                 }
+                if (S.Tool("paint-ab")) {   // every colour source's two paints, byte for byte
+                    int bad = 0;
+                    for (ColorSource* c : colorStack) bad |= tools::RunPaintAB(*c, S.place.anchor[1], S.place.anchor[0]);
+                    exitCode = bad;
+                    return nullptr;
+                }
                 // M9ak: THE GATE. The user's rule: "the GIS mask gates, the height band
                 // refines". srcBed is the WATER authority and its alpha is a height band,
                 // which cannot tell an inland hollow below +1.2 m NAVD from the sea; the
@@ -1611,7 +1618,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
-                              "gis-dump", "gis-sweep-test", "height-tree-probe", "ingest", "load-field", "ocean-probe", "pack-tiles",
+                              "gis-dump", "gis-sweep-test", "height-tree-probe", "ingest", "paint-ab", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "roads-probe", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",

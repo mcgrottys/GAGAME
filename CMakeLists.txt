@@ -23,6 +23,7 @@ add_executable(gagame
   src/app/Tools/SelfTest.cpp
   src/app/Tools/WaterMap.cpp
   src/app/Tools/HeightTreeProbe.cpp
+  src/app/Tools/PaintAB.cpp
   src/app/Tools/GisDump.cpp
   src/app/Tools/TreeAudit.cpp
   src/app/Tools/BuildingLod.cpp
