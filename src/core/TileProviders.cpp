@@ -109,9 +109,13 @@ std::string LoggablePath(const std::wstring& pathAndQuery) {
 
 // Minimal WinHTTP request. Returns false on any transport or non-200 status. `path` carries the
 // query (the key, the session's token): a log line names the request by LoggablePath only.
+// The status of this thread's last request (0: none came back): a 404 is an answer, not a failure.
+static thread_local unsigned long t_httpStatus = 0;
+
 static bool Http(const wchar_t* method, const std::wstring& host, const std::wstring& path,
                  const std::string& body, std::vector<uint8_t>& out) {
     bool ok = false;
+    t_httpStatus = 0;
     HINTERNET ses = WinHttpOpen(L"GAGAME/0.1 (hobby ocean simulator)",
                                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                 WINHTTP_NO_PROXY_BYPASS, 0);
@@ -133,6 +137,7 @@ static bool Http(const wchar_t* method, const std::wstring& host, const std::wst
             WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz,
                                 WINHTTP_NO_HEADER_INDEX);
+            t_httpStatus = status;
             if (status == 200) {
                 // A BODY IS WHOLE OR IT IS A FAILURE: a query or a read that fails mid-body
                 // fails the request (the part read is not a tile), and when the response says
@@ -176,7 +181,7 @@ static bool Http(const wchar_t* method, const std::wstring& host, const std::wst
 }
 
 bool GoogleTileProvider::Init(const std::string& mapType, uint32_t fetchBudget,
-                              const DayCaps& dayCaps) {
+                              const DayCaps& dayCaps, bool offline) {
     m_mapType = mapType;
     m_budget = fetchBudget;
     m_key = ReadKeyFromEnvOrRegistry();
@@ -189,7 +194,16 @@ bool GoogleTileProvider::Init(const std::string& mapType, uint32_t fetchBudget,
     CreateDirectoryA(("cache\\google\\" + m_mapType).c_str(), nullptr);
     // One ledger for the provider, not one per map type: the owner's cap is on Google, whole.
     m_day.Open(m_cacheRoot, dayCaps, "[google]");
-    return EnsureSession();
+    if (!offline && EnsureSession()) return true;
+    // OFFLINE (2026-10-14, Mark: "I want this to work offline too"): no session -- no network, or
+    // an expired one that cannot be renewed -- is not the end of the imagery. The cache serves; a
+    // tile not on disk is refused once for the run and nothing is sent.
+    m_noNetwork = true;
+    m_session = "offline";
+    m_attribution = "Imagery (c) Google";
+    Log("[google] %s: the cache serves this run, and nothing is asked of the network",
+        offline ? "offline (streaming.offline)" : "no session (offline?)");
+    return true;
 }
 
 void GoogleTileProvider::InitCacheOnly(const std::string& cacheRoot, const std::string& mapType,
@@ -266,8 +280,31 @@ bool GoogleTileProvider::CachedTile(int z, int x, int y, std::vector<uint8_t>& j
     return jpg.size() > 200;
 }
 
+// NOTHING THERE, KEPT (2026-10-14): Google answered 404 for this tile -- it has none at this zoom
+// (open ocean, no imagery). The answer is kept beside where the tile would be, an empty
+// z_x_y.none, so no run asks again: before, the same 404s were asked in six runs out of six.
+// Only a 404: a timeout or a 5xx is a failure, asked again by a later run.
+std::string GoogleTileProvider::NonePath(int z, int x, int y) const {
+    std::string p = TilePath(z, x, y);
+    return p.substr(0, p.size() - 4) + ".none";
+}
+bool GoogleTileProvider::KnownNone(int z, int x, int y) const {
+    return GetFileAttributesA(NonePath(z, x, y).c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
 bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jpg) {
     if (CachedTile(z, x, y, jpg)) return true;   // cache hit: zero network
+    if (m_noNetwork) {   // offline: what is not on disk is refused for the run, once
+        std::lock_guard<std::mutex> lk(m_mx);
+        RefuseLocked(z, x, y);
+        return false;
+    }
+    if (KnownNone(z, x, y)) {   // the source said it has none: nothing to ask
+        std::lock_guard<std::mutex> lk(m_mx);
+        RefuseLocked(z, x, y);
+        m_noneKnown.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     const std::string path = TilePath(z, x, y);
     // THE RUN'S OWN REFUSALS FIRST, before the day's ledger is asked: a gate render runs at
     // tileBudget 0 and refuses thousands of tiles, and none of them may take the machine's lock
@@ -294,12 +331,18 @@ bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jp
         // session, a quota) is asked kFailRow times in a row a run, not tileBudget times. A tile
         // that lands sets the row back to zero; a request never sent is not in the row.
         if (got == DayFetch::Fetched) m_failRow = 0;
-        if (got == DayFetch::Failed && ++m_failRow >= kFailRow && !m_failStopped) {
+        // A 404 is an answer (kept as none, never asked again), not a source that errs: it is not
+        // in the row, or a run over open water stops asking after eight of them.
+        if (got == DayFetch::Failed && t_httpStatus != 404 && ++m_failRow >= kFailRow && !m_failStopped) {
             m_failStopped = true;
             Log("[google] %u requests in a row were sent and landed nothing -- this run asks no "
                 "more (the cache still serves)",
                 kFailRow);
         }
+    }
+    if (got == DayFetch::Failed && t_httpStatus == 404) {
+        std::ofstream(NonePath(z, x, y), std::ios::binary);   // empty: the answer is its name
+        m_noneSaid.fetch_add(1, std::memory_order_relaxed);
     }
     if (got != DayFetch::Fetched) return false;
     jpg.swap(body);   // the response alone: a short cache file read above is not prepended
@@ -332,6 +375,7 @@ bool GoogleTileProvider::RefusedForRunLocked(int z, int x, int y) {
 // The run's budget, the throttle and the GET. The day's ledger is not touched here: FetchTile's
 // rule wraps this whole call, so the ledger's lock is never held across the network.
 DaySent GoogleTileProvider::Request(int z, int x, int y, std::vector<uint8_t>& jpg) {
+    t_httpStatus = 0;   // this request's status alone (a stand-in sends none)
     long long waitMs = 0;
     {
         std::lock_guard<std::mutex> lk(m_mx);
@@ -444,7 +488,16 @@ std::shared_ptr<std::vector<uint8_t>> GoogleTileProvider::DecodedTile(int z, int
         uint64_t k;
         ~Leave() { if (p) p->LeaveFlight(k); }
     } leave{this, key};
-    if (m_defer && g_loadTenant >= 0 && !CachedTile(z, x, y, jpg)) {
+    if (m_defer && g_loadTenant >= 0 && !CachedTile(z, x, y, jpg) && KnownNone(z, x, y)) {
+        std::lock_guard<std::mutex> lk(m_mx);   // the source has none: refused, never queued
+        m_inFlight.erase(key);
+        leave.p = nullptr;
+        m_flightDone.notify_all();
+        RefuseLocked(z, x, y);
+        m_noneKnown.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    if (m_defer && !m_noNetwork && g_loadTenant >= 0 && jpg.empty()) {
         // not on disk, and a load asks: queued for the network; the paint goes on without it. The
         // paint's flight ends in the same lock as the ask is queued: a fetch thread that took the
         // ask while the paint still held the flight passed it over, and it was never sent (3 of 329
@@ -501,8 +554,8 @@ void GoogleTileProvider::StopNetwork() {
     for (auto& t : m_net) t.join();
     m_net.clear();
     Log("[google] network: %u tiles queued, %u sent (%u landed nothing: not asked again this run), %u left the "
-        "queue unsent (their loads left the frame)",
-        netAsked.load(), netSent.load(), netFailed.load(), netPruned.load());
+        "queue unsent (their loads left the frame); %u answered 404 and kept as none, %u known none and not asked",
+        netAsked.load(), netSent.load(), netFailed.load(), netPruned.load(), m_noneSaid.load(), m_noneKnown.load());
 }
 
 void GoogleTileProvider::NetLoop() {

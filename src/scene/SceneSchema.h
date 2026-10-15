@@ -248,6 +248,9 @@ struct StreamingSection {
     // Sources paint a tile at a time where they can (ColorSource::PaintTile); false, texel by texel
     // (the A/B: the two must be byte for byte one).
     bool tilePaint = true;
+    // No network this run: every provider serves its cache and asks nothing (a session that cannot be
+    // made means the same without being asked).
+    bool offline = false;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true;
     // THE GLOBAL COAST: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py);

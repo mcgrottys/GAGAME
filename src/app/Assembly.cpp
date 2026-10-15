@@ -1047,7 +1047,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             DayCaps dayCaps;   // the scene's day caps (streaming.dayTiles / dayBytes)
             dayCaps.tiles = S.streaming.dayTiles;
             dayCaps.bytes = DayCaps::FromScene(S.streaming.dayBytes);
-            if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps)) {
+            if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps, S.streaming.offline)) {
                 googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
                 // THE NETWORK OFF THE LOADERS (core/TileProviders.h StartNetwork): a window's paints
                 // never wait on a fetch. A headless still keeps the fetch in the paint: its frames

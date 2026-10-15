@@ -60,7 +60,7 @@ class GoogleTileProvider {
 public:
     // mapType: "satellite" (imagery). Reads the key, opens the day's ledger (and logs what it
     // holds against the day's caps), restores or creates the tile session.
-    bool Init(const std::string& mapType, uint32_t fetchBudget, const DayCaps& dayCaps);
+    bool Init(const std::string& mapType, uint32_t fetchBudget, const DayCaps& dayCaps, bool offline = false);
     // The selftest's provider: tiles from `cacheRoot`\<mapType>\z_x_y.jpg and from nowhere
     // else. No key is read, no session made, and no connection is ever opened: a tile the
     // folder lacks is refused when the budget is spent and fails when it is not. With `day`,
@@ -95,6 +95,8 @@ public:
         return static_cast<uint32_t>(m_asks.size());
     }
     std::atomic<uint32_t> netAsked{0}, netSent{0}, netPruned{0}, netFailed{0};
+    uint32_t NoneSaid() const { return m_noneSaid.load(); }
+    uint32_t NoneKnown() const { return m_noneKnown.load(); }
     // One decoded 256x256 RGBA Mercator tile (cache-first, throttled, budget-capped); nullptr
     // on budget exhaustion or transport failure. shared_ptr on purpose: workers hold decoded
     // tiles across LRU evictions by other workers (a raw pointer here was a use-after-free
@@ -138,6 +140,8 @@ private:
                     std::shared_ptr<std::vector<uint8_t>>* hit);
     void LeaveFlight(uint64_t key);
     bool CachedTile(int z, int x, int y, std::vector<uint8_t>& jpg);   // the file alone
+    std::string NonePath(int z, int x, int y) const;   // the kept 404: z_x_y.none beside the tile
+    bool KnownNone(int z, int x, int y) const;
     std::string TilePath(int z, int x, int y) const;
     std::shared_ptr<std::vector<uint8_t>> Keep(uint64_t key, std::vector<uint8_t>& jpg);
     bool EnsureSession();
@@ -154,6 +158,7 @@ private:
     std::string m_key, m_session, m_mapType = "satellite", m_attribution;
     std::string m_cacheRoot = "cache\\google";
     bool m_offline = false;              // InitCacheOnly: no request is ever sent
+    bool m_noNetwork = false;            // Init without a session: the cache serves, nothing is sent
     uint32_t m_budget = 1000;
     uint32_t m_fetched = 0;
     bool m_budgetLogged = false;
@@ -170,6 +175,7 @@ private:
     std::set<uint64_t> m_inFlight;       // KeyOf of every tile being fetched now; under m_mx
     std::condition_variable m_flightDone;   // woken whenever a tile leaves m_inFlight
     std::atomic<uint32_t> m_flightWaits{0};
+    std::atomic<uint32_t> m_noneSaid{0}, m_noneKnown{0};   // 404s kept; asks answered by a kept 404
     DayLedger m_day;                     // opened by Init (and by InitCacheOnly given `day`)
     // The deferred network (StartNetwork); under m_mx.
     struct Ask {
