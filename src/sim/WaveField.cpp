@@ -432,8 +432,10 @@ struct Memo {
 };
 static bool g_solveAudit = false;
 
+// `phiOut`, when given: each component's EIKONAL phase, the real number before it is packed as a spinor
+// (nComp planes of nx*ny, component-major) -- the field the blend between tide buckets interpolates.
 void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& table,
-           Memo* memo) {
+           Memo* memo, std::vector<float>* phiOut = nullptr) {
     const auto t0 = std::chrono::steady_clock::now();
     const WaveFieldConfig& cfg = in.cfg;
     const int nx = cfg.nx, ny = cfg.ny;
@@ -799,6 +801,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     uint8_t* px = &atlas[arow + size_t(i) * 4];
                     px[1] = Quant8(kbuf[row + i], kMax);
                     const double ph = phibuf[row + i];
+                    if (phiOut) (*phiOut)[size_t(ic) * cells + row + i] = float(ph);
                     px[2] = Quant8(std::cos(ph) * 0.5 + 0.5, 1.0);
                     px[3] = Quant8(std::sin(ph) * 0.5 + 0.5, 1.0);
                     eta[row + i] += double(aPlane[row + i]) * std::cos(ph);
@@ -1199,9 +1202,9 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix, bool block) {
     });
 }
 
-WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
-                                      const std::vector<PartParam>& parts) const {
-    wavecore::Inputs in;
+// The question a solve answers at an instant: the level and current buckets, the spectrum, the bed, the
+// flow -- SolveNow's own inputs, made once (the blend's midpoint test asks them at three levels).
+void WaveField::BuildInputs(double simUnix, const std::vector<PartParam>& parts, wavecore::Inputs& in) const {
     in.cfg = m_cfg;
     const int nx = m_cfg.nx, ny = m_cfg.ny;
     const size_t cells = size_t(nx) * size_t(ny);
@@ -1276,6 +1279,15 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
         wavecore::BuildCurrentPlanes(m_cfg, in.level, in.currentMs, in.bed, in.u, in.v);
     }
 
+}
+
+WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
+                                      const std::vector<PartParam>& parts) const {
+    wavecore::Inputs in;
+    BuildInputs(simUnix, parts, in);
+    const int nx = m_cfg.nx, ny = m_cfg.ny;
+    (void)nx;
+    (void)ny;
     Solved out;
     out.key = key;
     if (!m_memo) m_memo = std::make_shared<wavecore::Memo>();
@@ -1662,6 +1674,11 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         // 294 MB in 65-130 ms at the helm, the roll's hitch whenever a bucket came back. The
         // asynchronous path looks the key up on its worker first and solves only on a miss; the
         // blocking path (the dump frames) reads here as before.
+        if (s_blendTest) {   // --tool wave-blend-test: the first solve's question, at three levels
+            std::vector<PartParam> pcopy;
+            if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
+            std::exit(BlendMidpointTest(simUnix, pcopy) ? 0 : 1);
+        }
         Solved s;
         if (block && !wavecore::g_solveAudit && LoadCache(key, s)) {
             // a cache hit is offered like a solve: its pages swap in, then it is live.
@@ -1685,6 +1702,158 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         }
     }
     return m_inFlight.load();
+}
+
+// ================================================================================================
+//  THE BLEND'S MIDPOINT TEST (--tool wave-blend-test). Whether a solve between two tide buckets can be
+//  the BLEND of its neighbours instead of a solve of its own: per cell and component the field is one
+//  even element of Cl(2), z = a R with R = e^{B phi} the phase rotor in the e1^e2 plane (`wavefield`,
+//  `cl2`). Three blends are held against the TRUE solve at the midpoint level, the bed, flow and
+//  spectrum held fixed (only the level moves -- the tide's own effect: depth, so k, refraction and
+//  shoaling):
+//    SNAP     -- today: the nearest bucket's field (either neighbour);
+//    CHORD    -- the cl2 law, componentwise: z = (z0 + z1) / 2 (right for neighbouring CELLS, whose
+//                phases differ by little; the chord of an arc is shorter than it by cos(dphi/2));
+//    GEODESIC -- the rotor's own interpolation, R0 (~R0 R1)^(1/2), with the amplitude halfway:
+//                follows the arc, exact while the phase moves less than pi between the neighbours.
+//  The measure is the time-averaged elevation error: sqrt(sum |z - z_true|^2 / sum |z_true|^2) over
+//  wet cells and components (the components' frequencies differ, so the cross terms average out), and
+//  k's relative error. And the phase step between the neighbours, |arg(~R0 R1)|, whose size decides
+//  whether the geodesic is safe. At two spacings: 0.25 m (today's bucket) and 0.5 m.
+// ================================================================================================
+bool WaveField::BlendMidpointTest(double simUnix, const std::vector<PartParam>& parts) const {
+    wavecore::Inputs base;
+    BuildInputs(simUnix, parts, base);
+    if (!(base.hs > 0.0)) {
+        Log("[wave-blend] no sea to solve (Hs %.2f): nothing to test", base.hs);
+        return false;
+    }
+    const int nx = m_cfg.nx, ny = m_cfg.ny;
+    const size_t aw = size_t(nx) * 2;
+    struct Field {
+        std::vector<uint8_t> atlas;
+        GpuTable t{};
+        std::vector<float> phi;   // the eikonal phase, component-major
+    };
+    const auto solveAt = [&](double level, Field& f) {
+        wavecore::Inputs in = base;
+        in.level = level;
+        const auto t0 = std::chrono::steady_clock::now();
+        f.phi.assign(size_t(m_cfg.nComp) * size_t(m_cfg.nx) * size_t(m_cfg.ny), 0.0f);
+        wavecore::Solve(in, f.atlas, f.t, nullptr, &f.phi);
+        Log("[wave-blend] solved at %+.3f m NAVD in %.1f s", level,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    };
+    // the decoded component at a cell: amplitude, wavenumber, spinor (cos, sin)
+    const auto at = [&](const Field& f, uint32_t c, int i, int j, double& a, double& k, double& cs, double& sn) {
+        const size_t sx = size_t(c & 1u) * size_t(nx) + size_t(i), sy = size_t(c >> 1u) * size_t(ny) + size_t(j);
+        const uint8_t* b = &f.atlas[(sy * aw + sx) * 4];
+        a = (double(b[0]) + 0.5) / 255.0 * double(f.t.aMax[c]);
+        k = (double(b[1]) + 0.5) / 255.0 * double(f.t.kMax[c]);
+        cs = (double(b[2]) + 0.5) / 255.0 * 2.0 - 1.0;
+        sn = (double(b[3]) + 0.5) / 255.0 * 2.0 - 1.0;
+        const double n = std::sqrt(cs * cs + sn * sn);
+        if (n > 1e-9) { cs /= n; sn /= n; }
+    };
+    bool ok = true;
+    const double L = base.level;
+    for (const double spacing : {0.25, 0.5}) {
+        Field lo, mid, hi;
+        solveAt(L - 0.5 * spacing, lo);
+        solveAt(L, mid);
+        solveAt(L + 0.5 * spacing, hi);
+        // the fan must be one fan: the same components, frequencies and directions
+        bool sameFan = lo.t.nUsed == mid.t.nUsed && hi.t.nUsed == mid.t.nUsed;
+        for (uint32_t c = 0; sameFan && c < mid.t.nUsed; ++c) {
+            sameFan = lo.t.sigma[c] == mid.t.sigma[c] && hi.t.sigma[c] == mid.t.sigma[c] &&
+                      lo.t.dirX[c] == mid.t.dirX[c] && hi.t.dirX[c] == mid.t.dirX[c];
+        }
+        if (!sameFan) {
+            Log("[wave-blend] spacing %.2f m: the three solves' fans differ -- a blend has no meaning here", spacing);
+            ok = false;
+            continue;
+        }
+        double eTrue = 0.0, eSnapLo = 0.0, eSnapHi = 0.0, eChord = 0.0, eGeo = 0.0, ePlant = 0.0;
+        double eTrueE = 0.0, eEik = 0.0, eEikPlant = 0.0, eSnapE = 0.0;   // on the eikonal phase
+        std::vector<double> dPhiE;
+        const size_t cells = size_t(nx) * size_t(ny);
+        std::vector<double> kErr, dPhi;
+        size_t wet = 0;
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                for (uint32_t c = 0; c < mid.t.nUsed; ++c) {
+                    if (!(mid.t.aMax[c] > 0.0f) || !(lo.t.aMax[c] > 0.0f) || !(hi.t.aMax[c] > 0.0f)) continue;
+                    double a0, k0, c0, s0, am, km, cm, sm, a1, k1, c1, s1;
+                    at(lo, c, i, j, a0, k0, c0, s0);
+                    at(mid, c, i, j, am, km, cm, sm);
+                    at(hi, c, i, j, a1, k1, c1, s1);
+                    if (am < 1e-4 && a0 < 1e-4 && a1 < 1e-4) continue;   // dry in all three
+                    ++wet;
+                    const double zmR = am * cm, zmI = am * sm;
+                    const double z0R = a0 * c0, z0I = a0 * s0, z1R = a1 * c1, z1I = a1 * s1;
+                    eTrue += zmR * zmR + zmI * zmI;
+                    eSnapLo += (z0R - zmR) * (z0R - zmR) + (z0I - zmI) * (z0I - zmI);
+                    eSnapHi += (z1R - zmR) * (z1R - zmR) + (z1I - zmI) * (z1I - zmI);
+                    const double chR = 0.5 * (z0R + z1R), chI = 0.5 * (z0I + z1I);
+                    eChord += (chR - zmR) * (chR - zmR) + (chI - zmI) * (chI - zmI);
+                    // ~R0 R1: the rotor carrying R0 onto R1; its angle is the phase step
+                    const double rR = c0 * c1 + s0 * s1, rI = c0 * s1 - s0 * c1;
+                    const double step = std::atan2(rI, rR);
+                    if (a0 > 1e-4 && a1 > 1e-4) dPhi.push_back(std::abs(step));
+                    const double h = 0.5 * step, ag = 0.5 * (a0 + a1);
+                    const double gc = c0 * std::cos(h) - s0 * std::sin(h), gs = s0 * std::cos(h) + c0 * std::sin(h);
+                    const double gR = ag * gc, gI = ag * gs;
+                    eGeo += (gR - zmR) * (gR - zmR) + (gI - zmI) * (gI - zmI);
+                    // THE PLANT: the geodesic turned the wrong way, R0 e^{-B step/2}
+                    const double pc = c0 * std::cos(h) + s0 * std::sin(h), ps = s0 * std::cos(h) - c0 * std::sin(h);
+                    ePlant += (ag * pc - zmR) * (ag * pc - zmR) + (ag * ps - zmI) * (ag * ps - zmI);
+                    if (km > 1e-6) kErr.push_back(std::abs(0.5 * (k0 + k1) - km) / km);
+                    // EIKONAL: the real phases, halfway, and the amplitude halfway -- then the rotor
+                    const size_t pi_ = size_t(c) * cells + size_t(j) * size_t(nx) + size_t(i);
+                    const double p0 = lo.phi[pi_], pm = mid.phi[pi_], p1 = hi.phi[pi_];
+                    const double tR = am * std::cos(pm), tI = am * std::sin(pm);
+                    eTrueE += tR * tR + tI * tI;
+                    const double pb = 0.5 * (p0 + p1);
+                    eEik += (ag * std::cos(pb) - tR) * (ag * std::cos(pb) - tR) + (ag * std::sin(pb) - tI) * (ag * std::sin(pb) - tI);
+                    eSnapE += 0.5 * ((a0 * std::cos(p0) - tR) * (a0 * std::cos(p0) - tR) + (a0 * std::sin(p0) - tI) * (a0 * std::sin(p0) - tI) +
+                                     (a1 * std::cos(p1) - tR) * (a1 * std::cos(p1) - tR) + (a1 * std::sin(p1) - tI) * (a1 * std::sin(p1) - tI));
+                    // THE PLANT: the eikonal phase blended with the neighbours swapped in weight (a third and two thirds)
+                    const double pp = (2.0 * p0 + p1) / 3.0;
+                    eEikPlant += (ag * std::cos(pp) - tR) * (ag * std::cos(pp) - tR) + (ag * std::sin(pp) - tI) * (ag * std::sin(pp) - tI);
+                    if (a0 > 1e-4 && a1 > 1e-4) dPhiE.push_back(std::abs(p1 - p0));
+                }
+            }
+        }
+        const auto rel = [&](double e) { return eTrue > 0.0 ? std::sqrt(e / eTrue) : 0.0; };
+        const auto q = [](std::vector<double>& v, double f) {
+            if (v.empty()) return 0.0;
+            std::nth_element(v.begin(), v.begin() + ptrdiff_t(f * double(v.size() - 1)), v.end());
+            return v[size_t(f * double(v.size() - 1))];
+        };
+        size_t overHalfPi = 0;
+        for (double d : dPhi) overHalfPi += d > 1.5707963 ? 1 : 0;
+        const double snap = 0.5 * (rel(eSnapLo) + rel(eSnapHi));
+        Log("[wave-blend] spacing %.2f m (the midpoint %+.3f m between %+.3f and %+.3f), %zu wet component-cells: "
+            "the elevation error relative to the true solve -- SNAP %.4f (low %.4f, high %.4f), CHORD %.4f, "
+            "GEODESIC %.4f; k's error median %.4f, p95 %.4f",
+            spacing, L, L - 0.5 * spacing, L + 0.5 * spacing, wet, snap, rel(eSnapLo), rel(eSnapHi), rel(eChord),
+            rel(eGeo), q(kErr, 0.5), q(kErr, 0.95));
+        Log("[wave-blend] spacing %.2f m: the phase step between the neighbours |arg(~R0 R1)| median %.4f rad, "
+            "p95 %.4f, p99 %.4f, max %.4f; over pi/2 at %.3f %% of component-cells",
+            spacing, q(dPhi, 0.5), q(dPhi, 0.95), q(dPhi, 0.99), q(dPhi, 1.0),
+            dPhi.empty() ? 0.0 : 100.0 * double(overHalfPi) / double(dPhi.size()));
+        const auto relE = [&](double e) { return eTrueE > 0.0 ? std::sqrt(e / eTrueE) : 0.0; };
+        Log("[wave-blend] spacing %.2f m, ON THE EIKONAL PHASE (the real phi, unwrapped by the solve): SNAP %.4f, "
+            "EIKONAL BLEND %.4f; the real phase step |phi1 - phi0| median %.3f rad, p95 %.3f, max %.3f -- "
+            "PLANT (weights a third / two thirds) %.4f: %s",
+            spacing, relE(eSnapE), relE(eEik), q(dPhiE, 0.5), q(dPhiE, 0.95), q(dPhiE, 1.0), relE(eEikPlant),
+            relE(eEikPlant) > relE(eEik) ? "CAUGHT" : "NOT CAUGHT");
+        ok &= relE(eEikPlant) > relE(eEik);
+        Log("[wave-blend] spacing %.2f m: PLANT the geodesic turned the wrong way: %.4f -- %s", spacing, rel(ePlant),
+            rel(ePlant) > rel(eGeo) ? "CAUGHT" : "NOT CAUGHT: this instrument cannot see a blend gone wrong");
+        ok &= rel(ePlant) > rel(eGeo);
+    }
+    return ok;
 }
 
 WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const {

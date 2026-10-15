@@ -41,7 +41,7 @@
 
 namespace ga {
 
-namespace wavecore { struct Memo; }   // F25: the last solve's wavenumbers, by cell (WaveField.cpp)
+namespace wavecore { struct Memo; struct Inputs; }   // F25: the last solve's wavenumbers, by cell (WaveField.cpp)
 
 class Gpu;
 // Used by reference in Configure() and held as a pointer below. It was never declared here and
@@ -132,6 +132,9 @@ public:
     // four sweep orders the entry's phase needs to stand still, per component, and how much of the
     // drawn phase the solve's two rounds differ from the still one in. The law is not touched.
     static bool ConvergeCache(const std::string& path);
+    // --tool wave-blend-test: the blend of two tide buckets against the true solve between them (WaveField.cpp).
+    bool BlendMidpointTest(double simUnix, const std::vector<PartParam>& parts) const;
+    static inline bool s_blendTest = false;
 
     // Per frame, main thread. parts/n = the live GFS-Wave partition set (SeaLayer's).
     // Kicks a background solve when a bucket rolls; uploads + swaps when one finishes.
@@ -316,6 +319,7 @@ private:
     void RefreshSweCurrent(Gpu& gpu, double simUnix, bool block);
     void SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts);
     Solved SolveNow(uint64_t key, double simUnix, const std::vector<PartParam>& parts) const;
+    void BuildInputs(double simUnix, const std::vector<PartParam>& parts, wavecore::Inputs& in) const;
     bool LoadCache(uint64_t key, Solved& out) const;
     void StoreCache(const Solved& s) const;
 
