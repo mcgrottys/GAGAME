@@ -331,3 +331,40 @@ current stations, buoys); harvest_river.py:26 (the two gauges); harvest_currents
 (ACT0816 first); harvest_refbathy.py:98 (focus 8440452 or 8440466); harvest_bathy.py:17 (the
 windows merrimack, capeann, boston); harvest_survey.py:374 and harvest_vectors.py:283-285 (the
 `_ne` files). Their `--place` modes and harvest_place.py write `data\<kind>\<place>\`.
+
+## 2026-10-13: what stands
+
+Every row was searched again by its quoted text in `src` and `shaders` (self-tests set aside).
+Phases A to C (pull request 43) had taken 30 of the 69. This pass took these, each now a key a
+scene carries, with today's literal written into `scenes/merrimack.json` so the shipped scenes
+read what they read before:
+
+| row | was | now |
+|---|---|---|
+| a2 | the velocity-gradient bank reopened `data/currents/currents.json` | `data.currents` |
+| a3, a4, b3 | the Cape Ann and Boston surveys and Boston's dormant solver, by path, station and a dammed river | DELETED (2026-10-14, the owner's word): the insets are gone; a dormant solver is a scene's `solvers` entry, a box of nx x ny cells on the stack's bed and a station's tide, no survey file. None is declared: Boston has no fine bed until a composite paints it |
+| a18 | the ETOPO 15" New England window, cropped to int16 in globe.json and read by its own source class | DELETED (2026-10-14): the 15" tile it was a crop of is a `sources` entry of kind height in every Earth scene that lists sources (EGM2008, offset -0.092 m); WindowHeightSource and GlobeModel's window gone |
+| a7 | `data/gis/edits.geojson` in three readers | `data.edits` ("" = none) |
+| a10, b6, d5 | Lawrence, else Lowell x 1.08, else 70 m^3/s | `data.river`, `water.swe.riverGauges` ("id[*scale] ..."), `water.swe.riverQFallback` |
+| a19, a20 | `gomofs_uv.f32` and `noaa.gomofs.current` | the field's own `file` and `model` (no default file) |
+| b5, c7 | buoy 44029 and its position as constants | `buoy_adcp.lat/lon`, else the scene's `stations` entry of its id |
+| b7 | the ocean probe's two stations by number | the two stations with a NAVD88 link nearest the probe |
+| c5 | the bed classifier's New England box as its default | the whole planet (the file on disk says its own) |
+| c8, c9 | the jetty-tip camera and 34 N 52 W before the scene's views | the scene's place |
+| d4 | the upriver prism area 3.9e6 m^2 | `water.swe.upriverAreaM2` (0 = none) |
+| f2 | `data.tides/seastate/currents` defaulting to New England's files | "" (every root scene names its own) |
+| a23 (part) | "gomofs.surface" as the current's source label | "current.field (surface)" |
+| (new) | GisDump's mouth point | the survey's centre |
+
+**What a shipped scene changes by it.** A scene that inherits `scenes/merrimack.json` but lists
+its own `sources` (the Haulover chain) no longer carries the Cape Ann and Boston surveys, nor
+Boston's dormant solver, which the code used to force on every Earth scene. By finding 104 every
+height source re-keys the stack, so those scenes' trees repaint once.
+
+**Still standing, and why.** a5/a8/a11/a13/a15/a16 name global or the owner's data folders, not
+a place's (`data/water`, `data/gis/`, `data/wave_scene.json`); the `_ne` names (a15, a16:
+`coast_ne`, `rivers_ne`, `nhd_water_ne.bin`) are the New England survey's files, still read by
+those names; a21/a22 are names taken from the scene; the solver's geography (d1-d3,
+d7, d8) stays the assumption 4.15 names; f4/f5 (the wave field's window about the anchor and the
+bar's normal) are relative to the scene's place and written in its file; f10 is a material's
+optics, not a place; the tide ribbon (d11) is the chart's river-kilometre view.

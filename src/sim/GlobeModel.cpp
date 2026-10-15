@@ -101,18 +101,7 @@ bool GlobeModel::Load(const std::string& jsonPath) {
         }
     }
 
-    // M6d: NE 15s window + global wind vector.
-    m_nenx = static_cast<int>(js.Num("ne_nx", 0));
-    m_neny = static_cast<int>(js.Num("ne_ny", 0));
-    m_neLon0 = js.Num("ne_lon0", -72.0);
-    m_neLat1 = js.Num("ne_lat1", 45.0);
-    m_neDlon = js.Num("ne_dlon", 15.0 / 3600.0);
-    m_neDlat = js.Num("ne_dlat", -15.0 / 3600.0);
-    if (m_nenx > 0 &&
-        !ReadBin(dir + js.Str("ne_file", "ne_15s.i16"),
-                 static_cast<size_t>(m_nenx) * m_neny, &m_neElev)) {
-        m_nenx = 0;
-    }
+    // M6d: the global wind vector. (The 15" relief is a file of the scene's `sources`.)
     m_wvnx = static_cast<int>(js.Num("windvec_nx", 0));
     m_wvny = static_cast<int>(js.Num("windvec_ny", 0));
     m_wvlat1 = js.Num("windvec_lat1", 90.0);
@@ -171,10 +160,10 @@ bool GlobeModel::Load(const std::string& jsonPath) {
         m_iceCycle.c_str(), m_ice.empty() ? "absent" : "loaded");
 
     Log("[globe] relief %dx%d (~%.1f km/texel at the equator); waves %s %dx%d%s; clouds %s "
-        "%dx%dx%d; NE 15s %dx%d; wind vec %dx%d",
+        "%dx%dx%d; wind vec %dx%d",
         m_nx, m_ny, 2.0 * 3.14159265358979 * kR / m_nx / 1000.0, m_cycle.c_str(), m_wnx, m_wny,
         m_wind.empty() ? " (no wind)" : " + wind", m_cloudsCycle.c_str(), m_cnx, m_cny, m_cnz,
-        m_nenx, m_neny, m_wvnx, m_wvny);
+        m_wvnx, m_wvny);
     return true;
 }
 

@@ -48,21 +48,17 @@ void WeatherManager::AddExternalWindow(const char* name, SweSolver* solver,
     m_windows.push_back(std::move(w));
 }
 
-void WeatherManager::AddDormantWindow(const char* name, BathyModel* bathy,
+void WeatherManager::AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny,
                                       const SweConfig& cfg,
                                       std::function<double(double)> oceanAt,
                                       double spinupHours) {
-    // PHASE C1: a dormant window's domain (and its holds-water line) is made on activation, from the
-    // survey's box and cells and the stack's bed.
+    // PHASE C1: a dormant window's domain (and its holds-water line) is made on activation, from its
+    // box and cells and the stack's bed.
     Window w;
     w.name = name;
-    w.bathy = bathy;
-    if (bathy && bathy->Ready()) {
-        w.box[0] = bathy->Lat1() - bathy->Ny() * bathy->Dlat();
-        w.box[1] = bathy->Lon0();
-        w.box[2] = bathy->Lat1();
-        w.box[3] = bathy->Lon0() + bathy->Nx() * bathy->Dlon();
-    }
+    for (int k = 0; k < 4; ++k) w.box[k] = box[k];
+    w.nx = nx;
+    w.ny = ny;
     w.cfg = cfg;
     w.cfg.name = nullptr;   // points at the caller's literal; rebound on activation
     w.oceanAt = std::move(oceanAt);
@@ -77,16 +73,15 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
     for (Window& w : m_windows) {
         if (w.name != name) continue;
         if (w.active) return true;
-        if (!w.bathy || !w.bathy->Ready()) return false;
-        Log("[weather] spinning up the %s window (%dx%d cells, %.1f h of history -- a "
+        if (!w.nx || !w.ny) return false;
+        Log("[weather] spinning up the %s window (%ux%u cells, %.1f h of history -- a "
             "one-time cost as the region becomes RESIDENT)",
-            w.name.c_str(), w.bathy->Nx(), w.bathy->Ny(), w.spinupHours);
-        // The window's bed is the ONE height channel at its cells (M6w): CUDEM inset, shelf
-        // beyond, hand edits on top -- lazily, as part of the activation cost.
+            w.name.c_str(), w.nx, w.ny, w.spinupHours);
+        // The window's bed is the ONE height channel at its cells (M6w): the scene's heights, the
+        // shelf beyond, hand edits on top -- lazily, as part of the activation cost.
         if (!m_comp || m_hgtCh < 0 || !(m_planetR > 0.0)) return false;
         SweDomain dom;
-        dom.Place(w.box[0], w.box[1], w.box[2], w.box[3], uint32_t(w.bathy->Nx()),
-                  uint32_t(w.bathy->Ny()), m_planetR);
+        dom.Place(w.box[0], w.box[1], w.box[2], w.box[3], w.nx, w.ny, m_planetR);
         dom.FillBed([&](double la, double lo, double resM) {
             return m_comp->SampleHeightStack(m_hgtCh, la * kD2R, lo * kD2R, resM);
         });
@@ -336,7 +331,7 @@ void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
                             double camAltM) {
     int active = 0;
     for (Window& w : m_windows) {
-        if (!w.active && w.bathy && w.bathy->Ready() && camAltM < kActivateAltM) {
+        if (!w.active && w.nx && camAltM < kActivateAltM) {
             // Residency rises on zoom: the camera entering a dormant window's footprint IS
             // the demand signal, exactly as a CDLOD node entering the frustum demands tiles.
             if (w.InBox(camLatDeg, camLonDeg)) Activate(gpu, sc, shaderDir, w.name.c_str(), simUnix);
@@ -414,14 +409,14 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
         s.levelSrc = "water.tide atlas";
     }
 
-    // ---- currents: the GoMOFS Gulf field; the solver's solved current replaces it where the
+    // ---- currents: the scene's regional model field; the solver's solved current replaces it where the
     // solver has one (SolverRefine).
-    if (m_currents && m_currents->Field().Valid()) {
+    if (m_currents && m_currents->FieldCount()) {
         float u = 0, v = 0;
-        if (m_currents->Field().Sample(lonDeg, latDeg, u, v)) {
+        if (m_currents->SampleAt(lonDeg, latDeg, u, v)) {
             s.u = u;
             s.v = v;
-            s.currentSrc = "gomofs.surface (700 m)";
+            s.currentSrc = "current.field (surface)";
         }
     }
 

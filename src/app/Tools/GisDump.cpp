@@ -37,10 +37,9 @@ void RunGisDump(const Options& opt, const GisVectorMask& gisMask) {
 void RunGisSweepTest(const GisVectorMask& gisMask) {
     double b0, a0, b1, a1;
     gisMask.Bounds(b0, a0, b1, a1);
-    // The Merrimack mouth when the survey holds it, else the survey's centre: the grains run
-    // from a 20 km tile to a 2 m one, 12 x 12 tiles each, so the finest grid lies in one ring.
-    double clon = 0.5 * (b0 + b1), clat = 0.5 * (a0 + a1);
-    if (b0 <= -70.82 && -70.82 <= b1 && a0 <= 42.815 && 42.815 <= a1) { clon = -70.82; clat = 42.815; }
+    // The survey's centre: the grains run from a 20 km tile to a 2 m one, 12 x 12 tiles each,
+    // so the finest grid lies in one ring.
+    const double clon = 0.5 * (b0 + b1), clat = 0.5 * (a0 + a1);
     const double widths[5] = {0.2, 0.02, 0.002, 0.0002, 0.00002};
     uint32_t tiles = 0, mismatched = 0, fullBefore = 0, oneBefore = 0;
     gisMask.SweepCounts(fullBefore, oneBefore);

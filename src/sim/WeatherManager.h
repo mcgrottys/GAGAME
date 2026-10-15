@@ -73,7 +73,7 @@ public:
     void SetSeaSources(const std::vector<const SeaState*>& s) { m_seaSources = s; }
     void AddExternalWindow(const char* name, SweSolver* solver,
                            std::function<double(double)> oceanAt);
-    void AddDormantWindow(const char* name, BathyModel* bathy, const SweConfig& cfg,
+    void AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny, const SweConfig& cfg,
                           std::function<double(double)> oceanAt, double spinupHours);
     // M9ar: the bed every OWNED solver binds at activation -- the height page tenant. There is
     // no per-window bed texture any more.
@@ -195,8 +195,8 @@ private:
         std::string name;
         SweSolver* solver = nullptr;              // external, or owned.get()
         std::unique_ptr<SweSolver> owned;
-        const BathyModel* bathy = nullptr;    // dormant windows: the survey whose box and cells
-                                              // the domain takes on activation (the bed: the stack)
+        uint32_t nx = 0, ny = 0;              // dormant windows: the domain's cells over box,
+                                              // taken on activation (the bed: the stack)
         double box[4] = {0.0, 0.0, 0.0, 0.0}; // PHASE C1: lat0, lon0, lat1, lon1 (degrees)
         bool InBox(double latDeg, double lonDeg) const {
             return latDeg > box[0] && latDeg < box[2] && lonDeg > box[1] && lonDeg < box[3];

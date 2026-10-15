@@ -94,12 +94,14 @@ struct IncludeEntry {
 };
 struct DataSection {
     std::string shaders = "shaders";
-    std::string tides = "data/tides/stations.json";
-    std::string seastate = "data/sea/seastate.json";
-    std::string currents = "data/currents/currents.json";
+    std::string tides;                // the water's products, as the harvesters write them: no
+    std::string seastate;             // place's files by default -- "" = none, and every shipped
+    std::string currents;             // root scene names its own
     std::string bathy;                // PHASE C5: "" = no survey; the shipped scenes name theirs
     std::string route;                // PHASE C5: the chart's channel route (geojson); "" = none
     std::string tideFocus;            // PHASE C3: a tide station's id; "" = the nearest the water's anchor
+    std::string river;                // the river gauges' discharges (harvest river); "" = none
+    std::string edits;                // the owner's hand polygons (the law over every survey); "" = none
 };
 // PHASE C4: THE SCENE'S PLACE. world.flat is the tangent plane about `anchor` ([lon, lat]), exact;
 // every {x, alt, z} the scene writes without a place of its own stands in it. No default place:
@@ -114,6 +116,13 @@ struct TimeSection {
     bool paused = false;
     double windowDays = 7.0;
 };
+// A CLOCK OF ITS OWN (docs: the collage binds a clock per producer). An instant and a pace,
+// read against the scene's clock: t = start + rate (scene time - the scene's start). start "" is
+// the scene's own time.start; rate 1 keeps the scene's pace, 0 holds the instant.
+struct ClockProps {
+    std::string start;
+    double rate = 1.0;
+};
 // THE EARTH, PLACED AROUND A SUN THAT IS A LIGHT AT THE ORIGIN. Position in metres (the sun is
 // at 0,0,0), and a turn of `spin` degrees about `axis`. Nothing here reads the clock: a scene can
 // hold a night storm at noon if it wants to, and coupling this to time is a later, separate step.
@@ -121,11 +130,13 @@ struct EarthPlacement {
     double at[3] = {-1.495978707e11, 0.0, 0.0};
     double axis[3] = {0.0, 0.0, 1.0};
     double spin = 0.0;
+    ClockProps clock;                 // ephemeris: the Earth's turn (where a place faces: the time of day)
 };
 struct SunSection {
     int source = 0;                   // ephemeris | pinned | earth
     float az = 112.0f, el = 26.0f;
     EarthPlacement earth;
+    ClockProps clock;                 // ephemeris: the sun's place on the ecliptic (declination, distance: the season)
 };
 // THE AIR OF THE DAY (src/scene/Air.h): the planet's air is rows of measurements; what changes from
 // day to day is the aerosol, and the picture's white follows from the one sun through that air.
@@ -156,7 +167,15 @@ struct SweProps {
     bool westBoundary = true;
     double spinupH = 1.0;
     float gain = 1.0f;
-    double riverQ = -1.0;             // m^3/s; < 0 = data/river/river.json
+    double riverQ = -1.0;             // m^3/s; < 0 = the gauges below, read from data.river
+    // THE RIVER'S GAUGES, in the order they are believed: "id[*scale] ...", a USGS site's id in
+    // data.river and the share of the river at the solver's face its discharge is (the drainage
+    // between); the first that reports is the discharge, else riverQFallback.
+    std::string riverGauges;
+    // The river's tidal reach above the solver's face (m^2): the prism the face's transport fills
+    // and drains, westQ = riverQ - area dh/dt (FrameLoop); 0 = none.
+    double upriverAreaM2 = 0.0;
+    double riverQFallback = 0.0;
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
     int window = 0;                   // full-weight | survey: where the solver's grid stands (4.17):
                                       // the open face's side drawn in, the walls the survey's
@@ -438,6 +457,16 @@ struct ToolProps {
     std::string name;
     std::string args;
 };
+// A SOLVER ASLEEP UNTIL THE EYE COMES (sim/WeatherManager.h AddDormantWindow): its domain a lat/lon
+// box of nx x ny cells, its bed the height stack at those cells, its open sea held to the tide of
+// `station` (a tide station's id in data.tides) on NAVD88, a river entering by `river`.
+struct SolverProps {
+    std::string name;
+    double box[4] = {0.0, 0.0, 0.0, 0.0};   // lon0, lat0, lon1, lat1
+    uint32_t nx = 0, ny = 0;
+    std::string station;
+    int river = 1;                          // west | none
+};
 // PHASE C3: where a station of the scene's data stands when its own file does not say.
 struct StationProps {
     std::string name;                 // the station's id in its file
@@ -452,6 +481,7 @@ struct PruneSection {
     double ageDays = 30.0;            // a stamp older than this is STALE (unstamped: twice it)
     double purgeDays = 7.0;           // a retired batch older than this is deleted by purge
     std::string confirm;
+    std::string node;                 // retire: only this node's folders; "" = every node
 };
 
 // THE RENDER section: the kept frame (scene/GlobeLayer.h keepOn) and the grains the picture is
@@ -460,6 +490,21 @@ struct RenderSection {
     bool keep = true;
     double keepSunGrainDeg = 0.01;
     double keepTideGrainM = 0.001;
+};
+
+// THE DEBUG VIEWS of the globe's surface (shaders/DebugView.hlsl, GlobeLayer.h DebugView): the
+// mesh and what it carries read as geometry and as numbers. `none` and no wire draws the shipped
+// picture through the shipped pipeline; anything else draws through its own, built only then.
+// G in the window steps through the views.
+struct DebugSection {
+    int view = 0;                     // none | flat | edges | normals | height | depth | meshlets |
+                                      // albedo | residency | residency.height | residency.landsea
+    float wirePx = 0.0f;              // the triangles' edges drawn this wide (pixels); 0 = none
+    float wireColor[4] = {1.0f, 0.85f, 0.2f, 1.0f};
+    int wireBy = 0;                   // colour | edge | depth: the wire's own colour or a hue
+    float contourM = 1.0f;            // height: a line every this many metres, a heavier every fifth
+    float depthNearM = 10.0f, depthFarM = 1.0e6f;   // depth: the log ramp's ends
+    float edgeRefM = 1.0f;            // edges: the length the hues are centred on; one octave a hue step
 };
 
 // The whole document as one prototype (the lists carry no fields).
@@ -475,6 +520,7 @@ struct SceneDocument {
     WaterSection water;
     StreamingSection streaming;
     RenderSection render;
+    DebugSection debug;
     CaptureSection capture;
     HudSection hud;
     RailsSection rails;

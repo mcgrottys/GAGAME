@@ -71,6 +71,7 @@
 #include <cstdio>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -79,39 +80,79 @@ using namespace ga::app;
 
 namespace {
 
-// M5c: latest Merrimack discharge for the SWE's upstream boundary. Lawrence when it reports;
-// else Lowell scaled up ~8% for the intervening drainage (Shawsheen, Spicket, Little); else a
-// low-summer climatological 70 m3/s. The ~20 h Lawrence-to-mouth travel time is ignored -- at
-// summer flows the tidal prism dwarfs it.
-double LoadRiverDischarge(const std::string& path) {
+// THE COMPOSITE'S TIERS (docs/FIDELITY.md section 3): a `sources` entry of kind composite names a
+// GACOMP01 file; a raster layer's tiers become raster entries -- a folder (relative to the file),
+// its pattern, its unit and datum and offset, its `over` -- named "<entry or layer>.t<grain>". A
+// tier that declares none of its own takes the composite's unit and datum. A point or field layer
+// carries no tiers: the scene's data key names its `file`.
+std::vector<RasterEntry> CompositeTiers(const scene::SourceProps& s) {
+    std::vector<RasterEntry> out;
+    std::ifstream f(s.file, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::string err;
+    const JsonValue root = JsonParser::Parse(text, &err);
+    if (!f || !err.empty() || root.Str("format") != "GACOMP01") {
+        Log("[composite] %s: not a GACOMP01 composite (%s); the scene goes on without it", s.file.c_str(),
+            !f ? "cannot be read" : !err.empty() ? err.c_str() : "its format says otherwise");
+        return out;
+    }
+    const std::string dir = s.file.substr(0, s.file.find_last_of("/\\") + 1);
+    const std::string layer = s.name.empty() ? root.Str("layer") : s.name;
+    const JsonValue* tiers = root.Get("tiers");
+    if (!tiers) return out;
+    for (const JsonValue& t : tiers->arr) {
+        RasterEntry e;
+        e.folder = dir + t.Str("folder");
+        e.match = t.Str("match", "*.tif");
+        char g[32];
+        snprintf(g, sizeof(g), ".t%g", t.Num("grain_m", 0));
+        e.name = layer + g;
+        e.kind = root.Str("kind") == "height" ? "height" : t.Str("kind");
+        e.over = s.over + t.Num("over", 0);
+        e.feather = s.feather;
+        e.unit = t.Str("unit", root.Str("unit").c_str());
+        e.datum = t.Str("datum", root.Str("datum").c_str());
+        // A tier off the engine's datum carries the separation it measured (offset_m); one on it, none.
+        e.hasOffset = t.Get("offset_m") != nullptr && e.datum != "NAVD88";
+        e.offset = e.hasOffset ? t.Num("offset_m", 0) : 0.0;
+        out.push_back(std::move(e));
+    }
+    Log("[composite] %s: layer %s, %zu tiers", s.file.c_str(), layer.c_str(), out.size());
+    return out;
+}
+
+// M5c: the latest discharge for the SWE's upstream boundary: the first of the scene's gauges
+// (water.swe.riverGauges, "id[*scale] ...") that reports in data.river, times its scale (the
+// drainage between the gauge and the solver's face), else the scene's fallback. The gauge-to-
+// mouth travel time is ignored -- at low flows the tidal prism dwarfs it.
+double LoadRiverDischarge(const std::string& path, const std::string& gauges, double fallback) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) {
-        Log("[river] no %s (run: py -3 harvester\\harvest_river.py); climatological 70 m3/s",
-            path.c_str());
-        return 70.0;
+    if (path.empty() || !f) {
+        Log("[river] no gauges file '%s'; %.1f m3/s (the scene's fallback)", path.c_str(), fallback);
+        return fallback;
     }
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     std::string err;
     const JsonValue root = JsonParser::Parse(text, &err);
-    double lowell = -1, lawrence = -1;
-    if (const JsonValue* sites = root.Get("sites")) {
-        for (const auto& s : sites->arr) {
-            const std::string id = s.Str("id");
-            if (id == "01100000") lowell = s.Num("discharge_cms", -1);
-            if (id == "01100500") lawrence = s.Num("discharge_cms", -1);
+    std::istringstream want(gauges);
+    for (std::string g; want >> g;) {
+        const size_t star = g.find('*');
+        const std::string id = g.substr(0, star);
+        const double scale = star == std::string::npos ? 1.0 : atof(g.c_str() + star + 1);
+        if (const JsonValue* sites = root.Get("sites")) {
+            for (const auto& s : sites->arr) {
+                const double q = s.Str("id") == id ? s.Num("discharge_cms", -1) : -1;
+                if (q > 0) {
+                    Log("[river] discharge %.1f m3/s (USGS %s %s x %.3f)", q * scale, id.c_str(),
+                        s.Str("name").c_str(), scale);
+                    return q * scale;
+                }
+            }
         }
     }
-    double q = 70.0;
-    const char* src = "climatology (no gauge value)";
-    if (lawrence > 0) {
-        q = lawrence;
-        src = "USGS 01100500 Lawrence";
-    } else if (lowell > 0) {
-        q = lowell * 1.08;
-        src = "USGS 01100000 Lowell +8% drainage";
-    }
-    Log("[river] discharge %.1f m3/s (%s)", q, src);
-    return q;
+    Log("[river] no gauge of '%s' reports in %s; %.1f m3/s (the scene's fallback)", gauges.c_str(),
+        path.c_str(), fallback);
+    return fallback;
 }
 
 // M5c: the MLLW -> NAVD88 join from CO-OPS station datums instead of a hand constant. Use the
@@ -190,25 +231,19 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& marsModel = A->marsModel;
     auto& globeDataOk = A->globeDataOk;
     auto& bathyRaw = A->bathyRaw;
-    auto& bathyCapeAnn = A->bathyCapeAnn;
-    auto& bathyBoston = A->bathyBoston;
     auto& haveBathyRaw = A->haveBathyRaw;
     auto& compositor = A->compositor;
     auto& navdAboveMsl = A->navdAboveMsl;
     auto& datumFrom = A->datumFrom;
     auto& haveMslLink = A->haveMslLink;
     auto& mslToNavd = A->mslToNavd;
-    auto& srcNe15 = A->srcNe15;
     auto& srcCudem = A->srcCudem;
-    auto& srcCudemCA = A->srcCudemCA;
-    auto& srcCudemBos = A->srcCudemBos;
     auto& srcEdits = A->srcEdits;
     auto& hgtCh = A->hgtCh;
     auto& waterAtlas = A->waterAtlas;
     auto& bathy = A->bathy;
     auto& bathySwe = A->bathySwe;
     auto& sweDomain = A->sweDomain;
-    auto& bathyBostonSwe = A->bathyBostonSwe;
     auto& swe = A->swe;
     auto& riverQ = A->riverQ;
     auto& gulf = A->gulf;
@@ -297,6 +332,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             if (s.kind == "buildings") continue;  // solids, not a raster: the buildings layer's (below)
             if (s.kind == "roads") continue;      // ways, not a raster: the tree's ribbons (--tool building-lod)
             if (s.kind == "bridges") continue;    // spans, not a raster: the decks' clearances (--tool building-lod)
+            if (s.kind == "composite") {
+                // A COMPOSITE (docs/FIDELITY.md section 3, GACOMP01): many sources made into one
+                // product by a harvester; a raster layer is its tiers, each a folder of one grain,
+                // read as any folder is. The engine reads the product, never its inputs.
+                for (RasterEntry& t : CompositeTiers(s)) entries.push_back(std::move(t));
+                continue;
+            }
             entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
                                s.feather, s.unit, s.datum, s.offset, s.hasOffset});
         }
@@ -365,7 +407,18 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     renderer.AddLayer(std::move(tideOwned));
 
     // The open sea (M2) is optional until harvest_waves.py has run once.
-    if (seaState.Load(S.data.seastate)) {
+    // A file of many points (a composite) stands the point nearest the scene's place as the sea's
+    // own, and every other point as one more source (below).
+    const std::vector<std::pair<double, double>> seaPoints = SeaState::PointsOf(S.data.seastate);
+    int seaPoint = -1;
+    double seaBestD2 = 0.0;
+    for (size_t i = 0; i < seaPoints.size(); ++i) {
+        const double dLat = seaPoints[i].first - S.place.anchor[1];
+        const double dLon = (seaPoints[i].second - S.place.anchor[0]) * std::cos(S.place.anchor[1] * 3.14159265358979 / 180.0);
+        const double d2 = dLat * dLat + dLon * dLon;
+        if (seaPoint < 0 || d2 < seaBestD2) { seaPoint = int(i); seaBestD2 = d2; }
+    }
+    if (seaState.Load(S.data.seastate, seaPoint)) {
         // PHASE C2: THE SEA STATE IS A FIELD OF SOURCES. data.seastate's file stands where it says,
         // or where sea.box places a file that says nothing; every `sources` entry of kind "seastate"
         // is one more, a source by being a file.
@@ -384,6 +437,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 Log("[sea] source %s: %s unreadable -- not a source", s.name.c_str(), s.file.c_str());
                 continue;
             }
+            sea->AddSource(src.get());
+            A->seaSources.push_back(std::move(src));
+        }
+        for (int i = 0; i < int(seaPoints.size()); ++i) {
+            if (i == seaPoint) continue;
+            auto src = std::make_unique<SeaState>();
+            if (!src->Load(S.data.seastate, i)) continue;
             sea->AddSource(src.get());
             A->seaSources.push_back(std::move(src));
         }
@@ -415,12 +475,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         (marsMode && marsModel.Ready()) ? marsModel : globeModel;
     A->activeGlobe = &activeGlobe;   // the loop reads the same choice through the Assembly
 
-    // The raw CUDEM planes are SOURCES (immutable after load -- their bytes are part of
-    // the tile-cache identity). capeann/boston are the M6w HQ insets: channel-only, no
-    // solver of their own yet.
+    // The raw CUDEM plane is a SOURCE (immutable after load -- its bytes are part of the tile-cache
+    // identity): the scene's data.bathy. Every other height is a file of the scene's `sources`.
     haveBathyRaw = bathyRaw.Load(S.data.bathy);
-    bathyCapeAnn.Load("data/bathy/capeann.json");
-    bathyBoston.Load("data/bathy/boston.json");
 
     // M9n: THE HEIGHT STACK'S VERTICAL DATUM, resolved once and applied at the sources.
     // ETOPO is MSL/geoid referenced and everything above it in the stack is NAVD88; the two
@@ -448,24 +505,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         hgtCh = compositor.AddHeightChannel("mars.height", {&srcMola});
     } else if (globeDataOk) {
         std::vector<HeightSource*> hstack{&srcEtopo};
-        if (globeModel.NeNx() > 0) {
-            srcNe15 = std::make_unique<WindowHeightSource>(
-                "noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0,
-                &globeModel.NeElev(), globeModel.NeNx(), globeModel.NeNy(),
-                globeModel.NeLon0(), globeModel.NeLat1(), globeModel.NeDLon(),
-                globeModel.NeDLat(), 0.04, mslToNavd);
-            hstack.push_back(srcNe15.get());
-        }
-        if (bathyCapeAnn.Ready()) {
-            srcCudemCA = std::make_unique<CudemHeightSource>(&bathyCapeAnn, 0.04,
-                                                             "noaa.cudem.capeann");
-            hstack.push_back(srcCudemCA.get());
-        }
-        if (bathyBoston.Ready()) {
-            srcCudemBos = std::make_unique<CudemHeightSource>(&bathyBoston, 0.04,
-                                                              "noaa.cudem.boston");
-            hstack.push_back(srcCudemBos.get());
-        }
         if (haveBathyRaw) {
             // PHASE C5: the survey's name is its file's (the scene's data.bathy), not a place's.
             std::string stem = S.data.bathy;
@@ -481,19 +520,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             if (s->Height()) hstack.push_back(s.get());
         }
         StackOrder(hstack);
-        if (srcEdits.Load("data/gis/edits.geojson", 2.5f)) {
+        if (!S.data.edits.empty() && srcEdits.Load(S.data.edits, 2.5f)) {
             hstack.push_back(&srcEdits);
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
-    }
-    // Boston's dormant solver stands by the same law and the same code as the Merrimack's
-    // (below). Its west edge is a wall (the Charles is dammed: FrameLoop's config), so no side
-    // carries an open face that reads the bed and it keeps the survey's extent. Its grid is its
-    // own copy: the activation realizes the bed into it, and the survey the source reads stays
-    // the file.
-    if (bathyBoston.Ready()) {
-        bathyBostonSwe.DrawFrom(bathyBoston, srcCudemBos.get(), S.water.swe.window == 0, false,
-                                "boston");
     }
 
     // M6v/M8i: THE WATER ATLAS -- water parameters through the same registry. 18 phasor
@@ -502,7 +532,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // RG16F window tiles on demand. The sim manager consumes these next.
     waterAtlas.Init(compositor, model, "data/water");
     if (S.Tool("water-map") || S.Tool("bathy-map")) {
-        exitCode = tools::RunWaterMap(opt, gpu, globeModel, compositor, hgtCh, waterAtlas, surface.flat);
+        exitCode = tools::RunWaterMap(opt, gpu, compositor, hgtCh, waterAtlas, surface.flat);
         return nullptr;
     }
 
@@ -513,7 +543,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if (hgtCh >= 0 && !marsMode) {
             bathy.RealizeFromChannel(compositor, hgtCh);
         } else {
-            bathy.ApplyMaskEdits("data/gis/edits.geojson", 2.5f);
+            if (!S.data.edits.empty()) bathy.ApplyMaskEdits(S.data.edits, 2.5f);
         }
         // THE SOLVER STANDS WHERE ITS SOURCES PAINT AT FULL WEIGHT (HIERARCHY 4.17). The survey
         // fades into the layer beneath it over a band at every edge (its feather), so there the
@@ -673,7 +703,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
         // station stage still carries it into eta; the prism term dwarfs it either way).
         riverQ = (S.water.swe.riverQ > 0) ? S.water.swe.riverQ
-                                         : LoadRiverDischarge("data/river/river.json");
+                                         : LoadRiverDischarge(S.data.river, S.water.swe.riverGauges,
+                                                              S.water.swe.riverQFallback);
         sea->SetSwe(&swe);
     }
     if (haveCurrents && currents.Field().Valid()) {
@@ -788,6 +819,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->albedoLens = opt.albedo;
         // Before Init: the residency lens's pipelines are built there, and only when asked for.
         globe->debugLens = opt.lens;
+        // ...and the scene's debug view, before Init for the same reason.
+        globe->SetDebug(S.debug);
         if (!opt.groundProbe.empty()) {   // Phase A0: lat,lon in degrees -> the planet direction
             double lat = 0.0, lon = 0.0;
             if (sscanf_s(opt.groundProbe.c_str(), " %lf , %lf", &lat, &lon) == 2) {
@@ -1034,7 +1067,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // it already has -- the global cube is not repainted for this.
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
-                    gisMask.Load("data/gis/", S.streaming.gisLand)) {
+                    gisMask.Load("data/gis/", S.streaming.gisLand, S.data.edits)) {
                     srcGisMask.Refresh();   // the rings are loaded: declare the real box
                     srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
@@ -1292,7 +1325,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             }
 
         }
-        globe->debugLens = opt.lens;
+        if (opt.lens) globe->debugLens = opt.lens;   // (the scene's residency view, set above, stands otherwise)
         globe->probeCullFar = opt.probeCullFar;
         globe->waterTileCount = opt.waterTiles;   // M13 step 0
         // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
@@ -1313,7 +1346,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             if (swe.Ready() && bathy.Ready()) {
                 LoaderRegistry freg;
                 freg.Register("json", CurrentFieldLoader::Open);
-                if (auto cld = freg.Open("data/currents/currents.json")) {
+                if (auto cld = freg.Open(S.data.currents)) {   // the scene's currents, as the model reads them
                     auto ras = std::make_shared<RasterSource>(std::move(cld), 0);
                     DomainCompositor fc;
                     LevelLadder lad;

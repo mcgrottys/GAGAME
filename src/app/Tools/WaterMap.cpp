@@ -10,7 +10,6 @@
 #include "hal/Gpu.h"
 #include "core/Image.h"
 #include "core/Json.h"
-#include "sim/GlobeModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -33,10 +32,10 @@ namespace {
 // the field (co-amplitude chart), GSHHG parity-filled land, coast + structures + stations.
 // bathyChannel >= 0 switches the sheet to HYPSOMETRIC BATHYMETRY: every pixel is
 // SampleHeightStack -- the same painted stack the renderer's tiles and the solver's bed
-// come from, so the chart IS the channel (all three CUDEM insets, the NE-15s base, the
-// hand-edit structures, one surface).
+// come from, so the chart IS the channel (the scene's heights, the hand-edit structures, one
+// surface).
 void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
-                    const GlobeModel& gm, const std::wstring& outPath, const Space::Anchor& chart,
+                    int heightChannel, const std::wstring& outPath, const Space::Anchor& chart,
                     int bathyChannel = -1) {
     const int H = 1500;
     int W = 1800;   // trimmed to the sheet's true aspect below
@@ -97,16 +96,11 @@ void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
         latD = phi / kD2R;
     };
 
-    // Land: the NE 15" relief grid (461 m -- honest chart-scale coastline). The vpack coast
-    // is CLIPPED polylines, so scanline parity is unsound (tried; false closure chords
-    // flipped the whole Atlantic to land). Heights are the region's land authority anyway.
+    // Land: the composed height stack at a chart's grain (461 m -- an honest chart-scale
+    // coastline). The vpack coast is CLIPPED polylines, so scanline parity is unsound (tried;
+    // false closure chords flipped the whole Atlantic to land). Heights are the land authority.
     auto isLand = [&](double latD, double lonD) {
-        if (gm.NeNx() <= 0) return false;
-        const double fx = (lonD - gm.NeLon0()) / gm.NeDLon();
-        const double fy = (latD - gm.NeLat1()) / gm.NeDLat();
-        const int c = static_cast<int>(fx), r = static_cast<int>(fy);
-        if (r < 0 || c < 0 || r >= gm.NeNy() || c >= gm.NeNx()) return false;
-        return gm.NeElev()[static_cast<size_t>(r) * gm.NeNx() + c] > 0;
+        return heightChannel >= 0 && comp.SampleHeightStack(heightChannel, latD * kD2R, lonD * kD2R, 461.0) > 0.0f;
     };
 
     // The page: paper white; ocean tinted by M2 AMPLITUDE from the composed stack (the same
@@ -230,17 +224,15 @@ void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
 
 }  // namespace
 
-int RunWaterMap(const Options& opt, Gpu& gpu, const GlobeModel& globeModel,
-                Compositor& compositor, int hgtCh, const WaterAtlas& waterAtlas,
+int RunWaterMap(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh, const WaterAtlas& waterAtlas,
                 const Space::Anchor& chart) {
     VectorPack mapVec;
     mapVec.Load("data/vectors/vectors.vpack");
     if (!opt.waterMap.empty()) {
-        RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.waterMap, chart);
+        RenderWaterMap(compositor, waterAtlas, mapVec, hgtCh, opt.waterMap, chart);
     }
     if (!opt.bathyMap.empty()) {
-        RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.bathyMap, chart,
-                       hgtCh);
+        RenderWaterMap(compositor, waterAtlas, mapVec, hgtCh, opt.bathyMap, chart, hgtCh);
     }
     gpu.WaitIdle();
     gpu.Shutdown();

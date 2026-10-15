@@ -44,7 +44,18 @@ double ShapeOf(const PartParam& p, double f) {
 
 }  // namespace
 
-bool SeaState::Load(const std::string& jsonPath) {
+std::vector<std::pair<double, double>> SeaState::PointsOf(const std::string& jsonPath) {
+    std::vector<std::pair<double, double>> out;
+    const std::string text = ReadFile(jsonPath);
+    std::string err;
+    const JsonValue root = JsonParser::Parse(text, &err);
+    if (const JsonValue* pts = root.Get("points"); pts && pts->type == JsonValue::Type::Array) {
+        for (const JsonValue& p : pts->arr) out.push_back({p.Num("lat", 0), p.Num("lon", 0)});
+    }
+    return out;
+}
+
+bool SeaState::Load(const std::string& jsonPath, int point) {
     const std::string text = ReadFile(jsonPath);
     if (text.empty()) {
         Log("[sea] cannot read %s", jsonPath.c_str());
@@ -57,19 +68,22 @@ bool SeaState::Load(const std::string& jsonPath) {
         return false;
     }
 
-    m_cycleUnix = root.Num("cycle_unix", 0);
-    m_cycleLabel = root.Str("cycle_label", "gfswave ?");
-    m_label = jsonPath;
+    const JsonValue* pts = root.Get("points");
+    const bool one = point >= 0 && pts && pts->type == JsonValue::Type::Array && size_t(point) < pts->arr.size();
+    const JsonValue& at = one ? pts->arr[size_t(point)] : root;   // the point's own forecast
+    m_cycleUnix = at.Num("cycle_unix", 0);
+    m_cycleLabel = at.Str("cycle_label", "gfswave ?");
+    m_label = one ? jsonPath + "#" + at.Str("id") : jsonPath;
     // PHASE C2: THE FILE SAYS WHERE IT IS -- its forecast's box (the harvester's grib subregion,
     // longitudes 0..360), when it carries one.
-    if (const JsonValue* box = root.Get("box"); box && box->type == JsonValue::Type::Object) {
+    if (const JsonValue* box = at.Get("box"); box && box->type == JsonValue::Type::Object) {
         const auto lon = [](double l) { return l > 180.0 ? l - 360.0 : l; };
         const double b[4] = {box->Num("bottomlat", 0), lon(box->Num("leftlon", 0)),
                              box->Num("toplat", 0), lon(box->Num("rightlon", 0))};
         SetBox(b);
     }
 
-    if (const JsonValue* hours = root.Get("hours");
+    if (const JsonValue* hours = at.Get("hours");
         hours && hours->type == JsonValue::Type::Array) {
         for (const JsonValue& jh : hours->arr) {
             SeaHour h;

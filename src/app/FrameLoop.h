@@ -183,6 +183,7 @@ private:
     const Options& m_opt;
     const Scene& m_S;
     Assembly& m_A;
+    scene::DebugSection m_debugStep;   // G's debug view, stepped from the scene's own
     WaveRebuild m_waveRebuild{this};
 
     // M12 step 5f: THE WHOLE SCENE HOT-RELOADS (scene/SceneReload.h). `m_live` is the session's
@@ -506,7 +507,7 @@ private:
     const bool m_hasSound = false;   // retired with the solver's south strip (see SweSolver)
     std::function<double(double)> m_southAt;
     std::function<double(double)> m_westAt;
-    const double m_kUpriverAreaM2 = 3.9e6;
+    const double m_kUpriverAreaM2 = m_S.water.swe.upriverAreaM2;   // the scene's (SweProps)
     std::function<double(double)> m_westQAt;
     WeatherManager m_weather;
     std::function<WaveFieldConfig(const WaterSceneConfig&)> m_sceneToWaveCfg;

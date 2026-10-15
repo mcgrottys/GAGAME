@@ -1,0 +1,21 @@
+{
+  "_readme": [
+    "THE SOLVER AT HAULOVER FROM THE WATER COMPOSITES (docs/FIDELITY.md): scenes/demos/haulover_solver.json's",
+    "keys, its water read from the same products scenes/demos/composite_merrimack.json reads -- one file per",
+    "layer for every painted region, the engine picking by position. Make them as that scene's readme says."
+  ],
+  "base": "scenes/demos/haulover_portal.json",
+  "scene": {"name": "composite-haulover"},
+  "data": {
+    "tides": "data/composite/coast3/tides/stations.json",
+    "currents": "data/composite/coast3/currents/currents.json",
+    "seastate": "data/composite/coast3/sea/seastate.json"
+  },
+  "sources": [
+    {"name": "water.bed", "file": "data/composite/coast3/water.bed.composite.json", "kind": "composite"},
+    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif", "unit": "m", "datum": "EGM2008", "offset": -0.092}
+  ],
+  "water": {
+    "swe": {"box": [-80.22, 25.82, -80.03, 26.02], "river": "none"}
+  }
+}

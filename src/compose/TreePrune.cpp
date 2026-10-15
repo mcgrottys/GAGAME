@@ -526,16 +526,17 @@ void RetireAll(const Request& q, Result& R, uint64_t now, const Say& say) {
     std::vector<Item> items;
     uint64_t bytes = 0;
     for (const Entry& e : R.listing.entries) {
-        if (!IsStale(e.verdict)) continue;
+        if (!IsStale(e.verdict) || (!q.node.empty() && e.node != q.node)) continue;
         Item it;
         it.e = e;
         it.to = batch + L"\\" + Widen(e.node + "." + e.id) + L"\\" + Widen(e.tag);
         items.push_back(std::move(it));
         bytes += e.bytes;
     }
-    say(Fmt("retire: %zu tag folders (%.1f MB) are STALE or STALE-UNSTAMPED; each moves with its "
+    say(Fmt("retire: %zu tag folders (%.1f MB)%s%s are STALE or STALE-UNSTAMPED; each moves with its "
             "archives, one rename apiece, into %s",
-            items.size(), double(bytes) / 1048576.0, Rel(batch, root).c_str()));
+            items.size(), double(bytes) / 1048576.0, q.node.empty() ? "" : " of node ", q.node.c_str(),
+            Rel(batch, root).c_str()));
     for (const Item& it : items) {
         say("  would move " + Rel(it.e.folder, root) + Belongings(it.e) + "  (" +
             VerdictName(it.e.verdict) + ")");

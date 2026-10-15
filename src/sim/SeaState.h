@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ga {
@@ -59,7 +60,12 @@ struct BuoyObs {
 
 class SeaState {
 public:
-    bool Load(const std::string& jsonPath);
+    // A file of many forecast points (the composite's `points`, docs/FIDELITY.md) is read one
+    // point at a time: `point` names which (its hours, cycle and box); -1 = the file's top level,
+    // which a file of one point is all of.
+    bool Load(const std::string& jsonPath, int point = -1);
+    // The forecast points a file holds, [lat, lon] each; empty = a file of one point.
+    static std::vector<std::pair<double, double>> PointsOf(const std::string& jsonPath);
     bool Ready() const { return !m_hours.empty(); }
 
     double CycleUnix() const { return m_cycleUnix; }

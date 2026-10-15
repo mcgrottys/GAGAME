@@ -148,37 +148,6 @@ float EquirectHeightSource::Sample(double latRad, double lonRad, double, float& 
     return 1.0f;
 }
 
-// ------------------------------------------------------------------------------ window grid
-
-WindowHeightSource::WindowHeightSource(const char* name, const char* structure,
-                                       double cmPerPixel, const std::vector<int16_t>* elev,
-                                       int nx, int ny, double lon0, double lat1, double dLon,
-                                       double dLat, double featherFrac, double datumShiftM)
-    : m_elev(elev), m_nx(nx), m_ny(ny), m_lon0(lon0), m_lat1(lat1), m_dLon(dLon),
-      m_dLat(std::abs(dLat)), m_feather(featherFrac), m_datumShift(datumShiftM) {
-    char crs[96];   // was a function-local static shared by every instance
-    if (datumShiftM != 0.0) {
-        snprintf(crs, sizeof(crs), "EPSG:4326 window (row 0 N), vdatum %+.3f m -> NAVD88",
-                 datumShiftM);
-    } else {
-        snprintf(crs, sizeof(crs), "EPSG:4326 window (row 0 north)");
-    }
-    m_info = {name, structure, crs, cmPerPixel, lon0, lat1 - ny * std::abs(dLat),
-              lon0 + nx * dLon, lat1};
-}
-
-float WindowHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
-    if (!m_elev || m_nx <= 0) return 0.0f;
-    const double lonDeg = lonRad * 180.0 / kPi, latDeg = latRad * 180.0 / kPi;
-    const double u = (lonDeg - m_lon0) / (m_nx * m_dLon);
-    const double v = (m_lat1 - latDeg) / (m_ny * m_dLat);
-    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return 0.0f;
-    metres = Bilinear(*m_elev, m_nx, m_ny, u * m_nx, v * m_ny, false) +
-             static_cast<float>(m_datumShift);
-    const double edge = (std::min)((std::min)(u, 1.0 - u), (std::min)(v, 1.0 - v));
-    return Feather(edge, m_feather);   // the old render-time NeWeight feather, at paint time
-}
-
 // ------------------------------------------------------------------------------ CUDEM
 
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
@@ -186,7 +155,7 @@ CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac
     : m_bathy(bathy), m_feather(featherFrac) {
     m_info = {name,
               "geotiff-window float32 (thalweg-preserving resample)",
-              "local tangent metres @ ACT0816 (from EPSG:4326 GeoTIFF)", 1370.0, bathy->Lon0(),
+              "EPSG:4326 grid (the harvester's resample of its GeoTIFF)", 1370.0, bathy->Lon0(),
               bathy->Lat0(), bathy->Lon1(), bathy->Lat1()};
 }
 
@@ -325,7 +294,7 @@ float BedValNoise(double x, double y) {
 const char* kBedRulesDefault = R"JSON({
   "version": 1,
   "comment": "synth.bed -- the compositor's first synthesis node. Colors are DRY bed albedo, sRGB 0..1: the renderer's refracted ray applies the water's own attenuation, so author the bed as if drained. Rules run in order; the first whose slope gates pass paints. Add polygons to bed_zones.geojson (properties.bed = a rule name, optional properties.albedo = [r,g,b]) to override by survey or by hand; every edit repaints exactly the touched tiles.",
-  "bounds": {"lon0": -71.15, "lat0": 42.15, "lon1": -70.25, "lat1": 43.10},
+  "bounds": {"lon0": -180, "lat0": -90, "lon1": 180, "lat1": 90},
   "alpha": {"full0": -9.0, "full1": 0.4, "off0": -14.0, "off1": 1.2},
   "rules": [
     {"name": "rock", "slopeMin": 0.05, "shallow": [0.37, 0.35, 0.31], "deep": [0.28, 0.28, 0.26], "noise": 0.16},
@@ -358,8 +327,8 @@ bool BedSynthSource::Load(const std::string& rulesPath, const Compositor* comp,
     const JsonValue root = JsonParser::Parse(text, &err);
     if (!err.empty()) return false;
     if (const JsonValue* b = root.Get("bounds")) {
-        m_info.lon0 = b->Num("lon0", -71.15); m_info.lat0 = b->Num("lat0", 42.15);
-        m_info.lon1 = b->Num("lon1", -70.25); m_info.lat1 = b->Num("lat1", 43.10);
+        m_info.lon0 = b->Num("lon0", -180.0); m_info.lat0 = b->Num("lat0", -90.0);
+        m_info.lon1 = b->Num("lon1", 180.0); m_info.lat1 = b->Num("lat1", 90.0);
     }
     if (const JsonValue* a = root.Get("alpha")) {
         m_full0 = a->Num("full0", -9.0); m_full1 = a->Num("full1", 0.4);

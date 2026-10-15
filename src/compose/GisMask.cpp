@@ -259,7 +259,7 @@ void GisVectorMask::LoadEdits(const std::string& path) {
     }
 }
 
-bool GisVectorMask::Load(const std::string& dir, const std::string& landPath) {
+bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, const std::string& editsPath) {
     m_pts.reserve(1400000);
     if (!landPath.empty()) {   // THE GLOBAL COAST: its cell index only (see the header)
         std::ifstream f(landPath, std::ios::binary);
@@ -291,7 +291,7 @@ bool GisVectorMask::Load(const std::string& dir, const std::string& landPath) {
     // The NHD carve. survey.json: "NHD open-water even-odd per feature", with marsh and wetland
     // excluded because the live tide owns that call -- which is the same split as this gate.
     ReadRings(dir + "nhd_water_ne.bin", m_water);
-    LoadEdits(dir + "edits.geojson");
+    if (!editsPath.empty()) LoadEdits(editsPath);
     if (!coast) {
         Log("[gismask] no coast rings at %s -- the gate will not exist, and nothing that does "
             "not depend on it changes",

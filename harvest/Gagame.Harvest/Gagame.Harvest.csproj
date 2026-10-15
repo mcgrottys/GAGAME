@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Gagame.Harvest</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- HDF5 / netCDF-4 (the NOS OFS nowcasts, the EOT20 grids): pure managed, replaces hdf5.py and the netCDF4 module. -->
+    <PackageReference Include="PureHDF" Version="2.2.0" />
+    <!-- JPEG 2000 (the MassGIS orthos): replaces Pillow + OpenJPEG. -->
+    <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="15.0.0" />
+    <!-- GeoPackage / tile-scheme SQLite: replaces the sqlite3 module. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,19 @@
+{
+  "id": "noaa.etopo2022.60s",
+  "title": "ETOPO 2022 v1 60 arc-second surface elevation",
+  "label": "ETOPO 2022 60\"",
+  "short": "etopo60",
+  "kind": "tiled-geotiff",
+  "rank": 0,
+  "url": "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/60s/60s_surface_elev_gtif/ETOPO_2022_v1_60s_N90W180_surface.tif",
+  "license": "public domain (NOAA NCEI)",
+  "cite": "NOAA NCEI 2022, ETOPO 2022 60 Arc-Second Global Relief Model, doi:10.25921/fd45-gt74",
+  "datum": "EGM2008",
+  "vertical_epsg": 3855,
+  "step_arcsec": 60,
+  "variables": {"elevation": {"name": "band 1", "units": "m"}},
+  "tile_deg": [360, 180],
+  "name": "ETOPO_2022_v1_60s_{ns}{lat1:00}{ew}{lon0:000}_surface.tif",
+  "fetch": "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/60s/60s_surface_elev_gtif/{name}",
+  "cache": ["cache/globe/ETOPO_2022_v1_60s_surface.tif"]
+}

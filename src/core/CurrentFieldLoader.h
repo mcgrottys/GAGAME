@@ -46,7 +46,7 @@ public:
     }
 
     const char* Name() const override { return m_name.c_str(); }
-    const char* Structure() const override { return "gomofs uv float32 planar (row 0 south)"; }
+    const char* Structure() const override { return "current uv float32 planar (row 0 south)"; }
     const GeoRef& Ref() const override { return m_ref; }
     // A current is a VECTOR. grad() of it is kG0 | kG2 by the Cayley closure, computed in the
     // type -- this loader never has to know that, which is the point.
@@ -157,7 +157,7 @@ private:
 
         const size_t slash = path.find_last_of("/\\");
         const std::string dir = (slash == std::string::npos) ? "" : path.substr(0, slash + 1);
-        const std::string bin = dir + jf->Str("file", "gomofs_uv.f32");
+        const std::string bin = dir + jf->Str("file");
         FILE* bf = fopen(bin.c_str(), "rb");
         if (!bf) {
             Log("[loader] %s: samples not found", bin.c_str());
@@ -173,7 +173,13 @@ private:
             Log("[loader] %s: short read (%zu + %zu of %zu)", bin.c_str(), gu, gv, n);
             return false;
         }
-        m_name = "noaa.gomofs.current";
+        // The field's name is its model's (the harvester's `model`, else its file's stem): a
+        // current from any model is a current.
+        m_name = jf->Str("model");
+        if (m_name.empty()) {
+            const std::string f = jf->Str("file");
+            m_name = "current." + f.substr(0, f.find('.'));
+        }
         Log("[loader] %s: %ux%u %s, %s", m_name.c_str(), m_ref.width, m_ref.height,
             m_ref.Describe().c_str(), jf->Str("source", "").substr(0, 52).c_str());
         return true;

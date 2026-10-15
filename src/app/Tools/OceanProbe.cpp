@@ -12,10 +12,13 @@
 #include "sim/TideModel.h"
 #include "sim/WeatherManager.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <functional>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace ga::app::tools {
 
@@ -56,22 +59,30 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
         show(20000.0);
         show(500.0);
         show(15.0);
-        // Consistency gates: the manager's level vs the fitted station truth.
+        // Consistency gates: the manager's level vs the fitted station truth, at the two stations
+        // with a NAVD88 link nearest the probe (by the chord, which orders as the arc does).
         bool ok = true;
-        for (const char* sid : {"8443970", "8441841"}) {
-            for (size_t i = 0; i < model.Count(); ++i) {
-                if (model.S(i).id != sid) continue;
-                const TideStation& st = model.S(i);
-                if (st.mllwMinusNavdM < -900.0) continue;
-                const double direct = model.Height(i, simUnix) + st.mllwMinusNavdM;
-                const WeatherSample q = weather.Query(st.lat, st.lon, simUnix, 200.0);
-                const double err = std::abs(q.levelNavd - direct);
-                Log("[wx] gate %s (%s): manager %+.3f vs station %+.3f -- err %.0f mm "
-                    "(%s)",
-                    sid, st.name.c_str(), q.levelNavd, direct, err * 1000.0,
-                    q.levelSrc);
-                if (err > 0.25) ok = false;
-            }
+        std::vector<std::pair<double, size_t>> nearest;
+        for (size_t i = 0; i < model.Count(); ++i) {
+            if (model.S(i).mllwMinusNavdM < -900.0) continue;
+            const double d2 = (model.S(i).lat - plat) * (model.S(i).lat - plat) +
+                              (model.S(i).lon - plon) * (model.S(i).lon - plon) *
+                                  std::cos(plat * 3.14159265358979 / 180.0) * std::cos(plat * 3.14159265358979 / 180.0);
+            nearest.push_back({d2, i});
+        }
+        std::sort(nearest.begin(), nearest.end());
+        if (nearest.size() > 2) nearest.resize(2);
+        for (const auto& n : nearest) {
+            const size_t i = n.second;
+            const TideStation& st = model.S(i);
+            const double direct = model.Height(i, simUnix) + st.mllwMinusNavdM;
+            const WeatherSample q = weather.Query(st.lat, st.lon, simUnix, 200.0);
+            const double err = std::abs(q.levelNavd - direct);
+            Log("[wx] gate %s (%s): manager %+.3f vs station %+.3f -- err %.0f mm "
+                "(%s)",
+                st.id.c_str(), st.name.c_str(), q.levelNavd, direct, err * 1000.0,
+                q.levelSrc);
+            if (err > 0.25) ok = false;
         }
         Log("[wx] ---- %s: %d windows active ----", ok ? "PASS" : "FAIL",
             weather.ActiveWindows());

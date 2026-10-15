@@ -118,6 +118,18 @@ private:
     const uint8_t* Texel(size_t file, int x, int y);
     double Bilinear(size_t file, double fx, double fy, uint8_t rgba[4]);
     double BoxMean(size_t file, double uc, double vc, double su, double sv, uint8_t rgba[4]);
+    // A HEIGHT'S BOX BY ITS INTEGRAL. A window's summed-area table (its values and its count of
+    // values, NaN counted in neither) gives the integral of the window's piecewise-constant field
+    // at any fractional corner by the table's bilinear (exact: within a cell the integral is
+    // bilinear in the corner), so a box of any size is the same area mean as the texel loop, at the
+    // cost of the windows it touches and not of its texels. 2026-10-13: the bed classifier asks the
+    // stack at a kilometre; over a 3.4 m set that loop read 85,000 texels a sample and the colour
+    // tiles over the Merrimack never returned.
+    struct Sat {
+        std::vector<double> v, n;   // (kWin + 1)^2 each, row-major: sums over texels x < i, y < j
+    };
+    std::shared_ptr<const Sat> WindowSat(size_t file, uint32_t wx, uint32_t wy);
+    void BoxIntegral(size_t file, double u0, double u1, double v0, double v1, double& value, double& have);
     float Feathered(double x, double y) const;
 
     std::vector<std::unique_ptr<File>> m_files;
@@ -135,6 +147,8 @@ private:
     std::mutex m_cacheMx;
     std::list<std::pair<uint64_t, std::shared_ptr<const std::vector<uint8_t>>>> m_lru;
     std::unordered_map<uint64_t, decltype(m_lru)::iterator> m_index;
+    std::list<std::pair<uint64_t, std::shared_ptr<const Sat>>> m_satLru;   // under m_cacheMx
+    std::unordered_map<uint64_t, decltype(m_satLru)::iterator> m_satIndex;
 };
 
 // Every entry, opened: one source each. A refused entry is logged by name with its reason, and

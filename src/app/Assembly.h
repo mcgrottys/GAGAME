@@ -136,7 +136,7 @@ struct Assembly {
     GlobeModel marsModel;
     bool globeDataOk = false;
     GlobeModel* activeGlobe = nullptr;   // main's `GlobeModel&`: marsModel when ready, else globeModel
-    BathyModel bathyRaw, bathyCapeAnn, bathyBoston;
+    BathyModel bathyRaw;
     bool haveBathyRaw = false;
     Compositor compositor;
     double navdAboveMsl = 0.0;
@@ -145,8 +145,7 @@ struct Assembly {
     double mslToNavd = 0.0;
     std::optional<EquirectHeightSource> srcEtopo;   // emplaced once globeModel is loaded: the
     std::optional<EquirectHeightSource> srcMola;    // grid dimensions are constructor arguments
-    std::unique_ptr<WindowHeightSource> srcNe15;
-    std::unique_ptr<CudemHeightSource> srcCudem, srcCudemCA, srcCudemBos;
+    std::unique_ptr<CudemHeightSource> srcCudem;
     EditsHeightSource srcEdits;   // M6w: the hand edits ARE a stack layer now -- their
                                   // cache identity is the geojson content, so an operator
                                   // edit repaints exactly the touched tiles at every rung
@@ -157,7 +156,7 @@ struct Assembly {
     // paint at full weight (BathyModel::DrawFrom). `bathy` stays the survey's whole window for
     // what draws or stands on the ground (the foundation sink, the camera's clamp);
     // every reader of a solver's fields reads it by these.
-    BathyModel bathySwe, bathyBostonSwe;
+    BathyModel bathySwe;
     SweDomain sweDomain;   // PHASE C1: the solver's chart (the scene's box) and its CPU bed
     SweSolver swe;
     SweSolver::BedWindow bedWindow{};   // PHASE B2 (D4): the standing window's rows, for the weather manager

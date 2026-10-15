@@ -21,7 +21,9 @@
     "tides": "data/tides/stations.json",
     "seastate": "data/sea/seastate.json",
     "currents": "data/currents/currents.json",
-    "bathy": "data/bathy/merrimack.json"
+    "bathy": "data/bathy/merrimack.json",
+    "river": "data/river/river.json",
+    "edits": "data/gis/edits.geojson"
   },
   "time": {"start": "now", "timeScale": 1, "paused": false, "windowDays": 7},
   "sun": {"source": "ephemeris", "az": 112, "el": 26},
@@ -35,7 +37,9 @@
     "foam": 1,
     "edgePx": 12,
     "heightScale": 1.15,
-    "swe": {"enabled": true, "westBoundary": true, "spinupH": 1, "gain": 1, "riverQ": -1},
+    "swe": {"enabled": true, "westBoundary": true, "spinupH": 1, "gain": 1, "riverQ": -1,
+            "riverGauges": "01100500 01100000*1.08", "riverQFallback": 70,
+            "upriverAreaM2": 3.9e6},
     "bank": {"flatBed": false, "flatBedNavd": -30},
     "wavefield": {
       "enabled": true,
@@ -144,11 +148,14 @@
   "tools": [],
   "sources": [
     {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
-    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1}
+    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1},
+    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif",
+     "unit": "m", "datum": "EGM2008", "offset": -0.092}
   ],
   "stations": [
     {"name": "ACT0816", "lat": 42.81833, "lon": -70.81},
     {"name": "ACT0821", "lat": 42.81333, "lon": -70.86833},
-    {"name": "ACT0826", "lat": 42.705, "lon": -70.78833}
+    {"name": "ACT0826", "lat": 42.705, "lon": -70.78833},
+    {"name": "44029", "lat": 42.523, "lon": -70.566}
   ]
 }

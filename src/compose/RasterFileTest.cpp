@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -1211,6 +1212,55 @@ bool RunRasterFileSelfTest() {
                   "a signed 16-bit height (SampleFormat 2) reads -5 and 12 m where the file holds them: %.2f, "
                   "%.2f%s%s", top, low, loaded ? "" : " -- ", loaded ? "" : why.c_str());
         }
+        {   // A HEIGHT'S BOX BY ITS INTEGRAL (RasterFileSource::WindowSat): past two texels a side the
+            // mean is read from the windows' summed-area tables. A 700-texel float32 file (three windows
+            // a side): a linear field's mean over a box is its value at the box's centre (within the
+            // staircase's own step over the box), across window edges; a constant field with a hole of
+            // NaN keeps its value and loses weight. A table read a window off is metres off on (1).
+            constexpr uint32_t W = 700;
+            const double g = 0.5, la0 = 25.8997, lo0 = -80.1239;
+            Raster lr{"out/rastertest/height_f32_sat.tif", 4326, 0, 0, 0, 0};
+            const double d = g / (kA * kD2R);
+            lr.sx = d / std::cos(la0 * kD2R);
+            lr.sy = -d;
+            lr.ox = lo0 - W / 2.0 * lr.sx;
+            lr.oy = la0 - W / 2.0 * lr.sy;
+            for (int field = 0; field < 2; ++field) {
+                std::vector<uint8_t> px(size_t(W) * W * 4);
+                for (uint32_t y = 0; y < W; ++y) {
+                    for (uint32_t x = 0; x < W; ++x) {
+                        const bool hole = field == 1 && x >= 300 && x < 340 && y >= 300 && y < 340;
+                        const float v = field == 0 ? 0.25f * (x + 0.5f) + 0.75f * (y + 0.5f)
+                                                   : (hole ? std::numeric_limits<float>::quiet_NaN() : 7.0f);
+                        std::memcpy(&px[(size_t(y) * W + x) * 4], &v, 4);
+                    }
+                }
+                GeoTags t = TagsOf(lr, 4326);
+                t.keys[3] = 4;
+                t.keys.insert(t.keys.end(), {4096, 0, 1, 5703});
+                TiffImage im{W, W, 1, 32, px, 0};
+                im.fmt = 3;
+                WriteTiff(lr.file, {im}, t);
+                RasterFileSource sf;
+                why.clear();
+                const bool loaded = sf.Load(reg, lr.file, none, &why);
+                double lat = 0.0, lon = 0.0;
+                PixelLatLon(lr, 320.0, 320.0, lat, lon);   // a box about texel corner (320, 320): past the edge at 256
+                float wide = 0.0f, fine = 0.0f;
+                const float wb = loaded ? sf.Sample(lat, lon, 60.0 * g / std::cos(lat), wide) : 0.0f;
+                const float ws = loaded ? sf.Sample(lat, lon, 1e-4, fine) : 0.0f;
+                if (field == 0) {
+                    Check(loaded && wb > 0.999f && std::abs(wide - fine) < 0.02f,
+                          "a height's box of 60 texels across a window's edge, by its integral, is a linear field's "
+                          "value at its centre: %.4f against %.4f m%s%s", wide, fine, loaded ? "" : " -- ", why.c_str());
+                } else {
+                    Check(loaded && std::abs(wide - 7.0f) < 1e-5f && wb < 0.9f && wb > 0.4f,
+                          "a constant field with a 40-texel hole of NaN keeps its value by the integral (%.6f m) and "
+                          "loses the hole's share of the weight (%.3f)", wide, wb);
+                }
+                (void)ws;
+            }
+        }
     }
     Sweep(trees);
 
@@ -1284,16 +1334,10 @@ bool RunRealHeightsCheck() {
     e60.file = "cache/globe/ETOPO_2022_v1_60s_surface.tif";
     e60.name = "noaa.etopo2022.60s";
     e60.hasOffset = true;
-    RasterEntry e15 = e60;
-    e15.file = "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif";
-    e15.name = "noaa.etopo2022.15s";
-    const auto et = LoadRasterSources({e60, e15});
-    if (et.size() != 2) return false;
+    const auto et = LoadRasterSources({e60});
+    if (et.size() != 1) return false;
     EquirectHeightSource rel("noaa.etopo2022", "equirect-grid int16 8192x4096", 489200.0, &gm.Elev(), gm.Nx(), gm.Ny());
-    WindowHeightSource ne("noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0, &gm.NeElev(), gm.NeNx(),
-                          gm.NeNy(), gm.NeLon0(), gm.NeLat1(), gm.NeDLon(), gm.NeDLat());
-    std::vector<double> dp, dc, dn;
-    size_t roundEq = 0;
+    std::vector<double> dp, dc;
     for (int i = 0; i < 2000; ++i) {
         // the global relief: a point uniform on the sphere, and the cell it falls in, at its centre
         const double lat = std::asin(2.0 * u01(rng) - 1.0), lon = (2.0 * u01(rng) - 1.0) * kPi;
@@ -1306,19 +1350,9 @@ bool RunRealHeightsCheck() {
         if (et[0]->Sample(clat * kD2R, clon * kD2R, cell / std::cos(clat * kD2R), fb) > 0.0f) {
             dc.push_back(double(fb) - gm.Elev()[size_t(cy) * gm.Nx() + size_t(cx)]);
         }
-        // the NE ring: a cell of ne_15s at its centre, which is the 15" file's texel centre
-        const double nx = std::floor(u01(rng) * gm.NeNx()), ny = std::floor(u01(rng) * gm.NeNy());
-        const double nlon = gm.NeLon0() + (nx + 0.5) * gm.NeDLon(), nlat = gm.NeLat1() + (ny + 0.5) * gm.NeDLat();
-        float g15 = 0.0f, n15 = 0.0f;
-        if (et[1]->Sample(nlat * kD2R, nlon * kD2R, 1e-3, g15) > 0.0f && ne.Sample(nlat * kD2R, nlon * kD2R, 0.0, n15) > 0.0f) {
-            dn.push_back(double(g15) - n15);
-            roundEq += std::lround(g15) == std::lround(n15) ? 1 : 0;
-        }
     }
     Distribution("C.2 ETOPO 60\" file (bilinear) - the engine's relief (bilinear on 8192x4096 int16)", dp);
     Distribution("C.2   the file's area mean over a relief cell - that cell's int16", dc);
-    Distribution("C.2 ETOPO 15\" file at a ne_15s cell's centre - that cell's int16", dn);
-    Log("[realheights] C.2   the 15\" file rounded equals ne_15s at %zu of %zu cells", roundEq, dn.size());
     // A SECOND HAND: the hill Python wrote (out\s3\make_hill.py: deflate, the float predictor, tiled)
     // at the 36 points, against this file's closed form.
     RasterEntry he;

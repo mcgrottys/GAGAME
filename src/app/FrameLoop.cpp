@@ -12,6 +12,7 @@
 //  members went to the header with them.
 // ================================================================================================
 #include "app/FrameLoop.h"
+#include "compose/RasterFileSource.h"
 
 #include <sys/stat.h>
 
@@ -122,6 +123,15 @@ static double ChordM(double R, double lat0, double lon0, double lat1, double lon
     const double sa = std::sin(0.5 * (lat1 - lat0) * d), so = std::sin(0.5 * (lon1 - lon0) * d);
     const double hav = sa * sa + std::cos(lat0 * d) * std::cos(lat1 * d) * so * so;
     return 2.0 * R * std::sqrt((std::min)((std::max)(hav, 0.0), 1.0));
+}
+
+// A producer's own clock (SceneSchema.h ClockProps) at the scene's instant: its start, else the
+// scene's, carried at its rate from the scene's start. "now" is the session's first instant, read
+// once, so the clock runs at its rate and not at the wall's as well.
+double ClockAt(const scene::ClockProps& c, double simUnix, double sceneStartUnix) {
+    static const double kSessionNow = NowUnix();
+    const double t0 = c.start.empty() ? sceneStartUnix : c.start == "now" ? kSessionNow : ParseStartTime(c.start);
+    return t0 + c.rate * (simUnix - sceneStartUnix);
 }
 
 void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool paused,
@@ -358,7 +368,7 @@ void TreeTally(TileTree& t, uint64_t (&n)[8]) {
 }  // namespace
 
 FrameLoop::FrameLoop(const Options& opt, const Scene& S, Assembly& A)
-    : m_opt(opt), m_S(S), m_A(A) {}
+    : m_opt(opt), m_S(S), m_A(A), m_debugStep(S.debug) {}
 
 int FrameLoop::Run() {
     if (const std::optional<int> rc = Session()) return *rc;
@@ -566,7 +576,6 @@ std::optional<int> FrameLoop::Session() {
     auto& marsMode = m_A.marsMode;
     auto& globeModel = m_A.globeModel;
     GlobeModel& activeGlobe = *m_A.activeGlobe;
-    auto& bathyBostonSwe = m_A.bathyBostonSwe;   // HIERARCHY 4.17: the solvers' own grids
     auto& bathySwe = m_A.bathySwe;
     auto& compositor = m_A.compositor;
     auto& hgtCh = m_A.hgtCh;
@@ -682,11 +691,9 @@ std::optional<int> FrameLoop::Session() {
     ViewEyeCompass(S.View("chart"), cam, m_A.surface.anchorToRoot);
 
     // Chart and sea each keep their own camera; TAB cycles views and each resumes where you
-    // left it. With bathymetry loaded, the sea default is the LITERAL vqview signature shot:
-    // standing on the north jetty tip (world 522, 72 -- located in the CUDEM data), az 246
-    // back into the inlet.
-    if (bathy.Ready()) camSea.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
-    else camSea.SetFromCompass(0.0, 12.0, 0.0, 246.0f, -5.0f);
+    // left it. The sea's default stands over the scene's place, 12 m up; the scene's `sea` view
+    // (below) says where it really stands.
+    camSea.SetFromCompass(0.0, 12.0, 0.0, 246.0f, -5.0f);
     camSea.Carry(m_A.surface.anchorToRoot);   // the built-in pose is about the scene's place too
     // M12 step 5d: THE DECLARED EYE OVER THE ENGINE'S DEFAULT. --cam/--campos write into the
     // START view (`scene.view`), so that is read first; a scene whose start view is the orbit (or
@@ -712,9 +719,9 @@ std::optional<int> FrameLoop::Session() {
         // M12 step 5a: the four lines that placed the eye are scene::GlobeCamera (the
         // scene's {lat, lon, alt} spelling resolves through the same function); gR is
         // planetR + gAlt inside it, the same sum. M12 step 5d: the engine's default -- over the
-        // North Atlantic at 2.1 planet radii -- then the `orbit` view's declared eye, which is
-        // where --globe-cam writes and what merrimack.json writes down (34 N, 52 W, 2.1 R).
-        camGlobe = scene::GlobeCamera(34.0, -52.0, planetR * 2.1, planetR);
+        // scene's place at 2.1 planet radii -- then the `orbit` view's declared eye, which is
+        // where --globe-cam writes and what the scene writes down.
+        camGlobe = scene::GlobeCamera(S.place.anchor[1], S.place.anchor[0], planetR * 2.1, planetR);
         ViewEyeOrbit(S.View("orbit"), planetR, camGlobe);
         camGlobe.fovY = cam.fovY;
         camGlobe.speed = 800000.0f;
@@ -1255,20 +1262,24 @@ std::optional<int> FrameLoop::Session() {
                  haveCurrents ? &currents : nullptr);
     if (sea) weather.SetSeaSources(sea->Sources());   // PHASE C2: the sea state's sources
     if (swe.Ready()) weather.AddExternalWindow(S.scene.name.c_str(), &swe, oceanAt);   // C3: the scene's name
-    if (bathyBostonSwe.Ready()) {
-        int iBos = -1;
+    // The scene's dormant solvers (`solvers`): each asleep until the eye comes, its domain a box of
+    // cells on the stack's bed, its open sea held to its own station's tide on NAVD88.
+    for (const scene::SolverProps& v : S.solvers) {
+        int st = -1;
         for (size_t i = 0; i < model.Count(); ++i) {
-            if (model.S(i).id == "8443970") iBos = static_cast<int>(i);
+            if (model.S(i).id == v.station) st = static_cast<int>(i);
         }
-        if (iBos >= 0 && model.S(iBos).mllwMinusNavdM > -900.0) {
-            const double bosOff = model.S(iBos).mllwMinusNavdM;
-            auto oceanAtBoston = [&model, iBos, bosOff](double t) {
-                return model.Height(static_cast<size_t>(iBos), t) + bosOff;
-            };
-            SweConfig bcfg;
-            bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
-            weather.AddDormantWindow("boston", &bathyBostonSwe, bcfg, oceanAtBoston, 0.5);
+        if (st < 0 || model.S(st).mllwMinusNavdM <= -900.0 || !v.nx || !v.ny) {
+            Log("[solver] %s: its station '%s' is not in data.tides with a NAVD88 link, or it names no cells; it stays off",
+                v.name.c_str(), v.station.c_str());
+            continue;
         }
+        const double off = model.S(st).mllwMinusNavdM;
+        auto oceanAt = [&model, st, off](double t) { return model.Height(static_cast<size_t>(st), t) + off; };
+        SweConfig cfg;
+        cfg.westBoundary = v.river == 0;
+        const double box[4] = {v.box[1], v.box[0], v.box[3], v.box[2]};   // the window's lat0, lon0, lat1, lon1
+        weather.AddDormantWindow(v.name.c_str(), box, v.nx, v.ny, cfg, oceanAt, 0.5);
     }
     // PHASE B2 (D4): every solver binds the standing window (it reads it where the window holds its
     // cells, the cube elsewhere), and the pin and the whole-bed wait ask for its tiles. PHASE C1: this
@@ -2826,12 +2837,21 @@ bool FrameLoop::Frame() {
             tide->contourStepM = (tide->contourStepM > 0.4f) ? 0.25f
                                : (tide->contourStepM > 0.2f) ? 0.0f : 0.5f;
         }
-        if (in.keyPressed['G']) {
-            // M9b: THE GEOMETRY QUESTION, answered by the rasterizer. Shading sells
-            // amplitude the geometry may not actually have (priors 8), so the honest
-            // check is to stop filling the triangles. G cycles shipped -> wireframe
-            // -> meshlet tint. The globe mesh IS the sea.
-            if (globe) globe->surfaceDebug = (globe->surfaceDebug + 1) % 3;
+        if (in.keyPressed['G'] && globe) {
+            // M9b: THE GEOMETRY QUESTION, answered by the rasterizer. Shading sells amplitude the
+            // geometry may not actually have (priors 8), so the honest check is to stop filling
+            // the triangles. G steps through the scene's debug views (SceneSchema.h DebugSection)
+            // from the scene's own: the picture with its wire, then each view in the schema's
+            // order, the wire kept (1.5 px when the scene gave none). The globe mesh IS the sea.
+            m_debugStep.view = (m_debugStep.view + 1) % 11;
+            if (m_debugStep.wirePx <= 0.0f && m_debugStep.view <= 1) m_debugStep.wirePx = 1.5f;
+            globe->surfaceDebug = 0;
+            globe->albedoLens = false;
+            globe->debugLens = 0;
+            if (globe->SetDebug(m_debugStep)) renderer.ReloadShaders();
+            static const char* kNames[11] = {"none", "flat", "edges", "normals", "height", "depth", "meshlets",
+                                             "albedo", "residency", "residency.height", "residency.landsea"};
+            Log("[debug] view %s, wire %.1f px", kNames[m_debugStep.view], m_debugStep.wirePx);
         }
         if (in.keyPressed['V']) {
             if (mode == 1 && globe && altOf(cam) > 6000.0) globe->windOverlay = !globe->windOverlay;
@@ -2984,7 +3004,8 @@ bool FrameLoop::Frame() {
         const sun::SolarSystem ss =
             (S.sun.source == Scene::kEarth)
                 ? sun::BuildEarth(S.sun.earth.at, S.sun.earth.axis, S.sun.earth.spin)
-                : sun::Build(simUnix);
+                : sun::Build(ClockAt(S.sun.clock, simUnix, startUnix),
+                             ClockAt(S.sun.earth.clock, simUnix, startUnix));
         m_solar = ss;
         m_solarValid = true;
         const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
@@ -5399,6 +5420,11 @@ int FrameLoop::Finish() {
             "fetches a larger budget or day cap would have made",
             m_A.googleTiles.Refused(), m_A.googleTiles.Budget(), m_A.googleTiles.Fetched());
     }
+
+    // The rasters read by being files: the windows their reads decoded and the time in the decoder.
+    Log("[raster] %llu windows decoded this run, %.1f s in the decoder",
+        static_cast<unsigned long long>(RasterFileSource::s_decodes.load()),
+        double(RasterFileSource::s_decodeUs.load()) / 1.0e6);
 
     if (S.Tool("sea-verify") && sea) tools::RunSeaVerify(opt, gpu, sea);
     if (!S.dumpW.empty()) {

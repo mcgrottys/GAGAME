@@ -1,0 +1,21 @@
+{
+  "id": "noaa.cudem.third",
+  "title": "NOAA CUDEM 1/3 arc-second topobathy (NCEI_third_Topobathy_2014_8580)",
+  "label": "CUDEM 1/3\"",
+  "short": "cudem13",
+  "kind": "cudem-index",
+  "rank": 0,
+  "url": "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/dem/NCEI_third_Topobathy_2014_8580/",
+  "license": "public domain (NOAA); NODD: open to the public",
+  "cite": "Amante, C. et al. 2023, Continuously Updated Digital Elevation Model (CUDEM), NOAA NCEI",
+  "datum": "NAVD88",
+  "vertical_epsg": 5703,
+  "step_arcsec": "1/3",
+  "variables": {"elevation": {"name": "band 1", "units": "m"}},
+  "bucket": "noaa-nos-coastal-lidar-pds",
+  "prefix": "dem/NCEI_third_Topobathy_2014_8580/",
+  "index": "tileindex_NCEI_third_Topobathy_2014.zip",
+  "index_cache": "{datacache}/cudem/third/{index}",
+  "cache": ["{datacache}/cudem/third/{region}/{name}"],
+  "listing_cache": "cache/places/_s3/cudem_third_{region}.xml"
+}

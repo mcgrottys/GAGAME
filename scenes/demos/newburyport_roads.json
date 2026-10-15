@@ -96,7 +96,8 @@
       "name": "noaa.enc",
       "kind": "bridges",
       "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"
-    }
+    },
+    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif", "unit": "m", "datum": "EGM2008", "offset": -0.092}
   ],
   "entities": [
     {

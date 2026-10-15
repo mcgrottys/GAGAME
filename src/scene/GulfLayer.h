@@ -21,9 +21,6 @@ namespace ga {
 
 class GulfLayer : public Layer {
 public:
-    // NERACOOS A01 / NDBC 44029, Massachusetts Bay.
-    static constexpr double kBuoyLon = -70.566, kBuoyLat = 42.523;
-
     void Configure(const std::wstring& shaderDir, const CurrentModel* currents) {
         m_shaderDir = shaderDir;
         m_currents = currents;
