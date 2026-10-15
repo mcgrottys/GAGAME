@@ -48,6 +48,11 @@ Minimap::Rect Minimap::TravelButton(const Rect& r) {
     return Rect{b.x - b.w - 6.0f, b.y, b.w, b.h};   // to the left of Reset, the same size
 }
 
+Minimap::Rect Minimap::CacheButton(const Rect& r) {
+    const Rect t = TravelButton(r);
+    return Rect{t.x - t.w - 6.0f, t.y, t.w, t.h};   // to the left of Travel, the same size
+}
+
 // The unit ray through a pixel of the rectangle, from the basis the picture is drawn with.
 void Minimap::Ray(const Rect& r, float px, float py, double d[3]) const {
     DirectX::XMFLOAT3 f, rt, u;
@@ -97,6 +102,8 @@ bool Minimap::Input(InputState& in, uint32_t W, uint32_t H) {
             Reset();
         } else if (TravelButton(r).Contains(in.mouseX, in.mouseY)) {
             m_travel = !m_travel;
+        } else if (CacheButton(r).Contains(in.mouseX, in.mouseY)) {
+            m_cacheLens = !m_cacheLens;
         } else if (m_travel) {
             // THE PICK: the grab's own point, handed on instead of held.
             double d[3];

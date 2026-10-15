@@ -23,6 +23,10 @@
 //              grab the planet: it PICKS the sea-level point under the cursor (the grab's own
 //              law, HitSphere) and hands it to the owner of the rectangle (TakeTravel), who opens
 //              the fast-travel sphere to that place. The wheel still zooms.
+//      Cache   a toggle left of Travel (2026-10-15). While it is on, the globe draws this eye
+//              with the cache lens (GlobeLayer, shaders/CacheLens.hlsl): a heat map of where the
+//              harvest holds tiles offline and how fine. It changes only what this eye paints;
+//              the hand does exactly what it did.
 //
 //  The rasterizer gets a Camera at the last moment (BuildCamera), with the motor's own up as the
 //  roll reference -- so looking straight down is an ordinary view, neither clamped nor blended
@@ -63,7 +67,10 @@ public:
     Rect Place(uint32_t W, uint32_t H) const;
     static Rect Button(const Rect& r);
     static Rect TravelButton(const Rect& r);
+    static Rect CacheButton(const Rect& r);
     bool Travel() const { return m_travel; }
+    bool Cache() const { return m_cacheLens; }
+    void SetCache(bool on) { m_cacheLens = on; }
     // The point picked for a fast travel since the last call (root frame, on the sea-level
     // sphere): true once per press.
     bool TakeTravel(double out[3]) {
@@ -119,6 +126,7 @@ private:
     bool m_dragging = false;
     bool m_lmbWas = false;
     bool m_travel = false;          // the toggle: a press on the map picks a place to travel to
+    bool m_cacheLens = false;       // the toggle: this eye is painted with the cache lens
     bool m_travelPicked = false;
     double m_travelPick[3] = {};
     double m_grab[3] = {};

@@ -745,6 +745,16 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
                         "globe.debug");
         }
     }
+    // The cache lens likewise, for a scene with a minimap (the only eye that draws with it).
+    if (cacheLensBuild) {
+        ShaderBlob psK = sc.Compile(m_shaderDir + L"/CacheLens.hlsl", L"PsCacheLens", L"ps_6_0");
+        if (psK.Valid()) {
+            d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            d.PS = {psK.Data(), psK.Size()};
+            hal::Reload(m_psoCache, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.cache"); },
+                        "globe.cache");
+        }
+    }
     return true;
 }
 
@@ -874,6 +884,20 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
                 m_msPsoDebug = psoD;
             } else {
                 Log("[globe] mesh DEBUG-VIEW PSO creation failed (solid path unaffected)");
+            }
+        }
+    }
+    // ...and the cache lens (shaders/CacheLens.hlsl), only for a scene with a minimap.
+    if (cacheLensBuild) {
+        ShaderBlob psK = sc.Compile(m_shaderDir + L"/CacheLens.hlsl", L"PsCacheLens", L"ps_6_5");
+        if (psK.Valid()) {
+            d.fill = D3D12_FILL_MODE_SOLID;
+            d.ps = psK;
+            hal::Pso psoK = hal::BuildMesh(gpu, d, "globe.mesh.cache");
+            if (psoK) {
+                m_msPsoCache = psoK;
+            } else {
+                Log("[globe] mesh CACHE-LENS PSO creation failed (solid path unaffected)");
             }
         }
     }
@@ -2777,6 +2801,10 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                            int limbCount, GpuBuffer& rec, bool skyPass, float skyWeight,
                            const std::vector<float>& levelRows) {
     if (!m_pso || (nodes.empty() && meshlets.empty())) return;
+    // THE CACHE LENS is a property of the eye, not of the run: only another eye whose toggle is on
+    // paints it (SetCacheLens), so the first eye's pipeline is chosen exactly as it ever was.
+    const bool cacheLens = ctx.viewIndex > 0 && ctx.viewIndex <= kMaxOtherEyes &&
+                           m_other[ctx.viewIndex - 1].cacheLens != UINT32_MAX;
     PixScope scope(ctx.cmd->Native(),
                    "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
 
@@ -2822,6 +2850,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
         else if (ResidencyLensOn() && m_msPsoLens) msSel = m_msPsoLens.Get();
+        if (cacheLens && m_msPsoCache) msSel = m_msPsoCache.Get();
         ctx.cmd->Pipeline(msSel);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
@@ -2880,7 +2909,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
             // THE KEPT FRAME (GlobeLayer.h keepOn). Keepable: the keep on, no lens or probe (they draw
             // other pictures), a view the renderer handed its inputs and targets, and a cache the
             // record count fits.
-            const bool keepable = keepOn && surfaceDebug == 0 && !ResidencyLensOn() && !DebugViewOn() && !overdrawProbe &&
+            const bool keepable = keepOn && surfaceDebug == 0 && !ResidencyLensOn() && !DebugViewOn() && !cacheLens && !overdrawProbe &&
                                   m_msPsoKeep.Get() && m_keepPso.Get() && m_classPso.Get() && ctx.viewIndex <= kMaxOtherEyes &&
                                   ctx.constants && ctx.colorRtv.ptr && ctx.depthTex && ctx.frameW && ctx.frameH &&
                                   n <= kClassMax;
@@ -3006,6 +3035,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
     else if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
     else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
     else if (ResidencyLensOn() && m_psoLens) sel = m_psoLens.Get();
+    if (cacheLens && m_psoCache) sel = m_psoCache.Get();
     ctx.cmd->Pipeline(sel);
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cmd->GraphicsConstantsAt(1, cbVa);
@@ -3253,6 +3283,10 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
 
     // ---- keep what it walked
     o.cb = m_cb;
+    if (o.cacheLens != UINT32_MAX) {   // the cache lens's map and the rectangle's corner (CacheLens.hlsl)
+        o.cb.lensU[2] = o.cacheLens;
+        o.cb.lensU[3] = o.cacheOrg;
+    }
     o.levelRows.swap(m_levelRows);
     o.skyCb = m_skyCb;
     o.meshlets.swap(m_meshlets);
