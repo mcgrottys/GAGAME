@@ -417,39 +417,6 @@ bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
 // M9bg: CURRENTLY UNREFERENCED. This textured the bank's physics coverage per pixel; the
 // vertex-shaded water takes the bank's foam number as it comes. Kept because foamlaw and the
 // reference's 30.7% -> 2.1% gouache measurement still describe the shipped bank kernel.
-// Per-pixel value noise in three IRRATIONALLY-ROTATED octaves (axis-aligned octaves at
-// 2x spacing share lattice seams and sum to rectangular blocks); each octave fades once
-// its features stop covering several pixels of RANGE (never a bank texel -- a shading
-// texture lives at shading resolution). The renormalization keeps the mean exactly 1/2
-// in every fade state, so foam coverage never becomes a function of camera distance.
-float FoamHash21(float2 p) {
-    p = frac(p * float2(123.34f, 456.21f));
-    p += dot(p, p + 45.32f);
-    return frac(p.x * p.y);
-}
-
-float FoamValueNoise(float2 p) {
-    const float2 i0 = floor(p);
-    const float2 f = frac(p);
-    const float2 u = f * f * (3.0f - 2.0f * f);
-    return lerp(lerp(FoamHash21(i0), FoamHash21(i0 + float2(1, 0)), u.x),
-                lerp(FoamHash21(i0 + float2(0, 1)), FoamHash21(i0 + float2(1, 1)), u.x),
-                u.y);
-}
-
-float FoamBreakup(float2 posM, float range) {
-    const float2x2 r1 = float2x2(0.8776f, -0.4794f, 0.4794f, 0.8776f);
-    const float2x2 r2 = float2x2(0.6062f, -0.7952f, 0.7952f, 0.6062f);
-    const float w1 = smoothstep(0.035f, 0.130f, 2.4f / max(range, 1e-3f));
-    const float w2 = smoothstep(0.035f, 0.130f, 6.5f / max(range, 1e-3f));
-    const float w3 = smoothstep(0.035f, 0.130f, 17.0f / max(range, 1e-3f));
-    const float n = 0.45f * FoamValueNoise(posM * 0.42f) * w1 +
-                    0.34f * FoamValueNoise(mul(r1, posM) * 0.155f) * w2 +
-                    0.21f * FoamValueNoise(mul(r2, posM) * 0.059f) * w3;
-    const float wsum = 0.45f * w1 + 0.34f * w2 + 0.21f * w3;
-    return (wsum > 1e-3f) ? (n / wsum) : 0.5f;
-}
-
 bool BankSampleT(float2 worldXZ, out float4 disp, out float4 param, out float4 detail,
                  out float texelOut, out float3 dDdx, out float3 dDdz) {
     disp = 0.0f;
@@ -1192,10 +1159,14 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // M10: the level's own sun, eclipsed by the inner globe (PortalShadow) and by the planet
     // under this pixel (PlanetShadow) -- asked of upT, never of nPix.
     // ...and by the ground around it (TerrainRay): a jetty, a dune, the far shore's hill.
+    // The ground is asked only where the spheres left any sun to take (a set sun's march would
+    // cost the frame 3 ms to multiply a zero).
     TerrainHit sunHit;
-    const float sunVis = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f)) *
-                         PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x) *
-                         TerrainRay(upT, lvlW + dispW, geo, lvl, GA_SUN_DIR, footPx, lod, false, sunHit);
+    const float sunSph = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f)) *
+                         PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x);
+    const float sunVis = (sunSph > 0.0f)
+                             ? sunSph * TerrainRay(upT, lvlW + dispW, geo, lvl, GA_SUN_DIR, footPx, lod, false, sunHit)
+                             : 0.0f;
     const float3 hv = normalize(v + GA_SUN_DIR);
     const float ch = saturate(dot(hv, nPix));
     const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
@@ -1702,7 +1673,7 @@ float4 PsSurface(VsOut i, out float land) {
     // planet above, and now by the ground around it. Asked only where there is land in the pixel;
     // the water asks its own (WaterPixelColor), from its own surface.
     TerrainHit sunHit;
-    const float sunLand = (landness > 0.0f)
+    const float sunLand = (landness > 0.0f && sunVis > 0.0f)
                               ? sunVis * TerrainRay(upT, hp, i.geo, i.lvl, GA_SUN_DIR, footPxW, lod, false, sunHit)
                               : sunVis;
     // THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h), read once here for both of their laws

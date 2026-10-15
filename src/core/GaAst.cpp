@@ -168,7 +168,7 @@ void RegisterKnownComposeEdges() {
     Register({"globe.walk", "residency.mgr", "wants", uvS, uvS, false, "mip requests",
               "mips 0..7 + floor 4..7", 1.0, "GlobeLayer node walk + M7g mip floor"});
     Register({"residency.mgr", "globe.ps", "have-map", resMap, uvS, false,
-              "finest mip * 16 (R8)", "0..7*16", 1.0, "CsHave2D residency clamp"});
+              "finest mip * 16 (R8)", "0..7*16", 1.0, "CsHaveCubeArr residency clamp"});
 }
 
 void RegisterKnownWaterEdges() {

@@ -33,15 +33,10 @@ float3 CsToPlanet(float3 t) {   // transpose of the orthonormal rotation
 // -- Tier-2 null zeros -- which diluted the window's alpha toward 0 and let the coarse cube
 // bleed through in bilinear-isoline blobs (the "mottled marsh"). Never sample finer than any
 // texel under the filter footprint; smoothness comes from trilinear WITHIN resident data.
-// A page tenant's floor is PageHave / PageHaveCube (PageSample.hlsli); these two serve the old
-// three-tenant path's TextureCube / Texture2D realizations (and Mars's native pyramids) with
-// the same law.
+// A page tenant's floor is PageHave / PageHaveCube (PageSample.hlsli); this one serves a
+// TextureCube realization (Mars's native pyramids, the height cube alone) with the same law.
 float CsHaveCube(uint mapSrv, float3 dir) {
     const float4 g = gTexCube[mapSrv].GatherRed(sLinearClamp, dir);
-    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
-}
-float CsHave2D(uint mapSrv, float2 uv) {
-    const float4 g = gTex[mapSrv].GatherRed(sLinearClamp, uv);
     return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
 }
 
@@ -63,9 +58,6 @@ float3 CsPointOfDir(float3 dir) {
 // lighting expects, and scaling exposure is honest where bending the curve was not.
 // M9ap: residency of a PAGE (a slice of the page tenant's array) and of a face through the
 // tenant's cube view, conservative like the rest (PageSample.hlsli).
-float CsHavePage(uint mapSrv, float2 uv, uint slice) {
-    return PageHave(gTexArr[mapSrv], sLinearClamp, uv, slice);
-}
 float CsHaveCubeArr(uint mapSrv, float3 dir) {
     return PageHaveCube(gTexCubeArr[mapSrv], sLinearClamp, dir);
 }

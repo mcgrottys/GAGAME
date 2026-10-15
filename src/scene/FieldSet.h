@@ -7,7 +7,7 @@
 //
 //  That moment is this project. Every sample goes through a FieldDesc (worldToUv affine +
 //  per-channel value scale/bias + SRV heap slot + algebraic layout), and the HLSL side samples
-//  through SampleField(), so when the residency manager starts swapping tiles it rewrites
+//  through its FieldDesc, so when the residency manager starts swapping tiles it rewrites
 //  FieldDescs and the shaders do not change.
 //
 //  ALGEBRAIC LAYOUTS (the GA mapping, verbatim from vqview because it is exactly our plan):
