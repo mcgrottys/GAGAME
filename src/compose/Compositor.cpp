@@ -1,3 +1,4 @@
+#include <limits>
 #include "compose/Compositor.h"
 
 #include <windows.h>
@@ -552,6 +553,24 @@ double Compositor::HeightGrainM(int channel, double latRad, double lonRad) const
         if (finest <= 0.0 || m < finest) finest = m;
     }
     return finest;
+}
+
+bool Compositor::HeightStackCeiling(int channel, double lat0, double lon0, double lat1, double lon1, float limit,
+                                    float& hi) const {
+    const Channel& ch = m_channels[channel];
+    hi = -std::numeric_limits<float>::infinity();
+    for (size_t i = ch.height.size(); i-- > 0;) {
+        float mn = 0.0f, mx = 0.0f;
+        bool full = false;
+        const HeightSource::Range r = ch.height[i]->RangeIn(lat0, lon0, lat1, lon1, mn, mx, full);
+        if (r == HeightSource::Range::None) continue;
+        if (r == HeightSource::Range::Unknown) return false;
+        hi = (std::max)(hi, mx);
+        if (hi > limit) return false;
+        if (full) return true;   // it owns the box: nothing beneath it reaches the answer
+    }
+    hi = (std::max)(hi, 0.0f);   // no source owns the whole box: the chain's 0 can show through
+    return hi <= limit;
 }
 
 float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,

@@ -69,6 +69,9 @@ public:
                          double datumShiftM = 0.0);
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
+    // The grid's cells under the box and the bilinear's one beyond, the longitude wrapped; it owns
+    // every box (its weight is 1 everywhere).
+    Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
 
 private:
     const std::vector<int16_t>* m_elev;
@@ -91,6 +94,8 @@ public:
     // The weight the feather gives a world point (x east, z north, metres) -- Sample's own,
     // before the data is asked: 1 inside the band the window fades over, 0 at its edge.
     float EdgeWeight(double lon, double lat) const;
+    // The grid's cells under the box (and the one beyond, the bilinear's), nodata skipped.
+    Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
     // WHERE THIS SURVEY PAINTS AT FULL WEIGHT, in its own cells: the first and last column and
     // row whose centres EdgeWeight calls 1 (HIERARCHY 4.17: a solver stands there). False when
     // no cell does. The band follows the feather: ask again and a new feather gives a new box.
@@ -187,6 +192,8 @@ public:
     bool Load(const std::string& geojsonPath, float crestNavd = 2.5f);
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
+    // The crest where a land ring's box meets the box, -1 where a water ring's does.
+    Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
 
 private:
     struct Ring {

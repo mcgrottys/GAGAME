@@ -559,6 +559,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 compositor.BindHeightTree(hgtCh, std::make_shared<HeightTree>(heightTree->Reader(pyr),
                                                                               heightTree->MagnifiedQuery(pyr), pyr));
             }
+            if (S.Tool("exposure-ab")) {
+                exitCode = tools::RunExposureAB(compositor, hgtCh, S.place.anchor[1], S.place.anchor[0]);
+                return nullptr;
+            }
             if (S.Tool("fetch-probe")) {
                 exitCode = tools::RunFetchProbe(*compositor.HeightTreeOf(hgtCh), S.place.anchor[1], S.place.anchor[0]);
                 return nullptr;
@@ -1622,7 +1626,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
-                              "gis-dump", "gis-sweep-test", "height-tree-probe", "fetch-probe", "ingest", "paint-ab", "load-field", "ocean-probe", "pack-tiles",
+                              "gis-dump", "gis-sweep-test", "height-tree-probe", "fetch-probe", "exposure-ab", "ingest", "paint-ab", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "roads-probe", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",

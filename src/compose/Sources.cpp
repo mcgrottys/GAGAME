@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "compose/Sources.h"
 
 #include "core/Json.h"
@@ -202,6 +203,32 @@ float EquirectHeightSource::Sample(double latRad, double lonRad, double, float& 
     return 1.0f;
 }
 
+HeightSource::Range EquirectHeightSource::RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo,
+                                                  float& hi, bool& full) {
+    full = false;
+    if (!m_elev || m_nx <= 0) return Range::None;
+    // Sample's own texel coordinates (Bilinear subtracts the half): u * nx, v * ny
+    const double fx0 = (lon0 / 360.0 + 0.5) * m_nx - 0.5, fx1 = (lon1 / 360.0 + 0.5) * m_nx - 0.5;
+    const double fy0 = std::clamp(0.5 - lat1 / 180.0, 0.0, 1.0) * m_ny - 0.5,
+                 fy1 = std::clamp(0.5 - lat0 / 180.0, 0.0, 1.0) * m_ny - 0.5;
+    const int x0 = int(std::floor(fx0)), x1 = int(std::floor(fx1)) + 1;
+    const int y0 = std::clamp(int(std::floor(fy0)), 0, m_ny - 1), y1 = std::clamp(int(std::floor(fy1)) + 1, 0, m_ny - 1);
+    if (double(x1 - x0 + 1) * double(y1 - y0 + 1) > 1048576.0) return Range::Unknown;
+    int16_t mn = INT16_MAX, mx = INT16_MIN;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            const int xw = ((x % m_nx) + m_nx) % m_nx;
+            const int16_t v = (*m_elev)[size_t(y) * size_t(m_nx) + size_t(xw)];
+            mn = (std::min)(mn, v);
+            mx = (std::max)(mx, v);
+        }
+    }
+    lo = float(mn) + float(m_datumShift);
+    hi = float(mx) + float(m_datumShift);
+    full = true;
+    return Range::Known;
+}
+
 // ------------------------------------------------------------------------------ CUDEM
 
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
@@ -281,6 +308,45 @@ float EditsHeightSource::Sample(double latRad, double lonRad, double, float& met
         }
     }
     return 0.0f;
+}
+
+HeightSource::Range EditsHeightSource::RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo,
+                                              float& hi, bool& full) {
+    full = false;
+    bool any = false;
+    for (const Ring& r : m_rings) {
+        if (lon1 < r.lon0 || lon0 > r.lon1 || lat1 < r.lat0 || lat0 > r.lat1) continue;
+        const float v = r.land ? m_crest : -1.0f;
+        lo = any ? (std::min)(lo, v) : v;
+        hi = any ? (std::max)(hi, v) : v;
+        any = true;
+    }
+    return any ? Range::Known : Range::None;
+}
+
+HeightSource::Range CudemHeightSource::RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo,
+                                               float& hi, bool& full) {
+    full = false;
+    if (!m_bathy || !m_bathy->Ready()) return Range::None;
+    const int nx = m_bathy->Nx(), ny = m_bathy->Ny();
+    const int x0 = (std::max)(0, int(std::floor((lon0 - m_bathy->Lon0()) / m_bathy->Dlon() - 0.5))),
+              x1 = (std::min)(nx - 1, int(std::floor((lon1 - m_bathy->Lon0()) / m_bathy->Dlon() - 0.5)) + 1);
+    const int y0 = (std::max)(0, int(std::floor((m_bathy->Lat1() - lat1) / m_bathy->Dlat() - 0.5))),
+              y1 = (std::min)(ny - 1, int(std::floor((m_bathy->Lat1() - lat0) / m_bathy->Dlat() - 0.5)) + 1);
+    if (x0 > x1 || y0 > y1) return Range::None;
+    if (double(x1 - x0 + 1) * double(y1 - y0 + 1) > 1048576.0) return Range::Unknown;   // the march is cheaper
+    const std::vector<float>& e = m_bathy->Elev();
+    bool any = false;
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            const float v = e[size_t(y) * size_t(nx) + size_t(x)];
+            if (v < -9000.0f) continue;
+            lo = any ? (std::min)(lo, v) : v;
+            hi = any ? (std::max)(hi, v) : v;
+            any = true;
+        }
+    }
+    return any ? Range::Known : Range::None;
 }
 
 float CudemHeightSource::Sample(double latRad, double lonRad, double, float& metres) {

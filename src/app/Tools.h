@@ -91,6 +91,8 @@ int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anc
 int RunPaintAB(ColorSource& src, double anchorLatDeg, double anchorLonDeg);
 // --tool fetch-probe: the fetch on the height tree (HeightTree::Fetch) against a brute march.
 int RunFetchProbe(HeightTree& tree, double anchorLatDeg, double anchorLonDeg);
+// --tool exposure-ab: the exposure's open-sea shortcut against the march, value for value.
+int RunExposureAB(const Compositor& comp, int hgtCh, double anchorLatDeg, double anchorLonDeg);
 int RunWaterMap(const Options& opt, Gpu& gpu, Compositor& compositor,
                 int hgtCh, const WaterAtlas& waterAtlas, const Space::Anchor& chart);
 // --gis-dump PATH: the survey gate over its box as a PGM; std::exit(0) from inside.

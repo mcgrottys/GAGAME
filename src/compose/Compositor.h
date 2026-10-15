@@ -128,6 +128,17 @@ public:
     // layers declare none, so their trees keep the key they were painted under.
     virtual int OwnMip(const Lattice&) const { return -1; }
     virtual bool Footprint(double&, double&, double&, double&) const { return false; }
+    // THE RANGE OVER A BOX (degrees): every value Sample can give at any point of the box, at any
+    // grain, lies in [lo, hi] -- a bound, not an estimate (a sample is a weighted mean of the source's
+    // own values, so it never leaves their range). `full`: the weight is 1 everywhere in the box.
+    // None: the weight is 0 everywhere in it. The default knows only the coverage box.
+    enum class Range { None, Known, Unknown };
+    virtual Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi,
+                          bool& full) {
+        (void)lo; (void)hi; full = false;
+        const SourceInfo& s = Info();
+        return (lon1 < s.lon0 || lon0 > s.lon1 || lat1 < s.lat0 || lat0 > s.lat1) ? Range::None : Range::Unknown;
+    }
 };
 
 // M6v: the two-component fiber -- a WATER-parameter field sample. The value algebra is a
@@ -194,6 +205,13 @@ public:
     // than the data's cell reads the interpolant's facets (bilinear ETOPO at 4.9 km stepped at
     // 1 km rendered the continental slope as terraces).
     double HeightGrainM(int channel, double latRad, double lonRad) const;
+    // THE STACK'S CEILING OVER A BOX (degrees): no SampleHeightStack in the box returns more than `hi`.
+    // The stack is a chain of lerps h += (m - h) w, w in [0, 1], from 0: each step keeps h inside the
+    // range of what came before and the source's own -- or replaces it, where the source owns the box
+    // whole. So the walk goes from the top down to the first source that owns the box (0 if none does),
+    // and stops early, false, once the ceiling passes `limit`. False where a source cannot bound itself.
+    bool HeightStackCeiling(int channel, double lat0, double lon0, double lat1, double lon1, float limit,
+                            float& hi) const;
     float SampleHeightStack(int channel, double latRad, double lonRad,
                             double groundResM) const;
     // THE ONE READ OF A CHANNEL'S HEIGHT for a CPU reader (compose/HeightTree.h): the tree the GPU
