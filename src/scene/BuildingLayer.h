@@ -319,6 +319,7 @@ private:
         std::shared_ptr<const DrawCpu> cpu;
         uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0;   // hidden: nodes the occluder cut
         uint64_t aired = 0;   // nodes the air cut: under the threshold through it, not without it
+        uint64_t low = 0;     // boxes and shapes the height law cut: their lift of the picture under a pixel
         uint64_t cellsVersion = 0;      // the detail cells it skipped were these
         double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
         uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)

@@ -855,11 +855,11 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         const bool largest = e.drawn.insts > e.walkInstsMax;
         if (largest) e.walkInstsMax = e.drawn.insts;
         if (e.walks <= 3 || e.walks % 50 == 0 || (largest && e.drawn.insts > 200000u)) {
-            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes, %llu hidden, %llu cut by the air, in %.1f ms (visit %.1f, "
+            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes, %llu hidden, %llu cut by the air, %llu too low, in %.1f ms (visit %.1f, "
                 "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), w.eye / kWorlds, w.eye % kWorlds,
                 static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, static_cast<unsigned long long>(w.singles),
                 static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), static_cast<unsigned long long>(w.hidden),
-                static_cast<unsigned long long>(w.aired), w.ms, w.msVisit, w.msSort,
+                static_cast<unsigned long long>(w.aired), static_cast<unsigned long long>(w.low), w.ms, w.msVisit, w.msSort,
                 w.msBuf, m_pages.size(), m_pageBytes / 1048576.0, e.wants.size());
         }
     }
@@ -1203,7 +1203,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             std::set<PageKey> used;
             std::map<PageKey, double> wants;
             std::map<std::pair<PageKey, uint32_t>, StandAsk> stands;
-            uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0, aired = 0;
+            uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0, aired = 0, low = 0;
             PageKey lastUsed{INT32_MIN, 0, 0};
         };
         struct Frontier {
@@ -1221,8 +1221,37 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             auto it = in.pages.find(k);
             return it == in.pages.end() ? nullptr : it->second;
         };
-        auto emit = [&](Acc& acc, const RtBox& b, double alpha, float landed) {
+        // THE LIFT (the owner, 2026-10-15: "cull the buildings that are too low"). What a drawn
+        // solid adds to the picture is not its footprint -- the imagery under it already holds the
+        // roof as seen from above -- but how far it LIFTS that picture: its walls, and its roof
+        // displaced up from the ground, both h cos e on screen for a height h seen at elevation e
+        // (e = 90 straight down: nothing; e = 0 at the horizon: the whole height). So a box or a
+        // shape is drawn when its lift through the air, 2 hz cos e T / (d pixAng), reaches the
+        // threshold, and fades in over one threshold above it as the width law does; a flat
+        // warehouse 10 px wide and 0.3 px tall is left to the imagery, which shows it better than a
+        // grey box would. `tau` is the node's threshold through the air (lodPixels / T).
+        auto lift = [&](const RtBox& b, double tau, double& alpha) {
+            const double hz = Len3(b.w);
+            if (hz <= 1e-9) return false;
+            double v[3], d2 = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                v[i] = b.p[i] - in.eye[i];
+                d2 += v[i] * v[i];
+            }
+            const double d = std::sqrt((std::max)(d2, 1.0));
+            const double sinE = std::abs(v[0] * b.w[0] + v[1] * b.w[1] + v[2] * b.w[2]) / (d * hz);
+            const double cosE = std::sqrt((std::max)(1.0 - sinE * sinE, 0.0));
+            const double hpx = 2.0 * hz * cosE / (d * in.pixAng);
+            if (hpx < tau) return false;
+            alpha = (std::min)(alpha, (std::min)((hpx - tau) / tau, 1.0));
+            return true;
+        };
+        auto emit = [&](Acc& acc, const RtBox& b, double alpha, float landed, double tau) {
             if (!b.valid || acc.out.size() >= kMaxBoxes) return;
+            if (!lift(b, tau, alpha)) {
+                ++acc.low;
+                return;
+            }
             // The half-axes as a rotor and three extents; an axis of no length takes its direction
             // from the other two (a fold of no spread is still a box with an attitude).
             const double a1 = Len3(b.u), a2 = Len3(b.v), hz = Len3(b.w);
@@ -1247,8 +1276,12 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             acc.out.push_back(x);
         };
         // ...or its own form: the ground frame under its centroid and its record in the pool (MsShape).
-        auto emitShape = [&](Acc& acc, const StoodBld& sb, const RtBld& b, double alpha, float landed, uint64_t addr) {
+        auto emitShape = [&](Acc& acc, const StoodBld& sb, const RtBld& b, double alpha, float landed, uint64_t addr, double tau) {
             if (acc.out.size() + acc.inst.size() >= kMaxBoxes) return;
+            if (!lift(sb.box, tau, alpha)) {
+                ++acc.low;
+                return;
+            }
             Inst x{};
             const double E[3] = {sb.e[0], sb.e[1], sb.e[2]}, N[3] = {sb.n[0], sb.n[1], sb.n[2]}, U[3] = {sb.up[0], sb.up[1], sb.up[2]};
             for (int i = 0; i < 3; ++i) x.b.c[i] = static_cast<float>(sb.g[i] - in.org[i]);
@@ -1365,15 +1398,15 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                     }
                     if (in.shapes && sz >= in.tauS && b.shapeOff != UINT32_MAX && b.shapeOff / kSlotBytes < pg.slots.size()) {
                         emitShape(acc, sb, b, (std::min)(a, 1.0), pg.landed,
-                                  uint64_t(pg.slots[b.shapeOff / kSlotBytes]) * kSlotBytes + b.shapeOff % kSlotBytes);
+                                  uint64_t(pg.slots[b.shapeOff / kSlotBytes]) * kSlotBytes + b.shapeOff % kSlotBytes, tau);
                     } else {
-                        emit(acc, sb.box, (std::min)(a, 1.0), pg.landed);
+                        emit(acc, sb.box, (std::min)(a, 1.0), pg.landed, tau);
                     }
                     ++acc.singles;
                     if (a < 1.0) ++acc.fading;
                 }
             } else if (sp && needBlds) {
-                emit(acc, sp->own, (std::min)(1.0, double(n.own.cover)), pg.landed);   // its own fold, until its buildings stand
+                emit(acc, sp->own, (std::min)(1.0, double(n.own.cover)), pg.landed, tau);   // its own fold, until its buildings stand
             }
             if (L == lod::kLmin || !n.kids) return;
             // The children's pages: the loaded ones are walked; the missing ones are asked for, by
@@ -1388,7 +1421,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                     // The fold stands in while the page is on its way (unless its cell's prisms are drawn).
                     if (sp && !(n.descCell.first >= in.cx0 && n.descCell.first <= in.cx1 && n.descCell.second >= in.cy0 &&
                                 n.descCell.second <= in.cy1 && in.cells.count(n.descCell))) {
-                        emit(acc, sp->desc, n.descCover, pg.landed);
+                        emit(acc, sp->desc, n.descCover, pg.landed, tau);
                     }
                 }
                 return;
@@ -1474,6 +1507,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 top.fading += a.fading;
                 top.hidden += a.hidden;
                 top.aired += a.aired;
+                top.low += a.low;
             }
         }
         std::vector<Box>& out = top.out;
@@ -1484,6 +1518,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         w.fading = top.fading;
         w.hidden = top.hidden;
         w.aired = top.aired;
+        w.low = top.low;
         const auto tV = std::chrono::steady_clock::now();
         w.msVisit = std::chrono::duration<double, std::milli>(tV - t0).count();
         // Far to near FROM THE EYE (the instances are about the walk's origin, the eye a float3 off

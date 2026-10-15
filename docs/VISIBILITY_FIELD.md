@@ -98,18 +98,37 @@ lanes of one fold. Lines: the buildings' walk loses its horizon, cone and occlud
 lines) and gains a cell iterator; the globe's wants likewise. The field itself is ~250 lines on
 OriginLattice.
 
+### 3a. What the field cannot do alone (found building step 2, 2026-10-15)
+
+The buildings' walk stops a subtree at the first node that fails the horizon, the cone or the
+occluder, so a field carrying those three verdicts closes exactly the nodes the walk already
+closes and cannot reduce its visits; the 200k nodes it visits at Tokyo city are open by every one
+of those tests. The field earns its place by two things the walk does not have: (1) verdicts
+SHARED by every tenant (the globe's, the masks', the exposure's wants are each their own walk
+today), and (2) CONTENT lanes folded on its cells -- the tallest thing in a cell, the roofs'
+height, a cloud's density -- which no tenant's tree carries and which close cells no geometric
+test can. So the order below puts the content laws first, where they can be stated on the
+buildings' own tree now, and the field where several tenants read it.
+
+The first content law is the owner's "too low", built here as **the lift** (section 6): a drawn
+solid adds to the picture only what it lifts the imagery by, its height across the view, h cos e;
+under a pixel through the air it is the imagery's own roof and is not drawn.
+
 ## 4. Order and gates
 
-1. **The air term in the walk** (built here): the walk's nodes, boxes and ms at Tokyo city and at
-   30 km; the GPU buildings row; the still's difference confined to what the air had already taken
-   (sub-LSB away from the fade band). Section 5.
-2. **The field over the lattice, read by the buildings' walk alone**: the same stills and numbers,
-   plus the walk's visit count; the gate is "the same instances out, fewer nodes visited".
-3. **The globe's wants read the field**: the residency turn's ms and the loader's issued reads at
-   the storm rail and Tokyo city, against today's.
-4. **The max lane / roof lane folded on the cells**: the occlusion by content; then the horizon
+1. **The air term in the walk** (built): section 5.
+2. **The lift** (built): section 6 -- boxes and shapes under a pixel of lift are not emitted.
+3. **A height lane in the building tree** (the planet tree rebuilt with each node's tallest
+   building; hours, every core): then the lift closes SUBTREES, not just emits, and the walk's
+   visits fall with the boxes. The gate: nodes visited and the walk's ms at the city and 30 km,
+   the same instances out.
+4. **The field over the lattice, read by the globe's wants and the buildings' walk**: one
+   horizon/cone/occluder/air verdict per cell, every tenant reading it; the gate is the residency
+   turn's ms and the loader's issued reads at the storm rail and Tokyo city, and the lines removed
+   from each walk.
+5. **The max lane / roof lane folded on the cells**: the occlusion by content; then the horizon
    tenant retires the per-pixel marches (the other note).
-5. **Density lanes for the clouds and fog**: the atmosphere as a sparse tree on the same cells.
+6. **Density lanes for the clouds and fog**: the atmosphere as a sparse tree on the same cells.
 
 ## 5. Measured: the air term
 
@@ -141,3 +160,32 @@ fade-in band moves with it -- scattered single pixels over the whole field, not 
 by the air, and his eye decides whether 1 / T is the right scaling or lodPixels should be read as
 "a pixel of contrast" (then the law is lodPixels / (T C) with C the wall's albedo contrast, and
 the threshold at the quay doubles too). The nodes cut are counted on the walk's line.
+
+## 6. Measured: the lift
+
+Before = the air-law binary, after = the same plus the lift (`BuildingLayer::Walk`, the `lift`
+test both emits ask; the walk's line says how many it cut, "too low"). Stills as section 5; the
+50th walk's line for the counts, the last walk for the settled set.
+
+| | Tokyo city | | Tokyo harbour (1.5 km) | | Tokyo from 30 km | |
+|---|---|---|---|---|---|---|
+| | before | after | before | after | before | after |
+| boxes + shapes, settled | 241,624 + 27,265 | **24,004 + 9,138** | 90,497 + 24,080 | **12,750 + 12,321** | 17,363 + 3,680 | **732 + 594** |
+| cut as too low, 50th walk | | 175,638 | | 83,095 | | 14,300 |
+| nodes visited, 50th walk | 202,295 | 202,324 | 125,349 | 125,378 | 335,189 | 334,929 |
+| the walk | 98.7 ms (buffers 7.4) | 87.7 (buffers 0.7) | 49.4 | 40.9 | 132.7 | 136.5 |
+| mean frame (unheld) | 21.93 ms | **19.37** | 24.66 | 24.31 | 15.66 | 16.16 |
+| the still | | 29 % px, SSIM 0.67 | | 4.1 % | | 2.3 % |
+
+What it bought: nine tenths of the boxes at the city and the harbour, 96 % from 30 km; the frame
+at the city 2.6 ms (the boxes' draw and the buffers the walk filled); the walk's buffers from
+7.4 to 0.7 ms. The nodes visited do not move: the lift is tested at the emit, and the walk still
+opens every node whose LARGEST POSSIBLE building could be a pixel wide -- the height lane
+(section 4, step 3) is what lets it stop above.
+
+What it changed: the city's still on 29 % of its pixels -- the carpet of one- and two-pixel grey
+boxes that stood for the suburbs is gone and the imagery's own roofs show through; the towers,
+the mid-rise blocks and everything whose walls reach a pixel stand as before. The harbour (4 %)
+and the 30 km view (2 %) lose the same carpet where it was thin. The owner's eye decides whether
+the imagery is the better suburb; the law has no knob of its own (lodPixels is the pixel), and
+if a fraction of a pixel of lift should still draw, that is lodPixels for the height alone.
