@@ -2417,6 +2417,7 @@ void FrameLoop::ShadowRows() {
     knobs(m_minimapSurface);
     BuildingLayer* bl = m_A.buildingLayer;
     if (!bl || !bl->declared) return;
+    bl->SetAir(renderer.air);   // the walk's threshold through the planet's air
     const DirectX::XMFLOAT3 f3 = m_cam.Forward();
     double d = 1500.0;
     if (const Renderer::Occluder* ro = renderer.OccluderOf(0); ro && ro->w && ro->h) {

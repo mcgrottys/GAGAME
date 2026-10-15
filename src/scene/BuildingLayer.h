@@ -48,6 +48,7 @@
 #include "sim/PlaceField.h"
 #include "compose/BuildingSolids.h"
 #include "scene/Layer.h"
+#include "scene/Air.h"   // the walk's air: what the atmosphere leaves of a building's contrast
 #include "compose/Compositor.h"   // ComposedSurfaceCb: the sun map's rows on b2
 
 #include <atomic>
@@ -142,6 +143,16 @@ public:
     // <= 0: no map, the rows say none, and nothing is drawn.
     void PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, const double focus[3], ComposedSurfaceCb& cb);
     static constexpr uint32_t kSunTexels = 2048;
+    // THE AIR IN THE WALK'S LAW (2026-10-15; the owner: cull what the atmosphere obscures). A
+    // building is drawn when it covers lodPixels of the picture -- but what the picture holds of it
+    // is its contrast against the ground, and the air between takes that contrast: a face at range
+    // r keeps T(r) of it (Common.hlsli AerialPerspective: col T + L). So the walk's threshold is
+    // lodPixels / T: a building 100 km off in clear air must be six pixels wide to be worth a pixel,
+    // and the far field's nodes, the most numerous, stop where the air says they are not seen.
+    // T is bounded from above (the least extinction the path meets, at its highest point -- the
+    // eye's altitude above a city), so the law can only keep what the air leaves, never cut what
+    // it does not. The planet's rows are the scene's (scene/Air.h); set each frame by the loop.
+    void SetAir(const AirRows& a) { m_air = a; }
     // The map as a picture (--dump writes it beside the still): depth toward the sun as grey,
     // 0 where the sun meets nothing. An instrument; it waits for the GPU.
     void DumpSunMap(const std::wstring& path);
@@ -307,6 +318,7 @@ private:
         std::vector<std::shared_ptr<const Page>> hold;   // its pages: their pool ranges stay while it is drawn
         std::shared_ptr<const DrawCpu> cpu;
         uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0;   // hidden: nodes the occluder cut
+        uint64_t aired = 0;   // nodes the air cut: under the threshold through it, not without it
         uint64_t cellsVersion = 0;      // the detail cells it skipped were these
         double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
         uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)
@@ -379,8 +391,10 @@ private:
         bool on = false;
         float vp[16] = {};
         float side = 0.0f;
+        double centre[3] = {0.0, 0.0, 0.0};   // the map's centre, flat frame (the world), snapped
     } m_sun;
     bool m_sunSaid = false, m_sunPlanSaid = false;
+    AirRows m_air = EarthAir();
     void RenderSunMap(const FrameContext& ctx);
     // THE SOLIDS OF ONE EYE, drawn through the pipelines given: the resident cells (and the ones
     // leaving whose boxes the drawn walk does not hold yet), then each of `worlds` worlds' boxes

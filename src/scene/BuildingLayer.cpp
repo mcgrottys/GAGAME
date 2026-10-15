@@ -855,10 +855,11 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         const bool largest = e.drawn.insts > e.walkInstsMax;
         if (largest) e.walkInstsMax = e.drawn.insts;
         if (e.walks <= 3 || e.walks % 50 == 0 || (largest && e.drawn.insts > 200000u)) {
-            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes, %llu hidden, in %.1f ms (visit %.1f, "
+            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes, %llu hidden, %llu cut by the air, in %.1f ms (visit %.1f, "
                 "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), w.eye / kWorlds, w.eye % kWorlds,
                 static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, static_cast<unsigned long long>(w.singles),
-                static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), static_cast<unsigned long long>(w.hidden), w.ms, w.msVisit, w.msSort,
+                static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), static_cast<unsigned long long>(w.hidden),
+                static_cast<unsigned long long>(w.aired), w.ms, w.msVisit, w.msSort,
                 w.msBuf, m_pages.size(), m_pageBytes / 1048576.0, e.wants.size());
         }
     }
@@ -1099,6 +1100,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
     E.walkPages = m_pagesVersion;
     struct In {
         double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB, tauS;
+        double extinct = 0.0;   // the air's extinction (1/m) at the path's least dense point: T(r) = exp(-extinct r)
         double org[3];   // the walk's origin (the cloud's, at the eye), flat frame: what the instances are about
         std::shared_ptr<const Occluder> occ;   // the eye's farthest depth by cell, or none
         Motor pull;                            // a window world's instances into the true frame (identity for the own)
@@ -1156,6 +1158,13 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
     in.cosHalf = std::cos(in.halfDiag);
     in.sinHalf = std::sin(in.halfDiag);
     in.tauB = m_lodPixels;
+    {   // THE AIR (SetAir): Rayleigh + aerosol extinction at 550 nm, thinned by their scale heights to
+        // the eye's altitude -- the least dense point of a path from the eye to the ground, so T is
+        // the most the air could leave, and the law cuts only what is surely gone.
+        const double hA = (std::max)(h, 0.0);
+        const double rayH = (std::max)(double(m_air.row[0][3]), 1.0), mieH = (std::max)(double(m_air.row[1][3]), 1.0);
+        in.extinct = double(m_air.row[0][1]) * std::exp(-hA / rayH) + double(m_air.row[2][1]) * std::exp(-hA / mieH);
+    }
     in.tauS = m_shapePixels;   // its own form from here, its moment box below (the same mass)
     in.pages.reserve(m_pages.size());
     in.hold.reserve(m_pages.size());
@@ -1194,7 +1203,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             std::set<PageKey> used;
             std::map<PageKey, double> wants;
             std::map<std::pair<PageKey, uint32_t>, StandAsk> stands;
-            uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0;
+            uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0, aired = 0;
             PageKey lastUsed{INT32_MIN, 0, 0};
         };
         struct Frontier {
@@ -1316,12 +1325,18 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             // nothing here or below is wider than half the quad: under lodPixels, the walk stops.
             const double dn = (std::max)(dist - nrad, 1.0);
             const double px = lod::QuadDeg(L) * lod::kMetresPerDeg / (dn * in.pixAng);
-            if (L < lod::kLmax && 0.5 * px < in.tauB) return;
+            // THE THRESHOLD THROUGH THE AIR (SetAir): what the picture holds of a building at this
+            // distance is its contrast times T(dn), so a pixel of it is lodPixels / T pixels of size.
+            const double tau = in.tauB * std::exp(in.extinct * dn);
+            if (L < lod::kLmax && 0.5 * px < tau) {
+                if (0.5 * px >= in.tauB) ++acc.aired;
+                return;
+            }
             // THE STAND IT NEEDS: its buildings once the largest of them is a pixel here, at the grain
             // of two pixels of ground at its distance (a metre at least); asked when there is none,
             // when the folds alone stand where buildings are wanted, or when a stand twice as fine
             // is earned. What stands meanwhile is what the last stand made.
-            const bool needBlds = n.ownN && n.own0 < pg.blds.size() && 2.0 * pg.blds[n.own0].rho / (dn * in.pixAng) >= in.tauB;
+            const bool needBlds = n.ownN && n.own0 < pg.blds.size() && 2.0 * pg.blds[n.own0].rho / (dn * in.pixAng) >= tau;
             const double grain = (std::max)(1.0, dn * in.pixAng * 2.0);
             if (!sp || (needBlds && !sp->withBlds) || double(sp->grainM) > 2.0 * grain) {
                 StandAsk& ask = acc.stands[{pageOf(L, n.x, n.y), ni}];
@@ -1337,12 +1352,12 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 for (uint32_t k = n.own0; k < n.own0 + n.ownN && k < pg.blds.size() && k - n.own0 < sp->blds.size(); ++k) {
                     const RtBld& b = pg.blds[k];
                     const StoodBld& sb = sp->blds[k - n.own0];
-                    if (2.0 * b.rho / (dn * in.pixAng) < in.tauB) break;   // this and every smaller one: under a pixel
+                    if (2.0 * b.rho / (dn * in.pixAng) < tau) break;   // this and every smaller one: under a pixel through the air
                     if (!sb.box.valid) continue;
                     double d = 0.0;
                     for (int i = 0; i < 3; ++i) d += (sb.box.p[i] - in.eye[i]) * (sb.box.p[i] - in.eye[i]);
                     const double sz = 2.0 * b.rho / ((std::max)(std::sqrt(d), 1.0) * in.pixAng);
-                    const double a = (sz - in.tauB) / in.tauB;
+                    const double a = (sz - tau) / tau;
                     if (a <= 0.0) continue;   // too small here
                     if (b.cell.first >= in.cx0 && b.cell.first <= in.cx1 && b.cell.second >= in.cy0 && b.cell.second <= in.cy1 &&
                         in.cells.count(b.cell)) {
@@ -1384,7 +1399,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             }
             if (L - 1 == lod::kLmin) {   // the finest children: their largest, at this node's nearest distance
                 auto pm = cp->parentRho.find(Page::QuadKey(n.x, n.y));
-                if (pm == cp->parentRho.end() || 2.0 * pm->second / (dn * in.pixAng) < in.tauB) return;
+                if (pm == cp->parentRho.end() || 2.0 * pm->second / (dn * in.pixAng) < tau) return;
             }
             for (int j = 0; j < 2; ++j) {
                 for (int i = 0; i < 2; ++i) {
@@ -1458,6 +1473,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 top.singles += a.singles;
                 top.fading += a.fading;
                 top.hidden += a.hidden;
+                top.aired += a.aired;
             }
         }
         std::vector<Box>& out = top.out;
@@ -1467,6 +1483,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         w.singles = top.singles;
         w.fading = top.fading;
         w.hidden = top.hidden;
+        w.aired = top.aired;
         const auto tV = std::chrono::steady_clock::now();
         w.msVisit = std::chrono::duration<double, std::milli>(tV - t0).count();
         // Far to near FROM THE EYE (the instances are about the walk's origin, the eye a float3 off
@@ -1984,6 +2001,7 @@ void BuildingLayer::Render(const FrameContext& ctx) {
 // ================================================================================================
 void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, const double focus[3], ComposedSurfaceCb& cb) {
     using namespace DirectX;
+    const bool stood = m_sun.on;   // a centre stands from the frame before
     m_sun.on = false;
     cb.sunMapU[0] = UINT32_MAX;
     cb.sunMapU[1] = kSunTexels;
@@ -2009,13 +2027,30 @@ void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double 
     const double rl = std::sqrt(R[0] * R[0] + R[1] * R[1] + R[2] * R[2]);
     for (double& v : R) v /= rl;
     const double U[3] = {F[1] * R[2] - F[2] * R[1], F[2] * R[0] - F[0] * R[2], F[0] * R[1] - F[1] * R[0]};
-    // The centre: the focus relative to the eye, snapped to the texel grid across the sun.
+    // THE CENTRE STANDS IN THE WORLD. It is kept in the flat frame's doubles, snapped to the texel
+    // grid of the sun's axes THERE, and taken eye-relative only for the matrix: snapped about the
+    // eye instead (the first form), the grid slid with the eye and every shadow edge crawled as the
+    // camera moved. It moves only when the focus has left the map's middle (a quarter side from
+    // the centre), so a focus that wanders with the eye's forward does not slide the map's edge
+    // through the shadows every frame; and it moves when the side or the sun's axes change by more
+    // than a texel's worth, so the grid is the sun's own.
     const double texel = sideM / double(kSunTexels);
-    double c[3] = {focus[0] - cam.px, focus[1] - cam.py, focus[2] - cam.pz};
-    const double cR = std::round((c[0] * R[0] + c[1] * R[1] + c[2] * R[2]) / texel) * texel;
-    const double cU = std::round((c[0] * U[0] + c[1] * U[1] + c[2] * U[2]) / texel) * texel;
-    const double cS = c[0] * S[0] + c[1] * S[1] + c[2] * S[2];
-    for (int i = 0; i < 3; ++i) c[i] = cR * R[i] + cU * U[i] + cS * S[i];
+    double fR = focus[0] * R[0] + focus[1] * R[1] + focus[2] * R[2];
+    double fU = focus[0] * U[0] + focus[1] * U[1] + focus[2] * U[2];
+    const double fS = focus[0] * S[0] + focus[1] * S[1] + focus[2] * S[2];
+    bool move = !stood || m_sun.side != static_cast<float>(sideM);
+    if (!move) {
+        const double dR = m_sun.centre[0] * R[0] + m_sun.centre[1] * R[1] + m_sun.centre[2] * R[2] - fR;
+        const double dU = m_sun.centre[0] * U[0] + m_sun.centre[1] * U[1] + m_sun.centre[2] * U[2] - fU;
+        const double dS = m_sun.centre[0] * S[0] + m_sun.centre[1] * S[1] + m_sun.centre[2] * S[2] - fS;
+        move = std::abs(dR) > 0.25 * sideM || std::abs(dU) > 0.25 * sideM || std::abs(dS) > 0.25 * sideM;
+    }
+    if (move) {
+        fR = std::round(fR / texel) * texel;
+        fU = std::round(fU / texel) * texel;
+        for (int i = 0; i < 3; ++i) m_sun.centre[i] = fR * R[i] + fU * U[i] + fS * S[i];
+    }
+    const double c[3] = {m_sun.centre[0] - cam.px, m_sun.centre[1] - cam.py, m_sun.centre[2] - cam.pz};
     // The camera on the sun's side, half a side out, looking down the sun; near = side (the far
     // face -> 0), far = 0 (the sun's face -> 1): reversed, as the frame's depth is.
     const XMVECTOR pos = XMVectorSet(float(c[0] + S[0] * 0.5 * sideM), float(c[1] + S[1] * 0.5 * sideM), float(c[2] + S[2] * 0.5 * sideM), 1.0f);
