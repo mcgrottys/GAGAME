@@ -106,10 +106,16 @@ private:
         // The height TREE's texel when one is bound (compose/HeightTree.h): the bytes the GPU loads, a fold
         // of the texels beneath where a source's own level is finer -- which the stack read at the centre
         // was not (the probe: 49 % equal at the 38 m level).
+        // The tree is read RESIDENT: the finest level held at or coarser than the rung, a miss asked of a
+        // loader and answered on a later read -- the GPU's own rule, so the hull stands on the bed the
+        // drawn sea stands on, and never waits. Measured 2026-10-15 (Mark's travel run): read through
+        // Sample() on the frame thread, the hull's bed at each new place waited 15.9 s on 335 cold
+        // tiles, frames of 75-340 ms. A provisional answer is not memoised: the next read asks again.
+        bool provisional = false;
         const float h = m_stack ? m_comp->SampleHeightStack(m_ch, latR, lonR, lat.GroundRes(mip))
-                                : m_comp->SampleHeight(m_ch, latR, lonR, lat.GroundRes(mip));
+                                : m_comp->SampleHeightResident(m_ch, latR, lonR, lat.GroundRes(mip), &provisional);
         const float q = HalfToFloat(tree_detail::F2H(h));   // the one quantization: the GPU's
-        m_memo.emplace(key, q);
+        if (!provisional) m_memo.emplace(key, q);
         return q;
     }
 

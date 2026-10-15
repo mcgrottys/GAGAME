@@ -389,7 +389,10 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
 
     // ---- the bed: the one composed stack, provenance = the topmost covering source.
     if (m_comp && m_hgtCh >= 0) {
-        s.bedNavd = m_comp->SampleHeight(m_hgtCh, latRad, lonRad, groundResM);
+        // RESIDENT: a hull asks this on the frame thread every step (TreeWater::SlowAt, at 1 m); the tree's
+        // blocking read painted each cold tile there -- 2.8 s of the frame's waits over four travels
+        // (2026-10-15). The finest level held answers now; the step after a landing reads the finer one.
+        s.bedNavd = m_comp->SampleHeightResident(m_hgtCh, latRad, lonRad, groundResM);
         s.bedSrc = "earth.height base";
         const auto& ch = m_comp->ChannelAt(m_hgtCh);
         for (const auto* src : ch.height) {

@@ -78,11 +78,8 @@ public:
     std::string Identity() const override {
         const uint64_t p = m_params.load();
         char b[96];
-        // v7: each ray is the height TREE's maximum along its great circle (HeightTree::MaxAlongRay), when a
-        // tree is bound; v4, the march over the stack
-        snprintf(b, sizeof(b), "swell.exposure|%s fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
-                 m_comp && m_hgtCh >= 0 && m_comp->HeightTreeOf(m_hgtCh) ? "v7 tree ray" : "v4", kStepMinM, kMaxRangeM,
-                 DirBucket(p), LevelBucket(p));
+        snprintf(b, sizeof(b), "swell.exposure|v4 fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
+                 kStepMinM, kMaxRangeM, DirBucket(p), LevelBucket(p));
         std::string id = b;
         if (m_comp && m_hgtCh >= 0) {
             for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
@@ -122,7 +119,11 @@ public:
         const double ang0 = dirB * kDirBucketDeg * 3.14159265358979 / 180.0;
         constexpr double kD2R = 3.14159265358979 / 180.0;
         const double lat0 = q.lat * kD2R, lon0 = q.lon * kD2R;
-        const float e0 = m_comp->SampleHeight(m_hgtCh, lat0, lon0, q.groundM);
+        // THE STACK, NOT THE TREE (2026-10-15): the tree's ray (HeightTree::MaxAlongRay) was 1.5x faster
+        // where the tree was warm, but a node read on the frame thread (ExposurePage, a hull) and on the
+        // loaders paints every cold tile its five 50 km rays cross -- at each place a travel reached, 3.2 s
+        // a page on the loaders and 7.3 s of the frame thread's waits.
+        const float e0 = m_comp->SampleHeightStack(m_hgtCh, lat0, lon0, q.groundM);
         out.c[0] = 1.0f;
         out.weight = 1.0f;
         if (e0 > level) return true;   // land: exposed by convention; never sampled as water
@@ -146,26 +147,17 @@ public:
             const double ang = ang0 + kFanDeg[r] * kD2R;
             // Propagation direction (unit, world east/north); the march goes TOWARD the source.
             const double dirX = std::cos(ang), dirZ = std::sin(ang);
+            // PHASE C5: the step's angle on the sphere at the march's own latitude (radians).
+            const double dLat = -dirZ * stepM / GlobeModel::kR;
+            const double dLon = -dirX * stepM / (GlobeModel::kR * std::cos(lat0));
+            double lat = lat0, lon = lon0;
             double excess = 0.0;   // worst blocker height above the water line en route
-            if (HeightTree* tree = m_comp->HeightTreeOf(m_hgtCh)) {
-                // THE RAY ON THE TREE: the highest texel its great circle crosses, the floor at the water
-                // line (nothing beneath it is a blocker, so the tree passes over every block below it)
-                // and the stop at a full wall. The same excess the march took, over every texel crossed.
-                const float top = tree->MaxAlongRay(lat0, lon0, -dirX, -dirZ, kMaxRangeM, stepM, float(level),
-                                                    float(level + 1.2000001));
-                excess = (std::max)(0.0, double(top) - level);
-            } else {
-                // PHASE C5: the step's angle on the sphere at the march's own latitude (radians).
-                const double dLat = -dirZ * stepM / GlobeModel::kR;
-                const double dLon = -dirX * stepM / (GlobeModel::kR * std::cos(lat0));
-                double lat = lat0, lon = lon0;
-                for (int s = 0; s < maxSteps; ++s) {
-                    lat += dLat;
-                    lon += dLon;
-                    const float e = m_comp->SampleHeight(m_hgtCh, lat, lon, stepM);
-                    if (e > -9000.0f) excess = (std::max)(excess, double(e) - level);
-                    if (excess > 1.2) break;   // a full wall already
-                }
+            for (int s = 0; s < maxSteps; ++s) {
+                lat += dLat;
+                lon += dLon;
+                const float e = m_comp->SampleHeightStack(m_hgtCh, lat, lon, stepM);
+                if (e > -9000.0f) excess = (std::max)(excess, double(e) - level);
+                if (excess > 1.2) break;   // a full wall already
             }
             double tr = 1.0;
             if (excess > 0.15) {

@@ -1132,16 +1132,17 @@ std::optional<int> FrameLoop::Session() {
             while (std::getline(in, tok, ',')) if (!tok.empty()) m_cycleAt.push_back(uint32_t(std::stoul(tok)));
             std::sort(m_cycleAt.begin(), m_cycleAt.end());
         }
-        if (const char* at = std::getenv("GAGAME_TRAVEL_AT")) {   // the travel harness: "frame,lat,lon"
-            std::istringstream in(at);
-            std::string tok;
-            std::vector<double> v;
-            while (std::getline(in, tok, ',')) if (!tok.empty()) v.push_back(std::stod(tok));
-            if (v.size() == 3) {
-                m_travelAt = uint32_t(v[0]);
-                m_travelAtLat = v[1];
-                m_travelAtLon = v[2];
+        if (const char* at = std::getenv("GAGAME_TRAVEL_AT")) {   // the travel harness: "frame,lat,lon[;...]"
+            std::istringstream hops(at);
+            std::string hop;
+            while (std::getline(hops, hop, ';')) {
+                std::istringstream in(hop);
+                std::string tok;
+                std::vector<double> v;
+                while (std::getline(in, tok, ',')) if (!tok.empty()) v.push_back(std::stod(tok));
+                if (v.size() == 3) m_travelAt.push_back({uint32_t(v[0]), v[1], v[2]});
             }
+            std::sort(m_travelAt.begin(), m_travelAt.end(), [](const auto& a, const auto& b) { return a.frame < b.frame; });
         }
     }
     startUnix = simUnix;
@@ -2062,11 +2063,13 @@ bool FrameLoop::TravelTo(double toLat, double toLon) {
     // top of the water-over-bed stack, the seat's surface, at the planet's grain). The carry
     // keeps a body's height about the centre, and Entity::Carry then seats the keel by the live
     // surfaces where they answer. (A click on dry land used to put the vehicle under it.) Part of
-    // the record: a peer rebuilds the same exit.
+    // the record: a peer rebuilds the same exit. Read RESIDENT (never a paint on the frame thread: the
+    // far place is cold by definition, and its 2 m tile painted there held the click's frame 200-740 ms,
+    // 2026-10-15): the finest level held, which the carry's seat then corrects by the live surfaces.
     auto topAt = [&](double lat, double lon) {
         const double d2r = 3.14159265358979323846 / 180.0;
         const double g = (m_A.hgtCh >= 0)
-                             ? double(m_A.compositor.SampleHeight(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
+                             ? double(m_A.compositor.SampleHeightResident(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
                              : 0.0;
         return (std::max)(g, 0.0);
     };
@@ -2158,9 +2161,10 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         m_cycleAt.erase(m_cycleAt.begin());
         CycleVehicle(+1);
     }
-    if (m_travelAt != 0u && m_frame >= m_travelAt) {   // the travel harness (GAGAME_TRAVEL_AT)
-        m_travelAt = 0u;
-        TravelTo(m_travelAtLat, m_travelAtLon);
+    if (!m_travelAt.empty() && m_frame >= m_travelAt.front().frame) {   // the travel harness (GAGAME_TRAVEL_AT)
+        const TravelHop h = m_travelAt.front();
+        m_travelAt.erase(m_travelAt.begin());
+        TravelTo(h.lat, h.lon);
     }
     scene::FrameInfo fi;
     fi.simUnix = m_simUnix;
