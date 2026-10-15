@@ -110,14 +110,16 @@ height, a cloud's density -- which no tenant's tree carries and which close cell
 test can. So the order below puts the content laws first, where they can be stated on the
 buildings' own tree now, and the field where several tenants read it.
 
-The first content law is the owner's "too low", built here as **the lift** (section 6): a drawn
-solid adds to the picture only what it lifts the imagery by, its height across the view, h cos e;
-under a pixel through the air it is the imagery's own roof and is not drawn.
+The first content law tried was the owner's "too low", **the lift** (section 6): a drawn solid
+adds to the picture only what it lifts the imagery by, its height across the view, h cos e. It
+cut nine tenths of the boxes; the owner liked the suburbs showing and set it aside for the three
+FORMS (section 7): the same buildings, each as the cheapest form its size on screen allows.
 
 ## 4. Order and gates
 
 1. **The air term in the walk** (built): section 5.
-2. **The lift** (built): section 6 -- boxes and shapes under a pixel of lift are not emitted.
+2. **The three forms** (built; the lift of section 6 tried and set aside): section 7 -- a point
+   under boxPixels, the box to shapePixels (8), the mesh above; opaque at every size.
 3. **A height lane in the building tree** (the planet tree rebuilt with each node's tallest
    building; hours, every core): then the lift closes SUBTREES, not just emits, and the walk's
    visits fall with the boxes. The gate: nodes visited and the walk's ms at the city and 30 km,
@@ -189,3 +191,43 @@ the mid-rise blocks and everything whose walls reach a pixel stand as before. Th
 and the 30 km view (2 %) lose the same carpet where it was thin. The owner's eye decides whether
 the imagery is the better suburb; the law has no knob of its own (lodPixels is the pixel), and
 if a fraction of a pixel of lift should still draw, that is lodPixels for the height alone.
+
+## 7. Measured: the three forms (the lift set aside)
+
+The owner, on the lift's stills: "I kinda liked those suburbs showing ... I don't think the
+transparent blocks are good. It should be a point at the lowest LOD, a hexahedron, then the full
+mesh ... if a building fits more than 8x8 pixels we do the proper mesh"; and "a simple point,
+maybe a GA product for orientation so that it can be lit and coloured accurately"; and "make sure
+that improved scalability does not hurt frame times".
+
+**The law.** One record (the 48-byte instance: centre, rotor, extents) and one width on screen
+through the air decide the form: under `boxPixels` (2) a POINT -- one vertex through the vertex
+stage (Buildings.hlsl VsPoint), lit by its rotor: the eye's elevation against the rotor's up is
+the share of roof the eye sees, the rest the wall that faces it, so its colour and normal are that
+mix of the palette and the point is lit as the building would be (the building field's law for the
+walls it does not draw, Globe.hlsl PsSurface); from boxPixels the moment box (a hexahedron); from
+`shapePixels` (now 8, was 4) the building's own form. Every form is opaque: the page fade-in and
+the size fade are gone (the boxes' blend state with them; the shapes keep blending for a ribbon
+thinner than a pixel, whose width is its alpha), so no block is ever transparent. Folds take the
+same law by their box's width. The points are not drawn into the sun map (under two pixels, they
+cast nothing a texel could hold).
+
+**Measured.** Before = the air-law binary (the suburbs as boxes, fades on); after = the three
+forms. Stills as section 5; `--gpu-time` over 600 frames at Tokyo city, unheld.
+
+| | Tokyo city | | harbour | | 30 km | |
+|---|---|---|---|---|---|---|
+| | before | after | before | after | before | after |
+| boxes + shapes + points, 50th walk | 168,245 + 21,173 | 51,408 + 3,003 + 153,296 | 85,263 + 22,521 | 20,555 + 2,720 + 84,080 | 11,155 + 3,108 | 5,287 + 280 + 8,856 |
+| buildings on the GPU (mean / p95 ms) | 6.08 / 7.51 | **3.65 / 4.39** | | | | |
+| of which boxes / shapes / points / sun draw | 2.36 / 1.39 / - / 0.65 | 1.09 / 0.35 / 0.56 / 0.14 | | | | |
+| mean frame (unheld) | 21.48 ms | **19.75** | 24.66 | 23.80 | 15.66 | 15.62 |
+| the still | | 17 % px | | 1.9 % | | 0.8 % |
+
+What it bought: 2.4 ms of the buildings' 6.1 at the city (a point is one vertex where a box was
+eight and twelve triangles; a building between 4 and 8 px is a box where it was a mesh; the sun
+map draws a third of what it drew), 1.7 ms off the frame, every building that showed still
+showing, the walk unchanged. What it changed: the still on 17 % of the city's pixels -- the
+suburbs stand as single lit points where they stood as one- and two-pixel boxes, and nothing
+fades: a building is there or not. The walk's own cost (85-125 ms a walk on the pool) is
+untouched by the form; that is the height lane's and the field's (section 4).

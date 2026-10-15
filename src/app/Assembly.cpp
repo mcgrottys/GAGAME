@@ -1662,7 +1662,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     }
                     Log("[buildings] the ranked tree from %s: each building from %.1f px, faded in to twice that; pages by "
                         "level %s", bl->lod.c_str(), bl->lodPixels, per.c_str());
-                    blOwned->ConfigureFar(std::move(lodf), bl->lodPixels, bl->shapePixels, bl->pageMB, bl->marginDeg);
+                    blOwned->ConfigureFar(std::move(lodf), bl->lodPixels, bl->shapePixels, bl->pageMB, bl->marginDeg, bl->boxPixels);
                 } else {
                     Log("[buildings] no far boxes: %s", why.c_str());
                 }

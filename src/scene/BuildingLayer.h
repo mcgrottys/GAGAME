@@ -84,8 +84,13 @@ public:
     void Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack, double radiusM,
                    Place place, Locate locate, Ground ground);
     // The folded tree (null = none) and the pixels a building needs to be drawn on its own.
-    void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 4.0,
-                      double pageMB = 1024.0, double marginDeg = 5.0);
+    // THREE FORMS BY SIZE (the owner, 2026-10-15): under boxPixels across, a building is a POINT --
+    // one vertex carrying the building's rotor, so the eye's elevation against its up mixes roof
+    // and wall and the point is lit as the building would be; from boxPixels its moment box; from
+    // shapePixels its own form. Every form is opaque: a fade between forms, or in as a page
+    // lands, left transparent blocks over the imagery, and the owner saw them.
+    void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 8.0,
+                      double pageMB = 1024.0, double marginDeg = 5.0, double boxPixels = 2.0);
 
     const char* Name() const override { return "buildings"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields, hal::RootSignature rootSig) override;
@@ -309,17 +314,16 @@ private:
     };
     struct Walked {                     // a walk's answer
         double origin[3];
-        uint32_t count = 0;             // boxes, then insts shaped instances (one buffer)
-        uint32_t insts = 0;
+        uint32_t count = 0;             // boxes, then insts shaped instances, then points (one buffer, 3 rows each)
+        uint32_t insts = 0, points = 0;
         GpuBuffer staging, vb;
         std::vector<std::pair<double, PageKey>> wants;   // pages asked for, by pixels (largest first)
         std::vector<StandAsk> stands;   // the stands asked for, the largest on screen first
         std::vector<PageKey> used;
         std::vector<std::shared_ptr<const Page>> hold;   // its pages: their pool ranges stay while it is drawn
         std::shared_ptr<const DrawCpu> cpu;
-        uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0;   // hidden: nodes the occluder cut
+        uint64_t nodes = 0, singles = 0, hidden = 0;   // hidden: nodes the occluder cut
         uint64_t aired = 0;   // nodes the air cut: under the threshold through it, not without it
-        uint64_t low = 0;     // boxes and shapes the height law cut: their lift of the picture under a pixel
         uint64_t cellsVersion = 0;      // the detail cells it skipped were these
         double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
         uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)
@@ -383,7 +387,7 @@ private:
     Locate m_locate;
     Ground m_ground;
     hal::RootSignature m_rootSig = nullptr;
-    hal::Pso m_pso, m_psoBox;
+    hal::Pso m_pso, m_psoBox, m_psoPoint;   // the cells' prisms, the boxes by vertex, the points
     // THE SUN MAP's pass: the same four pipelines depth-only, the texture, its views, the cast.
     hal::Pso m_psoSun, m_psoSunBox, m_psoSunBoxMesh, m_psoSunShape;
     GpuTexture m_sunTex;
@@ -406,6 +410,7 @@ private:
         ID3D12PipelineState* box = nullptr;
         ID3D12PipelineState* boxMesh = nullptr;
         ID3D12PipelineState* shape = nullptr;
+        ID3D12PipelineState* point = nullptr;   // null: the points are not drawn (the sun's pass)
     };
     void DrawSolids(const FrameContext& ctx, uint32_t eyeIndex, uint32_t worlds, const Pipes& p, const char* tag);
     std::shared_ptr<Shared> m_shared = std::make_shared<Shared>();
@@ -427,7 +432,7 @@ private:
     Key m_eyeCell{INT32_MIN, INT32_MIN};   // the instrument: cells taken back warm vs built
 
     std::shared_ptr<const BuildingLodFile> m_lod;
-    double m_lodPixels = 1.0, m_shapePixels = 4.0;
+    double m_lodPixels = 1.0, m_shapePixels = 8.0, m_boxPixels = 2.0;
     std::map<PageKey, std::shared_ptr<const Page>> m_pages;
     std::map<PageKey, uint64_t> m_pageUsed;   // the frame a walk last used it
     std::set<PageKey> m_pagePending;
@@ -437,7 +442,7 @@ private:
     struct Drawn {
         double origin[3];
         GpuBuffer vb;
-        uint32_t count = 0, insts = 0;
+        uint32_t count = 0, insts = 0, points = 0;
         std::shared_ptr<const DrawCpu> cpu;   // its instances, kept for a lost device's report
     };
     // TWO DISPATCHES a frame (the boxes, then the shapes): DRED names the one the GPU stopped in,

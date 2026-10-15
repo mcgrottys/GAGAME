@@ -438,7 +438,11 @@ struct BuildingsLayerProps {
     double levelHeight = 3.0, defaultHeight = 6.0, radius = 3000.0;
     std::string lod;                 // the size-stratified pyramid's folder ("" = no far boxes)
     double lodPixels = 1.0;
-    double shapePixels = 4.0;        // a building is its own form from here; its moment box below
+    // THREE FORMS BY SIZE (the owner, 2026-10-15): a building narrower than boxPixels on screen is a
+    // POINT (one vertex, lit by its rotor), from boxPixels its moment BOX (a hexahedron), from
+    // shapePixels its own form (the mesh). Opaque at every size: no form fades into another.
+    double boxPixels = 2.0;
+    double shapePixels = 8.0;
     double pageMB = 1024.0;          // the loaded pages' budget (CPU); the shape pool on the GPU is fixed
     double marginDeg = 5.0;          // the walk's cone past the view's edge: what a turn finds already asked
     bool field = true;               // the buildings under a pixel as scalars (compose/BuildingField.h)

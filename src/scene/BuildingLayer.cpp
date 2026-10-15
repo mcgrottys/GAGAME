@@ -57,9 +57,10 @@ void BuildingLayer::Configure(const std::wstring& shaderDir, std::shared_ptr<con
 }
 
 void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels,
-                                 double pageMB, double marginDeg) {
+                                 double pageMB, double marginDeg, double boxPixels) {
     m_marginDeg = marginDeg;
     m_shapePixels = (std::max)(shapePixels, 0.0);
+    m_boxPixels = (std::max)(boxPixels, 0.0);
     m_pageBudget = static_cast<uint64_t>((std::max)(pageMB, 1.0) * 1048576.0);
     m_lod = std::move(lod);
     m_lodPixels = pixels > 0.0 ? pixels : 1.0;
@@ -99,10 +100,15 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     // undersides, which nothing sees, and the rasterizer drops them before a pixel is shaded.
     d.cull = D3D12_CULL_MODE_BACK;
     d.frontCcw = TRUE;
-    d.blend = true;                                  // a fold's coverage as its alpha
-    d.srcBlend = D3D12_BLEND_SRC_ALPHA;
-    d.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    // OPAQUE (the owner, 2026-10-15): a box fading in, or faded by its fold's coverage, was a
+    // transparent block over the imagery; a form is drawn whole or not at all.
     const bool okBox = hal::Reload(m_psoBox, [&] { return hal::BuildGraphics(gpu, d, "buildings.boxes"); }, "buildings.boxes");
+    // THE POINTS: one vertex a building, the smallest of the three forms (VsPoint), opaque, no cull.
+    hal::GraphicsPipelineDesc pd = d;
+    pd.vs = sc.Compile(path, L"VsPoint", L"vs_6_0");
+    pd.cull = D3D12_CULL_MODE_NONE;
+    pd.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    hal::Reload(m_psoPoint, [&] { return hal::BuildGraphics(gpu, pd, "buildings.points"); }, "buildings.points");
     // THE SUN'S PIPELINES (RenderSunMap): the same stages with no pixel stage and no colour target
     // -- the depth the sun sees is the whole picture -- and the same cull as the frame's, so the
     // solid the sun meets is the solid the eye sees, winding and all, and the map and the drawn
@@ -110,7 +116,6 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     // the receiver's plane absorbs that in SunMapClear).
     hal::GraphicsPipelineDesc sd = d;
     sd.ps = ShaderBlob{};
-    sd.blend = false;
     sd.numRenderTargets = 0;
     sd.rtvFormat = DXGI_FORMAT_UNKNOWN;
     hal::Reload(m_psoSunBox, [&] { return hal::BuildGraphics(gpu, sd, "buildings.sun.boxes"); }, "buildings.sun.boxes");
@@ -133,7 +138,7 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         md.depthClip = TRUE;
         md.depthTest = true;
         md.depthWrite = true;
-        md.blend = true;   // a building fading in, as the boxes
+        md.blend = true;   // a ribbon thinner than a pixel carries its width as alpha (MsShape); the buildings are opaque
         md.srcBlend = D3D12_BLEND_SRC_ALPHA;
         md.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
         if (md.as.Valid() && md.ms.Valid() && md.ps.Valid()) {
@@ -148,6 +153,7 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         // The boxes by mesh shader too: 8 vertices and 12 triangles a box, 16 a group, no amplification.
         hal::MeshPipelineDesc mb = md;
         mb.as = ShaderBlob{};
+        mb.blend = false;   // the boxes are opaque (above)
         mb.ms = sc.Compile(path, L"MsBox", L"ms_6_5");
         if (mb.ms.Valid() && mb.ps.Valid()) {
             hal::Reload(m_psoBoxMesh, [&] { return hal::BuildMesh(gpu, mb, "buildings.boxes.mesh"); }, "buildings.boxes.mesh");
@@ -824,9 +830,9 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
     }
     for (Walked& w : walked) {
         Eye& e = m_eyes[w.eye < kEyes * kWorlds ? w.eye : 0];
-        if ((w.count || w.insts) && w.vb.Valid()) {   // the cells' own copy and barrier (Upload)
+        if ((w.count || w.insts || w.points) && w.vb.Valid()) {   // the cells' own copy and barrier (Upload)
             ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
-            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + 15u) & ~uint64_t(15);
+            const uint64_t bytes = (uint64_t(w.count + w.insts + w.points) * sizeof(Box) + 15u) & ~uint64_t(15);
             cl->CopyBufferRegion(w.vb.res.Get(), 0, w.staging.res.Get(), 0, bytes);
             D3D12_RESOURCE_BARRIER br{};
             br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -841,6 +847,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         for (int i = 0; i < 3; ++i) e.drawn.origin[i] = w.origin[i];
         e.drawn.count = w.vb.Valid() ? w.count : 0;
         e.drawn.insts = w.vb.Valid() ? w.insts : 0;
+        e.drawn.points = w.vb.Valid() ? w.points : 0;
         e.drawnUsed = std::set<PageKey>(w.used.begin(), w.used.end());
         e.drawnHold = std::move(w.hold);
         e.drawn.cpu = std::move(w.cpu);
@@ -855,11 +862,11 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         const bool largest = e.drawn.insts > e.walkInstsMax;
         if (largest) e.walkInstsMax = e.drawn.insts;
         if (e.walks <= 3 || e.walks % 50 == 0 || (largest && e.drawn.insts > 200000u)) {
-            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes (%llu buildings, %llu fading in) over %llu nodes, %llu hidden, %llu cut by the air, %llu too low, in %.1f ms (visit %.1f, "
+            Log("[buildings] frame %llu eye %u world %u walk %llu: %u boxes + %u shapes + %u points (%llu buildings) over %llu nodes, %llu hidden, %llu cut by the air, in %.1f ms (visit %.1f, "
                 "sort %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked", static_cast<unsigned long long>(m_frame), w.eye / kWorlds, w.eye % kWorlds,
-                static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, static_cast<unsigned long long>(w.singles),
-                static_cast<unsigned long long>(w.fading), static_cast<unsigned long long>(w.nodes), static_cast<unsigned long long>(w.hidden),
-                static_cast<unsigned long long>(w.aired), static_cast<unsigned long long>(w.low), w.ms, w.msVisit, w.msSort,
+                static_cast<unsigned long long>(e.walks), e.drawn.count, e.drawn.insts, e.drawn.points, static_cast<unsigned long long>(w.singles),
+                static_cast<unsigned long long>(w.nodes), static_cast<unsigned long long>(w.hidden),
+                static_cast<unsigned long long>(w.aired), w.ms, w.msVisit, w.msSort,
                 w.msBuf, m_pages.size(), m_pageBytes / 1048576.0, e.wants.size());
         }
     }
@@ -1099,7 +1106,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
     E.walkCells = m_cellsVersion;
     E.walkPages = m_pagesVersion;
     struct In {
-        double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB, tauS;
+        double eye[3], fwd[3], lat, lon, h, pixAng, halfDiag, cosHalf, sinHalf, tauB, tauS, tauP;
         double extinct = 0.0;   // the air's extinction (1/m) at the path's least dense point: T(r) = exp(-extinct r)
         double org[3];   // the walk's origin (the cloud's, at the eye), flat frame: what the instances are about
         std::shared_ptr<const Occluder> occ;   // the eye's farthest depth by cell, or none
@@ -1165,7 +1172,8 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         const double rayH = (std::max)(double(m_air.row[0][3]), 1.0), mieH = (std::max)(double(m_air.row[1][3]), 1.0);
         in.extinct = double(m_air.row[0][1]) * std::exp(-hA / rayH) + double(m_air.row[2][1]) * std::exp(-hA / mieH);
     }
-    in.tauS = m_shapePixels;   // its own form from here, its moment box below (the same mass)
+    in.tauS = m_shapePixels;   // its own form from here, its moment box below
+    in.tauP = m_boxPixels;     // its box from here, a point below
     in.pages.reserve(m_pages.size());
     in.hold.reserve(m_pages.size());
     for (const auto& [k, p] : m_pages) {
@@ -1200,10 +1208,11 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         struct Acc {
             std::vector<Box> out;
             std::vector<Inst> inst;
+            std::vector<Box> pts;   // the points: a box record each, its centre and its rotor read, its extents not
             std::set<PageKey> used;
             std::map<PageKey, double> wants;
             std::map<std::pair<PageKey, uint32_t>, StandAsk> stands;
-            uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0, aired = 0, low = 0;
+            uint64_t nodes = 0, singles = 0, hidden = 0, aired = 0;
             PageKey lastUsed{INT32_MIN, 0, 0};
         };
         struct Frontier {
@@ -1221,37 +1230,11 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             auto it = in.pages.find(k);
             return it == in.pages.end() ? nullptr : it->second;
         };
-        // THE LIFT (the owner, 2026-10-15: "cull the buildings that are too low"). What a drawn
-        // solid adds to the picture is not its footprint -- the imagery under it already holds the
-        // roof as seen from above -- but how far it LIFTS that picture: its walls, and its roof
-        // displaced up from the ground, both h cos e on screen for a height h seen at elevation e
-        // (e = 90 straight down: nothing; e = 0 at the horizon: the whole height). So a box or a
-        // shape is drawn when its lift through the air, 2 hz cos e T / (d pixAng), reaches the
-        // threshold, and fades in over one threshold above it as the width law does; a flat
-        // warehouse 10 px wide and 0.3 px tall is left to the imagery, which shows it better than a
-        // grey box would. `tau` is the node's threshold through the air (lodPixels / T).
-        auto lift = [&](const RtBox& b, double tau, double& alpha) {
-            const double hz = Len3(b.w);
-            if (hz <= 1e-9) return false;
-            double v[3], d2 = 0.0;
-            for (int i = 0; i < 3; ++i) {
-                v[i] = b.p[i] - in.eye[i];
-                d2 += v[i] * v[i];
-            }
-            const double d = std::sqrt((std::max)(d2, 1.0));
-            const double sinE = std::abs(v[0] * b.w[0] + v[1] * b.w[1] + v[2] * b.w[2]) / (d * hz);
-            const double cosE = std::sqrt((std::max)(1.0 - sinE * sinE, 0.0));
-            const double hpx = 2.0 * hz * cosE / (d * in.pixAng);
-            if (hpx < tau) return false;
-            alpha = (std::min)(alpha, (std::min)((hpx - tau) / tau, 1.0));
-            return true;
-        };
-        auto emit = [&](Acc& acc, const RtBox& b, double alpha, float landed, double tau) {
-            if (!b.valid || acc.out.size() >= kMaxBoxes) return;
-            if (!lift(b, tau, alpha)) {
-                ++acc.low;
-                return;
-            }
+        // THE FORM BY THE WIDTH ON SCREEN (the owner, 2026-10-15): a box or a fold narrower than
+        // boxPixels (through the air: tauP / T, as every threshold here) is emitted as a POINT, one
+        // vertex with the building's rotor; from there as its box. Opaque either way: no alpha.
+        auto emit = [&](Acc& acc, const RtBox& b, float landed, double tauP) {
+            if (!b.valid || acc.out.size() + acc.pts.size() >= kMaxBoxes) return;
             // The half-axes as a rotor and three extents; an axis of no length takes its direction
             // from the other two (a fold of no spread is still a box with an attitude).
             const double a1 = Len3(b.u), a2 = Len3(b.v), hz = Len3(b.w);
@@ -1267,25 +1250,24 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             if (a2 <= 1e-9) { N[0] = U[1] * E[2] - U[2] * E[1]; N[1] = U[2] * E[0] - U[0] * E[2]; N[2] = U[0] * E[1] - U[1] * E[0]; }
             Box x{};
             for (int i = 0; i < 3; ++i) x.c[i] = static_cast<float>(b.p[i] - in.org[i]);
-            x.alpha = static_cast<float>(alpha);
+            x.alpha = 1.0f;
             RotorOf(E, U, N, x.q);
             x.x[0] = static_cast<float>(a1);
             x.x[1] = static_cast<float>(a2);
             x.x[2] = static_cast<float>(hz);
-            x.x[3] = landed;   // Buildings.hlsl: its page's landing, for the fade-in
-            acc.out.push_back(x);
+            x.x[3] = landed;
+            double d2 = 0.0;
+            for (int i = 0; i < 3; ++i) d2 += (b.p[i] - in.eye[i]) * (b.p[i] - in.eye[i]);
+            const double wpx = 2.0 * (std::max)(a1, a2) / ((std::max)(std::sqrt(d2), 1.0) * in.pixAng);
+            if (wpx < tauP) acc.pts.push_back(x); else acc.out.push_back(x);
         };
         // ...or its own form: the ground frame under its centroid and its record in the pool (MsShape).
-        auto emitShape = [&](Acc& acc, const StoodBld& sb, const RtBld& b, double alpha, float landed, uint64_t addr, double tau) {
+        auto emitShape = [&](Acc& acc, const StoodBld& sb, const RtBld& b, float landed, uint64_t addr) {
             if (acc.out.size() + acc.inst.size() >= kMaxBoxes) return;
-            if (!lift(sb.box, tau, alpha)) {
-                ++acc.low;
-                return;
-            }
             Inst x{};
             const double E[3] = {sb.e[0], sb.e[1], sb.e[2]}, N[3] = {sb.n[0], sb.n[1], sb.n[2]}, U[3] = {sb.up[0], sb.up[1], sb.up[2]};
             for (int i = 0; i < 3; ++i) x.b.c[i] = static_cast<float>(sb.g[i] - in.org[i]);
-            x.b.alpha = static_cast<float>(alpha);
+            x.b.alpha = 1.0f;
             RotorOf(E, U, N, x.b.q);
             const uint32_t a32 = static_cast<uint32_t>(addr);
             std::memcpy(&x.b.x[0], &a32, 4);
@@ -1390,23 +1372,22 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                     double d = 0.0;
                     for (int i = 0; i < 3; ++i) d += (sb.box.p[i] - in.eye[i]) * (sb.box.p[i] - in.eye[i]);
                     const double sz = 2.0 * b.rho / ((std::max)(std::sqrt(d), 1.0) * in.pixAng);
-                    const double a = (sz - tau) / tau;
-                    if (a <= 0.0) continue;   // too small here
+                    if (sz < tau) continue;   // too small here, through the air
+                    const double air = tau / in.tauB;   // the air's factor on every threshold at this node
                     if (b.cell.first >= in.cx0 && b.cell.first <= in.cx1 && b.cell.second >= in.cy0 && b.cell.second <= in.cy1 &&
                         in.cells.count(b.cell)) {
                         continue;   // its prisms are drawn
                     }
-                    if (in.shapes && sz >= in.tauS && b.shapeOff != UINT32_MAX && b.shapeOff / kSlotBytes < pg.slots.size()) {
-                        emitShape(acc, sb, b, (std::min)(a, 1.0), pg.landed,
-                                  uint64_t(pg.slots[b.shapeOff / kSlotBytes]) * kSlotBytes + b.shapeOff % kSlotBytes, tau);
+                    if (in.shapes && sz >= in.tauS * air && b.shapeOff != UINT32_MAX && b.shapeOff / kSlotBytes < pg.slots.size()) {
+                        emitShape(acc, sb, b, pg.landed,
+                                  uint64_t(pg.slots[b.shapeOff / kSlotBytes]) * kSlotBytes + b.shapeOff % kSlotBytes);
                     } else {
-                        emit(acc, sb.box, (std::min)(a, 1.0), pg.landed, tau);
+                        emit(acc, sb.box, pg.landed, in.tauP * air);
                     }
                     ++acc.singles;
-                    if (a < 1.0) ++acc.fading;
                 }
             } else if (sp && needBlds) {
-                emit(acc, sp->own, (std::min)(1.0, double(n.own.cover)), pg.landed, tau);   // its own fold, until its buildings stand
+                emit(acc, sp->own, pg.landed, in.tauP * tau / in.tauB);   // its own fold, until its buildings stand
             }
             if (L == lod::kLmin || !n.kids) return;
             // The children's pages: the loaded ones are walked; the missing ones are asked for, by
@@ -1421,7 +1402,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                     // The fold stands in while the page is on its way (unless its cell's prisms are drawn).
                     if (sp && !(n.descCell.first >= in.cx0 && n.descCell.first <= in.cx1 && n.descCell.second >= in.cy0 &&
                                 n.descCell.second <= in.cy1 && in.cells.count(n.descCell))) {
-                        emit(acc, sp->desc, n.descCover, pg.landed, tau);
+                        emit(acc, sp->desc, pg.landed, in.tauP * tau / in.tauB);
                     }
                 }
                 return;
@@ -1487,6 +1468,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             for (Acc& a : accs) {
                 top.out.insert(top.out.end(), a.out.begin(), a.out.end());
                 top.inst.insert(top.inst.end(), a.inst.begin(), a.inst.end());
+                top.pts.insert(top.pts.end(), a.pts.begin(), a.pts.end());
                 top.used.insert(a.used.begin(), a.used.end());
                 for (const auto& [k, px] : a.wants) {
                     double& want = top.wants[k];
@@ -1504,10 +1486,8 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 }
                 top.nodes += a.nodes;
                 top.singles += a.singles;
-                top.fading += a.fading;
                 top.hidden += a.hidden;
                 top.aired += a.aired;
-                top.low += a.low;
             }
         }
         std::vector<Box>& out = top.out;
@@ -1515,10 +1495,8 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         std::map<PageKey, double>& wants = top.wants;
         w.nodes = top.nodes;
         w.singles = top.singles;
-        w.fading = top.fading;
         w.hidden = top.hidden;
         w.aired = top.aired;
-        w.low = top.low;
         const auto tV = std::chrono::steady_clock::now();
         w.msVisit = std::chrono::duration<double, std::milli>(tV - t0).count();
         // Far to near FROM THE EYE (the instances are about the walk's origin, the eye a float3 off
@@ -1531,20 +1509,22 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         std::sort(std::execution::par, out.begin(), out.end(), [&](const Box& a, const Box& b) { return d2(a.c) > d2(b.c); });
         std::vector<Inst>& inst = top.inst;
         std::sort(std::execution::par, inst.begin(), inst.end(), [&](const Inst& a, const Inst& b) { return d2(a.b.c) > d2(b.b.c); });
+        std::vector<Box>& pts = top.pts;   // (the points are opaque and depth tested: no order needed)
         // (No task list: the amplification stage cuts the instances' edges and roofs into groups.)
         const auto tS = std::chrono::steady_clock::now();
         w.msSort = std::chrono::duration<double, std::milli>(tS - tV).count();
         w.count = static_cast<uint32_t>(out.size());
         w.insts = static_cast<uint32_t>(inst.size());
+        w.points = static_cast<uint32_t>(pts.size());
         {
             auto cpu = std::make_shared<DrawCpu>();
             cpu->inst.reserve(inst.size());
             for (const Inst& x : inst) cpu->inst.push_back(x.b);
             w.cpu = std::move(cpu);
         }
-        if ((w.count || w.insts) && !shared->cancel.load()) {
-            // One buffer: the boxes, then the shaped instances, three rows each.
-            const uint64_t bytes = (uint64_t(w.count + w.insts) * sizeof(Box) + 15u) & ~uint64_t(15);
+        if ((w.count || w.insts || w.points) && !shared->cancel.load()) {
+            // One buffer: the boxes, then the shaped instances, then the points, three rows each.
+            const uint64_t bytes = (uint64_t(w.count + w.insts + w.points) * sizeof(Box) + 15u) & ~uint64_t(15);
             auto take = [&](std::vector<GpuBuffer>& list) {
                 std::lock_guard<std::mutex> lk(shared->mx);
                 auto best = list.end();
@@ -1568,6 +1548,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 std::memcpy(dst, &x.b, sizeof(Box));
                 dst += sizeof(Box);
             }
+            std::memcpy(dst, pts.data(), pts.size() * sizeof(Box));
             w.vb = take(shared->freeBoxes);
             if (!w.vb.Valid()) w.vb = gpu->CreateDefaultBuffer(nullptr, room, L"buildings.walk");
         }
@@ -1947,6 +1928,7 @@ void BuildingLayer::DrawSolids(const FrameContext& ctx, uint32_t eyeIndex, uint3
     const Drawn& m_drawn = e.drawn;
     if (!m_drawn.vb.Valid()) continue;
     if (world > 0 && world - 1 >= m_worlds[eyeIndex].size()) continue;
+    if (!m_drawn.count && !m_drawn.insts && !m_drawn.points) continue;
     // THE WORLD'S PLACE IN THE TRUE FRAME: the walk's origin pulled through the window, the eye off
     // it in doubles; its turn as the rotor the instances' own rotors are composed with.
     double org[3] = {m_drawn.origin[0], m_drawn.origin[1], m_drawn.origin[2]};
@@ -2003,6 +1985,20 @@ void BuildingLayer::DrawSolids(const FrameContext& ctx, uint32_t eyeIndex, uint3
         if (ctx.viewIndex == 0 && world == 0 && p.shape == m_psoShape.Get()) m_drawLog[m_frame % 3] = {m_frame, m_drawn.cpu};
         ctx.cmd->DispatchMesh((m_drawn.insts + kAsInsts - 1) / kAsInsts, 1, 1);   // kMaxBoxes / 64 < 65535
     }
+    if (p.point && m_drawn.points) {
+        // THE POINTS: the buildings under boxPixels, one vertex each through the vertex stage, lit by
+        // their rotors (Buildings.hlsl VsPoint). The sun's pass draws none: a thing under two pixels
+        // casts nothing a texel could hold.
+        GpuScope ptScope(ctx.prof, ctx.cmd->Native(), "buildings.points");
+        ctx.cmd->Pipeline(p.point);
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+        cb.mesh[0] = (m_drawn.count + m_drawn.insts) * 3u;   // the first point's row
+        cb.mesh[1] = m_drawn.points;
+        cb.mesh[3] = m_poolSrv;
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(2, m_drawn.vb.gpu);
+        ctx.cmd->Draw(m_drawn.points, 1, 0, 0);
+    }
     }
 }
 
@@ -2011,7 +2007,10 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     // and each window world it reaches, drawn pulled through the window.
     const uint32_t eyeIndex = ctx.viewIndex < kEyes ? ctx.viewIndex : 0;
     bool any = !m_cells.empty() || !m_warm.empty();
-    for (uint32_t k = 0; k < kWorlds; ++k) any = any || m_eyes[WalkerOf(eyeIndex, k)].drawn.count || m_eyes[WalkerOf(eyeIndex, k)].drawn.insts;
+    for (uint32_t k = 0; k < kWorlds; ++k) {
+        const Drawn& d = m_eyes[WalkerOf(eyeIndex, k)].drawn;
+        any = any || d.count || d.insts || d.points;
+    }
     if (!m_pso || !any || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
     Pipes p;
@@ -2019,6 +2018,7 @@ void BuildingLayer::Render(const FrameContext& ctx) {
     p.box = m_psoBox.Get();
     p.boxMesh = m_psoBoxMesh.Get();
     p.shape = m_psoShape.Get();
+    p.point = m_psoPoint.Get();
     DrawSolids(ctx, eyeIndex, kWorlds, p, "buildings");
 }
 
@@ -2128,7 +2128,7 @@ void BuildingLayer::DumpSunMap(const std::wstring& path) {
 void BuildingLayer::RenderSunMap(const FrameContext& ctx) {
     if (!m_sun.on || !ctx.cmd || !ctx.camera || !ctx.gpu || m_sunDsv == UINT32_MAX) return;
     const Eye& e = m_eyes[WalkerOf(0, 0)];
-    const bool any = !m_cells.empty() || !m_warm.empty() || e.drawn.count || e.drawn.insts;
+    const bool any = !m_cells.empty() || !m_warm.empty() || e.drawn.count || e.drawn.insts;   // (the points cast nothing)
     PixScope scope(ctx.cmd->Native(), "buildings.sun (the solids as the sun sees them)");
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings.sun");
     // The map is the pass's own target; the frame's targets, root and viewport are set by the
