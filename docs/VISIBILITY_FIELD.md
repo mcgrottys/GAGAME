@@ -121,7 +121,8 @@ FORMS (section 7): the same buildings, each as the cheapest form its size on scr
 2. **The three forms** (built; the lift of section 6 tried and set aside): section 7 -- a point
    under boxPixels, the box to shapePixels (8), the mesh above; opaque at every size.
    The walk's per-building work moved to the GPU and its stand asks made a list (built): section 8
-   -- the walk 84 -> 16 ms at the city, O(nodes visited).
+   -- the walk 84 -> 16 ms at the city, O(nodes visited); the fold stand-ins gone (the owner: one
+   hexahedron per building, never a node's mass as a box).
 3. **A height lane in the building tree** (the planet tree rebuilt with each node's tallest
    building; hours, every core): then the lift closes SUBTREES, not just emits, and the walk's
    visits fall with the boxes. The gate: nodes visited and the walk's ms at the city and 30 km,
@@ -253,16 +254,15 @@ over the ground zc, its shape's pool address, its heading and its detail cell. I
 the STAND'S OWN CENTRE -- a translator per node -- so it is small floats wherever the node stands,
 and the walk's origin can move without touching it; the walk's node entry carries the stand's
 centre about the walk's origin, the difference taken in doubles and cast once, and the pass
-composes the two. A fold is a record that claims the size of its node (rho = +inf); a box that
-stands nothing claims none (rho = 0): one law, no special case for either. The shape's ground
+composes the two. A box that stands nothing claims no size (rho = 0), so the pass draws it as
+nothing: one law, no special case. The shape's ground
 frame is the box's rotor with the heading taken back out (a rotor about up by -heading, applied
 first: `QMul(q, (0, sin h/2, 0, cos h/2))`); the stand checks that product against the ground
 frame on the first 32 shaped buildings of a run and logs a disagreement over 1e-3 (none seen).
 
 **The walk** (`Walk`): per visited node that has something to draw it emits ONE entry of 32 bytes
-(`NodeEntry`): the stand's centre about the origin, its first record in the pool, which parts are
-drawn (the own fold until the buildings stand, the descendants' fold while their page is on its
-way, the buildings), how many buildings lie within the node's size bound -- the page ranks a
+(`NodeEntry`): the stand's centre about the origin, its first record in the pool, how many of its
+buildings lie within the node's size bound -- the page ranks a
 node's buildings largest first, so that bound is one `partition_point`, the walk's O(log) share
 of the per-building law -- and the air's factor 1/T at the node. No per-building loop, no copy,
 no sort: every form is opaque and depth tested, so the order the pass writes is as good as any.
@@ -280,6 +280,21 @@ from the buffer's own header (`FormBase`, `FormCount`); `DrawSolids` binds the b
 `ExecuteIndirect` through two command signatures (a mesh dispatch, a draw) and never knows how
 many. The buffer's first row is copied to a readback ring and read three frames on, so the walk's
 log line still says what the GPU drew of what it sent, and the end-of-run line the settled set.
+
+**No folds (the owner, the same evening).** The first build kept the two stand-ins the walk had:
+a node's own fold as one box until its buildings stood, and its descendants' fold while their
+page was on its way. On a fast zoom-out from the city thousands of pages are missing at once and
+those stand-ins are the folds of 10 km nodes: opaque slabs over the land (since fbccee7 nothing
+fades) that shrank level by level as the pages landed -- the owner saw them, and the 16 ms walk
+showed every intermediate state where the 140 ms one had lagged the flight. He wanted one
+hexahedron per BUILDING as the middle state, never a node's mass as a box. So the folds are gone
+from the records, the walk and the pass: a stand's records are its buildings and nothing else, a
+node is named only for the buildings within its size bound, and a page that has not landed shows
+nothing until it does (`RtNode` keeps its folds for the size bound and the sphere alone). Measured
+against the build with the stand-ins: the orbit view's 50th walk sends 0 records where it drew
+521 fold boxes; the settled city still differs on 358 pixels (0.025 %: folds still standing at the
+far edge), its settled set 62,838 boxes + 3,062 shapes + 215,686 points; the market bit-identical.
+Lines: -82 / +46 more.
 
 **The stand's lifetime.** A stand is published (its node's atomic pointer set) by Simulate when
 its records are recorded for the GPU, not by the job that made it, so a walk that reads a stand
@@ -314,7 +329,7 @@ harbour's is the 50th walk of each (125k / 128k nodes).
 | the walk, settled | 83.9 ms (visit 71.0, sort 0.9, buffers 0.9) | **15.8** (visit 14.7: roots 1.5, drain 8.0, merge 5.2; buffers 0.1) | 45.4 | **12.7** | | |
 | the walk, instrumented before the ask list | | 98.8 (visit 79.1: roots 1.2, drain 18.3, merge 59.6) | | | | |
 | nodes named / records sent, settled | | 20,311 / 270,068 | | 18,416 / 117,505 | | 117 / 440 |
-| drawn, settled (the GPU's count) | 64,300 boxes + 3,062 shapes (points not counted) | 64,917 + 3,062 + 229,024 points | 21,200 + 2,720 | 21,189 + 2,720 + 90,963 | 0 + 0 | 0 + 0 + 0 |
+| drawn, settled (the GPU's count) | 64,300 boxes + 3,062 shapes (points not counted) | 64,917 + 3,062 + 229,024 points (62,838 + 3,062 + 215,686 without the folds) | 21,200 + 2,720 | 21,189 + 2,720 + 90,963 | 0 + 0 | 0 + 0 + 0 |
 | buildings.classify (GPU, on landing frames) | | 0.11 ms mean, 0.31 max | | | | |
 | buildings on the GPU (mean) | 3.69 ms (boxes 1.12, shapes 0.35, points 0.55) | 4.26 (1.20, 0.35, 0.77) | | | | |
 | mean frame (unheld, 590 frames) | 20.28 ms (GPU p95 26.3) | 20.54 (GPU p95 19.9) | 24.66 (section 7) | 23.87 | | 12.78 |

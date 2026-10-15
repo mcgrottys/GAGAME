@@ -219,34 +219,34 @@ public:
     };
     static_assert(sizeof(Box) == 48, "three float4 rows");
     // A STAND'S RECORD ON THE GPU (shaders/BuildingsClassify.hlsl; 2026-10-15, the owner: the walk
-    // O(log n), not O(N)). Written ONCE when the stand lands, into a persistent pool, stated about
-    // the stand's own centre (a translator per node, so the record is small floats wherever the
-    // node stands and the walk's origin can move without touching it); the walk names a node's
-    // range, and the classify pass makes a Box of it for the form its size on screen earns. The
-    // same object as a Box plus what the per-building law needs: its size (rho: 0 claims nothing,
-    // a fold claims +inf), the centroid's height over the ground (zc: the shape's ground point),
+    // O(log n), not O(N)). One a building, written ONCE when the stand lands, into a persistent
+    // pool, stated about the stand's own centre (a translator per node, so the record is small
+    // floats wherever the node stands and the walk's origin can move without touching it); the
+    // walk names a node's range, and the classify pass makes a Box of it for the form its size on
+    // screen earns. The same object as a Box plus what the per-building law needs: its size (rho:
+    // 0 claims nothing), the centroid's height over the ground (zc: the shape's ground point),
     // its shape's pool address, its heading (the box's rotor is the ground frame's turned by it)
-    // and its detail cell.
+    // and its detail cell. No fold is ever a record: a building is a point, a hexahedron or its
+    // mesh, and a page that has not landed shows nothing (the owner, 2026-10-15).
     struct StoodRec {
         float p[3], rho;     // the box's centre about the stand's centre; its radius
         float q[4];          // the box's rotor (flat x, y, z to its long axis, up, its short axis)
         float a1, a2, hz, zc;
         uint32_t addr;       // the shape record's byte address in the shape pool; UINT32_MAX none
         float heading;       // radians, the long axis from east toward north
-        uint32_t cell;       // the detail cell (iy << 16 | ix as int16s); kNoCell for a fold
+        uint32_t cell;       // the detail cell (iy << 16 | ix as int16s)
         float landed;        // the page's landing (the layer's clock, s)
     };
     static_assert(sizeof(StoodRec) == 64, "four float4 rows");
-    static constexpr uint32_t kNoCell = 0x80008000u;
     // A NODE OF A WALK (two float4 rows): what the walk emits per visited node that has something
     // to draw -- O(nodes), never O(buildings) -- expanded on the GPU.
     struct NodeEntry {
         float off[3];        // the stand's centre about the walk's origin (the difference taken in doubles)
         uint32_t poolOff;    // its first record in the stands' pool
         uint32_t first;      // the node's first thread in the pass (a running sum over the list)
-        uint32_t count;      // its threads: the folds flagged plus the buildings within the node's size bound
+        uint32_t count;      // its threads: the buildings within the node's size bound
         float air;           // 1 / T at the node's nearest point: every threshold's factor there
-        uint32_t flags;      // bit 0 the own fold, bit 1 the descendants' fold, bit 2 the buildings
+        uint32_t pad;
     };
     static_assert(sizeof(NodeEntry) == 32, "two float4 rows");
     static constexpr uint32_t kWalkHeader = 8;   // the walk buffer's header rows (Buildings.hlsl)
@@ -277,12 +277,10 @@ private:
         double c[3];                    // the quad's centre AT SEA LEVEL, flat frame (the stand has the ground's)
         float rad;                      // a sphere about it holding the quad and its solids
         bool kids;                      // anything stands under it
-        // THE FOLDS, as the tree filed them: its own buildings' and its descendants' (the
-        // descendants' is drawn at its coverage while the children's page is on its way -- what
-        // stands there is never a hole, only coarser). Stood on the ground by a stand (below).
+        // THE FOLDS, as the tree filed them: its own buildings' and its descendants' -- the node's
+        // size bound and its sphere. Never drawn (the owner, 2026-10-15): a building is its own
+        // point, hexahedron or mesh, and a page on its way shows nothing until it lands.
         LodBox own{}, desc{};
-        float descCover = 0.0f;
-        Key descCell{INT32_MIN, INT32_MIN};   // the detail cell its centroid stands in
     };
     // A node whose stand has not come is tested at the worst of elevations: its sphere grown by
     // this, so a town on a plateau is never culled before its ground is known.
@@ -307,13 +305,12 @@ private:
         double g[3] = {};                 // its point...
         float e[3] = {}, n[3] = {}, up[3] = {};   // ...east, north, up
     };
-    // A stand's buildings live on the GPU (StoodRec, the pool m_stood): the stand holds its folds
-    // for the walk's node tests and its RANGE in the pool. Published when its records are copied
-    // (Simulate), so a walk that reads a stand reads records the GPU holds.
+    // A stand's buildings live on the GPU (StoodRec, the pool m_stood): the stand holds the quad's
+    // centre for the walk's node tests and its RANGE in the pool. Published when its records are
+    // copied (Simulate), so a walk that reads a stand reads records the GPU holds.
     struct Stood {
         double c[3] = {};                 // the quad's centre on the ground
-        RtBox own, desc;
-        uint32_t gpuOff = 0, gpuN = 0;    // its records: the two folds, then its buildings (withBlds)
+        uint32_t gpuOff = 0, gpuN = 0;    // its records: one a building (withBlds; none otherwise)
         float grainM = 0.0f;
         bool withBlds = false;
     };

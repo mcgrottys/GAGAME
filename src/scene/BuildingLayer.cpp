@@ -687,10 +687,6 @@ void BuildingLayer::RecordOf(const RtBox& b, const double c[3], float rho, uint3
     r.rho = rho;
 }
 
-static std::pair<int, int> CellOf(double lat, double lon) {
-    return {static_cast<int>(std::floor(lon / BuildingLayer::kCellDeg)), static_cast<int>(std::floor(lat / BuildingLayer::kCellDeg))};
-}
-
 void BuildingLayer::LoadPage(const PageKey& k) {
     const int L = std::get<0>(k);
     const LodPage* lp = m_lod->Find(L, std::get<1>(k), std::get<2>(k));
@@ -763,11 +759,6 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                 place(latc, lonc, 0.0, r.c);   // at sea level: its stand knows the ground
                 r.own = n.own;
                 r.desc = n.desc;
-                if (r.kids) {
-                    const double dlat = n.desc.lat7 * 1e-7, dlon = n.desc.lon7 * 1e-7;
-                    r.descCover = std::clamp(n.desc.cover, 0.0f, 1.0f);
-                    r.descCell = CellOf(dlat, dlon);
-                }
                 // The quad's corners and what stands on it, from its centre.
                 r.rad = static_cast<float>(0.75 * Qm + (std::max)(n.own.zc + n.own.hz, n.desc.zc + n.desc.hz) + 50.0);
                 page->at[Page::QuadKey(n.x, n.y)] = static_cast<uint32_t>(i);
@@ -1111,8 +1102,8 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             if (m_standPending.count({s->page, s->node})) continue;
             auto it = m_pages.find(s->page);
             if (it == m_pages.end() || !it->second->stood || s->node >= it->second->nodes.size()) continue;
-            // ITS RANGE IN THE STANDS' POOL: the two folds and, with its buildings, one record each
-            // (the job writes exactly these). No room: it is not asked now and the next walk asks again.
+            // ITS RANGE IN THE STANDS' POOL: one record a building (the job writes exactly these); a
+            // stand without its buildings takes none. No room: it is not asked now and the next walk asks again.
             StandAsk ask = *s;
             const Page& pg = *it->second;
             const RtNode& n = pg.nodes[s->node];
@@ -1120,7 +1111,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             if (s->blds && n.own0 < pg.blds.size() && n.own0 < pg.raw.size()) {
                 nb = static_cast<uint32_t>((std::min)(size_t(n.ownN), (std::min)(pg.blds.size() - n.own0, pg.raw.size() - n.own0)));
             }
-            ask.gpuN = m_stood.Valid() ? 2u + nb : 0u;
+            ask.gpuN = m_stood.Valid() ? nb : 0u;
             if (ask.gpuN && !m_stoodFree.Take(ask.gpuN, ask.gpuOff)) {
                 ++m_stoodFull;
                 continue;
@@ -1309,7 +1300,6 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         std::vector<std::shared_ptr<const Page>> hold;   // the walk's references
         bool shapes = false;                             // the shape pool and its pipeline stand
         bool pool = false;                               // the stands' pool stands: nodes can be named
-        int cx0 = 1, cx1 = 0, cy0 = 1, cy1 = 0;          // the resident cells' bounding box (empty: x0 > x1)
         std::set<Key> cells;
         uint64_t cellsVersion;
     } in;
@@ -1369,17 +1359,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         in.pages.emplace(k, p.get());
         in.hold.push_back(p);
     }
-    for (const auto& [k, c] : m_cells) {
-        in.cells.insert(k);
-        if (in.cx0 > in.cx1) {
-            in.cx0 = in.cx1 = k.first;
-            in.cy0 = in.cy1 = k.second;
-        }
-        in.cx0 = (std::min)(in.cx0, k.first);
-        in.cx1 = (std::max)(in.cx1, k.first);
-        in.cy0 = (std::min)(in.cy0, k.second);
-        in.cy1 = (std::max)(in.cy1, k.second);
-    }
+    for (const auto& [k, c] : m_cells) in.cells.insert(k);
     in.cellsVersion = m_cellsVersion;
     m_shared->walking[eyeIndex].store(1);
     Threads().Submit(Lane::Io, "buildings.walk", [shared = m_shared, lodf = m_lod, gpu = ctx.gpu, eyeIndex, in = std::move(in)] {
@@ -1417,22 +1397,25 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         };
         // THE NODE NAMED (BuildingsClassify.hlsl): one entry for the GPU -- the stand's centre about
         // the walk's origin (the difference in doubles, cast once), its range in the stands' pool,
-        // which parts to classify and the air's factor on every threshold at this node. The form of
-        // each record (none, a point, a box, its own shape) is the pass's verdict, by the law that
-        // stood here: the walk's cost is the nodes it names, not the buildings they hold.
-        auto name = [&](Acc& acc, const std::shared_ptr<const Stood>& sp, uint32_t nb, uint32_t flags, double air) {
-            const uint32_t count = uint32_t((flags & 1u) != 0u) + uint32_t((flags & 2u) != 0u) + nb;
+        // how many of its buildings to classify and the air's factor on every threshold at this
+        // node. The form of each building (none, a point, a box, its own shape) is the pass's
+        // verdict, by the law that stood here: the walk's cost is the nodes it names, not the
+        // buildings they hold. NO FOLDS (the owner, 2026-10-15): a node's mass as one box stood in
+        // for a page on its way and for buildings not yet stood, and on a fast zoom-out those
+        // stand-ins were the folds of 10 km nodes, slabs over the land that shrank as the pages
+        // landed. Every building is its own point, hexahedron or mesh, and a page that has not
+        // landed shows nothing until it does.
+        auto name = [&](Acc& acc, const std::shared_ptr<const Stood>& sp, uint32_t count, double air) {
             if (!count || acc.cap + count > kMaxRecords) return;
             NodeEntry e{};
             for (int i = 0; i < 3; ++i) e.off[i] = static_cast<float>(sp->c[i] - in.org[i]);
             e.poolOff = sp->gpuOff;
             e.count = count;
             e.air = static_cast<float>(air);
-            e.flags = flags;
             acc.nodes.push_back(e);
             acc.stands.push_back(sp);
             acc.cap += count;
-            acc.singles += nb;
+            acc.singles += count;
         };
         std::function<void(Acc&, bool, int, const Page&, const RtNode&)> visit = [&](Acc& acc, bool split, int L,
                                                                                        const Page& pg, const RtNode& n) {
@@ -1524,19 +1507,14 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
             }
             // THE NODE'S RANGE: its buildings within the node's size bound -- the page ranks them
             // largest first, so the bound is one partition point (the walk's O(log) share of the
-            // per-building law; the rest is the pass's at each building's own distance); its own fold
-            // until its buildings stand; its descendants' fold while their page is on its way.
-            uint32_t flags = 0, nb = 0;
+            // per-building law; the rest is the pass's at each building's own distance).
+            uint32_t nb = 0;
             if (sp && sp->withBlds) {
-                const uint32_t have = sp->gpuN > 2u ? sp->gpuN - 2u : 0u;   // the records the stand wrote
-                const size_t end = (std::min)(size_t(n.own0) + (std::min)(n.ownN, have), pg.blds.size());
+                const size_t end = (std::min)(size_t(n.own0) + (std::min)(n.ownN, sp->gpuN), pg.blds.size());
                 if (n.own0 < end) {
                     const auto b0 = pg.blds.begin() + n.own0, b1 = pg.blds.begin() + end;
                     nb = static_cast<uint32_t>(std::partition_point(b0, b1, [&](const RtBld& b) { return 2.0 * b.rho / (dn * in.pixAng) >= tau; }) - b0);
                 }
-                if (nb) flags |= 4u;
-            } else if (sp && needBlds) {
-                flags |= 1u;   // its own fold, until its buildings stand
             }
             // The children's pages: the loaded ones are walked; the missing ones are asked for, by
             // the quad's size on screen, and their buildings appear when they land.
@@ -1549,12 +1527,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                 if (!cp) {
                     if (lodf->Find(L - 1, std::get<1>(k), std::get<2>(k))) {
                         double& want = acc.wants[k];
-                        want = (std::max)(want, px);
-                        // The fold stands in while the page is on its way (unless its cell's prisms are drawn).
-                        if (sp && !(n.descCell.first >= in.cx0 && n.descCell.first <= in.cx1 && n.descCell.second >= in.cy0 &&
-                                    n.descCell.second <= in.cy1 && in.cells.count(n.descCell))) {
-                            flags |= 2u;
-                        }
+                        want = (std::max)(want, px);   // (nothing stands in: its buildings come when it lands)
                     }
                 } else {
                     if (k != acc.lastUsed) {
@@ -1568,7 +1541,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
                     }
                 }
             }
-            if (sp && flags && in.pool && sp->gpuN) name(acc, sp, nb, flags, tau / in.tauB);
+            if (sp && nb && in.pool) name(acc, sp, nb, tau / in.tauB);
             if (!recurse) return;
             for (int j = 0; j < 2; ++j) {
                 for (int i = 0; i < 2; ++i) {
@@ -1771,25 +1744,15 @@ void BuildingLayer::StandBatch(std::vector<std::pair<std::shared_ptr<const Page>
             const double Q = lod::QuadDeg(page->L);
             const double latc = (n.y + 0.5) * Q, lonc = (n.x + 0.5) * Q;
             place(latc, lonc, gAt(latc, lonc), s->c);
-            if (n.own.hz > 0.0f) {
-                const double la = n.own.lat7 * 1e-7, lo = n.own.lon7 * 1e-7;
-                StandBox(place, la, lo, gAt(la, lo), n.own.zc, n.own.hz, n.own.a1, n.own.a2, n.own.heading, s->own, nullptr);
-            }
-            if (n.desc.hz > 0.0f) {
-                const double la = n.desc.lat7 * 1e-7, lo = n.desc.lon7 * 1e-7;
-                StandBox(place, la, lo, gAt(la, lo), n.desc.zc, n.desc.hz, n.desc.a1, n.desc.a2, n.desc.heading, s->desc, nullptr);
-            }
             Shared::StandDone done;
-            // ITS RECORDS FOR THE GPU (StoodRec): the two folds, then its buildings, each about the
-            // stand's centre; exactly the range StandBatch took (a building past it claims nothing).
+            // ITS RECORDS FOR THE GPU (StoodRec): its buildings, each about the stand's centre;
+            // exactly the range StandBatch took (a building past it claims nothing).
             s->gpuOff = ask.gpuOff;
             s->gpuN = ask.gpuN;
             done.recs.assign(size_t(ask.gpuN) * sizeof(StoodRec), 0);
             auto recAt = [&](uint32_t i) -> StoodRec* {
                 return i < ask.gpuN ? reinterpret_cast<StoodRec*>(done.recs.data() + size_t(i) * sizeof(StoodRec)) : nullptr;
             };
-            if (StoodRec* r = recAt(0)) RecordOf(s->own, s->c, s->own.valid ? 1e30f : 0.0f, UINT32_MAX, 0.0f, kNoCell, page->landed, 0.0f, *r);
-            if (StoodRec* r = recAt(1)) RecordOf(s->desc, s->c, s->desc.valid ? 1e30f : 0.0f, UINT32_MAX, 0.0f, kNoCell, page->landed, 0.0f, *r);
             if (ask.blds && !shared->cancel.load()) {
                 constexpr double kDeg = 3.14159265358979323846 / 180.0, kR = 6371008.8;
                 for (uint32_t k = n.own0; k < n.own0 + n.ownN && k < page->raw.size() && k < page->blds.size(); ++k) {
@@ -1846,7 +1809,7 @@ void BuildingLayer::StandBatch(std::vector<std::pair<std::shared_ptr<const Page>
                         }
                     }
                     StandBox(place, lat, lon, base, zc, hz, a1, a2, hd, box, shaped ? &frame : nullptr);
-                    if (StoodRec* r = recAt(2u + (k - n.own0))) {
+                    if (StoodRec* r = recAt(k - n.own0)) {
                         // Its shape's pool address, as the page's slots place it (none: its box is drawn).
                         uint32_t addr = UINT32_MAX;
                         if (shaped && b.shapeOff / kSlotBytes < page->slots.size()) {
