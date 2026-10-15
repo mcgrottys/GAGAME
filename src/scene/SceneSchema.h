@@ -242,6 +242,9 @@ struct StreamingSection {
     // times the tiles. 14 is the source as it was; any other value names itself in the source's
     // structure, so it paints its own tree (compose/Sources.h).
     uint32_t googleZoom = 14;
+    // The Google fetch threads off the loaders (core/TileProviders.h StartNetwork): -1, four in a
+    // window and none headless (a still's frames must see their tiles); 0, the fetch in the paint.
+    int fetchThreads = -1;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true;
     // THE GLOBAL COAST: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py);

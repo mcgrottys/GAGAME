@@ -29,6 +29,7 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdarg>
@@ -535,6 +536,92 @@ bool RunDayLedgerSelfTest() {
                   B.Refused(), B.DayReads(), sent));
     }
 
+    // ---- 12b. THE NETWORK OFF THE LOADERS (StartNetwork): a paint queues, never fetches -----------
+    // One fetch thread; the stand-in holds its first request until released. A load (g_loadTenant)
+    // asks tile X: queued, the paint answered without it. With X on the wire, two loads ask tile Y:
+    // one ask, two waiters. The prune finds no load wanted: Y leaves the queue unsent and both its
+    // loads are told (asked again if they come back); X, on the wire, is not pruned. X lands: its
+    // load alone is asked again, and Y is never sent. A second provider's fetch lands nothing: its
+    // load is not asked again, and a later ask of that tile is refused without queueing.
+    {
+        const DayCaps caps{100, 1000000};
+        const std::string dir = caseDir("network");
+        std::atomic<int> sent{0};
+        std::atomic<bool> release{false};
+        GoogleTileProvider N;
+        N.InitCacheOnly(dir, "satellite", 100, &caps, clock, [&](std::vector<uint8_t>& b) {
+            ++sent;
+            for (int i = 0; i < 5000 && !release.load(); ++i) Sleep(1);
+            b.assign(300, 0x5a);
+            return DaySent::Landed;
+        });
+        std::mutex mx;
+        std::vector<int> landedX, forgot;   // the loads told, by their tile's x
+        N.StartNetwork(1, [&](int, const TileRequest& r) {
+            std::lock_guard<std::mutex> lk(mx);
+            landedX.push_back(int(r.x));
+        });
+        const auto ask = [&](int tileX, uint32_t load) {
+            g_loadTenant = 2;
+            g_loadReq = TileRequest{0, 0, load, 0};
+            const bool got = N.Decoded(12, tileX, 300) != nullptr;
+            g_loadTenant = -1;
+            return got;
+        };
+        const bool gotX = ask(100, 1);
+        for (int i = 0; i < 2000 && sent.load() == 0; ++i) Sleep(1);   // X on the wire
+        const bool gotY1 = ask(101, 2), gotY2 = ask(101, 3);
+        const uint32_t queued = N.Queued();
+        N.PruneQueue([](int, const TileRequest&) { return false; },
+                     [&](int, const TileRequest& r) {
+                         std::lock_guard<std::mutex> lk(mx);
+                         forgot.push_back(int(r.x));
+                     });
+        const uint32_t afterPrune = N.Queued();
+        release = true;
+        for (int i = 0; i < 2000 && N.Queued() != 0; ++i) Sleep(1);
+        Sleep(50);   // Y's passed-over entry, if the thread meets it
+        N.StopNetwork();
+        std::sort(forgot.begin(), forgot.end());
+        Check(!gotX && !gotY1 && !gotY2 && queued == 2 && afterPrune == 1 && sent.load() == 1 &&
+                  landedX == std::vector<int>{1} && forgot == std::vector<int>{2, 3} && N.netPruned == 1 &&
+                  N.netSent == 1,
+              Fmt("off the loaders: the paints got nothing in place (%d %d %d); %u tiles queued, %u after the "
+                  "prune; %d sent; the landing told load %s; the prune told loads %s; %u left unsent",
+                  int(gotX), int(gotY1), int(gotY2), queued, afterPrune, sent.load(),
+                  landedX.size() == 1 ? std::to_string(landedX[0]).c_str() : "(not one)",
+                  forgot.size() == 2 ? "2 and 3" : "(not two)", N.netPruned.load()));
+
+        const std::string dirF = caseDir("networkfail");
+        std::atomic<int> sentF{0};
+        GoogleTileProvider F;
+        F.InitCacheOnly(dirF, "satellite", 100, &caps, clock, [&sentF](std::vector<uint8_t>&) {
+            ++sentF;
+            return DaySent::Failed;
+        });
+        std::vector<int> landedF;
+        F.StartNetwork(1, [&](int, const TileRequest& r) {
+            std::lock_guard<std::mutex> lk(mx);
+            landedF.push_back(int(r.x));
+        });
+        g_loadTenant = 2;
+        g_loadReq = TileRequest{0, 0, 7, 0};
+        F.Decoded(12, 400, 300);
+        g_loadTenant = -1;
+        for (int i = 0; i < 2000 && (F.Queued() != 0 || sentF.load() == 0); ++i) Sleep(1);
+        Sleep(20);
+        g_loadTenant = 2;
+        F.Decoded(12, 400, 300);   // asked again: refused for the run, not queued
+        g_loadTenant = -1;
+        const uint32_t queuedAgain = F.Queued();
+        F.StopNetwork();
+        Check(sentF.load() == 1 && landedF.empty() && F.netFailed == 1 && F.Refused() == 1 && queuedAgain == 0 &&
+                  F.netAsked == 1,
+              Fmt("a fetch that lands nothing: sent %d time, its load told %zu times, %u failed, %u refused, "
+                  "asked again it is queued %u times (%u asks in all)",
+                  sentF.load(), landedF.size(), F.netFailed.load(), F.Refused(), queuedAgain, F.netAsked.load()));
+    }
+
     // ---- 13. PLANTED: the old rule, counting only what landed ---------------------------------
     {
         const std::string dir = caseDir("oldrule");
@@ -750,7 +837,8 @@ bool RunDayLedgerSelfTest() {
         "nothing; a damaged ledger is a met cap; a failure is asked, not a tile, and one never "
         "sent adds nothing; the provider stops asking after %u failures in a row and asks its "
         "budget before the ledger; one thread at a time fetches a tile and the others take its "
-        "result; a request's log form holds no part of its query; the four planted rules were "
+        "result; a request's log form holds no part of its query; a paint queues a fetch "
+        "off the loaders and the prune leaves an unwanted one unsent; the four planted rules were "
         "caught ----",
         g_ok ? "PASS" : "FAIL", GoogleTileProvider::kFailRow);
     return g_ok;

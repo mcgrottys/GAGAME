@@ -326,9 +326,25 @@ public:
     // version: the old bytes are another place's and are let go at once (readers fall to the
     // parent); the version law (old bytes held until the replacement lands) is for a repaint.
     void Invalidate(int tenant, const TileRequest& r, bool moved = false);
+    // ASK AGAIN (2026-10-14): what a source that answered "not now" can now answer (a Google tile
+    // landed, core/TileProviders.h). A tile held back not whole goes back to Seen where it stands --
+    // tracked, its record alive -- for the order to load; a held tile's replacement refused not whole
+    // is asked as Invalidate asks (the version law). Invalidate on the held-back tile untracked it,
+    // and a parent no reader names itself was never tracked again: its children waited on it for
+    // good (a z17 still, 12 tiles "waiting on a parent not held"). Safe from any thread -- it queues.
+    void Again(int tenant, const TileRequest& r) {
+        std::lock_guard<std::mutex> lk(m_invMx);
+        m_againQ.push_back({tenant, r, false});
+    }
     // PHASE A1 (the window's step, an instrument): the pool slot of a held tile -- mapped and
     // landed -- at a slot address, or UINT32_MAX. A tile a step kept is held at the same pool slot
     // the turns after it: its bytes were never moved, re-read or copied.
+    // Whether a tile was named by a reader within the last `frames` turns (main thread): what a
+    // queue of work for it asks before it spends anything on a tile that has left the frame.
+    bool NamedWithin(int tenant, const TileRequest& r, uint32_t frames) const {
+        const Tracked* t = Find(tenant, r);
+        return t && LastSeenOf(t) + frames >= m_frame;
+    }
     uint32_t HeldPool(int tenant, const TileRequest& r) const {
         const Tracked* t = Find(tenant, r);
         return (t && t->state == TileState::Mapped && t->landed) ? t->pool : UINT32_MAX;
@@ -848,6 +864,7 @@ private:
         // not whole: a refusal of this attempt, retried when the tree next changes for the tile;
         // while it is not held, it blocks its children (they are unreachable as it is).
         bool stale = false, refresh = false, incomplete = false;
+        bool askAgain = false;   // Again while its load ran (under m_mx): not whole is Seen, not Failed
         std::shared_ptr<Tracked> refill;   // F13: a stale held tile's replacement on its way (m_refresh)
         // 4.7: the slot's address (0: none) and whether it is a mapping of bytes another slot read.
         uint64_t gkey = 0;
@@ -881,6 +898,7 @@ private:
     std::mutex m_invMx;
     struct Inv { int tenant; TileRequest req; bool moved; };
     std::vector<Inv> m_invQ;   // M9bb: invalidations from paint threads; B11: moved = ground changed
+    std::vector<Inv> m_againQ;   // Again: tiles a source can now answer
     // Marks the tile dropped and, when it was mapped, retires it. Returns that -- the caller
     // compacts m_mapped ONCE afterwards (erase_if on `dropped`, order kept) instead of a
     // std::find per tile: Drop() of a 23-slice tenant was O(dropped x mapped).

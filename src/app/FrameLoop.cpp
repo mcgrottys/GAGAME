@@ -2985,6 +2985,12 @@ bool FrameLoop::Frame() {
         }
     }
 
+    // The Google fetches queued for loads the frame no longer names (about 2 s, the residency's
+    // glance) leave the queue unsent; their loads are asked again if they come back.
+    m_A.googleTiles.PruneQueue(
+        [&](int t, const TileRequest& r) { return m_A.resMgr.NamedWithin(t, r, 60u); },
+        [&](int t, const TileRequest& r) { m_A.resMgr.Again(t, r); });
+
     // ---- M9bi: THE SUN, PLACED. One conformal point at the origin of the
     // heliocentric frame, carried into THIS frame by the versor chain in Ephemeris.h
     // and handed to the renderer as the scene's single light. Everything that shades

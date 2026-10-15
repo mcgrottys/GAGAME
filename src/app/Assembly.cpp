@@ -1048,6 +1048,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             dayCaps.bytes = DayCaps::FromScene(S.streaming.dayBytes);
             if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps)) {
                 googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
+                // THE NETWORK OFF THE LOADERS (core/TileProviders.h StartNetwork): a window's paints
+                // never wait on a fetch. A headless still keeps the fetch in the paint: its frames
+                // must see the tiles they ask for.
+                const int fetchThreads = S.streaming.fetchThreads >= 0 ? S.streaming.fetchThreads
+                                                                       : (S.capture.headless ? 0 : 4);
+                googleTiles.StartNetwork(fetchThreads, [&resMgr](int t, const TileRequest& r) { resMgr.Again(t, r); });
                 std::vector<ColorSource*> colorStack{&srcGoogle};
                 size_t bedLayer = SIZE_MAX, maskLayer = SIZE_MAX;
                 // M7x (user catch): the ortho was painting its capture-day WATER over the
