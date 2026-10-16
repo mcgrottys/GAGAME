@@ -70,6 +70,7 @@ void BuildingLayer::ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, dou
 }
 
 void BuildingLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
+    for (uint32_t s = 0; s < kEyes * kWorlds; ++s) m_eyes[s].id = s;
     m_rootSig = rootSig;
     m_gpu = &gpu;
     // THE CLASSIFY PASS: its constants, the walk's node list, the stands' pool, the walk's buffer.
@@ -973,7 +974,8 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         ctx.cmd->Native()->ResourceBarrier(1, &br);
     }
     for (Walked& w : walked) {
-        Eye& e = m_eyes[w.eye < kEyes * kWorlds ? w.eye : 0];
+        const uint32_t slot = SlotOf(w.eye);   // where its walker stands now
+        Eye& e = m_eyes[slot];
         // THE PASS: the node list expanded into the three forms' lists on the GPU, the counts and
         // the draws' arguments in the buffer's header; the counts copied back for the log line.
         if (w.cap && w.out.b.Valid() && w.list.Valid() && m_clsPso && m_stood.Valid()) {
@@ -996,7 +998,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         e.drawnHold = std::move(w.hold);
         e.drawnCells = w.cellsVersion;
         for (const PageKey& k : w.used) m_pageUsed[k] = m_frame;
-        m_hidden[w.eye < kEyes * kWorlds ? w.eye : 0] = w.hidden;
+        m_hidden[slot] = w.hidden;
         // The pages the walk wanted, the largest on screen first; the stands likewise.
         e.wants = std::move(w.wants);
         e.stands = std::move(w.asks);
@@ -1005,7 +1007,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         if (e.walks <= 3 || e.walks % 50 == 0) {
             Log("[buildings] frame %llu eye %u world %u walk %llu: %u nodes named, %u records sent (%llu buildings) over %llu nodes visited, %llu hidden, %llu cut by the air, in %.1f ms (visit %.1f: "
                 "roots %.1f, %u subtrees on %u threads %.1f, merge %.1f; list %.1f, buffers %.1f); %zu pages (%.0f MB), %zu asked; the stands' pool %u of %u records",
-                static_cast<unsigned long long>(m_frame), w.eye / kWorlds, w.eye % kWorlds,
+                static_cast<unsigned long long>(m_frame), slot / kWorlds, slot % kWorlds,
                 static_cast<unsigned long long>(e.walks), w.named, w.cap, static_cast<unsigned long long>(w.singles),
                 static_cast<unsigned long long>(w.nodes), static_cast<unsigned long long>(w.hidden),
                 static_cast<unsigned long long>(w.aired), w.ms, w.msVisit, w.msRoots, w.subtrees, w.threads, w.msDrain,
@@ -1018,11 +1020,12 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
         if (m_frame < it->frame + kCountsLag || !m_countsRb.Valid()) { ++it; continue; }
         uint32_t c[4];
         std::memcpy(c, m_countsRb.cpu + size_t(it->slot) * 16u, 16);
-        for (int i = 0; i < 3; ++i) m_eyes[it->eye < kEyes * kWorlds ? it->eye : 0].lastDrawn[i] = c[i];
+        const uint32_t cs = SlotOf(it->eye);
+        for (int i = 0; i < 3; ++i) m_eyes[cs].lastDrawn[i] = c[i];
         if (it->walk <= 3 || it->walk % 50 == 0) {
             const float ms = ctx.prof ? ctx.prof->LastMs("buildings.classify") : -1.0f;
             Log("[buildings] frame %llu eye %u world %u walk %llu drew %u boxes + %u shapes + %u points of %u records over %u nodes named; classify %.2f ms on the GPU",
-                static_cast<unsigned long long>(it->frame), it->eye / kWorlds, it->eye % kWorlds, static_cast<unsigned long long>(it->walk),
+                static_cast<unsigned long long>(it->frame), cs / kWorlds, cs % kWorlds, static_cast<unsigned long long>(it->walk),
                 c[0], c[1], c[2], it->cap, it->named, ms);
         }
         it = m_countsPending.erase(it);
@@ -1230,6 +1233,39 @@ void BuildingLayer::WalkEye(const FrameContext& ctx, uint32_t eye) {
     const double at[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
     const DirectX::XMFLOAT3 f3 = ctx.camera->Forward();
     const double fwd[3] = {f3.x, f3.y, f3.z};
+    // A WALKER BELONGS TO WHERE ITS EYE STANDS, NOT TO ITS DEPTH IN THE CHAIN. Each world this eye
+    // reaches -- its own (the camera), then each window's (the eye carried through it) -- takes the
+    // walker whose last walk was asked nearest its eye. Stepping through a window changes every
+    // world's depth and no world's place: the walker that drew the far side through the window is
+    // the one standing nearest the eye that now stands there, so the world stepped into keeps what it
+    // already had, on the crossing frame, with no walk to wait for. A walk in flight follows its
+    // walker (Walked::eye is the walker's id). A walker no world takes is let go below.
+    {
+        const uint32_t n = 1u + static_cast<uint32_t>((std::min)(m_worlds[eye].size(), size_t(kWorlds - 1)));
+        double P[kWorlds][3] = {};
+        for (int i = 0; i < 3; ++i) P[0][i] = at[i];
+        for (uint32_t k = 1; k < n; ++k) {
+            for (int i = 0; i < 3; ++i) P[k][i] = m_worlds[eye][k - 1].cam[i];
+        }
+        const auto d2 = [&](uint32_t slot, uint32_t k) {
+            const Eye& e = m_eyes[WalkerOf(eye, slot)];
+            double s2 = 0.0;
+            for (int i = 0; i < 3; ++i) s2 += (e.walkEye[i] - P[k][i]) * (e.walkEye[i] - P[k][i]);
+            return s2;
+        };
+        for (uint32_t k = 0; k < n; ++k) {   // nearest first for the eye's own world, then each window's
+            uint32_t best = k;
+            for (uint32_t j = k + 1; j < kWorlds; ++j) {
+                if (d2(j, k) < d2(best, k)) best = j;
+            }
+            if (best == k) continue;
+            Log("[buildings] frame %llu eye %u: the walker of world %u now draws world %u (its eye %.1f m from "
+                "this world's; the one there %.0f m)", static_cast<unsigned long long>(m_frame), eye, best, k,
+                std::sqrt(d2(best, k)), std::sqrt(d2(k, k)));
+            std::swap(m_eyes[WalkerOf(eye, k)], m_eyes[WalkerOf(eye, best)]);
+            std::swap(m_hidden[WalkerOf(eye, k)], m_hidden[WalkerOf(eye, best)]);
+        }
+    }
     double lat = 0.0, lon = 0.0, h = 0.0;
     m_locate(at, lat, lon, h);
     Walk(ctx, WalkerOf(eye, 0), at, fwd, lat, lon, h);
@@ -1283,7 +1319,8 @@ void BuildingLayer::SimulateEye(const FrameContext& ctx) {
 
 void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const double eye[3], const double fwd[3], double latDeg, double lonDeg, double h) {
     Eye& E = m_eyes[eyeIndex];
-    if (m_shared->walking[eyeIndex].load() || !ctx.height) return;
+    const uint32_t walker = E.id;
+    if (m_shared->walking[walker].load() || !ctx.height) return;
     const double moved = std::sqrt((eye[0] - E.walkEye[0]) * (eye[0] - E.walkEye[0]) + (eye[1] - E.walkEye[1]) * (eye[1] - E.walkEye[1]) +
                                    (eye[2] - E.walkEye[2]) * (eye[2] - E.walkEye[2]));
     const double turned = fwd[0] * E.walkFwd[0] + fwd[1] * E.walkFwd[1] + fwd[2] * E.walkFwd[2];
@@ -1373,11 +1410,15 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
     }
     for (const auto& [k, c] : m_cells) in.cells.insert(k);
     in.cellsVersion = m_cellsVersion;
-    m_shared->walking[eyeIndex].store(1);
-    Threads().Submit(Lane::Io, "buildings.walk", [shared = m_shared, lodf = m_lod, gpu = ctx.gpu, eyeIndex, in = std::move(in)] {
+    m_shared->walking[walker].store(1);
+    // On the COMPUTE lane: a job goes on the lane of what it waits on, and the walk reads no file -- it
+    // is a pure function of `in` over pages already held. On the Io lane it queued behind the page reads
+    // and the stands' batches (a cold place: 0.4-3.3 s a batch), the one walk that refills a world after
+    // a crossing among them (measured: 30 ms at p90, 636 ms at worst, before it began).
+    Threads().Submit(Lane::Compute, "buildings.walk", [shared = m_shared, lodf = m_lod, gpu = ctx.gpu, walker, in = std::move(in)] {
         const auto t0 = std::chrono::steady_clock::now();
         Walked w;
-        w.eye = eyeIndex;
+        w.eye = walker;
         w.cellsVersion = in.cellsVersion;
         for (int i = 0; i < 3; ++i) w.origin[i] = in.org[i];   // the instances are about the cloud's point
         // THE WALK IN PARALLEL: the coarse levels walked here down to kSplit, the subtrees below it
@@ -1705,7 +1746,7 @@ void BuildingLayer::Walk(const FrameContext& ctx, uint32_t eyeIndex, const doubl
         w.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         std::lock_guard<std::mutex> lk(shared->mx);
         shared->walked.push_back(std::move(w));
-        shared->walking[eyeIndex].store(0);
+        shared->walking[walker].store(0);
     });
 }
 
