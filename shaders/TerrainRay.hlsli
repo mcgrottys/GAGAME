@@ -81,11 +81,12 @@ float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float fo
     return SunDiscClear(-worst);
 }
 
-// THE BUILDINGS' SHADOW (scene render.buildingShadowM; BuildingLayer::RenderSunMap). The solids the
-// buildings layer draws are drawn once more each frame as the SUN sees them: an orthographic cast
-// along the sun over a square of the eye's own world, buildingShadowM a side, its depth the
-// distance toward the sun (gCsSunVP), so a texel holds the nearest solid the sun meets there. A
-// lit point asks whether anything on the map stands nearer the sun than itself along its own ray.
+// THE BUILDINGS' SHADOW (scene render.buildingShadowM, buildingShadowLevels; BuildingLayer::
+// RenderSunMap). The solids the buildings layer draws are drawn once more each frame as the SUN
+// sees them: orthographic casts along the sun over cells of the eye's own world, each a cell of the
+// origin lattice, its depth the distance toward the sun over the cell's span (gCsSunVP[k]), so a
+// texel holds the nearest solid the sun meets there. A lit point asks whether anything on its map
+// stands nearer the sun than itself along its own ray.
 //
 // THE SUN IS A DISC, here as everywhere (SunDiscClear): the shadow's edge is not a line but the
 // disc's width at the occluder's distance. The point sees the disc as a cone of half-angle
@@ -109,25 +110,45 @@ float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float fo
 // point speckled every roof with its own shadow. One texel of depth is the margin left for the
 // map's own precision. The slope is held to eight depth texels a texel: a face past 83 degrees to
 // the sun takes almost no sun and is left to its own margin.
-// A tap: the texel under uv + d, its stored depth against the plane at its centre.
-bool SunMapTap(float2 uv, float2 d, float z, float2 grad, float margin, float N, out float zb) {
+//
+// THE MAPS ARE A CASCADE ON THE ORIGIN LATTICE (VISIBILITY_FIELD 9; BuildingLayer::PlanSunMap): one
+// cast per CELL the eye's ground address names -- its cell at the finest level, then that cell's
+// parents, each twice the span at the same texel count. A lit point takes the FINEST map that holds
+// it (the floor of its address), and from there the one law below runs on that level's matrix
+// alone: the uv, the blocker search, the disc, the receiver plane and the texel's margin are all in
+// the map's own units, so every quantity scales with the cell's grain and no level has a case of its
+// own. The seam between two levels is a change of grain, not of law.
+// A tap: the texel under uv + d of map `srv`, its stored depth against the plane at its centre.
+bool SunMapTap(uint srv, float2 uv, float2 d, float z, float2 grad, float margin, float N, out float zb) {
     const float2 tx = clamp(floor((uv + d) * N), 0.0f, N - 1.0f);
-    zb = gTex[gCsSunMapU.x].Load(int3(int(tx.x), int(tx.y), 0)).x;
+    zb = gTex[srv].Load(int3(int(tx.x), int(tx.y), 0)).x;
     const float2 dc = (tx + 0.5f) / N - uv;   // the texel's centre, from the point
     return zb > z + dot(grad, dc) + margin;
 }
 float SunMapClear(float3 rel, float3 n) {
-    if (gCsSunMapU.x == 0xFFFFFFFFu) return 1.0f;
-    const float4 q = mul(float4(rel, 1.0f), gCsSunVP);   // orthographic: w is 1
+    const uint levels = min(gCsSunMapU.x, GA_SUN_LEVELS);
+    if (levels == 0u) return 1.0f;
+    // THE FLOOR OF THE POINT'S ADDRESS: the finest cell whose map holds the point.
+    uint k = 0u;
+    float4 q = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    bool held = false;
+    [loop] for (k = 0u; k < levels && !held; ++k) {
+        q = mul(float4(rel, 1.0f), gCsSunVP[k]);   // orthographic: w is 1
+        held = all(abs(q.xy) < 1.0f) && q.z > 0.0f && q.z < 1.0f;
+    }
+    if (!held) return 1.0f;   // off every map: the sun is the planet's
+    k -= 1u;
+    const uint srv = gCsSunSrv[k >> 2u][k & 3u];
+    if (srv == 0xFFFFFFFFu) return 1.0f;
+    const float4x4 M = gCsSunVP[k];
     const float2 uv = float2(0.5f + 0.5f * q.x, 0.5f - 0.5f * q.y);
-    if (any(uv < 0.0f) || any(uv > 1.0f) || q.z <= 0.0f || q.z >= 1.0f) return 1.0f;   // off the map: the sun is the planet's
     const float N = float(gCsSunMapU.y);
     const float texel = 1.0f / N;
     // The map's axes in the eye's frame are the matrix's columns (scaled); the plane's normal in
     // map coordinates is n against each, over the column's own length squared.
-    const float3 c0 = float3(gCsSunVP._m00, gCsSunVP._m10, gCsSunVP._m20);
-    const float3 c1 = float3(gCsSunVP._m01, gCsSunVP._m11, gCsSunVP._m21);
-    const float3 c2 = float3(gCsSunVP._m02, gCsSunVP._m12, gCsSunVP._m22);
+    const float3 c0 = float3(M._m00, M._m10, M._m20);
+    const float3 c1 = float3(M._m01, M._m11, M._m21);
+    const float3 c2 = float3(M._m02, M._m12, M._m22);
     const float3 nq = float3(dot(n, c0) / dot(c0, c0), dot(n, c1) / dot(c1, c1), dot(n, c2) / dot(c2, c2));
     const float nz = (abs(nq.z) > 1e-6f) ? nq.z : 1e-6f;
     // Depth per uv step on the plane: uv.x runs with clip x (2 per side), uv.y against clip y.
@@ -148,7 +169,7 @@ float SunMapClear(float3 rel, float3 n) {
         const float a = float(k) * 2.39996323f;
         const float2 d = mul(R, float2(cos(a), sin(a))) * r;
         float zb;
-        if (SunMapTap(uv, d, q.z, grad, margin, N, zb)) {
+        if (SunMapTap(srv, uv, d, q.z, grad, margin, N, zb)) {
             zSum += zb;
             nBlock += 1.0f;
         }
@@ -163,7 +184,7 @@ float SunMapClear(float3 rel, float3 n) {
         const float a = float(j) * 2.39996323f;
         const float2 d = mul(R, float2(cos(a), sin(a))) * r;
         float zb;
-        clear += SunMapTap(uv, d, q.z, grad, margin, N, zb) ? 0.0f : 1.0f;
+        clear += SunMapTap(srv, uv, d, q.z, grad, margin, N, zb) ? 0.0f : 1.0f;
     }
     return clear / 16.0f;
 }

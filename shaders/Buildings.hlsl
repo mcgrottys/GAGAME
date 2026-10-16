@@ -455,6 +455,9 @@ float4 PsMain(VsOut i) : SV_Target {
         if (dot(n, i.rel) > 0.0f) n = -n;
         if (dot(n, up) > 0.9f) col *= 0.65f;   // kPalette[1] / kPalette[0]: the roof's shade of the wall's
     }
+    // THE INSTRUMENT (render.buildingShadowView): the face as its sun maps' clear share, red over a
+    // blue mark, before the light and the air -- the gate counts building pixels and shaded ones.
+    if (gCsSunMapU.z != 0u) return float4(depth == 0u ? SunMapClear(i.rel, n) : 1.0f, 0.0f, 1.0f, 1.0f);
     float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
     // THE GROUND AND THE OTHER BUILDINGS between this face and the sun, by the globe's own law
     // (Globe.hlsl PsSurface): the terrain march from the face's point at its pixel's grain, and the

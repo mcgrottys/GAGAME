@@ -353,15 +353,21 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // THE SUN'S RAY OVER THE GROUND AND THE BUILDINGS (TerrainRay.hlsli; scene render.shadowSteps,
 // shadowRangeM, reflectLand, buildingShadowM), appended at the END: on b2 because the ground AND
 // the buildings ask the same two questions of the same sun -- x = the march's samples (0 = off),
-// y = its range (m), z = 1 when the water's mirror reflects the land it meets, w = the sun map's
-// side (m; 0 = no map). gCsSunMapU.x = the sun map's heap slot (~0 = none), .y = its texels a side.
-// gCsSunVP takes an eye-relative point of the eye's own world to the map (BuildingLayer::PlanSunMap):
-// xy its place on the map in clip units, z its depth TOWARD the sun (1 nearest), an orthographic
-// cast along the sun, so the map's depth test (GREATER, as the frame's) keeps what the sun sees first.
+// y = its range (m), z = 1 when the water's mirror reflects the land it meets, w = the finest sun
+// map's side (m; 0 = no map). THE SUN MAPS ARE A CASCADE ON THE ORIGIN LATTICE (VISIBILITY_FIELD 9):
+// gCsSunMapU.x = how many levels stand (0 = none), .y = their texels a side, .z = the instrument's
+// flag (the faces drawn as their clear). gCsSunSrv holds each level's heap slot (~0 = none) and
+// gCsSunVP[k] takes an eye-relative point of the eye's own world to level k's map
+// (BuildingLayer::PlanSunMap): xy its place on the map in clip units, z its depth TOWARD the sun
+// (1 nearest), an orthographic cast along the sun over the cell's span, so the map's depth test
+// (GREATER, as the frame's) keeps what the sun sees first. Level 0 is the finest cell, the eye's;
+// each level up is its parent, twice the span.
+#define GA_SUN_LEVELS 6u
 #define GA_COMPOSED_CB_SHADOW_ROWS \
     float4 gCsShadow; \
     uint4  gCsSunMapU; \
-    row_major float4x4 gCsSunVP;
+    uint4  gCsSunSrv[2]; \
+    row_major float4x4 gCsSunVP[GA_SUN_LEVELS];
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame

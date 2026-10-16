@@ -356,8 +356,13 @@ const Schema& RenderSchema() {
             .Bind("reflectLand", p.reflectLand,
                   "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H)
             .Bind("buildingShadowM", p.buildingShadowM, Q::Length, "m",
-                  "the drawn buildings' shadow map: a square this wide about the view's ground focus, seen from the sun "
-                  "(0 = the buildings cast no shadow)", H);
+                  "the drawn buildings' shadow maps: the finest map is the eye's cell of the origin lattice at the "
+                  "finest level whose cells are no wider than this (0 = the buildings cast no shadow)", H)
+            .Bind("buildingShadowLevels", p.buildingShadowLevels, Q::Dimensionless, "1",
+                  "how many levels of the lattice the shadow maps climb from the finest cell, the span doubling each "
+                  "(0 = the buildings cast no shadow)", H)
+            .Bind("buildingShadowView", p.buildingShadowView,
+                  "an instrument: the buildings' faces drawn as their shadow maps' clear share (red) over a blue mark", H);
         return sc;
     }();
     return *s;
