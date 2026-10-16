@@ -572,7 +572,8 @@ public:
     // Float is the height's GPU form: 128x128 floats, 64 KB, R32F exactly -- the FloatW children's
     // value as it is, NO quantization: a half float steps 2 m above 2,048 m, and one-texel
     // differences of those steps drew every mountain's contours into its shading. Its children are
-    // FloatW at its 128x128 (128 KB), keyed apart from the 256x128 ones.
+    // FloatW at their own 256x128: a Float tile (x, y) is the columns (x & 1) * 128.. of its
+    // children's tile (x / 2, y) -- the CPU's form and its cache stay as they were (KidFrame, KidReq).
     // Raw4 (M9bc): four quantized channels, no coverage byte -- a tile-native node's planes
     // (the wave field's a, k, cos, sin); absence is the tile's absence. 128x128, 64 KB, a GPU tile.
     enum class Fmt : uint8_t { Rgba8, FloatW, Half, Raw4, Float };
@@ -585,8 +586,6 @@ public:
     explicit TileTree(const DomainSource* node, Fmt fmt = Fmt::Rgba8, TileTree* parent = nullptr,
                       const std::string& trees = std::string())
         : m_node(node), m_fmt(fmt), m_parent(parent) {
-        // A scalar tree's tile shape is its root's: a Float root's 128 x 128, a Half root's 256 x 128.
-        m_scalarTexels = parent ? parent->m_scalarTexels : (fmt == Fmt::Float ? 128u * 128u : 256u * 128u);
         if (!parent) m_stripes = std::make_unique<std::array<std::recursive_mutex, kStripes>>();
         m_trees = parent ? parent->m_trees
                          : tree_detail::Backslashes(trees.empty() ? TreeRoot() : trees);
@@ -612,7 +611,7 @@ public:
             tree_detail::Fnv1a(14695981039346656037ull, node->Identity()),
             "#" + std::to_string(kTileTreeVersion) +
                 (fmt == Fmt::Rgba8   ? ""
-                 : fmt == Fmt::FloatW ? (m_scalarTexels == 128u * 128u ? "fw128" : "fw")
+                 : fmt == Fmt::FloatW ? "fw"
                  : fmt == Fmt::Half   ? "h"
                  : fmt == Fmt::Float  ? "f"
                                       : "r4"));
@@ -642,7 +641,7 @@ public:
     // painting threads: the hook must be cheap and must queue, not touch GPU state.
     std::function<void(const std::string& tag, const TileRequest& r)> onChanged;
     Fmt Format() const { return m_fmt; }
-    size_t TileBytes() const { return m_fmt == Fmt::FloatW ? size_t(m_scalarTexels) * 8u : 65536u; }
+    size_t TileBytes() const { return m_fmt == Fmt::FloatW ? 262144u : 65536u; }
     // A root the GPU reads as it is: composed at its own mip, never folded or referenced.
     bool GpuRoot() const { return m_fmt == Fmt::Half || m_fmt == Fmt::Float; }
     const char* Name() const { return m_node->Name(); }
@@ -996,6 +995,16 @@ private:
                                                  box.lonMax * kR2D, box.latMax * kR2D);
     }
     // Which children can touch this tile, and what each holds. False if any is still Absent.
+    // A FLOAT ROOT's children answer in their own 256 x 128 tiles: the same lattice twice as wide a
+    // tile, asked at x / 2. Every other node asks its children what it was asked.
+    ColorFrame KidFrame(const ColorFrame& f) const {
+        ColorFrame k = f;
+        if (m_fmt == Fmt::Float) k.texW *= 2;
+        return k;
+    }
+    TileRequest KidReq(const TileRequest& r) const {
+        return m_fmt == Fmt::Float ? TileRequest{r.face, r.mip, r.x / 2, r.y} : r;
+    }
     bool KidsHeld(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
                   const Compositor::TileBox& box, std::vector<size_t>& inc,
                   std::vector<Held>& held) {
@@ -1003,7 +1012,7 @@ private:
         for (size_t i = 0; i < m_kids.size(); ++i) {
             if (!KidIn(i, box)) continue;   // absent: not in this tile's subset at all
             inc.push_back(i);
-            const Held h = m_kids[i]->Peek(frame, tag, r);
+            const Held h = m_kids[i]->Peek(KidFrame(frame), tag, KidReq(r));
             held.push_back(h);
             if (h == Held::Absent) all = false;
         }
@@ -1760,11 +1769,11 @@ private:
         std::vector<size_t> live;
         bool complete = true;
         for (size_t k = 0; k < inc.size(); ++k) {
-            if (!RefuseLattice(*m_kids[inc[k]], frame)) {   // M12 step 2d: not this tile's texels
+            if (!RefuseLattice(*m_kids[inc[k]], KidFrame(frame))) {   // M12 step 2d: not this tile's texels
                 complete = false;
                 continue;
             }
-            const Status s = m_kids[inc[k]]->Tile(frame, tag, r, tiles[k]);
+            const Status s = m_kids[inc[k]]->Tile(KidFrame(frame), tag, KidReq(r), tiles[k]);
             if (s == Status::Transient) {
                 complete = false;
                 continue;
@@ -1800,14 +1809,17 @@ private:
             float* d32 = reinterpret_cast<float*>(out.data());
             uint16_t* d16 = reinterpret_cast<uint16_t*>(out.data());
             const uint32_t n = frame.texW * frame.texH;
+            const bool half = m_fmt == Fmt::Float;   // this tile is half its children's (KidReq)
+            const uint32_t col = half ? (r.x & 1u) * frame.texW : 0u;
             bool any = false;
             for (uint32_t i = 0; i < n; ++i) {
+                const size_t ki = half ? size_t(i / frame.texW) * (2u * frame.texW) + col + i % frame.texW : i;
                 double acc[4] = {0, 0, 0, 0}, cov = 0.0;
                 for (const size_t k : live) {
                     const float* s32 = reinterpret_cast<const float*>(tiles[k].data());
-                    const float w = s32[i * 2 + 1];
+                    const float w = s32[ki * 2 + 1];
                     if (w <= 0.0f) continue;
-                    const float c[4] = {s32[i * 2], 0, 0, 0};
+                    const float c[4] = {s32[ki * 2], 0, 0, 0};
                     DomainCompositor::OverStep(acc, cov, c, w, 1);
                 }
                 if (cov <= 0.0) continue;
@@ -1956,7 +1968,6 @@ private:
 
     const DomainSource* m_node = nullptr;
     Fmt m_fmt = Fmt::Rgba8;
-    uint32_t m_scalarTexels = 256u * 128u;   // a scalar tile's texels (the root's shape)
     ColorSource* m_raw = nullptr;
     std::vector<std::unique_ptr<TileTree>> m_kids;
     std::string m_id, m_root;
