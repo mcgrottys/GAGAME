@@ -12,7 +12,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | massgis.ortho | fetch | compose.stack | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | EPSG:6348 UTM19N from its manifest | x1 | RasterFileSource (TM forward) |
 | height.stack | classify | synth.bed | latlon.deg +v=N | latlon.deg +v=N | - | m NAVD -> dry albedo | 3 samples/texel | x1 | BedSynthSource::Sample (M7d cross-channel edge) |
 | globe.walk | wants | residency.mgr | uv01.vS +v=S | uv01.vS +v=S | - | mip requests | mips 0..7 + floor 4..7 | x1 | GlobeLayer node walk + M7g mip floor |
-| residency.mgr | have-map | globe.ps | resmap.texel +v=S | uv01.vS +v=S | - | finest mip * 16 (R8) | 0..7*16 | x1 | CsHave2D residency clamp |
+| residency.mgr | have-map | globe.ps | resmap.texel +v=S | uv01.vS +v=S | - | finest mip * 16 (R8) | 0..7*16 | x1 | CsHaveCubeArr residency clamp |
 | world.flat | anchor tangent chart (exact) | latlon.deg | world.m +v=N | latlon.deg +v=N | - | deg | the tangent plane about place.anchor; shared by ALL water consumers | x1 | Space::Anchor about the scene's place.anchor |
 | height.pages | bed per texel | water.bank | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice only (AUDIT_WATER item 5); float merc ~0.25 px ulp (gatest-bounded); residency-clamped mips 2..7 | x1 | WaterBank.hlsl HpHeightChain (the windows' chain at the ring's grain) |
 | ocean.fft | cascade.disp | water.bank | patch.wrap +v=N | atlas.texel +v=N | - | m displacement | +-Hs/2 | x1 | WaterBank.hlsl CsBankFill wrap |

@@ -5564,6 +5564,9 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
         globe->keepOn = m_S.render.keep;
         globe->keepSunGrainDeg = static_cast<float>(m_S.render.keepSunGrainDeg);
         globe->keepTideGrainM = static_cast<float>(m_S.render.keepTideGrainM);
+        globe->shadowSteps = m_S.render.shadowSteps;
+        globe->shadowRangeM = static_cast<float>(m_S.render.shadowRangeM);
+        globe->reflectLand = m_S.render.reflectLand;
         globe->SetView(*e.cam, aspect, e.viewH, t);
     } else {
         const bool w = win && win->n > 0;

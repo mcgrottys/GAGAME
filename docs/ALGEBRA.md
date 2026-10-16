@@ -492,6 +492,22 @@ already owns (no BLAS — the scene descriptions are our own quadtrees):
   dipped horizon, sin(dip) = √(h(2R+h))/(R+h), ramped over the disc's own radius by
   `SunDiscClear` — the ramp `PortalShadow` already used for the Droste inner globe, so two
   occluding spheres share one law. The normal only shapes the lobe and the cosine (priors 44).
+- **The ground is the third occluder, by the same ramp** (`TerrainRay`, Globe.hlsl, 2026-10-15).
+  The composed height field is marched from the lit point along the sun's ray -- a0 its altitude
+  at zenith upT, mu = sun . upT, tPerp the sun's part across it -- in the small numbers of the
+  refracted cast: alt(s) = a0 + s mu + s^2 |tPerp|^2 / 2(R + a0), dir(s) = normalize(upT +
+  s tPerp / (R + alt)), the sphere to second order (2 mm at 8 km). Samples are log-spaced from
+  twice the pixel's footprint to `render.shadowRangeM` in `render.shadowSteps` steps, each read
+  at the level two texels a step wants and never finer than the pixel's own, through the level's
+  own windows (`ComposedHeightAt`). The occluder's rim is the WORST rise of the ground above
+  the ray in sines, (h - alt) cos e / s, and the sun term is multiplied by `SunDiscClear` of its
+  negative: a ridge's shadow has the sun's own penumbra and no edge of its own, and a point whose
+  ground never rises above the ray is lit to the last bit. Land, water and the building field's
+  street floor ask it; the mirror asks the SAME march for its first hit (`render.reflectLand`):
+  one secant between the bracketing samples, and the land there -- imagery lit flat, through the
+  air along the ray -- replaces the sky the mirror would have shown. The buildings' Boolean field
+  (ALGEBRA bedalbedo: walls met per tan z) is asked of the sun's ray exactly as of the eye's, so
+  the ground between the roofs is in the shade the roofs are not.
 - Foam whitens albedo (bank foam channel + churn memory); land takes imagery with the
   hand-edit rock override; sRGB pixels ship as captured (no re-grading — see priors).
 

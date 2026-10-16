@@ -130,21 +130,6 @@ SamplerState sAniso       : register(s3);
 // residency gathers take s1, the trilinear that wraps.
 SamplerState sAnisoWrap   : register(s4);
 
-#ifndef GA_NO_FIELD_BUFFER
-// Bilinear. Correct for scalars, vectors and independent-channel packings.
-float4 SampleField(uint idx, float2 worldXZ) {
-    FieldDesc f = gFields[idx];
-    float2 uv = worldXZ * f.worldToUv.xy + f.worldToUv.zw;
-    float4 v = gTex[f.srvIndex].SampleLevel(sLinearClamp, saturate(uv), 0);
-    return v * f.valueScale + f.valueBias;
-}
-
-float SampleField1(uint idx, float2 worldXZ) { return SampleField(idx, worldXZ).x; }
-#endif  // GA_NO_FIELD_BUFFER
-
-// Reversed-Z with an infinite far plane: ndcZ = nearZ / viewZ, so viewZ = nearZ / ndcZ.
-float LinearDepthFromReversedZ(float ndcZ) { return gNearZ / max(ndcZ, 1e-9f); }
-
 // World-space view ray for a pixel, from NDC in [-1,1]. No matrix inverse needed.
 float3 ViewRay(float2 ndc) {
     return normalize(gCamFwd.xyz + ndc.x * gCamRight.xyz + ndc.y * gCamUp.xyz);
@@ -305,17 +290,6 @@ float3 SkyRadianceDir(float3 dir) {
     return SkyAlong(dir, GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R, 1.0f);
 }
 
-// With only an elevation to give (the haze's colour, a slope's skylight): the sky along the sun's
-// own meridian at that elevation, from the eye.
-float3 SkyRadiance(float ey) {
-    const float3 up = GA_SKY_UP;
-    const float3 m = GA_SUN_DIR - up * dot(GA_SUN_DIR, up);
-    const float ml = length(m);
-    const float3 sh = (ml > 1e-6f) ? m / ml : float3(1.0f, 0.0f, 0.0f);
-    const float c = clamp(ey, -1.0f, 1.0f);
-    return SkyAlong(normalize(up * c + sh * sqrt(max(1.0f - c * c, 0.0f))), up, GA_SUN_DIR,
-                    GA_SKY_EYE_R, 0.0f);
-}
 
 // M6t: the sky WITHOUT the specular sun disc, for surfaces that carry their own explicit sun lobe
 // (the unified water BRDF owns the sun through Cox-Munk at every scale; the mirror disc on top of

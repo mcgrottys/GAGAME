@@ -10,11 +10,26 @@
     "       albedo, residency of colour / height / land-sea)   mouse drag turns the globe, wheel zooms",
     "",
     "Make the products first (network once, cached after):",
-    "  dotnet run --project harvest/harvest -- compose-water --fidelity harvest/testdata/coast3_3to10m.gafid --out data/composite/coast3"
+    "  dotnet run --project harvest/harvest -- compose-water --fidelity harvest/testdata/coast3_3to10m.gafid --out data/composite/coast3",
+    "",
+    "THE PLANET'S BUILDINGS AND ROADS (2026-10-15): the same folded tree the earth scene draws (docs/BUILDING_LOD.md,",
+    "docs/ROADS.md section 5), so the coast folds up into its towns as the views step down. The layer and its",
+    "sources are the earth scene's, merged by name over the composite base (the named-array law)."
   ],
   "base": "scenes/demos/composite_merrimack.json",
   "scene": {"name": "globe-test", "view": "orbit"},
   "time": {"start": "2026-08-28T16:00:00Z"},
+  "layers": [
+    {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
+     "lod": "D:/DataCache/OSM/buildings/planet-261012-decks.tree",
+     "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12}
+  ],
+  "sources": [
+    {"name": "osm.planet", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"},
+    {"name": "osm.roads.planet", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"},
+    {"name": "nbi.2025", "kind": "bridges", "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"},
+    {"name": "noaa.enc", "kind": "bridges", "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"}
+  ],
   "views": [
     {"name": "orbit", "_at": "the planet, the east coast at its centre",
      "at": {"lat": 36.0, "lon": -72.0, "alt": 0, "heading": 0, "tilt": 0, "range": 20000000}, "fovY": 55, "gauge": "root", "nearZ": 1000},

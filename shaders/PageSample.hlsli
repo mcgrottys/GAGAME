@@ -154,11 +154,6 @@ float4 PageSampleLevelCube(TextureCubeArray arr, SamplerState s, float3 dir, flo
 float PageGroundM(float ground0, float have) { return ground0 * exp2(have); }
 // The choice: a rung wins where its resident texel is at least as fine as the one held.
 bool PageWins(float rungGroundM, float heldGroundM) { return rungGroundM <= heldGroundM; }
-// The two-rung form: the page against the cube, from their resident mips and their mip-0
-// grounds (x = the cube's, y = the page's).
-bool PageWins(float haveCube, float havePage, float2 ground) {
-    return PageWins(PageGroundM(ground.y, havePage), PageGroundM(ground.x, haveCube));
-}
 
 // Direction (x = cos lat cos lon, y = sin lat, z = cos lat sin lon -- Compose.hlsli's
 // convention) -> D3D cube face and its texture uv, the inverse of Compositor::ComposeCubeDir.
