@@ -438,6 +438,11 @@ float4 PsMain(VsOut i) : SV_Target {
     const float r = length(fromCentre);
     const float3 up = (depth > 0u) ? sLvlSkyUp : fromCentre / r;
     const float h = (depth > 0u) ? 0.0f : r - Rb;
+    // THE AIR'S ZENITH IS THE PLANET'S, NEVER THE FRAME'S (2026-10-15): the haze below took the
+    // flat frame's y as up, which is the zenith only at the frame's anchor -- at Tokyo, 7,000 km
+    // from it, the sky's integral ran a ray through the wrong air and a building 50 km off stayed
+    // black against the hazed ground under it. The same up the light above uses.
+    sLvlSkyUp = up;
     // A box's faces share their corners and carry no normal: the face's own, from the surface's
     // derivatives, turned to face the eye (the box is convex and culled, so the eye sees outsides);
     // its top is a roof by its tilt.

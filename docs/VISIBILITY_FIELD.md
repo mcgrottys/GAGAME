@@ -306,6 +306,22 @@ merged order is made once when a walk lands and consumed from a cursor: 0.252 ms
 stands made, the settled set the same (63,156 boxes + 3,062 shapes + 217,190 points against 62,819
 + 3,062 + 215,636), the still within the stream's noise (0.081 % of pixels against the run before, the after binary's own A/A being 1.29 %).
 
+**The black specks (found the same night; a shader bug older than this branch).** Looking toward
+the sun from the city the far suburbs were a carpet of black points against pale haze, and the
+owner expected the air to blend or cull them. The cull already reads the air; the points were not
+hazed: Buildings.hlsl's PsMain lights a face with the planet's zenith at the point (`fromCentre / r`)
+but handed the air's integral `GA_SKY_UP`, the flat frame's y, which is the zenith only at the
+frame's anchor -- at Tokyo, 7,000 km from it, the sky's integral ran its ray through the wrong
+air and gave a building 50 km off almost no in-scatter. The globe passes the true zenith, so the
+ground under the same building hazed and the building did not. One line: the air's up is the
+point's. Measured on the sunward view (heading 290, tilt 82, 9 km; 600 frames, settled), the
+luma percentiles by band: the far band's p2 / p10 / p50 went 33 / 38 / 93 to 86 / 90 / 127 and
+the share of pixels 40 under their band's median (the specks) 0.32 to 0.03; the mid band 0.063 to
+0.000; the Newburyport market sub-lsb (the frame's y IS the zenith there); the city still differs
+on 30 % of its pixels, every building now in the same haze as its ground. Points, boxes and the
+terrain march had measured the same before the fix (three arms), which is what pointed away from
+the forms and at the air.
+
 **The stand's lifetime.** A stand is published (its node's atomic pointer set) by Simulate when
 its records are recorded for the GPU, not by the job that made it, so a walk that reads a stand
 names records the pass will find. The stand it replaces, and every stand of a dropped page, gives
