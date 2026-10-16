@@ -567,11 +567,15 @@ public:
     // float weight), 256 KB -- the form a node needs to be an INPUT (straight alpha, section
     // 31), and LOSSLESS, which a leaf tree must be: storing the leaves as half and composing
     // from them cost one half-ULP against the incumbent (2 m at 3 km depth, 0.125 m at 100 m).
-    // Half is the GPU form: 256x128 half values, 64 KB, R16F exactly -- the ONE quantization,
-    // at the root, which always materializes because its tile is what DirectStorage reads.
+    // Half is a GPU form: 256x128 half values, 64 KB, R16F exactly -- a quantization at the root,
+    // which always materializes because its tile is what DirectStorage reads (the exposure's).
+    // Float is the height's GPU form: 128x128 floats, 64 KB, R32F exactly -- the FloatW children's
+    // value as it is, NO quantization: a half float steps 2 m above 2,048 m, and one-texel
+    // differences of those steps drew every mountain's contours into its shading. Its children are
+    // FloatW at its 128x128 (128 KB), keyed apart from the 256x128 ones.
     // Raw4 (M9bc): four quantized channels, no coverage byte -- a tile-native node's planes
     // (the wave field's a, k, cos, sin); absence is the tile's absence. 128x128, 64 KB, a GPU tile.
-    enum class Fmt : uint8_t { Rgba8, FloatW, Half, Raw4 };
+    enum class Fmt : uint8_t { Rgba8, FloatW, Half, Raw4, Float };
 
     // Builds the tree of caches under this node, recursively. Every compose and gate node gets
     // its own folder; every leaf gets one. Nodes are borrowed -- the graph outlives the caches.
@@ -581,6 +585,8 @@ public:
     explicit TileTree(const DomainSource* node, Fmt fmt = Fmt::Rgba8, TileTree* parent = nullptr,
                       const std::string& trees = std::string())
         : m_node(node), m_fmt(fmt), m_parent(parent) {
+        // A scalar tree's tile shape is its root's: a Float root's 128 x 128, a Half root's 256 x 128.
+        m_scalarTexels = parent ? parent->m_scalarTexels : (fmt == Fmt::Float ? 128u * 128u : 256u * 128u);
         if (!parent) m_stripes = std::make_unique<std::array<std::recursive_mutex, kStripes>>();
         m_trees = parent ? parent->m_trees
                          : tree_detail::Backslashes(trees.empty() ? TreeRoot() : trees);
@@ -605,7 +611,11 @@ public:
         const uint64_t h = tree_detail::Fnv1a(
             tree_detail::Fnv1a(14695981039346656037ull, node->Identity()),
             "#" + std::to_string(kTileTreeVersion) +
-                (fmt == Fmt::Rgba8 ? "" : fmt == Fmt::FloatW ? "fw" : fmt == Fmt::Half ? "h" : "r4"));
+                (fmt == Fmt::Rgba8   ? ""
+                 : fmt == Fmt::FloatW ? (m_scalarTexels == 128u * 128u ? "fw128" : "fw")
+                 : fmt == Fmt::Half   ? "h"
+                 : fmt == Fmt::Float  ? "f"
+                                      : "r4"));
         m_id = tree_detail::Hex8(h);
         m_root = m_trees + "\\" + tree_detail::Sanitize(node->Name()) + "." + m_id;
         tree_detail::MakeDirs(m_trees);
@@ -632,7 +642,9 @@ public:
     // painting threads: the hook must be cheap and must queue, not touch GPU state.
     std::function<void(const std::string& tag, const TileRequest& r)> onChanged;
     Fmt Format() const { return m_fmt; }
-    size_t TileBytes() const { return m_fmt == Fmt::FloatW ? 262144u : 65536u; }
+    size_t TileBytes() const { return m_fmt == Fmt::FloatW ? size_t(m_scalarTexels) * 8u : 65536u; }
+    // A root the GPU reads as it is: composed at its own mip, never folded or referenced.
+    bool GpuRoot() const { return m_fmt == Fmt::Half || m_fmt == Fmt::Float; }
     const char* Name() const { return m_node->Name(); }
     const DomainSource* Node() const { return m_node; }
     size_t KidCount() const { return m_kids.size(); }
@@ -1290,7 +1302,7 @@ private:
             }
             return;
         }
-        if (m_fmt != Fmt::Rgba8) return;   // Half tiles are roots; they compose, never fold
+        if (m_fmt != Fmt::Rgba8) return;   // Half and Float tiles are roots; they compose, never fold
         for (uint32_t py = 0; py < hh; ++py) {
             for (uint32_t px = 0; px < hw; ++px) {
                 double c[3] = {0, 0, 0}, a = 0.0;
@@ -1329,7 +1341,7 @@ private:
             FoldUpNested(frame, tag, r, child);
             return;
         }
-        if (m_fmt == Fmt::Half) return;
+        if (GpuRoot()) return;
         std::vector<std::vector<uint8_t>> rising{child};
         TileRequest c = r;
         while (!rising.empty() && c.mip < MaxMip(frame)) {
@@ -1492,7 +1504,7 @@ private:
     void FoldUpNested(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
                       const std::vector<uint8_t>& child) {
         if (r.mip >= MaxMip(frame)) return;
-        if (m_fmt == Fmt::Half) return;
+        if (GpuRoot()) return;
         const TileRequest p{r.face, r.mip + 1, r.x / 2, r.y / 2};
         std::vector<uint8_t> parent;
         if (!FoldIntoNested(frame, tag, r, p, child, parent)) return;
@@ -1765,9 +1777,9 @@ private:
         const std::string cpath = base + "_" + tree_detail::Hex8(KeyOf(inc, got));
         // THE REFERENCE. Straight alpha makes a lone input's tile the composite exactly --
         // OverFinish divides by the coverage it just multiplied by -- so the record is the
-        // child's identity and nothing else. A Half ROOT never references: its tile is the
-        // GPU's, and a 128 KB FloatW child is not that.
-        if (live.size() == 1 && m_fmt != Fmt::Half) {
+        // child's identity and nothing else. A GPU ROOT never references: its tile is the
+        // GPU's, and a FloatW child (value and weight) is not that.
+        if (live.size() == 1 && !GpuRoot()) {
             out = std::move(tiles[live[0]]);
             if (complete) tree_detail::Touch(cpath + ".ref-" + m_kids[inc[live[0]]]->m_id);
             ++refs;
@@ -1783,7 +1795,7 @@ private:
         }
         if (m_fmt != Fmt::Rgba8) {
             // M9as: the scalar compose. Same OverStep, one channel, coverage from the halves.
-            // Inputs are FloatW (value, weight); the output is FloatW again, or Half at the root.
+            // Inputs are FloatW (value, weight); the output is FloatW again, or the root's own.
             out.assign(TileBytes(), 0);
             float* d32 = reinterpret_cast<float*>(out.data());
             uint16_t* d16 = reinterpret_cast<uint16_t*>(out.data());
@@ -1804,8 +1816,10 @@ private:
                 if (m_fmt == Fmt::FloatW) {
                     d32[i * 2] = v.c[0];
                     d32[i * 2 + 1] = (std::min)(1.0f, v.weight);
+                } else if (m_fmt == Fmt::Float) {
+                    d32[i] = v.c[0];   // the value as composed: no quantization
                 } else {
-                    d16[i] = tree_detail::F2H(v.c[0]);   // the one quantization: the GPU's
+                    d16[i] = tree_detail::F2H(v.c[0]);   // the half root's quantization
                 }
                 any = true;
             }
@@ -1942,6 +1956,7 @@ private:
 
     const DomainSource* m_node = nullptr;
     Fmt m_fmt = Fmt::Rgba8;
+    uint32_t m_scalarTexels = 256u * 128u;   // a scalar tile's texels (the root's shape)
     ColorSource* m_raw = nullptr;
     std::vector<std::unique_ptr<TileTree>> m_kids;
     std::string m_id, m_root;
@@ -2037,11 +2052,16 @@ inline void AuditTileTree(Compositor& comp, int channel, TileTree& tree, const C
         if (tt.size() != direct.size()) continue;
         bool same = true;
         if (height) {
-            // R16F vs R16F: the worst difference in millimetres, in worstDelta.
+            // The root's own values (R32F or R16F) against the direct path's: the worst difference
+            // in millimetres, in worstDelta.
+            const bool f32 = tree.Format() == TileTree::Fmt::Float;
             const uint16_t* d16 = reinterpret_cast<const uint16_t*>(direct.data());
             const uint16_t* t16 = reinterpret_cast<const uint16_t*>(tt.data());
-            for (size_t i = 0; i < direct.size() / 2; ++i) {
-                const float dm = std::fabs(tree_detail::H2F(d16[i]) - tree_detail::H2F(t16[i]));
+            const float* d32 = reinterpret_cast<const float*>(direct.data());
+            const float* t32 = reinterpret_cast<const float*>(tt.data());
+            for (size_t i = 0; i < direct.size() / (f32 ? 4 : 2); ++i) {
+                const float dm = f32 ? std::fabs(d32[i] - t32[i])
+                                     : std::fabs(tree_detail::H2F(d16[i]) - tree_detail::H2F(t16[i]));
                 if (dm > 0.0f) {
                     ++a.difTexels;
                     same = false;

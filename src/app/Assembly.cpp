@@ -324,7 +324,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
     surface = SurfaceFrame::About(planetR, opt.stencil, S.place.anchor[1], S.place.anchor[0]);
     // PHASE B2 (D1): THE WINDOWS' STEP, a whole tile at the floor of every tenant that shares them --
-    // the colour and the mask (128 x 128), the height and the exposure (256 x 128): 2048 x 1024.
+    // the colour, the mask and the height (128 x 128), the exposure (256 x 128): 2048 x 1024.
     surface.ShareWindows(128, 128);
     surface.ShareWindows(256, 128);
     Log("[surface] the windows step by %u x %u texels of their rank: a whole tile at the floor (mip 3) "
@@ -550,12 +550,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             Log("[height-tree] compose order, bottom to top (the channel's: `over`, the coarser "
                 "under the finer, the hand edits last):%s",
                 order.c_str());
-            heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
+            heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Float);
             heightTree->Print();
             // THE CPU'S READ OF IT (compose/HeightTree.h): the composed root on the pyramid, bound
             // to the channel; Compositor::SampleHeight answers from it.
             {
-                const Lattice pyr = hal::BlockBinding::Pyramid(256, 128);
+                const Lattice pyr = hal::BlockBinding::Pyramid(128, 128);
                 compositor.BindHeightTree(hgtCh, std::make_shared<HeightTree>(heightTree->Reader(pyr),
                                                                               heightTree->MagnifiedQuery(pyr), pyr));
             }
@@ -952,16 +952,20 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 hal::TenantDesc hd;
                 hd.name = L"earth.height (megatexture pages)";
                 hd.astNode = "height.pages";
-                hd.fiber = {DXGI_FORMAT_R16_FLOAT, 256, 128, "m NAVD88 (half float)"};
+                hd.fiber = {DXGI_FORMAT_R32_FLOAT, 128, 128, "m NAVD88 (float)"};
                 hd.semantics = hal::Semantics::Texture;
                 hd.residence = hal::Residence::Streamable;
                 hd.absence = hal::Absence::Unloaded;
                 hd.slices = SurfaceFrame::WindowSlices();
                 const Lattice& hCubeL = surface.cubeH;   // M12 step 4a: the surface's lattices
+                // The pages are the height tree's float root: without the tree there is no earth
+                // height to page (the compositor's direct cube is Mars's half-float form).
+                if (!(S.streaming.colorTrees && heightTree)) {
+                    Log("[height] no height tree (streaming.colorTrees off): the earth is drawn without relief");
+                }
                 hd.bindings.push_back({0, 6, hCubeL,
-                                       (S.streaming.colorTrees && heightTree)
-                                           ? heightTree->Provider(hCubeL)
-                                           : compositor.CubeHeight(hgtCh),
+                                       (S.streaming.colorTrees && heightTree) ? heightTree->Provider(hCubeL)
+                                                                              : TileProviderFn{},
                                        "paint cube faces"});
                 if (S.streaming.colorTrees && heightTree) hd.bindings.back().magnified = heightTree->MagnifiedQuery(hCubeL);   // F14
                 // PHASE B2: THE EYE'S WINDOWS -- the colour's slices, the
@@ -969,9 +973,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // on the pyramid (it is asked the global tile; the binding keeps the slot).
                 if (heightTree) {
                     surface.WindowBlocks(hd.blocks,
-                                         heightTree->Provider(hal::BlockBinding::Pyramid(256, 128)),
+                                         heightTree->Provider(hal::BlockBinding::Pyramid(128, 128)),
                                          "paint pyramid windows");
-                    const TileQueryFn q = heightTree->MagnifiedQuery(hal::BlockBinding::Pyramid(256, 128));   // F14
+                    const TileQueryFn q = heightTree->MagnifiedQuery(hal::BlockBinding::Pyramid(128, 128));   // F14
                     for (hal::BlockSlice& k : hd.blocks) k.magnified = q;
                 }
                 heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));

@@ -5,7 +5,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | from | field | to | src frame | dst frame | flip | units | range | gain | code anchor |
 |---|---|---|---|---|---|---|---|---|---|
 | compose.stack | paint cube faces | color.pages | latlon.deg +v=N | cube.face +v=N | - | sRGB bytes | slices 0..5 = cube16k; tile 128x128 | x1 | TileTree::Provider(cube16k) / ComposeCubeDir (composetest-pinned) |
-| compose.stack | paint cube faces | height.pages | latlon.deg +v=N | cube.face +v=N | - | m NAVD (R16F) | slices 0..5 = cube16k; tile 256x128 | x1 | TileTree::Provider(cube16k) / ComposeCubeDir (composetest-pinned) |
+| compose.stack | paint cube faces | height.pages | latlon.deg +v=N | cube.face +v=N | - | m NAVD (R16F) | slices 0..5 = cube16k; tile 128x128 | x1 | TileTree::Provider(cube16k) / ComposeCubeDir (composetest-pinned) |
 | color.pages | page-sample | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | finest containing page, residency-clamped mip | x1 | Compose.hlsli ComposedColorPages (no flip: both vS) |
 | height.pages | height | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | vertex + pixel classification (M9bg: the refracted cast retired) | x1 | Compose.hlsli ComposedHeightChain |
 | google.tiles | fetch | compose.stack | mercator.px +v=S | mercator.px +v=S | - | sRGB bytes | zoom = f(groundResM) | x1 | GoogleColorSource::ZoomFor |

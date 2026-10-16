@@ -174,7 +174,8 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
         case DXGI_FORMAT_R8G8B8A8_UNORM:
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: tileW = 128; tileH = 128; break;   // M6j: color
                                               // is sRGB -- HARDWARE decode, no shader hack
-        case DXGI_FORMAT_R16_FLOAT: tileW = 256; tileH = 128; break;   // M6i composed height
+        case DXGI_FORMAT_R16_FLOAT: tileW = 256; tileH = 128; break;   // M6i: a half-float cube (Mars), the exposure
+        case DXGI_FORMAT_R32_FLOAT: tileW = 128; tileH = 128; break;   // the earth's height, as composed
         default: GA_CHECK(E_INVALIDARG);
     }
     uint32_t mips = 1;

@@ -578,7 +578,7 @@ SurfaceFrame SurfaceFrame::About(double planetR, bool stencil, double latDeg, do
     OriginLattice::Floats(s.origin, a.c, s.anchorFloats);
     // The 16k quad-sphere in the two tile shapes.
     s.cube = Lattice::Cube(Lattice::kFaceDim);
-    s.cubeH = Lattice::Cube(Lattice::kFaceDim, 256, 128);
+    s.cubeH = Lattice::Cube(Lattice::kFaceDim, 128, 128);
     return s;
 }
 
@@ -701,9 +701,10 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm,
     cb.f[1] = 0.0f;   // the old window: none
     cb.f[2] = hgtOn ? 1.0f : 0.0f;
     cb.f[3] = static_cast<float>(planetR);
-    // R16F pyramids stop at the one-tile-ish mip (16384 -> 256 = 7 levels, max lod 6); one
-    // cube texel spans (pi/2)/16384 radians of arc along a face's midline.
-    cb.g[0] = 6.0f;
+    // The pyramids stop at the one-tile mip: the earth's float height in 128 x 128 tiles has 8 levels
+    // (16384 -> 128, max lod 7), a half-float cube (Mars) in 256 x 128 has 7; one cube texel spans
+    // (pi/2)/16384 radians of arc along a face's midline.
+    cb.g[0] = hpages ? 7.0f : 6.0f;
     cb.g[1] = static_cast<float>(3.14159265358979 * 0.5 / Compositor::kFaceDim);
     cb.g[2] = 6.0f;
     cb.g[3] = stencil ? 1.0f : 0.0f;

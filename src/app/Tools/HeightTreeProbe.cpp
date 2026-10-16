@@ -101,7 +101,7 @@ int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anc
     // MEASURED on the Merrimack: equal at 93 % of texels at level 9, 68 % at 11, 49 % at 13 (worst 2 cm,
     // 25 cm, 2.7 m): the folds' distance from the stack, which a twin of the GPU must not pretend away.
     {
-        const Lattice pyr = Lattice::Cube(Lattice::kFaceDim << 17, 256, 128);
+        const Lattice pyr = Lattice::Cube(Lattice::kFaceDim << 17, 128, 128);
         for (const uint32_t mip : {9u, 11u, 13u}) {
             double worst = 0.0;
             size_t same = 0, n = 0;
@@ -116,7 +116,7 @@ int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anc
                 double cla = 0.0, clo = 0.0;
                 pyr.Texel(r, ix % pyr.texW, iy % pyr.texH, cla, clo);
                 const float t = tree->Sample(cla, clo, pyr.GroundRes(mip));
-                const float h = HalfToFloat(tree_detail::F2H(comp.SampleHeightStack(ch, cla, clo, pyr.GroundRes(mip))));
+                const float h = comp.SampleHeightStack(ch, cla, clo, pyr.GroundRes(mip));   // R32F: as composed
                 worst = (std::max)(worst, std::abs(double(t) - double(h)));
                 same += t == h ? 1 : 0;
                 ++n;

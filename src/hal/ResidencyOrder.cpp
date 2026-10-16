@@ -130,13 +130,14 @@ void ResidencyManager::ApplyChanged() {
 bool ResidencyManager::EnableMaxLane(int tenant, Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
     if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return false;
     Tenant& t = m_tenants[tenant];
-    if (t.fmt != DXGI_FORMAT_R16_FLOAT || t.srv == UINT32_MAX) {
-        Log("[maxlane] %ls: not a scalar page tenant (R16F with an array view): no lane", t.name.c_str());
+    if ((t.fmt != DXGI_FORMAT_R16_FLOAT && t.fmt != DXGI_FORMAT_R32_FLOAT) || t.srv == UINT32_MAX) {
+        Log("[maxlane] %ls: not a scalar page tenant (R16F or R32F with an array view): no lane", t.name.c_str());
         return false;
     }
     auto lane = std::make_shared<MaxLane>();
-    // R16F's standard 64 KB tile is 256 x 128 texels.
-    if (!lane->Init(gpu, sc, shaderDir, t.name, t.faces, t.faceDim, t.mips, 256, 128, t.srv)) return false;
+    // The standard 64 KB tile: 256 x 128 half floats, 128 x 128 floats.
+    const uint32_t tw = t.fmt == DXGI_FORMAT_R32_FLOAT ? 128u : 256u, th = 128u;
+    if (!lane->Init(gpu, sc, shaderDir, t.name, t.faces, t.faceDim, t.mips, tw, th, t.srv)) return false;
     t.lane = std::move(lane);
     t.lanePrimed = false;
     return true;

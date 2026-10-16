@@ -84,7 +84,7 @@ struct SurfaceFrame {
     // The lattices (core/Lattice.h): the colour and the survey on the cube's 128x128 tiles, the
     // height and the exposure on its 256x128 tiles.
     Lattice cube;    // the 16k quad-sphere, 128x128 tiles
-    Lattice cubeH;   // the same cube, 256x128 tiles
+    Lattice cubeH;   // the same cube, the height's tiles (128 x 128 floats)
     // The tenants realized on them (-1 = none).
     int colorT = -1, hgtT = -1, maskT = -1, bldT = -1;   // bldT: the buildings under a pixel
     bool hgtWindows = false;   // PHASE B2: the height tenant declares the eye's windows

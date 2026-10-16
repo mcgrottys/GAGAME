@@ -322,9 +322,7 @@ private:
             if (c.blockMax[size_t(lby) * bw + lbx] <= running) return true;   // nothing here can raise it
             Traverse(x0, y0, x1, y1, 1.0, ta, tb, [&](long long ix, long long iy, double tIn, double) {
                 if (ix < 0 || iy < 0 || ix > last || iy > last) return true;
-                uint16_t h;
-                std::memcpy(&h, c.bytes.data() + (size_t(uint64_t(iy) % m_lat.texH) * m_lat.texW + size_t(uint64_t(ix) % m_lat.texW)) * 2, 2);
-                running = (std::max)(running, HalfToFloat(h));
+                running = (std::max)(running, At(c, size_t(uint64_t(iy) % m_lat.texH) * m_lat.texW + size_t(uint64_t(ix) % m_lat.texW)));
                 if (running >= stopAtM && stopT) *stopT = tIn;
                 return running < stopAtM;
             });
@@ -339,8 +337,17 @@ private:
     }
     float TexelIn(const Cached& t, uint32_t ix, uint32_t iy) const {
         if (t.bytes.size() < size_t(m_lat.texW) * m_lat.texH * 2) return 0.0f;   // nothing covers: the stack's 0
+        return At(t, size_t(iy % m_lat.texH) * m_lat.texW + ix % m_lat.texW);
+    }
+    // A root texel: R32F (4 bytes a texel, the earth's float root) or R16F (2), by the tile's size.
+    float At(const Cached& t, size_t i) const {
+        if (t.bytes.size() >= size_t(m_lat.texW) * m_lat.texH * 4) {
+            float f;
+            std::memcpy(&f, t.bytes.data() + i * 4, 4);
+            return f;
+        }
         uint16_t h;
-        std::memcpy(&h, t.bytes.data() + (size_t(iy % m_lat.texH) * m_lat.texW + ix % m_lat.texW) * 2, 2);
+        std::memcpy(&h, t.bytes.data() + i * 2, 2);
         return HalfToFloat(h);
     }
 
@@ -444,10 +451,8 @@ private:
                 c->blockMax.assign(size_t(bw) * bh, -1e30f);
                 for (uint32_t y = 0; y < m_lat.texH; ++y) {
                     for (uint32_t x = 0; x < m_lat.texW; ++x) {
-                        uint16_t h;
-                        std::memcpy(&h, c->bytes.data() + (size_t(y) * m_lat.texW + x) * 2, 2);
                         float& m = c->blockMax[size_t(y / kBlock) * bw + x / kBlock];
-                        m = (std::max)(m, HalfToFloat(h));
+                        m = (std::max)(m, At(*c, size_t(y) * m_lat.texW + x));
                     }
                 }
             }

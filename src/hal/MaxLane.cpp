@@ -16,11 +16,13 @@ namespace ga {
 bool MaxLane::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir, const std::wstring& name,
                    uint32_t slices, uint32_t faceDim, uint32_t mips, uint32_t texW, uint32_t texH,
                    uint32_t tenantSrv) {
-    if (texW != 256 || texH != 128 || faceDim % (kBlock * 256) != 0) {
-        Log("[maxlane] %ls: tiles of %ux%u on a %u side are not the kernel's 256x128: no lane", name.c_str(),
+    if (texW % kBlock || texH % kBlock || texW / kBlock > 16 || texH / kBlock > 8 || faceDim % (kBlock * texW) != 0) {
+        Log("[maxlane] %ls: tiles of %ux%u on a %u side do not fit the kernel's 16 x 8 blocks: no lane", name.c_str(),
             texW, texH, faceDim);
         return false;
     }
+    m_texW = texW;
+    m_texH = texH;
     // A typed UAV load of R16G16_FLOAT is one of the formats D3D12 leaves optional: asked, not assumed.
     D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{DXGI_FORMAT_R16G16_FLOAT, {}, {}};
     if (FAILED(gpu.Device()->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) ||
@@ -121,8 +123,8 @@ void MaxLane::Back(Gpu& gpu, const D3D12_TILED_RESOURCE_COORDINATE& c, uint32_t 
                                     &offset, &n, D3D12_TILE_MAPPING_FLAG_NONE);
 }
 
-// THE HOLD: a tenant slot (slice, mip, tile x, tile y) of 256 x 128 texels covers 16 x 8 lane texels,
-// so a lane tile of m_tileW x m_tileH covers (m_tileW / 16) x (m_tileH / 8) tenant tiles. The lane
+// THE HOLD: a tenant slot (slice, mip, tile x, tile y) of m_texW x m_texH texels covers m_texW / 16 x
+// m_texH / 16 lane texels, and a lane tile of m_tileW x m_tileH lane texels covers the rest. The lane
 // tile is backed by the first held slot under it and released with the last. A recycled page holds
 // another place's blocks; they are never read there, because a block is read only where its slot is
 // held, and a slot's blocks are built in the turn it is held (its job follows in Record).
@@ -131,7 +133,7 @@ void MaxLane::Hold(Gpu& gpu, uint32_t slice, uint32_t mip, uint32_t x, uint32_t 
     const uint64_t slot = (uint64_t(slice) << 56) | (uint64_t(mip) << 48) | (uint64_t(y & 0xFFFFFFu) << 24) |
                           uint64_t(x & 0xFFFFFFu);
     if (held ? !m_held.insert(slot).second : m_held.erase(slot) == 0) return;   // no change
-    const uint32_t lx = (x * (256 / kBlock)) / m_tileW, ly = (y * (128 / kBlock)) / m_tileH;
+    const uint32_t lx = (x * (m_texW / kBlock)) / m_tileW, ly = (y * (m_texH / kBlock)) / m_tileH;
     const uint64_t key = (uint64_t(slice) << 56) | (uint64_t(mip) << 48) | (uint64_t(ly) << 24) | uint64_t(lx);
     const D3D12_TILED_RESOURCE_COORDINATE c{lx, ly, 0, mip + slice * m_mips};
     Tile& e = m_tiles[key];
@@ -176,7 +178,7 @@ void MaxLane::Record(Gpu& gpu, ID3D12GraphicsCommandList* cl, std::vector<Job>& 
         const Job& j = jobs[i];
         Row& r = rows[i];
         r.job[0] = j.slice; r.job[1] = j.mip; r.job[2] = j.x; r.job[3] = j.y;
-        r.page[0] = j.wrap; r.page[1] = m_pageSide >> j.mip; r.page[2] = m_tenantSrv; r.page[3] = m_slices;
+        r.page[0] = j.wrap; r.page[1] = m_pageSide >> j.mip; r.page[2] = m_tenantSrv; r.page[3] = m_texW | (m_texH << 16);
         for (uint32_t c = 0; c < 4; ++c) {
             for (uint32_t k = 0; k < 4; ++k) r.child[c][k] = j.child[c][k];
         }
