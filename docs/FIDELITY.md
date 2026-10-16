@@ -126,8 +126,8 @@ reads the product, never the sources, and does not know how many there were.
   "fidelity": {"file": "data/fidelity/world.gafid", "fnv64": "..."},
   "unit": "m", "datum": "NAVD88",
   "tiers": [
-    {"grain_m": 3.4, "folder": "bed/t3", "match": "*.tif", "over": 3, "inputs": ["noaa.cudem.ninth"]},
-    {"grain_m": 460, "folder": "bed/t0", "match": "*.tif", "over": 0, "inputs": ["noaa.etopo2022.15s"]}
+    {"grain_m": 3.4, "folder": "bed/t3", "match": "*.tif", "inputs": ["noaa.cudem.ninth"]},
+    {"grain_m": 460, "folder": "bed/t0", "match": "*.tif", "inputs": ["noaa.etopo2022.15s"]}
   ],
   "file": "tides/stations.json",
   "inputs": [{"id": "noaa.cudem.ninth", "title": "...", "grain_m": 3.4, "url": "...", "license": "...",
@@ -140,7 +140,9 @@ reads the product, never the sources, and does not know how many there were.
 - A **raster** layer (`kind: height`) is `tiers`: each tier one grain, a folder of GeoTIFFs in
   EPSG:4326 (one float32 band, nodata declared), every tile of a tier the same grain. A tier is
   one raster set as the engine already reads a folder (`compose/RasterFileSource.h`: one CRS and
-  one grain a set); the engine stacks the tiers by `over`, finer over coarser, and its tree folds
+  one grain a set); the engine stacks the tiers by their grain among every height the scene reads, finer over
+  coarser (a tier carries no rank of its own: one put a 463 m gap fill over a scene's 13.7 m survey,
+  2026-10-14; the scene entry's `over` is the owner's override), and its tree folds
   and magnifies between them (HIERARCHY 4.20). Where a finer tier has nodata the coarser shows.
   A tier is written in **parts**, one folder (`bed/<tier>/p<k>`) for each group of tiles that touch,
   each a `tiers` entry of its own with its `box`: the engine takes a set's footprint as ONE box, and
@@ -221,7 +223,7 @@ relative to the folder of its `.composite.json`.
 
 ```
 data/composite/<name>/
-  water.bed.composite.json   tiers[] (one a part): grain_m, step_deg, folder, box, match "*.tif", over, inputs, decimation,
+  water.bed.composite.json   tiers[] (one a part): grain_m, step_deg, folder, box, match "*.tif", inputs, decimation,
                              datum, vertical_epsg, unit, nodata, offset_m, offset_measured, source_files, stats;
                              datum_separation, phases_s, later
   bed/<source>_<grain>m/p<k>/*.tif  float32 GeoTIFF tiles (section 3), named by their NW corner (n42x8125_w70x8125.tif)

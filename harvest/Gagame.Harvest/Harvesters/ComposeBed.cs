@@ -315,19 +315,17 @@ public sealed class ComposeBed : IHarvester
                 ("per_tile", perFile));
         }
 
-        var over = ordered.Count(tierStats.ContainsKey);
         foreach (var tk in ordered.Where(tierStats.ContainsKey))
         {
             var other = tk.S.Datum != datum;
             var offset = other ? offsets[tk.S.Datum] : null;
-            --over;
             for (int p = 0; p < tierParts[tk].Count; ++p)
             {
             if (!Directory.EnumerateFiles(Path.Combine(outDir, "bed", tk.Folder, $"p{p}"), "*.tif").Any()) continue;
             var pb = tierParts[tk][p];
             tierDocs.Add(D(("grain_m", Round(tk.Grain, 3)), ("step_deg", tk.S.StepDeg * Math.Pow(2, tk.K)), ("folder", $"bed/{tk.Folder}/p{p}"), ("match", "*.tif"),
                 ("box", new List<double> { pb.Lon0, pb.Lat0, pb.Lon1, pb.Lat1 }),
-                ("over", over), ("inputs", new List<object?> { tk.S.Id }), ("decimation", 1 << tk.K),
+                ("inputs", new List<object?> { tk.S.Id }), ("decimation", 1 << tk.K),
                 ("datum", tk.S.Datum), ("vertical_epsg", tk.S.VEpsg), ("unit", "m"), ("nodata", (double)NoData),
                 ("offset_m", other ? Round(offset ?? 0.0, 3) : 0.0),
                 ("offset_measured", other ? offset is not null : null),

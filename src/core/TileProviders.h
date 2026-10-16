@@ -26,8 +26,12 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <deque>
+#include <functional>
 #include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace ga {
 
@@ -56,7 +60,7 @@ class GoogleTileProvider {
 public:
     // mapType: "satellite" (imagery). Reads the key, opens the day's ledger (and logs what it
     // holds against the day's caps), restores or creates the tile session.
-    bool Init(const std::string& mapType, uint32_t fetchBudget, const DayCaps& dayCaps);
+    bool Init(const std::string& mapType, uint32_t fetchBudget, const DayCaps& dayCaps, bool offline = false);
     // The selftest's provider: tiles from `cacheRoot`\<mapType>\z_x_y.jpg and from nowhere
     // else. No key is read, no session made, and no connection is ever opened: a tile the
     // folder lacks is refused when the budget is spent and fails when it is not. With `day`,
@@ -69,6 +73,30 @@ public:
     bool Ready() const { return !m_session.empty(); }
     const std::string& Attribution() const { return m_attribution; }
     void SetFetchCounter(uint32_t* counter) { m_counter = counter; }
+    ~GoogleTileProvider() { StopNetwork(); }
+
+    // THE NETWORK OFF THE LOADERS (2026-10-14). The 80 ms pace is process-wide, and a loader that
+    // waited out its turn held its Io thread asleep: a burst put every loader in the queue and every
+    // other load (heights, the water's, the disk's colour) behind it. Deferred: a tile not on disk,
+    // asked by a load (g_loadTenant), is queued for the provider's own `threads` and the paint
+    // answers without it (not whole: the manager holds the tile back). When it lands, `landed` is
+    // told each load that waited (the manager's Again: asked again, now from the disk). A
+    // caller with no load (a tool) fetches in place as before; a headless still keeps the old way
+    // (its frames must see the tiles, as its wave solve blocks).
+    using LoadFn = std::function<void(int tenant, const TileRequest& r)>;
+    void StartNetwork(int threads, LoadFn landed);
+    void StopNetwork();
+    // Every frame, on the main thread: a load not named within the glance (`wanted` false) leaves
+    // its queued fetch, and is told (`forget`: asked again if it comes back); a fetch no load waits
+    // for leaves the queue unsent.
+    void PruneQueue(const std::function<bool(int, const TileRequest&)>& wanted, const LoadFn& forget);
+    uint32_t Queued() {
+        std::lock_guard<std::mutex> lk(m_mx);
+        return static_cast<uint32_t>(m_asks.size());
+    }
+    std::atomic<uint32_t> netAsked{0}, netSent{0}, netPruned{0}, netFailed{0};
+    uint32_t NoneSaid() const { return m_noneSaid.load(); }
+    uint32_t NoneKnown() const { return m_noneKnown.load(); }
     // One decoded 256x256 RGBA Mercator tile (cache-first, throttled, budget-capped); nullptr
     // on budget exhaustion or transport failure. shared_ptr on purpose: workers hold decoded
     // tiles across LRU evictions by other workers (a raw pointer here was a use-after-free
@@ -107,11 +135,13 @@ private:
     // ONE THREAD AT A TIME FETCHES A TILE. Under m_mx: the tile is decoded, refused, joined (it
     // was in flight on another thread, which has finished: take what that fetch left -- its
     // file, or its failure) or entered (this thread fetches it; LeaveFlight on every way out).
-    enum class Join { Decoded, Refused, Joined, Entered };
+    enum class Join { Decoded, Refused, Joined, Entered, Pending };
     Join JoinLocked(uint64_t key, std::unique_lock<std::mutex>& lk,
                     std::shared_ptr<std::vector<uint8_t>>* hit);
     void LeaveFlight(uint64_t key);
     bool CachedTile(int z, int x, int y, std::vector<uint8_t>& jpg);   // the file alone
+    std::string NonePath(int z, int x, int y) const;   // the kept 404: z_x_y.none beside the tile
+    bool KnownNone(int z, int x, int y) const;
     std::string TilePath(int z, int x, int y) const;
     std::shared_ptr<std::vector<uint8_t>> Keep(uint64_t key, std::vector<uint8_t>& jpg);
     bool EnsureSession();
@@ -128,6 +158,7 @@ private:
     std::string m_key, m_session, m_mapType = "satellite", m_attribution;
     std::string m_cacheRoot = "cache\\google";
     bool m_offline = false;              // InitCacheOnly: no request is ever sent
+    bool m_noNetwork = false;            // Init without a session: the cache serves, nothing is sent
     uint32_t m_budget = 1000;
     uint32_t m_fetched = 0;
     bool m_budgetLogged = false;
@@ -144,7 +175,21 @@ private:
     std::set<uint64_t> m_inFlight;       // KeyOf of every tile being fetched now; under m_mx
     std::condition_variable m_flightDone;   // woken whenever a tile leaves m_inFlight
     std::atomic<uint32_t> m_flightWaits{0};
+    std::atomic<uint32_t> m_noneSaid{0}, m_noneKnown{0};   // 404s kept; asks answered by a kept 404
     DayLedger m_day;                     // opened by Init (and by InitCacheOnly given `day`)
+    // The deferred network (StartNetwork); under m_mx.
+    struct Ask {
+        int z = 0, x = 0, y = 0;
+        std::vector<std::pair<int, TileRequest>> waiters;
+    };
+    bool m_defer = false, m_netStop = false;
+    std::map<uint64_t, Ask> m_asks;      // the tiles queued, by KeyOf
+    std::deque<uint64_t> m_netQ;         // their order; the newest is sent first
+    std::condition_variable m_netCv;
+    std::vector<std::thread> m_net;
+    LoadFn m_landed;
+    void NetLoop();
+    void AddWaiterLocked(Ask& a);
 };
 
 }  // namespace ga

@@ -187,7 +187,7 @@ bool BathyModel::RealizeFromChannel(const Compositor& comp, int heightChannel) {
         const double lat = (m_lat1 - (y + 0.5) * m_dlat) * d2r;
         for (int x = 0; x < m_nx; ++x) {
             const double lon = (m_lon0 + (x + 0.5) * m_dlon) * d2r;
-            const float v = comp.SampleHeightStack(heightChannel, lat, lon, resM);
+            const float v = comp.SampleHeight(heightChannel, lat, lon, resM);
             float& e = m_elev[static_cast<size_t>(y) * m_nx + x];
             if (e < -9000.0f) {
                 ++filled;                        // nodata -> the stack's base (NE15/ETOPO)

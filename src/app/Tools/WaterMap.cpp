@@ -100,7 +100,7 @@ void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
     // coastline). The vpack coast is CLIPPED polylines, so scanline parity is unsound (tried;
     // false closure chords flipped the whole Atlantic to land). Heights are the land authority.
     auto isLand = [&](double latD, double lonD) {
-        return heightChannel >= 0 && comp.SampleHeightStack(heightChannel, latD * kD2R, lonD * kD2R, 461.0) > 0.0f;
+        return heightChannel >= 0 && comp.SampleHeight(heightChannel, latD * kD2R, lonD * kD2R, 461.0) > 0.0f;
     };
 
     // The page: paper white; ocean tinted by M2 AMPLITUDE from the composed stack (the same
@@ -115,7 +115,7 @@ void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
             if (latD < lat0 || latD > lat1 || lonD < lon0 || lonD > lon1) continue;
             if (bathyChannel >= 0) {
                 const float h =
-                    comp.SampleHeightStack(bathyChannel, latD * kD2R, lonD * kD2R, 60.0);
+                    comp.SampleHeight(bathyChannel, latD * kD2R, lonD * kD2R, 60.0);
                 if (h > 0.0f) {                       // hypsometric land from the SAME stack
                     const double t = std::clamp(h / 60.0, 0.0, 1.0);
                     p[0] = static_cast<uint8_t>(196 + 40 * t);

@@ -128,10 +128,11 @@ public sealed class Tides : IHarvester
         var out_ = new List<Harcon>();
         foreach (var c in data.Arr("HarmonicConstituents"))
             out_.Add(new Harcon(c.Str("name") ?? "?", c.Num("speed"), c.Num("amplitude"), c.Num("phase_GMT")));
-        var m2 = out_.FirstOrDefault(c => c.Name == "M2");
-        if (m2 is not null && m2.AmpM > 2.5)
+        // The units the answer DECLARES (CO-OPS has ignored the request's `units` before, but its answer says
+        // which it holds). The old test, an M2 over 2.5 m read as feet, shrank real tides: Eastport's M2 is 2.6 m.
+        if ((data.Str("units") ?? "").StartsWith("feet", StringComparison.OrdinalIgnoreCase))
         {
-            _ctx.Log($"    harcon for {sid} looks like feet (M2={m2.AmpM:0.00}); converting to metres");
+            _ctx.Log($"    harcon for {sid} says feet; converting to metres");
             out_ = out_.Select(c => c with { AmpM = c.AmpM * 0.3048 }).ToList();
         }
         return (out_, cached);

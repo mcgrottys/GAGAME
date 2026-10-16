@@ -242,8 +242,10 @@ public sealed class FidelityMap
         var d = new double[3];
         DirOfLatLon(latDeg, lonDeg, d);
         int f = FaceOfDir(d, out double u, out double v);
-        int deepest = l.Cells.Keys.Max(k => (int)k.Level);
-        for (int L = deepest; L >= 0; --L)
+        // The point's own cell at every level, deepest first: at most MaxLevel + 1 lookups. Scanning
+        // the cells for the deepest level cost a pass over the layer a call (the painter's hover asks
+        // every mouse move); `Cells` is written from outside, so a cached level could go stale.
+        for (int L = MaxLevel; L >= 0; --L)
         {
             uint n = 1u << L;
             var k = new CellKey((byte)f, (byte)L, (uint)Math.Min(n - 1, Math.Floor(u * n)), (uint)Math.Min(n - 1, Math.Floor(v * n)));

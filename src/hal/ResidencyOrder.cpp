@@ -841,7 +841,9 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     std::vector<const Tracked*> refused;   // refused this pass, not held: the guard walks down from them
     for (const auto& [k, r] : m_failedKeys) {
         const Tracked* tr = Find(k, r);
-        if (tr && tr->rec != UINT32_MAX) m_rec[tr->rec].flags |= kDeadBit;
+        // dead while it is refused: one asked again since (Again, a source that can now answer) is
+        // Seen, and a dead mark here left its record out of every order for good
+        if (tr && tr->rec != UINT32_MAX && tr->state == TileState::Failed) m_rec[tr->rec].flags |= kDeadBit;
         if (tr && tr->state == TileState::Failed && !tr->magnified) refused.push_back(tr);
     }
     m_failedKeys.clear();

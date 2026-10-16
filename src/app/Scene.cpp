@@ -534,7 +534,10 @@ bool CheckLayerOrder(const Scene& S, const std::vector<std::string>& registered,
     // law), so what is checked is that the order it REGISTERED in is the declared order with the
     // layers this run could not build left out -- a subsequence. A repeat of the previous name is
     // a second instance of one declaration (the Droste outer bank's set B) and keeps its place.
-    const std::vector<std::string> want = S.LayerOrder();
+    // Every declared layer, enabled or not: a layer `enabled: false` is still built and registered
+    // (it is not drawn), and an enabled-only list refused every scene that switched one off.
+    std::vector<std::string> want;
+    for (const SceneLayer& l : S.layers) want.push_back(l.p.name);
     size_t i = 0;
     std::string prev;
     for (const std::string& name : registered) {

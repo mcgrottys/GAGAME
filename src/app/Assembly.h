@@ -50,6 +50,7 @@
 #include "core/ExitTrail.h"
 #include "compose/ExposurePage.h"
 #include "compose/HeightPage.h"
+#include "compose/HeightTree.h"
 #include "compose/ExposureSource.h"
 #include "compose/GisMask.h"
 #include "compose/BuildingField.h"
@@ -206,6 +207,15 @@ struct Assembly {
     // M9ak: the SAME survey, as rings rather than as a parity fill -- the compositor's
     // land/sea gate. Neither .raw mask is opened by this one.
     GisVectorMask gisMask;
+    // Declared after gisMask, so it runs first: the water banks' mask rasters run on loader threads
+    // and read it (WaterBankLayer::MaskJobs::Close waits for them). Each bank's state is added where
+    // the bank is given the mask.
+    struct BankMaskClose {
+        std::vector<std::shared_ptr<WaterBankLayer::MaskJobs>> jobs;
+        ~BankMaskClose() {
+            for (auto& j : jobs) j->Close();
+        }
+    } bankMaskClose;
     GisMaskSource srcGisMask{&gisMask};
     VectorPack vectors;      // M6p: lossless vector layers, LOD by wedge importance
     GisLayer* gisLayer = nullptr;
@@ -233,6 +243,15 @@ struct Assembly {
     // (the user's rule) -- and the order is printed, not assumed.
     std::shared_ptr<DomainSource> heightRoot;
     std::unique_ptr<TileTree> heightTree;
+    // Declared after heightTree, so it runs first: the CPU reader's loads (HeightTree::Request) read
+    // through that tree, and Close() waits for any still running before it can die.
+    struct HeightTreeClose {
+        Compositor& comp;
+        const int& ch;
+        ~HeightTreeClose() {
+            if (HeightTree* t = ch >= 0 ? comp.HeightTreeOf(ch) : nullptr) t->Close();
+        }
+    } heightTreeClose{compositor, hgtCh};
     // M9ba: THE SWELL EXPOSURE AS A TREE NODE. A DomainSource (the LOS march over the height
     // stack), a one-input compose root so the tree materializes R16F, the tree behind a
     // holder so a bucket roll swaps it under the tenant's provider, and the tenant itself.

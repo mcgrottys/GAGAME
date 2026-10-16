@@ -93,6 +93,9 @@ public:
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
     int OwnMip(const Lattice& lattice) const override;
     bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override;
+    // A height's range over a box: the files' 16 x 16 blocks under it (BlockRange), in kHeightFrame.
+    // Full where one file holds the whole box, every texel a number, past the feather.
+    Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
     // THE PLACEMENT of the first file from a georeference -- and a height's unit and datum from
     // its valueUnit; public so a test can plant a wrong one through the same door.
     bool Place(const GeoRef& ref, std::string* why);
@@ -129,6 +132,13 @@ private:
         std::vector<double> v, n;   // (kWin + 1)^2 each, row-major: sums over texels x < i, y < j
     };
     std::shared_ptr<const Sat> WindowSat(size_t file, uint32_t wx, uint32_t wy);
+    // A window's 16 x 16 blocks: each one's least and greatest number, and whether it holds a NaN
+    // (RangeIn's bound, read in blocks rather than texels).
+    struct Blocks {
+        float mn[256], mx[256];
+        uint8_t nan[256];
+    };
+    std::shared_ptr<const Blocks> WindowBlocks(size_t file, uint32_t wx, uint32_t wy);
     void BoxIntegral(size_t file, double u0, double u1, double v0, double v1, double& value, double& have);
     float Feathered(double x, double y) const;
 
@@ -149,6 +159,8 @@ private:
     std::unordered_map<uint64_t, decltype(m_lru)::iterator> m_index;
     std::list<std::pair<uint64_t, std::shared_ptr<const Sat>>> m_satLru;   // under m_cacheMx
     std::unordered_map<uint64_t, decltype(m_satLru)::iterator> m_satIndex;
+    std::list<std::pair<uint64_t, std::shared_ptr<const Blocks>>> m_blkLru;   // under m_cacheMx
+    std::unordered_map<uint64_t, decltype(m_blkLru)::iterator> m_blkIndex;
 };
 
 // Every entry, opened: one source each. A refused entry is logged by name with its reason, and

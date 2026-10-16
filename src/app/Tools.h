@@ -27,9 +27,11 @@
 namespace ga {
 class BathyModel;
 class Camera;
+class ColorSource;
 class Compositor;
 class ExposureSource;
 class GisVectorMask;
+class HeightTree;
 class GlobeLayer;
 class GlobeModel;
 class Gpu;
@@ -83,6 +85,14 @@ int RunSelfTest(const Options& opt);
 // ---- During assembly (the call keeps its exact place in the boot sequence).
 
 // --water-map / --bathy-map: the reprojection proof (Lambert conformal sheet); exit 0.
+// --tool height-tree-probe: the CPU's read of the height tree against the stack (compose/HeightTree.h).
+int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anchorLatDeg);
+// --tool paint-ab: a colour source's tile-at-a-time paint against its texel-by-texel one, byte for byte.
+int RunPaintAB(ColorSource& src, double anchorLatDeg, double anchorLonDeg);
+// --tool fetch-probe: the fetch on the height tree (HeightTree::Fetch) against a brute march.
+int RunFetchProbe(HeightTree& tree, double anchorLatDeg, double anchorLonDeg);
+// --tool exposure-ab: the exposure's open-sea shortcut against the march, value for value.
+int RunExposureAB(const Compositor& comp, int hgtCh, double anchorLatDeg, double anchorLonDeg);
 int RunWaterMap(const Options& opt, Gpu& gpu, Compositor& compositor,
                 int hgtCh, const WaterAtlas& waterAtlas, const Space::Anchor& chart);
 // --gis-dump PATH: the survey gate over its box as a PGM; std::exit(0) from inside.

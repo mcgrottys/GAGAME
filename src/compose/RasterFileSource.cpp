@@ -1,3 +1,4 @@
+#include <limits>
 #include "compose/RasterFileSource.h"
 
 #include "compose/ColorStackSource.h"
@@ -389,6 +390,109 @@ std::shared_ptr<const RasterFileSource::Sat> RasterFileSource::WindowSat(size_t 
         m_satLru.pop_back();
     }
     return m_satLru.front().second;
+}
+
+std::shared_ptr<const RasterFileSource::Blocks> RasterFileSource::WindowBlocks(size_t file, uint32_t wx, uint32_t wy) {
+    const uint64_t key = (uint64_t(file) << 48) | (uint64_t(wy) << 24) | wx;
+    {
+        std::lock_guard<std::mutex> lk(m_cacheMx);
+        auto it = m_blkIndex.find(key);
+        if (it != m_blkIndex.end()) {
+            m_blkLru.splice(m_blkLru.begin(), m_blkLru, it->second);
+            return it->second->second;
+        }
+    }
+    const auto px = Window(file, wx, wy);
+    auto b = std::make_shared<Blocks>();
+    for (int k = 0; k < 256; ++k) {
+        b->mn[k] = std::numeric_limits<float>::infinity();
+        b->mx[k] = -std::numeric_limits<float>::infinity();
+        b->nan[k] = 0;
+    }
+    for (uint32_t j = 0; j < kWin; ++j) {
+        for (uint32_t i = 0; i < kWin; ++i) {
+            float t;
+            std::memcpy(&t, &(*px)[(size_t(j) * kWin + i) * 4], 4);
+            const int k = int(j / 16) * 16 + int(i / 16);
+            if (std::isnan(t)) {
+                b->nan[k] = 1;
+                continue;
+            }
+            b->mn[k] = (std::min)(b->mn[k], t);
+            b->mx[k] = (std::max)(b->mx[k], t);
+        }
+    }
+    std::lock_guard<std::mutex> lk(m_cacheMx);
+    auto it = m_blkIndex.find(key);
+    if (it != m_blkIndex.end()) return it->second->second;
+    m_blkLru.emplace_front(key, b);
+    m_blkIndex[key] = m_blkLru.begin();
+    if (m_blkLru.size() > kWindows) {   // a few KB each
+        m_blkIndex.erase(m_blkLru.back().first);
+        m_blkLru.pop_back();
+    }
+    return m_blkLru.front().second;
+}
+
+// THE RANGE OVER A BOX. Sample's value is an area mean of the texels its box touches, times the scale
+// plus the offset, so it lies in the range of those texels; the box asked for is taken to the file's
+// texels through the CRS (its corners and edges, a margin for the projection's bend, two texels for
+// the sample's own box at the source's grain -- a coarser box is the caller's to add) and read in blocks.
+HeightSource::Range RasterFileSource::RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo,
+                                              float& hi, bool& full) {
+    full = false;
+    if (!m_height || m_files.empty()) return Range::None;
+    double xa = 1e300, xb = -1e300, ya = 1e300, yb = -1e300;
+    for (int j = 0; j <= 4; ++j) {
+        for (int i = 0; i <= 4; ++i) {
+            double x, y;
+            if (!ToCrs((lat0 + (lat1 - lat0) * j / 4.0) * kD2R, (lon0 + (lon1 - lon0) * i / 4.0) * kD2R, x, y)) {
+                return Range::Unknown;
+            }
+            xa = (std::min)(xa, x); xb = (std::max)(xb, x);
+            ya = (std::min)(ya, y); yb = (std::max)(yb, y);
+        }
+    }
+    const double bx = 0.01 * (xb - xa), by = 0.01 * (yb - ya);
+    xa -= bx; xb += bx; ya -= by; yb += by;
+    if (xb <= m_ux0 || xa >= m_ux1 || yb <= m_uy0 || ya >= m_uy1) return Range::None;
+    const bool insideWhole = xa > m_ux0 && xb < m_ux1 && ya > m_uy0 && yb < m_uy1;
+    bool any = false, nan = false;
+    int files = 0;
+    double tlo = 0.0, thi = 0.0;
+    for (size_t fi = 0; fi < m_files.size(); ++fi) {
+        const File& f = *m_files[fi];
+        if (xb < f.x0 || xa >= f.x1 || yb < f.yLo || ya >= f.yHi) continue;
+        ++files;
+        const double ua = (xa - f.x0) * f.kx - 2.0, ub = (xb - f.x0) * f.kx + 2.0;
+        const double va = (f.down ? f.yHi - yb : ya - f.yLo) * f.ky - 2.0;
+        const double vb = (f.down ? f.yHi - ya : yb - f.yLo) * f.ky + 2.0;
+        if (ua < 0.0 || va < 0.0 || ub > double(f.w) - 1.0 || vb > double(f.h) - 1.0) nan = true;   // the edge
+        const int u0 = (std::max)(0, int(std::floor(ua))), u1 = (std::min)(int(f.w) - 1, int(std::floor(ub)));
+        const int v0 = (std::max)(0, int(std::floor(va))), v1 = (std::min)(int(f.h) - 1, int(std::floor(vb)));
+        if (u0 > u1 || v0 > v1) continue;
+        // a survey finer than the box is worth: past ~16k blocks (a 2k x 2k texel box) the march is the
+        // cheaper answer, and near such a survey there is ground above the water anyway
+        if (double(v1 / 16 - v0 / 16 + 1) * double(u1 / 16 - u0 / 16 + 1) > 16384.0) return Range::Unknown;
+        for (int by_ = v0 / 16; by_ <= v1 / 16; ++by_) {
+            for (int bx_ = u0 / 16; bx_ <= u1 / 16; ++bx_) {
+                const auto b = WindowBlocks(fi, uint32_t(bx_ * 16 / int(kWin)), uint32_t(by_ * 16 / int(kWin)));
+                const int k = (by_ % int(kWin / 16)) * 16 + (bx_ % int(kWin / 16));
+                if (b->nan[k]) nan = true;
+                if (!(b->mn[k] <= b->mx[k])) continue;   // a block of NaN alone
+                tlo = any ? (std::min)(tlo, double(b->mn[k])) : double(b->mn[k]);
+                thi = any ? (std::max)(thi, double(b->mx[k])) : double(b->mx[k]);
+                any = true;
+            }
+        }
+    }
+    if (!any) return Range::None;
+    const double a = tlo * m_vScale + m_vOffset, c = thi * m_vScale + m_vOffset;
+    lo = float((std::min)(a, c));
+    hi = float((std::max)(a, c));
+    full = files == 1 && !nan && insideWhole && Feathered(xa, ya) >= 1.0f && Feathered(xa, yb) >= 1.0f &&
+           Feathered(xb, ya) >= 1.0f && Feathered(xb, yb) >= 1.0f;
+    return Range::Known;
 }
 
 void RasterFileSource::BoxIntegral(size_t file, double u0, double u1, double v0, double v1, double& value,

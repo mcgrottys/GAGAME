@@ -1,3 +1,4 @@
+#include <limits>
 #include "compose/Compositor.h"
 
 #include <windows.h>
@@ -304,6 +305,7 @@ void Compositor::PaintSourceTile(ColorSource* src, const ColorFrame& frame, cons
     const double groundRes = frame.GroundRes(r.mip);
     PaintCtx ctx;
     src->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax, groundRes, ctx);
+    if (s_tilePaint && src->PaintTile(frame, r, groundRes, ctx, out, complete, anyCover, fullCover)) return;
     out.assign(65536, 0);
     complete = true;
     anyCover = false;
@@ -553,6 +555,24 @@ double Compositor::HeightGrainM(int channel, double latRad, double lonRad) const
     return finest;
 }
 
+bool Compositor::HeightStackCeiling(int channel, double lat0, double lon0, double lat1, double lon1, float limit,
+                                    float& hi) const {
+    const Channel& ch = m_channels[channel];
+    hi = -std::numeric_limits<float>::infinity();
+    for (size_t i = ch.height.size(); i-- > 0;) {
+        float mn = 0.0f, mx = 0.0f;
+        bool full = false;
+        const HeightSource::Range r = ch.height[i]->RangeIn(lat0, lon0, lat1, lon1, mn, mx, full);
+        if (r == HeightSource::Range::None) continue;
+        if (r == HeightSource::Range::Unknown) return false;
+        hi = (std::max)(hi, mx);
+        if (hi > limit) return false;
+        if (full) return true;   // it owns the box: nothing beneath it reaches the answer
+    }
+    hi = (std::max)(hi, 0.0f);   // no source owns the whole box: the chain's 0 can show through
+    return hi <= limit;
+}
+
 float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,
                                     double groundResM) const {
     const Channel& ch = m_channels[channel];
@@ -564,6 +584,22 @@ float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,
         h += (m - h) * w;
     }
     return h;
+}
+
+float Compositor::SampleHeight(int channel, double latRad, double lonRad, double groundResM) const {
+    if (HeightTree* t = m_channels[channel].heightTree.get()) return t->Sample(latRad, lonRad, groundResM);
+    return SampleHeightStack(channel, latRad, lonRad, groundResM);
+}
+
+float Compositor::SampleHeightResident(int channel, double latRad, double lonRad, double groundResM,
+                                       bool* provisional) const {
+    if (HeightTree* t = m_channels[channel].heightTree.get()) return t->SampleResident(latRad, lonRad, groundResM, provisional);
+    return SampleHeightStack(channel, latRad, lonRad, groundResM);
+}
+
+uint64_t Compositor::HeightLanded(int channel) const {
+    const HeightTree* t = m_channels[channel].heightTree.get();
+    return t ? t->Landed() : 0u;
 }
 
 void Compositor::SampleFieldStack(int channel, double latRad, double lonRad,

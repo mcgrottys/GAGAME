@@ -284,8 +284,10 @@ public sealed class GeoTiff
     {
         var out_ = new float[w * h];
         Array.Fill(out_, float.NaN);
-        int bx0 = x0 / Tw, bx1 = (x0 + w - 1) / Tw;
-        int by0 = y0 / Th, by1 = (y0 + h - 1) / Th;
+        // the blocks the window meets INSIDE the image: a block column past the last one would index
+        // into the next row's first tile
+        int bx0 = Math.Max(0, x0) / Tw, bx1 = Math.Min(x0 + w - 1, Width - 1) / Tw;
+        int by0 = Math.Max(0, y0) / Th, by1 = Math.Min(y0 + h - 1, Height - 1) / Th;
         for (var by = by0; by <= by1; by++)
             for (var bx = bx0; bx <= bx1; bx++)
             {

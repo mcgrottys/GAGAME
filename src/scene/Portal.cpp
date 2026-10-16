@@ -131,7 +131,7 @@ bool Portal::Build() {
         (3.14159265358979 / 2.0) * planetR / double(1u << portalDecl.level);
     const double ground =
         (hgtCh >= 0 && m_o.compositor)
-            ? double(m_o.compositor->SampleHeightStack(hgtCh, latC, lonC, spanM * 0.25))
+            ? double(m_o.compositor->SampleHeight(hgtCh, latC, lonC, spanM * 0.25))
             : 0.0;
     const double twist = portalDecl.twistDeg * 3.14159265358979 / 180.0;
     const double axisN[3] = {0.0, 0.0, 1.0};   // the anchor's north, in the one frame

@@ -39,6 +39,9 @@ struct CurrentField {
     std::string source;
     double grainM = 0.0;                   // the model's own cell (the composite's grain_m); 0 = unsaid
     bool Valid() const { return nx > 0 && !u.empty(); }
+    bool Holds(double lon, double lat) const {
+        return Valid() && lon >= lon0 && lon <= lon0 + nx * dlon && lat >= lat0 && lat <= lat0 + ny * dlat;
+    }
     // Bilinear where all four corners are water; nearest otherwise. False on land/outside.
     bool Sample(double lon, double lat, float& outU, float& outV) const;
 };
@@ -57,9 +60,17 @@ public:
     double SignedSpeed(size_t sta, double unixT) const;
 
     // THE FIELDS (a composite's `fields`, docs/FIDELITY.md; a file of one says `field`), finest
-    // first. Field() is the finest, for the readers that draw one grid (the gulf map); a point is
-    // answered by SampleAt: the finest field holding water there.
-    const CurrentField& Field() const { static const CurrentField none; return m_fields.empty() ? none : m_fields[0]; }
+    // first. ONE RULE: a place is answered by the finest field whose box holds it -- FieldAt for a
+    // reader that draws one grid about a place (the gulf map), SampleAt for a point (the finest
+    // holding water there). The finest field anywhere answers nothing: in a composite it is another
+    // region's (the coastal map's finest is the Chesapeake's, beside a scene at the Merrimack).
+    const CurrentField& FieldAt(double lon, double lat) const {
+        static const CurrentField none;
+        for (const CurrentField& f : m_fields) {
+            if (f.Holds(lon, lat)) return f;
+        }
+        return none;
+    }
     size_t FieldCount() const { return m_fields.size(); }
     bool SampleAt(double lon, double lat, float& outU, float& outV) const;
 

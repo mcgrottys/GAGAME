@@ -1,6 +1,7 @@
 #include "scene/WaterBankLayer.h"
 
 #include "compose/GisMask.h"
+#include "core/ThreadManager.h"
 
 #include "hal/GpuProfiler.h"
 
@@ -223,31 +224,74 @@ void WaterBankLayer::PlaceOfRing(double wx, double wz, double& latDeg, double& l
     lonDeg = m_chart.lonDeg;
 }
 
-bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
-    if (!m_comp || m_hgtCh < 0) return true;
-    // THE MASK GATES, THE HEIGHT REFINES -- here as in the colour and the classifier: a tile the
-    // survey calls water anywhere carries waves. The height test alone kept only what the height
-    // stack held under 2.5 m, and a place with no fine bathymetry has none: Tokyo Bay read +9 m
-    // at the relief's 4.9 km, every near ring came out dry and the sea under the eye flat (Mark,
-    // 2026-10-10). The height test stays for what the survey cannot know (a flat under the tide,
-    // a river the coast's polygons hold as land).
-    if (m_mask && m_mask->Ready()) {
-        double la0 = 90.0, la1 = -90.0, lo0 = 180.0, lo1 = -180.0, lc = 0.0, loc = 0.0;
-        PlaceOfRing(wx0 + 0.5 * spanM, wz0 + 0.5 * spanM, lc, loc);
-        for (int k = 0; k < 4; ++k) {
-            double la = 0.0, lo = 0.0;
-            PlaceOfRing(wx0 + (k & 1) * spanM, wz0 + (k >> 1) * spanM, la, lo);
-            lo = loc + Space::Anchor::WrapDeg(lo - loc);   // one side of the antimeridian
-            la0 = (std::min)(la0, la); la1 = (std::max)(la1, la);
-            lo0 = (std::min)(lo0, lo); lo1 = (std::max)(lo1, lo);
-        }
-        constexpr uint32_t kDim = 16;   // a 128-texel tile at 1/8 of its texels
-        std::vector<uint8_t> g;
-        m_mask->RasterizeGate(la0, la1, lo0, lo1, kDim, g);
-        for (uint32_t i = 0; i + 1 < g.size(); i += 2) {
-            if ((g[i + 1] & 1u) && g[i] >= 128u) return true;   // surveyed, and water
-        }
+void WaterBankLayer::MaskBox(double wx0, double wz0, double spanM, double box[4]) const {
+    double la0 = 90.0, la1 = -90.0, lo0 = 180.0, lo1 = -180.0, lc = 0.0, loc = 0.0;
+    PlaceOfRing(wx0 + 0.5 * spanM, wz0 + 0.5 * spanM, lc, loc);
+    for (int k = 0; k < 4; ++k) {
+        double la = 0.0, lo = 0.0;
+        PlaceOfRing(wx0 + (k & 1) * spanM, wz0 + (k >> 1) * spanM, la, lo);
+        lo = loc + Space::Anchor::WrapDeg(lo - loc);   // one side of the antimeridian
+        la0 = (std::min)(la0, la); la1 = (std::max)(la1, la);
+        lo0 = (std::min)(lo0, lo); lo1 = (std::max)(lo1, lo);
     }
+    box[0] = la0; box[1] = la1; box[2] = lo0; box[3] = lo1;
+}
+
+// THE MASK GATES, THE HEIGHT REFINES -- here as in the colour and the classifier: a tile the
+// survey calls water anywhere carries waves. The height test alone kept only what the height
+// stack held under 2.5 m, and a place with no fine bathymetry has none: Tokyo Bay read +9 m
+// at the relief's 4.9 km, every near ring came out dry and the sea under the eye flat (Mark,
+// 2026-10-10). The height test stays for what the survey cannot know (a flat under the tide,
+// a river the coast's polygons hold as land).
+bool WaterBankLayer::MaskAnswer(const GisVectorMask& mask, const double box[4]) {
+    constexpr uint32_t kDim = 16;   // a 128-texel tile at 1/8 of its texels
+    std::vector<uint8_t> g;
+    mask.RasterizeGate(box[0], box[1], box[2], box[3], kDim, g);
+    for (uint32_t i = 0; i + 1 < g.size(); i += 2) {
+        if ((g[i + 1] & 1u) && g[i] >= 128u) return true;   // surveyed, and water
+    }
+    return false;
+}
+
+// THE MASK OFF THE FRAME (MEASURED 2026-10-14, the flood rail at the Merrimack, main and this branch
+// alike: a ring's sixteen rasters of the coast took up to 420 ms on the frame thread, 434 frames of
+// 1,200 over 20 ms). A ring that moves keeps the answers of the tiles it still covers; the tiles new
+// to it are asked of a loader thread and count as water until they are answered -- the gate's own
+// default, permissive: a tile wrongly wet costs memory for a moment, one wrongly dry flattens the sea.
+void WaterBankLayer::AskMask(int m, const std::vector<std::pair<int, std::array<double, 4>>>& tiles) {
+    if (tiles.empty() || !m_mask) return;
+    auto st = m_maskJobs;
+    uint64_t gen;
+    {
+        std::lock_guard<std::mutex> lk(st->mx);
+        if (st->closed) return;
+        gen = ++st->want[m];
+        ++st->inflight;
+    }
+    const GisVectorMask* mask = m_mask;
+    Threads().Submit(Lane::Io, "waterbank.mask", [st, mask, m, gen, tiles] {
+        std::vector<std::pair<int, uint8_t>> out;
+        for (const auto& [i, box] : tiles) {
+            {
+                std::lock_guard<std::mutex> lk(st->mx);
+                if (st->closed || st->want[m] != gen) break;   // the ring has moved on: not wanted
+            }
+            out.push_back({i, MaskAnswer(*mask, box.data()) ? uint8_t(1) : uint8_t(0)});
+        }
+        {
+            std::lock_guard<std::mutex> lk(st->mx);
+            if (!st->closed && st->want[m] == gen && out.size() == tiles.size()) {
+                st->answers[m] = std::move(out);
+                st->ready[m] = gen;
+            }
+            --st->inflight;
+        }
+        st->idle.notify_all();
+    });
+}
+
+bool WaterBankLayer::HeightWet(double wx0, double wz0, double spanM, bool& provisional) const {
+    if (!m_comp || m_hgtCh < 0) return true;
     // Five-point test against the one height stack: any point at or below the high-water
     // margin keeps the tile; a tile of pure upland stays NULL.
     for (int k = 0; k < 5; ++k) {
@@ -255,7 +299,7 @@ bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
         const double fz = (k == 4) ? 0.5 : (k & 2) ? 0.96 : 0.04;
         double lat = 0.0, lon = 0.0;
         PlaceOfRing(wx0 + fx * spanM, wz0 + fz * spanM, lat, lon);
-        if (m_comp->SampleHeightStack(m_hgtCh, lat * kD2R, lon * kD2R, spanM * 0.25) < 2.5f) {
+        if (m_comp->SampleHeightResident(m_hgtCh, lat * kD2R, lon * kD2R, spanM * 0.25, &provisional) < 2.5f) {
             return true;
         }
     }
@@ -271,7 +315,7 @@ void WaterBankLayer::CornerParams(double wx, double wz, float& lvl, float& bed) 
                                  m_atlas->Level(lat, lon, m_simUnix, 500.0));
     }
     bed = (m_comp && m_hgtCh >= 0)
-              ? m_comp->SampleHeightStack(m_hgtCh, lat * kD2R, lon * kD2R, 100.0)
+              ? m_comp->SampleHeightResident(m_hgtCh, lat * kD2R, lon * kD2R, 100.0)
               : -30.0f;
 }
 
@@ -281,18 +325,64 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
     const double half = 0.5 * kRingTexels * texel;
     const float ox = static_cast<float>(std::floor((camX - half) / tileSpan) * tileSpan);
     const float oz = static_cast<float>(std::floor((camZ - half) / tileSpan) * tileSpan);
-    if (m_orgValid[m] && ox == m_orgX[m] && oz == m_orgZ[m]) return;
+    // The tiles' land test reads what the height tree holds (it never waits on a paint). A ring
+    // whose heights were answered coarser than asked asks again when a load has landed: the height
+    // half only, where the ring stands -- the mask's answer is the ring's place's, kept until it moves.
+    const bool moved = !(m_orgValid[m] && ox == m_orgX[m] && oz == m_orgZ[m]);
+    const uint64_t landed = (m_comp && m_hgtCh >= 0) ? m_comp->HeightLanded(m_hgtCh) : 0u;
+    // the mask's answers for this ring's tiles, if a loader has brought them since
+    bool answered = false;
+    {
+        std::lock_guard<std::mutex> lk(m_maskJobs->mx);
+        if (m_maskJobs->ready[m] && m_maskJobs->ready[m] == m_maskJobs->want[m]) {
+            for (const auto& [i, w] : m_maskJobs->answers[m]) {
+                m_maskWet[m][i] = w;
+                m_maskKnown[m][i] = 1;
+            }
+            m_maskJobs->ready[m] = 0;
+            answered = true;
+        }
+    }
+    if (!moved && !answered && !(m_provisional[m] && landed != m_landSeen[m])) return;
+    m_landSeen[m] = landed;
+    if (moved) {
+        // the tiles the ring still covers keep their answers; the rest are asked (and wet meanwhile)
+        uint8_t kept[kRingTiles * kRingTiles];
+        std::vector<std::pair<int, std::array<double, 4>>> ask;
+        const bool was = m_orgValid[m];
+        const int dx = was ? int(std::lround((ox - m_orgX[m]) / tileSpan)) : 0;
+        const int dz = was ? int(std::lround((oz - m_orgZ[m]) / tileSpan)) : 0;
+        for (int ty = 0; ty < kRingTiles; ++ty) {
+            for (int tx = 0; tx < kRingTiles; ++tx) {
+                const int sx = tx + dx, sy = ty + dz, i = ty * kRingTiles + tx;
+                if (was && sx >= 0 && sy >= 0 && sx < kRingTiles && sy < kRingTiles &&
+                    m_maskKnown[m][sy * kRingTiles + sx]) {
+                    kept[i] = m_maskWet[m][sy * kRingTiles + sx];
+                    continue;
+                }
+                kept[i] = 2;   // asked
+                std::array<double, 4> box;
+                MaskBox(ox + tx * tileSpan, oz + ty * tileSpan, tileSpan, box.data());
+                ask.push_back({i, box});
+            }
+        }
+        const bool mask = m_mask && m_mask->Ready();
+        for (int i = 0; i < kRingTiles * kRingTiles; ++i) {
+            m_maskKnown[m][i] = !mask || kept[i] != 2;
+            m_maskWet[m][i] = !mask ? 0 : kept[i] == 2 ? 1 : kept[i];
+        }
+        if (mask) AskMask(m, ask);
+    }
     m_orgX[m] = ox;
     m_orgZ[m] = oz;
     m_orgValid[m] = true;
 
     // Land tiles NULL: RGBA16F hardware tiles are 128x64, so one logical 128^2 tile is a
     // 1x2 hardware pair in each bank.
-    bool changed = false;
+    bool changed = false, provisional = false;
     for (int ty = 0; ty < kRingTiles; ++ty) {
         for (int tx = 0; tx < kRingTiles; ++tx) {
-            const bool wet =
-                TileWet(ox + tx * tileSpan, oz + ty * tileSpan, tileSpan);
+            const bool wet = m_maskWet[m][ty * kRingTiles + tx] || HeightWet(ox + tx * tileSpan, oz + ty * tileSpan, tileSpan, provisional);
             uint8_t& state = m_wet[m][ty * kRingTiles + tx];
             if (state == (wet ? 1 : 0) && m_orgValid[m]) {
                 // state carries over; mapping only changes on wet/dry flips
@@ -322,6 +412,7 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
     m_param.CommitMappings(gpu, &fresh);
     fresh.clear();
     m_detail.CommitMappings(gpu, &fresh);
+    m_provisional[m] = provisional;
     (void)changed;
 }
 

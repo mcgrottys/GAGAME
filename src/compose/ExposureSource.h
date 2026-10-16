@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace ga {
@@ -35,6 +36,14 @@ namespace ga {
 namespace expo_detail {
 inline constexpr uint64_t kNoTile = ~0ull;
 inline thread_local uint64_t t_tile = kNoTile;
+// THE OPEN SEA, per thread: a cell whose ceiling the stack cannot rise above (Compositor::
+// HeightStackCeiling), by (source, cell, grain, bucket); the last few, round robin.
+struct OpenCell {
+    uint64_t key = 0;
+    bool open = false;
+};
+inline thread_local OpenCell t_open[8];
+inline thread_local uint32_t t_openNext = 0;
 }  // namespace expo_detail
 
 class ExposureSource : public DomainSource {
@@ -119,12 +128,23 @@ public:
         const double ang0 = dirB * kDirBucketDeg * 3.14159265358979 / 180.0;
         constexpr double kD2R = 3.14159265358979 / 180.0;
         const double lat0 = q.lat * kD2R, lon0 = q.lon * kD2R;
-        const float e0 = m_comp->SampleHeightStack(m_hgtCh, lat0, lon0, q.groundM);
+        // THE STACK, NOT THE TREE (2026-10-15): the tree's ray (HeightTree::MaxAlongRay) was 1.5x faster
+        // where the tree was warm, but a node read on the frame thread (ExposurePage, a hull) and on the
+        // loaders paints every cold tile its five 50 km rays cross -- at each place a travel reached, 3.2 s
+        // a page on the loaders and 7.3 s of the frame thread's waits.
         out.c[0] = 1.0f;
         out.weight = 1.0f;
-        if (e0 > level) return true;   // land: exposed by convention; never sampled as water
         // The step follows the texel: a 76 m texel does not need 13 m steps, a 9 m one does.
         const double stepM = (std::max)(kStepMinM, q.groundM * 0.35);
+        // THE OPEN SEA (2026-10-15): where nothing the stack holds within the march's reach rises
+        // past the water line by the 0.15 m that starts a shadow, every ray's excess is under it, its
+        // transmission 1, and the answer the march would give is exactly 1 -- so it is given without the
+        // march. The reach: the cell about this texel, out by the range, the sample's own box at the
+        // step and at the texel, and a margin. Offshore this was 750 stack reads a texel, 3.2 s a page.
+        s_lastOpen = s_openSea && OpenSea(q.lat, q.lon, q.groundM, stepM, level, p);
+        if (s_lastOpen) return true;
+        const float e0 = m_comp->SampleHeightStack(m_hgtCh, lat0, lon0, q.groundM);
+        if (e0 > level) return true;   // land: exposed by convention; never sampled as water
         const int maxSteps = static_cast<int>(kMaxRangeM / stepM);
         // A FAN, not a ray -- and the BEST ray, not the mean. The sea has directional spread
         // (the wave-field spectrum's +-26 degrees, `wavefield`); a jettied channel takes
@@ -181,8 +201,43 @@ public:
     static constexpr double kLevelBucketM = 0.25;
     static constexpr double kStepMinM = 13.0;
     static constexpr double kMaxRangeM = 4000.0;
+    // --tool exposure-ab: the shortcut on or off, the plant's slack on its limit, and whether the last
+    // sample on this thread was answered open.
+    static inline bool s_openSea = true;
+    static inline float s_openSlack = 0.0f;
+    static inline thread_local bool s_lastOpen = false;
 
 private:
+    static constexpr double kCellDeg = 0.05;
+    bool OpenSea(double latDeg, double lonDeg, double groundM, double stepM, double level, uint64_t p) const {
+        if (std::abs(latDeg) > 80.0) return false;
+        const double cy = std::floor(latDeg / kCellDeg), cx = std::floor(lonDeg / kCellDeg);
+        uint64_t key = 14695981039346656037ull;
+        const auto mix = [&key](uint64_t v) {
+            for (int b = 0; b < 8; ++b) key = (key ^ ((v >> (8 * b)) & 0xFFu)) * 1099511628211ull;
+        };
+        uint64_t g;
+        std::memcpy(&g, &groundM, 8);
+        mix(reinterpret_cast<uintptr_t>(this));
+        mix(uint64_t(int64_t(cy)));
+        mix(uint64_t(int64_t(cx)));
+        mix(g);
+        mix(p);
+        for (const expo_detail::OpenCell& c : expo_detail::t_open) {
+            if (c.key == key) return c.open;
+        }
+        const double marginM = kMaxRangeM + 2.0 * (std::max)(stepM, groundM) + 100.0;
+        const double lat0 = cy * kCellDeg, lat1 = lat0 + kCellDeg;
+        const double dLat = marginM / GlobeModel::kR * 180.0 / 3.14159265358979;
+        const double cosMin = std::cos((std::min)(89.0, (std::max)(std::abs(lat0), std::abs(lat1)) + dLat) * 3.14159265358979 / 180.0);
+        const double dLon = dLat / (std::max)(cosMin, 0.05);
+        float hi = 0.0f;
+        const float limit = float(level + 0.15) - 1e-3f + s_openSlack;
+        const bool open = m_comp->HeightStackCeiling(m_hgtCh, lat0 - dLat, cx * kCellDeg - dLon, lat1 + dLat,
+                                                     (cx + 1.0) * kCellDeg + dLon, limit, hi);
+        expo_detail::t_open[expo_detail::t_openNext++ & 7u] = {key, open};
+        return open;
+    }
     static int32_t DirBucket(uint64_t p) { return static_cast<int32_t>(uint32_t(p >> 32)); }
     static int32_t LevelBucket(uint64_t p) { return static_cast<int32_t>(uint32_t(p & 0xFFFFFFFFu)); }
 

@@ -454,10 +454,13 @@ private:
     // The gate harness only (GAGAME_CYCLE_AT="f1,f2,..." in the environment): cycle forward at
     // those frames, so a headless run can read the [vehicle] and set-down lines. Not a flag.
     std::vector<uint32_t> m_cycleAt;
-    // The travel harness only (GAGAME_TRAVEL_AT="frame,lat,lon"): open the fast-travel portal to
-    // that place at that frame, so a headless run can read the [travel] and [gate] lines.
-    uint32_t m_travelAt = 0;
-    double m_travelAtLat = 0.0, m_travelAtLon = 0.0;
+    // The travel harness only (GAGAME_TRAVEL_AT="frame,lat,lon[;frame,lat,lon...]"): open the fast-travel
+    // portal to each place at its frame, so a headless run can read the [travel] and [gate] lines.
+    struct TravelHop {
+        uint32_t frame;
+        double lat, lon;
+    };
+    std::vector<TravelHop> m_travelAt;
     // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
     // hull goes through a window, the eye keeps standing on this side and chases the hull's
     // APPARENT pose -- pulled back through that window's motor, which is the map the window's
