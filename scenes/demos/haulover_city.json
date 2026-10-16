@@ -15,6 +15,7 @@
     "TRAVEL   the minimap's second button toggles fast travel: click the map and a spherical gate opens",
     "         ahead of the vehicle (hud.minimap.travel*: 8 m ahead, grows to 25 m over 7 s, gone at 12 s)",
     "         leading to the clicked place at your heading -- drive in, or let it swallow you",
+    "CACHE    the minimap's third button paints that map as a heat map of the tiles cached offline (docs/FIDELITY.md 7)",
     "",
     "BRIDGES: the decks come from the tree (docs/ROADS.md). The planet tree named in layers.buildings.lod must have",
     "been built with the two bridges sources below; rebuild it (hours, every core) with",

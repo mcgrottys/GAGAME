@@ -322,6 +322,32 @@ directory entries (7.2 M tiles, 3.6 M voids, 2.3 M other markers), 561.7 GB in c
 (archive directories) outside them. The first scan took 14.5 s; a rebuild with the file system's
 cache warm 3.6 s; a rescan with nothing changed 0.1-0.2 s plus 0.3-0.5 s to load the 33 MB index.
 
+### The cache lens on the minimap
+
+The minimap's third button (left of Travel, a 3 x 3 grid of squares, bright while on and faint while off) paints that
+eye -- and only that eye; the first eye's pipeline and rows are untouched -- as a heat map of this
+index: where tiles are cached offline and how fine. The engine reads `storage-index.bin` itself
+(`src/compose/CacheIndex.{h,cpp}`, a reader of the layout `StorageIndex.Save` writes) the first time
+the toggle turns on in a session, and never again in that session: run `harvest storage` to refresh
+the index, then restart. Every entry, of every source, store and parameter (derived ones too), is
+reduced by one law to the lattice at level 10 (1024 cells a face side, ~9.8 km): an entry of level
+L covers the level-10 cells under it, or the one above it when L > 10; each cell keeps the finest
+level over it and the bytes over it (an entry's bytes spread evenly over the cells it covers). The
+six faces go to the GPU stacked in one 1024 x 6144 R8G8 texture, read in `shaders/CacheLens.hlsl` by
+the pixel's planet direction through the lattice's own face and uv (HpCubeFace), one Load a pixel.
+
+**The colours** are the finest level: dark navy where nothing is stored, blue for the coarsest
+levels, through cyan (6) and yellow (9) to red (11) and white (12, ~2.4 km cells -- anything finer,
+centimetre imagery included, is counted in its level-12 cell, so white means "level 12 or finer").
+The bytes brighten a cell by up to 30 % (log2 of the bytes, over 0..2^40). The day/night lambert
+of the meshlet tint is kept, so the terminator stays readable. The key, bottom left of the map,
+above the altitude, reads left to right: nothing, then levels 0 to 12. No index on disk: the lens
+paints grey and the log says so once.
+
+**The instrument.** `GAGAME_MINIMAP_CACHE=1` starts a run with the toggle on (read once, in
+`FrameLoop::MinimapStep`), so a headless still can show it; the log line `[cachelens]` gives the
+file, folders, entries, cells lit and the milliseconds the read took.
+
 ## 8. Sources by configuration (`harvest/sources/<layer>/<id>.json`)
 
 Started 2026-10-14 (Mark: "a factory design pattern taking buoy data from different sources ... ERDDAP

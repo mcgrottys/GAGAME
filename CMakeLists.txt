@@ -94,6 +94,7 @@ add_executable(gagame
   src/compose/GisMask.cpp
   src/compose/GisStencil.cpp
   src/compose/VectorPack.cpp
+  src/compose/CacheIndex.cpp
   src/compose/Exchange.cpp
   src/compose/WaterAtlas.cpp
   src/core/OceanFft.cpp

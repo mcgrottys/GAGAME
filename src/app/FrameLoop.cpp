@@ -23,6 +23,7 @@
 #include "compose/HeightStackSource.h"
 #include "compose/TileTree.h"
 #include "compose/TileArchive.h"
+#include "compose/CacheIndex.h"
 #include "compose/TileIndex.h"
 #include "hal/TileStream.h"
 #include "compose/ComposeTree.h"
@@ -5984,9 +5985,29 @@ void FrameLoop::DrawGlass(float dt) {
         const float tc = t.w * 0.5f, tr = (std::max)(2.0f, t.w * 0.32f * share);
         hud->Rect(t.x + tc - tr, t.y + tc - tr, 2.0f * tr, 2.0f * tr, HudLayer::Ring,
                   {1.0f, 1.0f, 1.0f, 0.95f}, on ? 3.0f : 2.0f);
+        // THE CACHE TOGGLE (Minimap::Cache): a 3 x 3 grid of squares -- the lattice whose cells the
+        // lens paints -- bright when the toggle is on, faint when it is off.
+        const scene::Minimap::Rect k = scene::Minimap::CacheButton(r);
+        const bool cacheOn = m_minimap.Cache();
+        hud->Rect(k.x, k.y, k.w, k.h, HudLayer::Fill,
+                  cacheOn ? HudLayer::Rgba{0.1f, 0.35f, 0.6f, 0.85f} : HudLayer::Rgba{0.05f, 0.07f, 0.1f, 0.65f});
+        hud->Rect(k.x, k.y, k.w, k.h, HudLayer::Frame, {0.85f, 0.9f, 1.0f, 0.9f}, 1.5f);
+        const float cell = k.w * 0.18f, step = k.w * 0.24f, k0 = 0.5f * (k.w - 2.0f * step - cell);
+        for (int gy = 0; gy < 3; ++gy) {
+            for (int gx = 0; gx < 3; ++gx) {
+                hud->Rect(k.x + k0 + gx * step, k.y + k0 + gy * step, cell, cell, HudLayer::Fill,
+                          {1.0f, 1.0f, 1.0f, cacheOn ? 0.95f : 0.4f});
+            }
+        }
+        // The labels of the toggles that are on, under the row of buttons, each ending at its own
+        // button's right edge and each on a line of its own, so no two ever overlap.
+        float ly = t.y + t.h + 6.0f;
         if (on) {
-            hud->Text(t.x - HudLayer::TextWidth("TRAVEL", 2.0f) - 8.0f, t.y + 5.0f, 2.0f, "TRAVEL",
-                      {1.0f, 1.0f, 1.0f, 0.9f});
+            hud->Text(t.x + t.w - HudLayer::TextWidth("TRAVEL", 2.0f), ly, 2.0f, "TRAVEL", {1.0f, 1.0f, 1.0f, 0.9f});
+            ly += 18.0f;
+        }
+        if (cacheOn) {
+            hud->Text(k.x + k.w - HudLayer::TextWidth("CACHE", 2.0f), ly, 2.0f, "CACHE", {1.0f, 1.0f, 1.0f, 0.9f});
         }
     }
 }
@@ -6039,9 +6060,35 @@ void FrameLoop::MinimapStep(float dt) {
         m_minimapHasSubject = true;
         break;
     }
+    if (!m_cacheLensEnvRead) {   // the gate's hook (FIDELITY.md 7): start with the cache lens on
+        m_cacheLensEnvRead = true;
+        if (const char* v = std::getenv("GAGAME_MINIMAP_CACHE"); v && v[0] == '1') m_minimap.SetCache(true);
+    }
+    if (m_minimap.Cache() && m_cacheLensSrv == UINT32_MAX) {
+        // THE CACHE LENS's map, read the first time it is asked for, on this thread: the harvest's
+        // index is tens of MB and reads in well under a second, once a session.
+        CacheIndex ci;
+        std::string why;
+        const std::wstring path = CacheIndex::DefaultPath();
+        if (ci.Read(path, why)) {
+            m_cacheLensTex = m_A.gpu.CreateTexture2D(CacheIndex::kSide, 6 * CacheIndex::kSide, DXGI_FORMAT_R8G8_UNORM,
+                                                     D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                     L"minimap.cacheLens (the harvest's storage index, level 10)");
+            m_A.gpu.UploadTexture(m_cacheLensTex, ci.rg.data(), CacheIndex::kSide * 2);
+            m_cacheLensSrv = m_A.gpu.CreateSrv(m_cacheLensTex.res.Get(), DXGI_FORMAT_R8G8_UNORM);
+            Log("[cachelens] %ls: %llu folders, %llu entries, %llu of %u level-10 cells lit, %.1f ms",
+                path.c_str(), static_cast<unsigned long long>(ci.folders), static_cast<unsigned long long>(ci.entries),
+                static_cast<unsigned long long>(ci.texelsLit), 6u * CacheIndex::kSide * CacheIndex::kSide, ci.ms);
+        } else {
+            m_cacheLensSrv = kCacheLensNone;
+            Log("[cachelens] %ls: %s -- the lens shows nothing", path.c_str(), why.c_str());
+        }
+    }
     m_minimap.Step(dt, m_minimapHasSubject ? m_minimapSubject : nullptr);
     const scene::Minimap::Rect r = m_minimap.Place(m_A.renderer.Width(), m_A.renderer.Height());
     m_minimapDrawn = r.w >= 8.0f && r.h >= 8.0f;   // it will be drawn: it may claim a set
+    globe->SetCacheLens(1, m_minimap.Cache() ? m_cacheLensSrv : UINT32_MAX, static_cast<uint32_t>(r.x),
+                        static_cast<uint32_t>(r.y));
     m_minimapWin = EyeWindows{};
     m_minimapChain.clear();
     if (!m_minimapDrawn) return;
