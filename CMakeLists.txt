@@ -4,6 +4,8 @@ project(gagame LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# compile_commands.json feeds tools/astindex (libclang): the exact flags of every TU.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if (MSVC)
   add_compile_options(/W4 /permissive- /Zi /utf-8 /MP)
@@ -231,4 +233,18 @@ endif()
 if (DXIL_DLL)
   add_custom_command(TARGET gagame POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DXIL_DLL} $<TARGET_FILE_DIR:gagame>)
+endif()
+
+# The AST index (tools/astindex): after every link, libclang + dxc re-read what changed and update
+# the ast_* tables of tools/Scriptorium/scriptorium.db for the Scriptorium's refs / callers /
+# callees / layout / cbuffer_reads / includes tools. launch.py starts it DETACHED and returns in
+# well under a second, so the build never waits on it; the run logs to build/astindex.log and,
+# without the libclang wheel, writes one line saying so and indexes the HLSL only.
+# GA_ASTINDEX=OFF turns it off.
+option(GA_ASTINDEX "Update the AST index after each build (tools/astindex)" ON)
+find_program(GA_PY_LAUNCHER py)
+if(GA_ASTINDEX AND GA_PY_LAUNCHER)
+  add_custom_command(TARGET gagame POST_BUILD
+    COMMAND ${GA_PY_LAUNCHER} -3 "${CMAKE_SOURCE_DIR}/tools/astindex/launch.py" "${CMAKE_BINARY_DIR}"
+    VERBATIM)
 endif()

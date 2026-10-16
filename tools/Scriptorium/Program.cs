@@ -4,13 +4,16 @@
 //  A .NET MCP server (stdio, newline-delimited JSON-RPC) backed by SQLite, so a growing
 //  GAGAME stays navigable: every symbol across C++/HLSL/Python, every harvester and the data
 //  products it owns, and the monastery registry (channels + sources + CRS) mirrored from the
-//  code. v1 is a SYMBOL GRAPH, not a full AST -- honest and fast; libclang is the named
-//  upgrade path if this ever proves too shallow.
+//  code. v1 is a SYMBOL GRAPH, not a full AST -- honest and fast. The AST tools (refs, callers,
+//  callees, layout, cbuffer_reads, includes; Ast.cs) read the ast_* tables tools/astindex writes
+//  into this same file with libclang and dxc.
 //
 //  Modes:
 //    dotnet run -- --index          scan the repo, (re)build scriptorium.db, print a summary
 //    dotnet run                     serve MCP over stdio (tools: symbols, who_writes,
-//                                   script_for, channels, reindex, graph, note, math, plan)
+//                                   script_for, channels, reindex, graph, note, math, plan,
+//                                   and from Ast.cs refs, callers, callees, layout,
+//                                   cbuffer_reads, includes)
 //
 //  'math' is the record of what IS built (docs/ALGEBRA.md). 'plan' serves what is PROPOSED
 //  or FOUND -- the texture-hierarchy proposal (docs/HIERARCHY.md) and the code reviews beside
@@ -456,7 +459,13 @@ static class McpServer
           {"name":"graph","description":"The GA state diagram as machine-readable JSON (docs/ga_ast.json, emitted by the engine every boot): nodes + edges with frames, units, ranges, gains, flips, code anchors. The contract a future Blueprint-style node editor loads/saves; tools/astdiagram.py renders it to docs/diagrams/*.svg.","inputSchema":{"type":"object","properties":{}}},
           {"name":"note","description":"Operational notes (docs/LAUNCH.md): how to BUILD (vcvars64 + VS cmake + Ninja), RUN (windowed / headless renders, camera + time + storm flags), render the RAIL VIDEOS (+ the ffmpeg line), the VERIFICATION LOOP (seven gates, the --trace hypervisor, fiber dumps, the 2D proof figure + match report, data lenses), DATA prerequisites (harvesters, D:\\DataCache), and SECRETS policy. No arg: list sections. With name (substring, e.g. 'build', 'videos', 'verify'): print that section.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}}}},
           {"name":"math","description":"The algebra whitepaper (docs/ALGEBRA.md), served per topic. No arg: list topics. With topic (substring): print that section's mathematics for a human or an outside expert -- GA products, wave physics, radiometry, frames, the compositor's algebra, and the PRIORS LEDGER (where measured reality diverged from textbook/training expectations; read it first when the engine surprises you).","inputSchema":{"type":"object","properties":{"topic":{"type":"string"}}}},
-          {"name":"plan","description":"What is PROPOSED or FOUND, NOT what is built: the texture-hierarchy proposal (docs/HIERARCHY.md) and the code reviews beside it (docs/REVIEW_*.md), served per section. The record of what IS built is 'math' (docs/ALGEBRA.md); never cite these as the engine's behaviour. No arg: list the documents and their numbered sections. With name: a section number, optionally after a document word (e.g. '4.6', 'hierarchy 5', 'review 1'), prints that section (a parent prints its preamble and the list of its subsections); 'finding N' (e.g. 'finding 7') prints that row of the review's tables under its section heading and the table's header row; anything else matches section titles (substring), and failing that, lines of the text.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}}}}
+          {"name":"plan","description":"What is PROPOSED or FOUND, NOT what is built: the texture-hierarchy proposal (docs/HIERARCHY.md) and the code reviews beside it (docs/REVIEW_*.md), served per section. The record of what IS built is 'math' (docs/ALGEBRA.md); never cite these as the engine's behaviour. No arg: list the documents and their numbered sections. With name: a section number, optionally after a document word (e.g. '4.6', 'hierarchy 5', 'review 1'), prints that section (a parent prints its preamble and the list of its subsections); 'finding N' (e.g. 'finding 7') prints that row of the review's tables under its section heading and the table's header row; anything else matches section titles (substring), and failing that, lines of the text.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}}}},
+          {"name":"refs","description":"AST index (tools/astindex): every place a C++ or HLSL symbol is referenced, resolved by the compiler, not by text: kind call | read | write | addr | type | base | member-init, the enclosing function, file:line. symbol: a name, a qualified name (ga::Foo::Bar) or a ::suffix of one; HLSL cbuffer fields too (gMisc). A name grep cannot tell apart (two classes with a member 'Update') is answered per declaration.","inputSchema":{"type":"object","properties":{"symbol":{"type":"string"}},"required":["symbol"]}},
+          {"name":"callers","description":"AST index: the functions that call fn (C++ or HLSL), with the number of call sites and the first one. fn: name, qualified name or ::suffix.","inputSchema":{"type":"object","properties":{"fn":{"type":"string"}},"required":["fn"]}},
+          {"name":"callees","description":"AST index: the functions fn calls (C++ or HLSL), engine functions only (not std:: or the SDK), with where each is declared.","inputSchema":{"type":"object","properties":{"fn":{"type":"string"}},"required":["fn"]}},
+          {"name":"layout","description":"AST index: a record's memory layout -- fields, byte offsets, sizes, total size and alignment as clang lays it out for MSVC x64 -- and, beside it, the HLSL cbuffer or StructuredBuffer struct that mirrors it (same name, else the most field names in common), flagging every offset or size that differs. type: C++ type name / qualified name, or an HLSL cbuffer or struct name. HLSL offsets are COMPUTED from the packing rules, not read from DXC reflection.","inputSchema":{"type":"object","properties":{"type":{"type":"string"}},"required":["type"]}},
+          {"name":"cbuffer_reads","description":"AST index (HLSL): which shader functions read which cbuffer fields and COMPONENTS. arg: a field (gMisc), a field and component (gWavesB.z), a cbuffer (SceneCb), or a function (PsMain) -- a function lists what it and everything it calls reads, and which entry points reach it.","inputSchema":{"type":"object","properties":{"arg":{"type":"string"}},"required":["arg"]}},
+          {"name":"includes","description":"AST index: what a file includes and what includes it (the preprocessor's resolution for C++, #include lines for HLSL). file: a substring of the repo path (Renderer.h, Common.hlsli).","inputSchema":{"type":"object","properties":{"file":{"type":"string"}},"required":["file"]}}
         ]}
         """)!;
 
@@ -508,6 +517,12 @@ static class McpServer
             // ToString, not GetValue<string>: a section number is the argument most likely to
             // arrive as a JSON number (4.6), and GetValue<string> would throw and end the server.
             "plan" => Plan(db, args?["name"]?.ToString()),
+            "refs" => Ast.Guard(() => Ast.Refs(db, args?["symbol"]?.ToString() ?? "")),
+            "callers" => Ast.Guard(() => Ast.Callers(db, args?["fn"]?.ToString() ?? "")),
+            "callees" => Ast.Guard(() => Ast.Callees(db, args?["fn"]?.ToString() ?? "")),
+            "layout" => Ast.Guard(() => Ast.Layout(db, args?["type"]?.ToString() ?? "")),
+            "cbuffer_reads" => Ast.Guard(() => Ast.CbufferReads(db, args?["arg"]?.ToString() ?? "")),
+            "includes" => Ast.Guard(() => Ast.Includes(db, args?["file"]?.ToString() ?? "")),
             _ => $"unknown tool '{name}'"
         };
         return new JsonObject
