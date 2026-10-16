@@ -172,7 +172,6 @@ public:
         int camFace = 0;            // step 24: the eye's own cube face, walked first
         double frustum[6][4] = {};  // camera-relative planes; planeCount 0 = no cull
         int planeCount = 0;
-        float reliefExagg = 1.0f;
         int maxDepth = kMaxDepth;
         // M9bk: THE WAVE GRAIN. The wave bank's ring-0 texel (m); 0 = no bank, rule inert.
         // The walk carries the surface at the density the WAVE FIELD is stored at wherever
@@ -205,7 +204,7 @@ public:
         // distance cannot be seen, and is not walked.
         double occ[4] = {0.0, 0.0, 0.0, 0.0};
         // M10: a LOCAL relief bound for the culls. The shipped bound pads every node with 9 km
-        // of relief (the planet's worst case, x the exaggeration) -- right from orbit, and ruinous
+        // of relief (the planet's worst case) -- right from orbit, and ruinous
         // for a Droste level whose eye sits 70 m above its sea: nothing within 9 km of that eye
         // can ever be culled, so the whole entrance walks to the wave grain in every direction
         // (MEASURED: 34 k records for the outer level alone, the inner globe then starved to 0).
@@ -222,7 +221,7 @@ public:
         // slot, its eye from camPos, and its cull -- its own horizon, planes it must be inside and
         // a hole (the next window's cone, which belongs to a deeper world) it must not be wholly
         // inside, the planes eye-relative in this frame. Worlds share a walk only where their own
-        // walks would split and bound a node alike (the wave grain, the relief exaggeration).
+        // walks would split and bound a node alike (the wave grain).
         // worldCount 0 is the single walk, frustum and all.
         struct World {
             uint32_t slot = 0;
@@ -272,7 +271,6 @@ public:
     uint64_t predictWalkNs = 0, predictWaitNs = 0, predictReplayNs = 0;
     ~GlobeLayer() override;   // joins the worker
 
-    float reliefExagg = 1.0f;       // set per frame by main (altitude-scaled display choice)
     float waterNavd = 0.0f;         // M6j: live water level, for the close-up material model
     bool msSurface = true;          // M6j: request the mesh-shader unified surface
     bool MeshPathActive() const { return m_msPath; }
@@ -342,14 +340,13 @@ public:
         // frustum planes ARE pulled through (PullPlane; step 4d-2: the transport the walk culls
         // by, the hand form from Q and sigma above being the instrument's record).
         Placement gauge;
-        float reliefExagg = 1.0f;     // the display exaggeration at this level's own altitude
         float sun[3] = {0.0f, 1.0f, 0.0f};   // the sun in this level's own frame
         int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
         float skyUp[3] = {0.0f, 1.0f, 0.0f};   // the zenith of the sky this level SEES, own frame
         float skyDay = -1.0f;         // that sky's daylight; < 0 = the level's own local day
     };
     // A WORLD SEEN THROUGH THE VIEW'S WINDOWS (scene/Gateway.h WindowChain). Not a Droste level:
-    // the same planet at scale 1, the eye's own exaggeration, its own local day -- what is its own
+    // the same planet at scale 1, its own local day -- what is its own
     // is the eye carried through its k + 1 windows, the rotation its geometry is drawn back by, the
     // sun and the zenith at that eye, and its cull. Its depth is its place in the chain; nothing
     // else about it counts. It shares the walk of any world whose eye stands near its own (the
@@ -387,7 +384,7 @@ public:
     }
     // ANOTHER EYE: the minimap, a split screen's second player, a remote player's view. It walks
     // the same planet from its own camera, after the first eye's SetView, with no Droste levels
-    // or gate worlds of its own, under its own exaggeration, zenith and residency sampler
+    // or gate worlds of its own, under its own zenith and residency sampler
     // ("eye<view>"), and keeps what it walked for Render at ctx.viewIndex == view. The layer's
     // working set stays the first eye's, so nothing the first eye reads afterwards has moved.
     // --gate-overdraw (an instrument): on the frame it is raised, the first eye's surface is drawn one
@@ -422,7 +419,7 @@ public:
         m_bankChartUpSet = true;
     }
     void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
-                      double simTime, float exagg, const float skyUp[3], bool skyPass,
+                      double simTime, const float skyUp[3], bool skyPass,
                       const GateWorld* gates = nullptr,
                       int n = 0, const double (*hole)[4] = nullptr, int holeN = 0,
                       const EyeRings* rings = nullptr);

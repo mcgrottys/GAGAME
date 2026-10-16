@@ -39,7 +39,7 @@ static float sLvlSkyEyeR = 6371000.0f;
 #include "Common.hlsli"
 
 cbuffer GlobeCb : register(b1) {
-    float4 gGlo;        // x = R (m), y = relief exaggeration, z = node count, w = sim time s
+    float4 gGlo;        // x = R (m), y spare, z = node count, w = sim time s
     float4 gCamAbs;     // xyz = sphere-centred TANGENT-frame camera (flat cam + (0,R,0), the
                         // doubles cancelled on the CPU)
     uint4  gTexIdx;     // x = unused (was equirect relief; the composed height cube retired
@@ -151,7 +151,7 @@ float2 ChartUOf(float3 q, uint c) {
 // ---- M10: the level being drawn (LoadLevel) --------------------------------------------------
 // Six rows per level, filled by GlobeLayer::SetView:
 //   0  the eye in the level's own frame, sphere-centred (replaces gCamAbs)   | s^k
-//   1  Q^k row 0 (own -> true rotation)                                      | relief exaggeration
+//   1  Q^k row 0 (own -> true rotation)                                      | spare
 //   2  Q^k row 1                                                             | the eye's flat y
 //   3  Q^k row 2                                                             | bank set (0, 1, -1)
 //   4  the sun in the level's own frame                                      | spare
@@ -160,7 +160,6 @@ float2 ChartUOf(float3 q, uint c) {
 static float3 sLvlCamAbs = float3(0.0f, 0.0f, 0.0f);
 static float sLvlSigma = 1.0f;
 static float3x3 sLvlQ = float3x3(1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f);
-static float sLvlExag = 1.0f;
 static int sLvlBank = 0;
 static float sLvlSkyDay = -1.0f;
 
@@ -172,7 +171,6 @@ void LoadLevel(uint slot) {
     sLvlCamAbs = r0.xyz;
     sLvlSigma = r0.w;
     sLvlQ = float3x3(r1.xyz, r2.xyz, r3.xyz);
-    sLvlExag = r1.w;
     sLvlEyeY = r2.w;
     sLvlBank = (int)round(r3.w);
     sLvlSun = r4.xyz;
@@ -725,11 +723,11 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     o.lvl = 0u;
     o.dir = dir;   // PLANET frame: texturing (cube samples, lat/lon) stays untouched
     o.h = h;
-    // The ocean surface renders AT the geoid; land rides the (altitude-scaled) exaggeration.
+    // The ocean surface renders AT the geoid; land at its true height above it.
     // M6g: rotate the unit direction (exact in float), scale, subtract the sphere-centred
     // camera -- the same cancellation profile the planet frame had, now in ONE shared frame.
     const float3 dirT = CsToTangent(dir);
-    o.rel = dirT * (gGlo.x + max(h, 0.0f) * gGlo.y) - gCamAbs.xyz;
+    o.rel = dirT * (gGlo.x + max(h, 0.0f)) - gCamAbs.xyz;
     // The water's sample point, undisplaced: made the way rel is made, with rel's precision --
     // this path has no double-precision anchor to make it from.
     o.geo = dirT * gGlo.x - gCamAbs.xyz;
@@ -1349,7 +1347,7 @@ float4 PsSurface(VsOut i, out float land) {
     // on the view plane, which is dry cos e / footPxW pixels; so the band is the larger of the
     // shore's 0.4 m and the height one pixel can hold, footPxW / cos e. At Tokyo's quay a pixel is
     // centimetres and the band is the 0.4 m it was; from orbit the face is edge-on, the band grows
-    // past any drawn height, and the survey decides -- the exaggerated relief of a coast cell
+    // past any drawn height, and the survey decides -- the relief of a coast cell
     // kilometres wide stood its whole cell over the survey's sea, in mesh-cell stair steps.
     const float sinE = saturate(dot(normalize(-i.rel), upT));
     const float cosE = sqrt(max(1.0f - sinE * sinE, 1e-6f));
@@ -1379,9 +1377,8 @@ float4 PsSurface(VsOut i, out float land) {
         // mixed in with weight landness = 0 (lerp(wcol, col, 0) is wcol), so its four height
         // reads were dead there.
         const float2 gr = (landness > 0.0f) ? ComposedHeightGradAt(up, i.geo, lod, i.lvl) : float2(0.0f, 0.0f);
-        const float kSlopeGain = 4.0f;
         const float3 nLand =
-            normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
+            normalize(upT - east * gr.x - north * gr.y);
         const float3 albLand = Hypsometric(max(hp, 0.0f), lat);
         // ---- M9bg: THE SEA SIDE IS GONE FROM THIS SHADER. Everything that used to paint
         // water here -- the ocean-colour retrieval and its K_d transfer, the wave-grid Hs and

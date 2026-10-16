@@ -129,8 +129,10 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // north jetty goes awash at high water (the user's catch). Surveyed data taller
     // than the floor still wins through the max below.
     const float editFloor = editLand * gBankE.w;
-    // M10: the relief exaggeration is a display choice made at the level's OWN altitude.
-    const float dispLand = max(max(h, 0.0f) * sLvlExag, editFloor * sLvlExag);
+    // THE GROUND AT ITS TRUE HEIGHT, from the helm to orbit: the water, the air, the normals and
+    // the sun's ray all see the planet at scale 1, so the land's horizon is the sea's and the
+    // limb's (an exaggerated land stood above the sea's horizon and through the air's).
+    const float dispLand = max(max(h, 0.0f), editFloor);
     // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
     // (tide + solver) plus the folded cascade displacement, one tiled resource, ring LOD.
     // Beyond every ring (or bank off) the M6t sunk plane remains: it exists only so the
@@ -390,7 +392,7 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     // none beside water, stands in the cache and is not drawn again (its class 1, GlobeClass.hlsl);
     // one with water, land beside it, or no pixel at all is.
     const bool live = liveA && (gKeepU.y == 0u || gBufU[gKeepU.x][gKeepU.z + min(gid, max(count, 1u) - 1u)] != 1u);
-    // M10: this record's Droste level -- its eye, sun, exaggeration, bank set and the gauge's
+    // M10: this record's Droste level -- its eye, sun, bank set and the gauge's
     // outward map. A seam band's coarse neighbour is always a record of the SAME level (the
     // seam table keys on it), so one load serves every vertex this group writes.
     LoadLevel(rec.level);

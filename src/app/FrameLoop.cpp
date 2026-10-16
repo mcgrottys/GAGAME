@@ -1627,7 +1627,7 @@ std::optional<int> FrameLoop::Session() {
         if (b > -9000.0f) {
             elev = std::max(static_cast<double>(b), lastWaterNavd);
         } else if (globe && activeGlobe.Ready()) {
-            elev = (std::max)(0.0, activeGlobe.ElevAt(gla, glo)) * globe->reliefExagg;
+            elev = (std::max)(0.0, activeGlobe.ElevAt(gla, glo));
         }
         return pr - planetR - elev;
     };
@@ -3199,10 +3199,6 @@ bool FrameLoop::Frame() {
                 L.gauge = Lk;
                 L.gauge.t[0] = L.gauge.t[1] = L.gauge.t[2] = 0.0;
             }
-            const double gy = L.cam[1] + planetR;
-            const double altK =
-                std::sqrt(L.cam[0] * L.cam[0] + gy * gy + L.cam[2] * L.cam[2]) - planetR;
-            L.reliefExagg = static_cast<float>(std::clamp(altK / 250000.0, 1.0, 20.0));
             double sk[3] = {sr[0], sr[1], sr[2]};
             if (portalDecl.lighting == 0) drosteLeaf.LevelApplyDir(-double(camLevel + rel), sr, sk);
             for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sk[i]);
@@ -3347,7 +3343,7 @@ bool FrameLoop::Frame() {
     }
 
     // M6g world housekeeping, all continuous in altitude: gravity-up for the view
-    // basis, speed and relief exaggeration scale with height, the camera never sinks
+    // basis and speed scale with height, the camera never sinks
     // under the ground (terrain near home, sphere+relief elsewhere), and the layer
     // set sheds by altitude the way residency sheds by distance.
     const double altV = altOf(cam);
@@ -3812,7 +3808,6 @@ bool FrameLoop::Frame() {
         cam.Transport(y);
     }
     if (mode == 1 && globe) {
-        globe->reliefExagg = ReliefOf(Eye{0, &cam, 1.0f, 1.0f, camLevel});
         PROF_BEGIN();
         const double c = groundClear(cam.px, cam.py, cam.pz);
         PROF_END(6);
@@ -4068,7 +4063,7 @@ bool FrameLoop::Frame() {
             for (uint32_t w = 0; w < SurfaceFrame::kWindowSets; ++w) m_ngK += sf.bound[w].K;
         }
         PROF_BEGIN();
-        WalkEye(Eye{0, &cam, viewW, viewH, camLevel}, globe->reliefExagg, eyeSky0, true);
+        WalkEye(Eye{0, &cam, viewW, viewH, camLevel}, eyeSky0, true);
         PROF_END(7);
         // WHAT EACH WORLD COSTS: this walk's records per slot, when the corridor's depth changes and
         // every ten seconds of frames -- a window is walked only along its own rays, and a place's
@@ -5620,22 +5615,14 @@ std::vector<scene::WindowLink> FrameLoop::ChainOf(const Eye& e) const {
                               kWindowReachM);
 }
 
-// The display exaggeration of the relief: continuous in the eye's altitude, 1 at the helm and 20
-// from orbit (a display choice, M6g; the physics never sees it).
-float FrameLoop::ReliefOf(const Eye& e) const {
-    return static_cast<float>(std::clamp(m_altOf(*e.cam) / 250000.0, 1.0, 20.0));
-}
-
-void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
+void FrameLoop::WalkEye(const Eye& e, const EyeSky& es, bool dome,
                         const EyeWindows* win, const GlobeLayer::EyeRings* rings) {
     GlobeLayer* globe = m_A.globe;
     if (!globe) return;
     const double t = m_simUnix - m_startUnix;
     const float aspect = e.viewW / e.viewH;
     if (e.view == 0) {
-        // The first eye's exaggeration is the layer's own (the camera's ground clamp reads it
-        // before the walk); its sky and levels were handed over above.
-        (void)exagg;
+        // The first eye's sky and levels were handed over above.
         (void)es;
         (void)dome;
         (void)win;     // (the first eye's windows were handed over with SetGates and its table)
@@ -5650,7 +5637,7 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
             m_worldTables[e.view].SetChain(w ? win->boxes.data() : nullptr, w ? win->upWin.data() : nullptr,
                                            w ? win->sunWin.data() : nullptr, w ? win->n : 0);
         }
-        globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome,
+        globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, es.camUp, !dome,
                             w ? win->gates.data() : nullptr, w ? win->n : 0,
                             w ? win->viewHole : nullptr, w ? win->viewHoleN : 0, rings);
     }
@@ -6177,7 +6164,6 @@ void FrameLoop::MinimapStep(float dt) {
     const Eye eye{1, &mc, r.w, r.h, 0};
     float sunRoot[3];
     m_A.renderer.SunDir(sunRoot);
-    m_minimapExagg = ReliefOf(eye);
     m_minimapChain = ChainOf(eye);
     m_minimapWin = WindowsOf(eye, m_minimapChain, ViewConeOf(mc, r.w / r.h, r.h), sunRoot);
 }
@@ -6200,7 +6186,6 @@ void FrameLoop::MinimapFrame(float dt) {
     m_minimapEyeRadius = es.EyeRadius(m_A.planetR);
     m_minimapSky = m_A.sky && m_A.sky->enabled;   // one backdrop, one integral, as the first eye's
     // ITS WINDOWS: found and built in MinimapStep, before the claim.
-    const float exagg = m_minimapExagg;
     const EyeWindows& win = m_minimapWin;
     if (win.n != m_minimapWindowsSaid) {
         m_minimapWindowsSaid = win.n;
@@ -6278,7 +6263,7 @@ void FrameLoop::MinimapFrame(float dt) {
         for (int i = 0; i < 3; ++i) sf.slotEye[k + 1][i] = sf.up[i] * ry + sf.east[i] * c[0] + sf.north[i] * c[2];
     }
     sf.slotsLive = uint32_t(1 + win.n);
-    WalkEye(eye, exagg, es, m_minimapSky, &win, ringsOf);
+    WalkEye(eye, es, m_minimapSky, &win, ringsOf);
     SurfaceFor(eye, m_minimapSurface);
     sf.slotSet = slotSet0;
     sf.slotEye = slotEye0;
