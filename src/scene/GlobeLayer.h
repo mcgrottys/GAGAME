@@ -550,11 +550,6 @@ public:
     // the kept frame's composite + water; the mouth's 13.2 likewise -- the numbers in the PR.
     bool keepOn = true;
     float keepSunGrainDeg = 0.01f, keepTideGrainM = 0.001f;
-    // The terrain shadow and the mirror's land (scene render.shadowSteps / shadowRangeM /
-    // reflectLand; Globe.hlsl TerrainRay): packed into gShadowA every frame.
-    int shadowSteps = 12;
-    float shadowRangeM = 8000.0f;
-    bool reflectLand = false;
     uint64_t keepFull = 0, keepKept = 0, keepPlain = 0, keepWhy[8] = {};
     int m_keepWhySaid = 0;
     // M9d: --mesh-stats. The storm wireframe LOOKED like the near field carried coarser
@@ -686,9 +681,6 @@ private:
         float bankChart[16];
         float bankBChart[16];
         uint32_t keepU[4];    // THE KEPT FRAME (Keep): classes' UAV slot, kept frame, keep on, spare
-        // THE TERRAIN SHADOW (Globe.hlsl TerrainRay) -- appended at the END on both sides (priors
-        // 22): x = the march's samples (0 = off), y = its range (m), z = the mirror's land (1 on).
-        float shadowA[4];
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {

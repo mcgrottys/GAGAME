@@ -381,6 +381,7 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.F64("radius", l.radius);
             r.Str("lod", l.lod);
             r.F64("lodPixels", l.lodPixels);
+            r.F64("boxPixels", l.boxPixels);
             r.F64("shapePixels", l.shapePixels);
             r.F64("pageMB", l.pageMB);
             r.F64("marginDeg", l.marginDeg);

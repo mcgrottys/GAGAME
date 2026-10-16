@@ -133,10 +133,6 @@ cbuffer GlobeCb : register(b1) {
     // meshlet classes' SRV slot, y = 1 on a kept frame (a meshlet whose pixels were all land is not
     // drawn: the cache has it).
     uint4  gKeepU;
-    // THE TERRAIN SHADOW AND THE MIRROR'S LAND (TerrainRay; scene render.shadowSteps, shadowRangeM,
-    // reflectLand) -- appended at the END on both sides (priors 22): x = the march's samples (0 =
-    // off), y = its range in metres, z = 1 when the water's mirror ray reflects the land it meets.
-    float4 gShadowA;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -495,71 +491,10 @@ float3 BankNormal(float3 dDdx, float3 dDdz, float3 east, float3 upT, float3 nort
 
 #include "Compose.hlsli"
 
-// THE GROUND'S OWN SHADOW, AND THE MIRROR'S LAND (scene render.shadowSteps / shadowRangeM /
-// reflectLand). PlanetShadow asks whether the SPHERE stands between a point and the sun; this asks
-// the same of the GROUND on it -- the composed height field, read along the ray from the point --
-// and one march serves two askers. The sun's asker wants the worst of the terrain's rise above the
-// ray, the rim of the hill that eclipses the disc, in the sine units SunDiscClear takes, so a
-// ridge's shadow has the sun's own penumbra and no edge of its own; the mirror's asker wants the
-// FIRST sample where the ground stands above the ray, refined by one secant between the two
-// samples that bracket it, and the land there is what the water reflects.
-//
-// The ray is made in small numbers, as the refracted cast is (WaterPixelColor): from the point's
-// altitude a0 at its zenith upT, the ray's point at s is an altitude and a direction,
-//     alt(s) = a0 + s mu + s^2 |tPerp|^2 / 2 (R + a0),   dir(s) = normalize(upT + s / (R + alt) tPerp),
-// the sphere to second order in s / R (the third-order term is 2 mm at 8 km). The ground under it
-// is read at the level's own point through that level's windows (ComposedHeightAt), at the level a
-// step's length wants (two texels a step) and never finer than the pixel's own, so the march reads
-// what the picture reads. The samples are log-spaced from twice the pixel's footprint to the
-// range: a dune a metre off is seen as surely as a ridge eight kilometres off, and the march costs
-// the same at every altitude. Its first sample stands two footprints out, so the pixel's own
-// texel cannot shade itself.
-struct TerrainHit {
-    float s;       // the ray's length to the ground, < 0 when it meets none within the range
-    float3 dirP;   // the planet direction of the hit
-    float3 pL;     // the hit in the level's own frame (the windows' address)
-    float alt;     // its altitude above the geoid
-};
-float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float footM, float lodPix,
-                 bool wantHit, out TerrainHit hit) {
-    hit.s = -1.0f;
-    hit.dirP = CsToPlanet(upT);
-    hit.pL = geo;
-    hit.alt = a0;
-    const uint steps = uint(gShadowA.x);
-    if (steps == 0u) return 1.0f;
-    const float mu = dot(rayT, upT);
-    const float3 tPerp = rayT - mu * upT;
-    const float tPerp2 = dot(tPerp, tPerp);
-    const float cosE = sqrt(tPerp2);
-    const float R = gGlo.x;
-    const float twoR = 2.0f * (R + a0);
-    const float s0 = max(2.0f * footM, 0.5f);
-    if (s0 >= gShadowA.y) return 1.0f;   // from orbit the first sample is past the range: no ground to march
-    const float ratio = pow(max(gShadowA.y / s0, 1.0f), 1.0f / max(float(steps) - 1.0f, 1.0f));
-    float worst = -1.0f;   // in sines: nothing stands above the ray yet
-    float sP = s0, prevS = 0.0f, prevGap = 1.0e9f;
-    [loop] for (uint k = 0u; k < steps; ++k) {
-        const float altP = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;
-        const float3 dirP = normalize(upT + (sP / (R + altP)) * tPerp);
-        const float lodP = max(lodPix, ComposedHeightLod(0.5f * sP * (ratio - 1.0f), 1.0f));
-        const float3 pL = geo + upT * a0 + sP * rayT;
-        const float gap = altP - ComposedHeightAt(CsToPlanet(dirP), pL, lodP, s);   // the ray's clearance
-        worst = max(worst, -gap * cosE / sP);
-        if (wantHit && gap < 0.0f) {
-            const float sH = prevS + (sP - prevS) * prevGap / max(prevGap - gap, 1e-6f);
-            hit.s = sH;
-            hit.alt = (a0 + sH * mu) + sH * sH * tPerp2 / twoR;
-            hit.dirP = CsToPlanet(normalize(upT + (sH / (R + hit.alt)) * tPerp));
-            hit.pL = geo + upT * a0 + sH * rayT;
-            break;
-        }
-        prevS = sP;
-        prevGap = gap;
-        sP *= ratio;
-    }
-    return SunDiscClear(-worst);
-}
+// THE SUN'S RAY FROM A LIT POINT (TerrainRay.hlsli): the ground's shadow and the mirror's land
+// (TerrainRay), the drawn buildings' shadow (SunMapClear) -- shared with Buildings.hlsl, so a tower
+// and the hill behind it shade the ground and each other by the one law.
+#include "TerrainRay.hlsli"
 
 // M6e: sample a streamed cube with the classic residency clamp -- the R8 residency-map cube
 // carries (finest resident mip * 16) per base tile; clamping the LOD there means a miss
@@ -1164,9 +1099,12 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     TerrainHit sunHit;
     const float sunSph = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f)) *
                          PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x);
-    const float sunVis = (sunSph > 0.0f)
-                             ? sunSph * TerrainRay(upT, lvlW + dispW, geo, lvl, GA_SUN_DIR, footPx, lod, false, sunHit)
-                             : 0.0f;
+    // ...and by the buildings drawn about the eye (SunMapClear), where the water is the eye's own
+    // world's: a tower on the quay shades the water at its foot as it shades the quay.
+    float sunVis = (sunSph > 0.0f)
+                       ? sunSph * TerrainRay(upT, lvlW + dispW, geo, lvl, GA_SUN_DIR, footPx, lod, gGlo.x, false, sunHit)
+                       : 0.0f;
+    if (lvl == 0u && sunVis > 0.0f) sunVis *= SunMapClear(rel, upT);
     const float3 hv = normalize(v + GA_SUN_DIR);
     const float ch = saturate(dot(hv, nPix));
     const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
@@ -1193,9 +1131,9 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // field the sun's was. Where it meets the ground, the water reflects that ground -- its imagery
     // lit flat by the sun and the sky at its own altitude, seen through the air along the ray --
     // and not the sky that was behind it. A ray that meets nothing is the mirror above, unchanged.
-    if (gShadowA.z > 0.5f) {
+    if (gCsShadow.z > 0.5f) {
         TerrainHit mh;
-        TerrainRay(upT, lvlW + dispW, geo, lvl, rDir, footPx, lod, true, mh);
+        TerrainRay(upT, lvlW + dispW, geo, lvl, rDir, footPx, lod, gGlo.x, true, mh);
         // Only ground that stands ABOVE the water is a mirror's land: a facet whose ray dips below
         // the surface meets the bed, and what that ray sees is the sea (the seaward share above),
         // never the bed through the back of the surface.
@@ -1672,10 +1610,14 @@ float4 PsSurface(VsOut i, out float land) {
     // THE GROUND'S SUN (TerrainRay): the land's sun is the pixel's, eclipsed by the globe and the
     // planet above, and now by the ground around it. Asked only where there is land in the pixel;
     // the water asks its own (WaterPixelColor), from its own surface.
+    // ...and by THE BUILDINGS drawn about the eye (SunMapClear): the eye's own world has the sun
+    // map; a window's world is drawn from its own eye and has none of its own yet, so its ground
+    // takes the planet's and the terrain's shadow alone.
     TerrainHit sunHit;
-    const float sunLand = (landness > 0.0f && sunVis > 0.0f)
-                              ? sunVis * TerrainRay(upT, hp, i.geo, i.lvl, GA_SUN_DIR, footPxW, lod, false, sunHit)
-                              : sunVis;
+    float sunLand = (landness > 0.0f && sunVis > 0.0f)
+                        ? sunVis * TerrainRay(upT, hp, i.geo, i.lvl, GA_SUN_DIR, footPxW, lod, gGlo.x, false, sunHit)
+                        : sunVis;
+    if (ownLvl && sunLand > 0.0f) sunLand *= SunMapClear(i.rel, n);
     // THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h), read once here for both of their laws
     // below: lambda_p (the roofs' share of the ground) and lambda_f (the walls' frontal area per
     // ground area), a Boolean field of obstacles. THE SUN'S RAY THROUGH THAT FIELD: a ray from the
@@ -1686,7 +1628,7 @@ float4 PsSurface(VsOut i, out float land) {
     const float2 bf = fieldOn ? CsBuildingField(up, pA CS_WC) : float2(0.0f, 0.0f);
     const float openF = max(1.0f - bf.x, 0.05f);
     float fieldSun = 1.0f;
-    if (fieldOn && gShadowA.x > 0.0f) {   // the one knob: the sun's ray meets the ground and what stands on it
+    if (fieldOn && gCsShadow.x > 0.0f) {   // the one knob: the sun's ray meets the ground and what stands on it
         const float muS = max(dot(GA_SUN_DIR, upT), 0.02f);
         const float tzS = sqrt(max(1.0f - muS * muS, 0.0f)) / muS;
         fieldSun = lerp(exp(-bf.y * tzS / openF), 1.0f, bf.x);   // the roofs' share stands in the sun

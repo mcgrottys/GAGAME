@@ -48,6 +48,8 @@
 #include "sim/PlaceField.h"
 #include "compose/BuildingSolids.h"
 #include "scene/Layer.h"
+#include "scene/Air.h"   // the walk's air: what the atmosphere leaves of a building's contrast
+#include "compose/Compositor.h"   // ComposedSurfaceCb: the sun map's rows on b2
 
 #include <atomic>
 #include <chrono>
@@ -82,8 +84,13 @@ public:
     void Configure(const std::wstring& shaderDir, std::shared_ptr<const BuildingStack> stack, double radiusM,
                    Place place, Locate locate, Ground ground);
     // The folded tree (null = none) and the pixels a building needs to be drawn on its own.
-    void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 4.0,
-                      double pageMB = 1024.0, double marginDeg = 5.0);
+    // THREE FORMS BY SIZE (the owner, 2026-10-15): under boxPixels across, a building is a POINT --
+    // one vertex carrying the building's rotor, so the eye's elevation against its up mixes roof
+    // and wall and the point is lit as the building would be; from boxPixels its moment box; from
+    // shapePixels its own form. Every form is opaque: a fade between forms, or in as a page
+    // lands, left transparent blocks over the imagery, and the owner saw them.
+    void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 8.0,
+                      double pageMB = 1024.0, double marginDeg = 5.0, double boxPixels = 2.0);
 
     const char* Name() const override { return "buildings"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields, hal::RootSignature rootSig) override;
@@ -129,6 +136,31 @@ public:
     double m_marginDeg = 5.0;
 
     size_t ResidentCells() const { return m_cells.size(); }
+
+    // THE SUN MAP (scene render.buildingShadowM; shaders/TerrainRay.hlsli SunMapClear). The solids
+    // this layer draws for the eye's own world are drawn once more each frame, depth only, as the
+    // SUN sees them: an orthographic cast along the sun over a square `sideM` wide about `focus`
+    // (the eye's ground focus, flat frame), its depth the distance toward the sun over the same
+    // span, so a 2048-texel map a side holds the city at a metre. PlanSunMap (the frame loop, after
+    // the surface rows are filled) makes the cast from the camera and the sun and writes b2's rows
+    // (ComposedSurfaceCb::shadow.w, sunMapU, sunVP); Simulate records the pass. The map's centre is
+    // snapped to its own texel grid, so an eye moving within a texel moves no shadow edge. sideM
+    // <= 0: no map, the rows say none, and nothing is drawn.
+    void PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, const double focus[3], ComposedSurfaceCb& cb);
+    static constexpr uint32_t kSunTexels = 2048;
+    // THE AIR IN THE WALK'S LAW (2026-10-15; the owner: cull what the atmosphere obscures). A
+    // building is drawn when it covers lodPixels of the picture -- but what the picture holds of it
+    // is its contrast against the ground, and the air between takes that contrast: a face at range
+    // r keeps T(r) of it (Common.hlsli AerialPerspective: col T + L). So the walk's threshold is
+    // lodPixels / T: a building 100 km off in clear air must be six pixels wide to be worth a pixel,
+    // and the far field's nodes, the most numerous, stop where the air says they are not seen.
+    // T is bounded from above (the least extinction the path meets, at its highest point -- the
+    // eye's altitude above a city), so the law can only keep what the air leaves, never cut what
+    // it does not. The planet's rows are the scene's (scene/Air.h); set each frame by the loop.
+    void SetAir(const AirRows& a) { m_air = a; }
+    // The map as a picture (--dump writes it beside the still): depth toward the sun as grey,
+    // 0 where the sun meets nothing. An instrument; it waits for the GPU.
+    void DumpSunMap(const std::wstring& path);
 
     // THE DECKS THE PHYSICS READS (2026-10-12): every bridge deck and ramp ribbon (compose/
     // BuildingShape.h kDeck) in the pages resident about the eye whose polyline comes within rM of
@@ -282,15 +314,16 @@ private:
     };
     struct Walked {                     // a walk's answer
         double origin[3];
-        uint32_t count = 0;             // boxes, then insts shaped instances (one buffer)
-        uint32_t insts = 0;
+        uint32_t count = 0;             // boxes, then insts shaped instances, then points (one buffer, 3 rows each)
+        uint32_t insts = 0, points = 0;
         GpuBuffer staging, vb;
         std::vector<std::pair<double, PageKey>> wants;   // pages asked for, by pixels (largest first)
         std::vector<StandAsk> stands;   // the stands asked for, the largest on screen first
         std::vector<PageKey> used;
         std::vector<std::shared_ptr<const Page>> hold;   // its pages: their pool ranges stay while it is drawn
         std::shared_ptr<const DrawCpu> cpu;
-        uint64_t nodes = 0, singles = 0, fading = 0, hidden = 0;   // hidden: nodes the occluder cut
+        uint64_t nodes = 0, singles = 0, hidden = 0;   // hidden: nodes the occluder cut
+        uint64_t aired = 0;   // nodes the air cut: under the threshold through it, not without it
         uint64_t cellsVersion = 0;      // the detail cells it skipped were these
         double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
         uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)
@@ -354,7 +387,32 @@ private:
     Locate m_locate;
     Ground m_ground;
     hal::RootSignature m_rootSig = nullptr;
-    hal::Pso m_pso, m_psoBox;
+    hal::Pso m_pso, m_psoBox, m_psoPoint;   // the cells' prisms, the boxes by vertex, the points
+    // THE SUN MAP's pass: the same four pipelines depth-only, the texture, its views, the cast.
+    hal::Pso m_psoSun, m_psoSunBox, m_psoSunBoxMesh, m_psoSunShape;
+    GpuTexture m_sunTex;
+    uint32_t m_sunDsv = UINT32_MAX, m_sunSrv = UINT32_MAX;
+    struct SunMap {
+        bool on = false;
+        float vp[16] = {};
+        float side = 0.0f;
+        double centre[3] = {0.0, 0.0, 0.0};   // the map's centre, flat frame (the world), snapped
+    } m_sun;
+    bool m_sunSaid = false, m_sunPlanSaid = false;
+    AirRows m_air = EarthAir();
+    void RenderSunMap(const FrameContext& ctx);
+    // THE SOLIDS OF ONE EYE, drawn through the pipelines given: the resident cells (and the ones
+    // leaving whose boxes the drawn walk does not hold yet), then each of `worlds` worlds' boxes
+    // and shapes -- the frame's draw (Render, three worlds, lit) and the sun's (RenderSunMap, the
+    // eye's own world, depth only) are the one walk over the one set of buffers.
+    struct Pipes {
+        ID3D12PipelineState* cells = nullptr;
+        ID3D12PipelineState* box = nullptr;
+        ID3D12PipelineState* boxMesh = nullptr;
+        ID3D12PipelineState* shape = nullptr;
+        ID3D12PipelineState* point = nullptr;   // null: the points are not drawn (the sun's pass)
+    };
+    void DrawSolids(const FrameContext& ctx, uint32_t eyeIndex, uint32_t worlds, const Pipes& p, const char* tag);
     std::shared_ptr<Shared> m_shared = std::make_shared<Shared>();
     std::map<Key, Cell> m_cells;
     struct Warm {
@@ -374,7 +432,7 @@ private:
     Key m_eyeCell{INT32_MIN, INT32_MIN};   // the instrument: cells taken back warm vs built
 
     std::shared_ptr<const BuildingLodFile> m_lod;
-    double m_lodPixels = 1.0, m_shapePixels = 4.0;
+    double m_lodPixels = 1.0, m_shapePixels = 8.0, m_boxPixels = 2.0;
     std::map<PageKey, std::shared_ptr<const Page>> m_pages;
     std::map<PageKey, uint64_t> m_pageUsed;   // the frame a walk last used it
     std::set<PageKey> m_pagePending;
@@ -384,7 +442,7 @@ private:
     struct Drawn {
         double origin[3];
         GpuBuffer vb;
-        uint32_t count = 0, insts = 0;
+        uint32_t count = 0, insts = 0, points = 0;
         std::shared_ptr<const DrawCpu> cpu;   // its instances, kept for a lost device's report
     };
     // TWO DISPATCHES a frame (the boxes, then the shapes): DRED names the one the GPU stopped in,

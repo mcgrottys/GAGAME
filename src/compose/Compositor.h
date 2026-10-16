@@ -352,6 +352,15 @@ struct ComposedSurfaceCb {
     // are the view's world table's (scene/WorldTable.h winRows, SurfaceFrame::Fill); here only
     // rankG, rank k + 1's ground (m) at mip 0, the pyramid's own -- appended at the END.
     float rankG[8];
+    // THE SUN'S RAY OVER THE GROUND AND THE BUILDINGS (shaders/TerrainRay.hlsli; scene
+    // render.shadowSteps / shadowRangeM / reflectLand / buildingShadowM), appended at the END:
+    // x = the march's samples (0 = off), y = its range (m), z = the mirror's land (1 on), w = the
+    // sun map's side (m; 0 = none). sunMapU: x the sun map's heap slot (~0 = none), y its texels a
+    // side. sunVP: the eye's own world, eye-relative, to the map (BuildingLayer::PlanSunMap).
+    // Written every frame by FrameLoop::ShadowRows for every view's surface, after Fill.
+    float shadow[4];
+    uint32_t sunMapU[4];
+    float sunVP[16];
 };
 
 // M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and

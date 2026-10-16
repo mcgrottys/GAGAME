@@ -354,7 +354,10 @@ const Schema& RenderSchema() {
             .Bind("shadowRangeM", p.shadowRangeM, Q::Length, "m",
                   "how far the terrain shadow's march reaches from the lit point", H)
             .Bind("reflectLand", p.reflectLand,
-                  "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H);
+                  "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H)
+            .Bind("buildingShadowM", p.buildingShadowM, Q::Length, "m",
+                  "the drawn buildings' shadow map: a square this wide about the view's ground focus, seen from the sun "
+                  "(0 = the buildings cast no shadow)", H);
         return sc;
     }();
     return *s;
@@ -777,6 +780,9 @@ const Schema& BuildingsLayerSchema() {
                       "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
             .Bind("lodPixels", kBuildings.lodPixels, Q::Dimensionless, "px",
                   "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's", R)
+            .Bind("boxPixels", kBuildings.boxPixels, Q::Dimensionless, "px",
+                  "a building is drawn as its moment box (a hexahedron) from this many pixels across, and as one lit "
+                  "point below (from lodPixels)", R)
             .Bind("shapePixels", kBuildings.shapePixels, Q::Dimensionless, "px",
                   "a building or road piece is drawn as its own form from this many pixels across, and as its "
                   "moment box (the same volume, centroid and heading) below; 1 = always its form. Tokyo at 9 km: 16.5 ms of buildings at 1, 2.3 ms at 6, the stills alike", R)

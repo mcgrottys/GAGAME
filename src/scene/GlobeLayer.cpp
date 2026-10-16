@@ -2672,10 +2672,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.drosteA[1] = static_cast<float>(m_camLevelAbs);
     m_cb.drosteA[2] = static_cast<float>(m_lighting);
     m_cb.drosteA[3] = (m_drosteOn && m_portal[3] > 0.0) ? 1.0f : 0.0f;
-    m_cb.shadowA[0] = static_cast<float>((std::max)(shadowSteps, 0));
-    m_cb.shadowA[1] = (std::max)(shadowRangeM, 1.0f);
-    m_cb.shadowA[2] = reflectLand ? 1.0f : 0.0f;
-    m_cb.shadowA[3] = 0.0f;
     for (int i = 0; i < 3; ++i) m_cb.drostePortal[i] = static_cast<float>(m_portal[i]);
     m_cb.drostePortal[3] = m_drosteOn ? static_cast<float>(m_portal[3]) : 0.0f;
     m_cb.bankBU[0] = m_bankB[0];

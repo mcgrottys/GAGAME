@@ -20,6 +20,11 @@ static float sLvlSkyEyeR = 6371000.0f;
 #define GA_SUN_DIR (sLvlSun)
 #define GA_SKY_UP (sLvlSkyUp)
 #include "Common.hlsli"
+// THE GROUND UNDER THE SUN (Compose.hlsli, TerrainRay.hlsli): a face asks the composed height field
+// whether a hill stands between it and the sun, and the sun map whether another building does --
+// the same two questions the globe's surface asks of the same rows (b2 is bound for every layer).
+#include "Compose.hlsli"
+#include "TerrainRay.hlsli"
 
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
@@ -99,7 +104,6 @@ Inst ReadInst(uint row) {
     o.x = gWalk[row + 2u];
     return o;
 }
-float FadeIn(float alpha, float landed) { return alpha * saturate((gBdTime.x - landed) / max(gBdTime.y, 1e-3f)); }
 
 // THE FAR BOXES (docs/BUILDING_LOD.md): a building past its own form as its moment box, 8 vertices
 // and 12 triangles a box, 16 boxes a mesh group. The faces share their corners, so no vertex carries
@@ -132,7 +136,7 @@ void MsBox(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut v
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     o.n = float3(0, 0, 0);   // flat: the pixel shader's derivatives
     o.col = kPalette[0] * gBdOrigin.w;
-    o.alpha = FadeIn(b.alpha, asfloat(b.x.w));
+    o.alpha = 1.0f;   // opaque: a box drawn is drawn whole (the owner saw the transparent ones)
     verts[gi] = o;
     // 12 triangles over 8 threads: each writes one, the first four write a second.
     const uint tb = bi * 12u, vb = bi * 8u;
@@ -160,7 +164,32 @@ VsOut VsBox(uint vid : SV_VertexID) {
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     o.n = s * A / max(length(A), 1e-6f);
     o.col = kPalette[(ax == 2u && s > 0.0f) ? 1u : 0u] * gBdOrigin.w;
-    o.alpha = FadeIn(b.alpha, asfloat(b.x.w));
+    o.alpha = 1.0f;
+    return o;
+}
+
+// THE POINT (the owner, 2026-10-15): the smallest of the three forms, a building under boxPixels
+// across -- one vertex at its centre, and its ROTOR is what makes it a building and not a dot:
+// the eye's elevation against the rotor's up, sin e, is the share of the roof the eye sees and
+// cos e the share of the walls, so the point's colour is that mix of the palette and its normal
+// the mix of the roof's up and the wall that faces the eye -- the same law the building field
+// gives the walls it does not draw (Globe.hlsl PsSurface), so a suburb is lit the same whether it
+// stands as points, as boxes or as the field. PsMain lights it as any face.
+VsOut VsPoint(uint vid : SV_VertexID) {
+    Inst b = ReadInst(gBdMesh.x + vid * 3u);
+    b.c = Rotate(gBdWorld, b.c);
+    b.q = QMul(gBdWorld, b.q);
+    const float3 U = Rotate(b.q, float3(0, 1, 0));
+    VsOut o;
+    o.rel = gBdOrigin.xyz + b.c;
+    o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+    const float3 v = -o.rel / max(length(o.rel), 1e-3f);   // toward the eye
+    const float sinE = abs(dot(v, U));
+    float3 nw = v - dot(v, U) * U;                           // the wall that faces the eye
+    nw = dot(nw, nw) > 1e-8f ? normalize(nw) : U;
+    o.n = normalize(lerp(nw, U, sinE));
+    o.col = lerp(kPalette[0], kPalette[1], sinE) * gBdOrigin.w;
+    o.alpha = 1.0f;
     return o;
 }
 
@@ -266,7 +295,7 @@ void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, in payload ShapePa
     const float part = (flags & 1u) ? 2.0f : 0.0f;
     const bool ribbon = (flags & 4u) != 0u;   // shape::kRibbon: a road piece, one quad a segment
     VsOut o;
-    o.alpha = FadeIn(b.alpha, asfloat(b.x.y));
+    o.alpha = 1.0f;   // opaque (a ribbon's width under a pixel is the one alpha, below)
     if (ribbon) {   // THE RIBBON IS A SLAB: segment e of the polyline, mitred at both vertices, as four
         // one-sided faces -- top, underside, right and left -- so a bridge's deck has an underside for
         // the eye on the water and the cull stays (the owner, 2026-10-11: keep the cull, lose no face).
@@ -404,7 +433,20 @@ float4 PsMain(VsOut i) : SV_Target {
         if (dot(n, i.rel) > 0.0f) n = -n;
         if (dot(n, up) > 0.9f) col *= 0.65f;   // kPalette[1] / kPalette[0]: the roof's shade of the wall's
     }
-    const float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
+    float ndl = saturate(dot(n, GA_SUN_DIR)) * PlanetShadow(up, GA_SUN_DIR, h, Rb);
+    // THE GROUND AND THE OTHER BUILDINGS between this face and the sun, by the globe's own law
+    // (Globe.hlsl PsSurface): the terrain march from the face's point at its pixel's grain, and the
+    // sun map of the drawn solids. Asked where the sun still reaches (a set sun or a face turned
+    // away needs no march), and of the eye's own world only: a window world's point is here in the
+    // true frame, pulled through its window, and its ground is addressed in its own -- the step that
+    // carries the march through a window is not taken yet.
+    if (depth == 0u && ndl > 0.0f) {
+        const float range = length(i.rel);
+        const float footM = range * gBdTime.z;   // a pixel's metres at this face
+        TerrainHit hit;
+        ndl *= TerrainRay(up, h, i.rel, 0u, GA_SUN_DIR, footM, ComposedHeightLod(range, gBdTime.z), Rb, false, hit) *
+               SunMapClear(i.rel, n);
+    }
     const float3 lit = col * (SkyAmbient(n, up, h) + ndl * SunAt(up, h) * 1.15f);
     // ...and seen through THE AIR IN FRONT OF IT, the ground's own law: a box 60 km off fades into
     // the same haze as the land under it, where it stood out at full contrast.

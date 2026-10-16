@@ -350,6 +350,18 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // (WtWinRow below; SurfaceFrame::Fill); here rank k + 1's ground texel (m) at mip 0.
 #define GA_COMPOSED_CB_WINDOW_ROWS \
     float4 gCsRankG[2];
+// THE SUN'S RAY OVER THE GROUND AND THE BUILDINGS (TerrainRay.hlsli; scene render.shadowSteps,
+// shadowRangeM, reflectLand, buildingShadowM), appended at the END: on b2 because the ground AND
+// the buildings ask the same two questions of the same sun -- x = the march's samples (0 = off),
+// y = its range (m), z = 1 when the water's mirror reflects the land it meets, w = the sun map's
+// side (m; 0 = no map). gCsSunMapU.x = the sun map's heap slot (~0 = none), .y = its texels a side.
+// gCsSunVP takes an eye-relative point of the eye's own world to the map (BuildingLayer::PlanSunMap):
+// xy its place on the map in clip units, z its depth TOWARD the sun (1 nearest), an orthographic
+// cast along the sun, so the map's depth test (GREATER, as the frame's) keeps what the sun sees first.
+#define GA_COMPOSED_CB_SHADOW_ROWS \
+    float4 gCsShadow; \
+    uint4  gCsSunMapU; \
+    row_major float4x4 gCsSunVP;
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
@@ -360,6 +372,7 @@ cbuffer SurfaceCb : register(b2) {
     GA_COMPOSED_CB_ROWS
     GA_COMPOSED_CB_EYE_ROWS
     GA_COMPOSED_CB_WINDOW_ROWS
+    GA_COMPOSED_CB_SHADOW_ROWS
 };
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with
