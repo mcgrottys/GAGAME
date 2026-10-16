@@ -145,15 +145,18 @@ public:
     // than `sideM`, then that cell's parents, the span doubling each level, `levels` of them. Every
     // level has kSunTexels a side, so the grain grows with the cell as a pixel's footprint grows with
     // its distance from the eye. A cell's map stands on the cell's own point, lifted to the ground
-    // there (asked of the height stack once per cell, on the Io lane): it is the cell's, not the
-    // eye's, so it has no hysteresis and no snapping -- an eye moving within its cell moves no shadow
-    // edge, and the set of cells changes only when the eye's address does. PlanSunMap (the frame
-    // loop, after the surface rows are filled) makes the casts and writes b2's rows
-    // (ComposedSurfaceCb::shadow.w, sunMapU, sunSrv, sunVP); Simulate records the passes, one
-    // ExecuteIndirect walk per level. A lit point takes the FINEST map that holds it (the floor of
-    // its address). sideM <= 0 or levels <= 0: no maps, the rows say none, nothing is drawn.
+    // under the eye (`eyeClearM`: the frame's own clamp, no read) in steps of a sixteenth of the
+    // span, a world quantity: it is the cell's, not the eye's, so it has no hysteresis and no
+    // snapping -- an eye moving within its cell moves no shadow edge, and the set of cells changes
+    // only when the eye's address does. A map is KEPT across frames and recast only when its cell,
+    // its altitude step, the sun (by a texel's worth), the drawn walk or the near cells change; the
+    // maps are dropped while the walk draws nothing that casts (orbit). PlanSunMap (the frame loop,
+    // after the surface rows are filled) plans the casts and writes b2's rows (ComposedSurfaceCb::
+    // shadow.w, sunMapU, sunSrv, sunVP); Simulate records the passes due, one ExecuteIndirect walk
+    // per level. A lit point takes the FINEST map that holds it (the floor of its address). sideM
+    // <= 0 or levels <= 0: no maps, the rows say none, nothing is drawn.
     // `view`: the instrument (render.buildingShadowView) -- the faces drawn as their maps' clear.
-    void PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, int levels, bool view, ComposedSurfaceCb& cb);
+    void PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, int levels, bool view, double eyeClearM, ComposedSurfaceCb& cb);
     static constexpr uint32_t kSunTexels = 2048;
     static constexpr uint32_t kSunLevels = 6;   // the cascade's cap: b2's rows (ComposedSurfaceCb::sunSrv, sunVP)
     // THE AIR IN THE WALK'S LAW (2026-10-15; the owner: cull what the atmosphere obscures). A
@@ -456,18 +459,20 @@ private:
     // texture, its views, the cell and the cast. A level's texture is made when the scene first asks
     // for that many levels (kSunTexels square, D32: 16 MB each).
     hal::Pso m_psoSun, m_psoSunBox, m_psoSunBoxMesh, m_psoSunShape;
-    struct GroundAsk {   // the ground's height at a cell's point, asked of the height stack off the frame thread
-        std::atomic<int> state{0};   // 0 asked, 1 landed
-        double alt = 0.0;
-        int64_t index = -1;
-    };
+    // A LEVEL'S MAP IS KEPT until one of its inputs moves (the still frame's law, docs/VISIBILITY_FIELD.md
+    // 9): the cell, the cube's altitude step, the sun by a texel's worth, the walk the eye draws, the
+    // near cells. The cast's own axes and centre are held with it, so the lookup's matrix is the
+    // kept map's and never a newer sun's.
     struct SunLevel {
-        bool on = false;                   // cast this frame (the rows name it)
+        bool on = false;                   // the rows name it this frame
+        bool cast = false;                 // its map must be drawn (an input moved since it was)
         bool stood = false;                // a cell is known from a frame before
         int lattice = 0;                   // the lattice level whose cell this is
         OriginLattice::Origin cell{};      // the eye's ground address at that level
-        double alt = 0.0;                  // the ground's height at the cell's point (0 until the ask lands)
-        std::shared_ptr<GroundAsk> ask;
+        double alt = 0.0;                  // the cube's altitude: the ground under the eye, in steps of a sixteenth of the span
+        double S[3] = {}, R[3] = {}, U[3] = {};   // the cast's sun axes (down-sun is -S)
+        double centre[3] = {};             // the cube's centre, flat frame
+        uint64_t walks = 0, cells = 0;     // the walk and the near cells the map was cast from
         float side = 0.0f;                 // the cell's span (m): the cube's every edge
         float vp[16] = {};
         GpuTexture tex;

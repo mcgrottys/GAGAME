@@ -461,3 +461,22 @@ grain (1.7 m) where the pixel's is finer: the lookup's law is the floor of the p
 and the cascade stands on the eye's address only; the cells the view reaches that are not the
 eye's own chain (the neighbours at each level) are the next form, when the field of section 3 says
 which cells the view holds. A window world's buildings still have no map.
+
+**The maps kept (the owner, the same night: "did we miss an optimization?").** His orbit log showed
+it: at 300 km the eye crosses a finest cell every frame, and each crossing asked the height stack
+for the cell's ground on the Io lane -- a `HeightPage` made and read per cell, 5 a frame -- and the
+page loads behind them waited up to 3.2 s in the lane ("their wait in the lane 3246 ms"), which is
+what starved the tiles he saw. Two laws replace it. (1) The cube's altitude is the ground under the
+eye by the frame's own clamp (`FrameLoop::m_groundClear`, no read), in world steps of a sixteenth
+of the span: a city's ground is within the cube, the step moves only when the ground has crossed
+it, and nothing is asked of any lane. (2) A level's map is a pure function of its cell, that
+altitude step, the sun and the drawn walk (plus the near cells), so it is KEPT across frames and
+recast only when one of them moves -- the sun by half a texel of angle (7 s at the finest level,
+2 min at the coarsest), the walk when one lands; the cast's axes and centre are held with the map so
+the lookup's matrix is the kept map's and never a newer sun's. And while the walk draws nothing that
+casts (orbit: points alone) no map stands and no cell is named. Measured at the city: the casts ran
+on 85 of 581 frames (the walks' landings); `buildings.sun` 0.681 -> 0.081 ms mean (p50 0), the
+boxes and shapes rows back to 1.27 / 0.34 ms, the mean frame 21.2 -> 18.2 ms. The stills differ
+from the per-frame cast's on scattered single pixels of the shadowed ground (city 6.1 %, harbour
+0.8 %, market 0.15 %): the cubes' altitude is now the step's, not the stack's, and every shadow
+edge re-sampled; no region changed.

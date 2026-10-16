@@ -2419,8 +2419,10 @@ void FrameLoop::ShadowRows() {
     bl->SetAir(renderer.air);   // the walk's threshold through the planet's air
     float sun[3];
     renderer.SunDir(sun);
+    // The ground under the eye, by the frame's own clamp: the cubes' altitude, no read of the stack.
+    const double clear = m_groundClear ? m_groundClear(m_cam.px, m_cam.py, m_cam.pz) : 0.0;
     bl->PlanSunMap(m_cam, sun, bl->enabled ? m_S.render.buildingShadowM : 0.0, m_S.render.buildingShadowLevels,
-                   m_S.render.buildingShadowView, renderer.surfaceCb);
+                   m_S.render.buildingShadowView, clear, renderer.surfaceCb);
 }
 
 void FrameLoop::PublishBuildingWorlds() {

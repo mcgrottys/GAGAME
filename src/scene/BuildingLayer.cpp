@@ -2191,7 +2191,7 @@ void BuildingLayer::Render(const FrameContext& ctx) {
 //  gViewProj is, stored row-major as Common.hlsli reads it; the receivers read their place on a map
 //  from the same bytes, so a cast and its lookup cannot disagree about where a texel is.
 // ================================================================================================
-void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, int levels, bool view, ComposedSurfaceCb& cb) {
+void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, int levels, bool view, double eyeClearM, ComposedSurfaceCb& cb) {
     using namespace DirectX;
     constexpr double kR = 6371008.8, kDeg = 3.14159265358979323846 / 180.0;
     for (SunLevel& L : m_sun) L.on = false;
@@ -2211,20 +2211,27 @@ void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double 
         }
         return;
     }
+    // NOTHING TO CAST (orbit: the walk draws points alone, and points cast nothing): no maps, no
+    // cells named, no log -- at 300 km the eye crosses a finest cell every frame.
+    const Eye& e0 = m_eyes[WalkerOf(0, 0)];
+    if (m_cells.empty() && m_warm.empty() && e0.lastDrawn[0] + e0.lastDrawn[1] == 0) {
+        for (SunLevel& L : m_sun) L.stood = false;
+        return;
+    }
     // THE FINEST LEVEL: the lattice level whose cells are no wider than sideM at the surface --
     // eps_L R <= sideM, L = ceil(log2(edge R / sideM)); 2000 m is level 12 (1,722 m).
     const int finest = (std::max)(2, (std::min)(OriginLattice::kLmax - 1,
                            int(std::ceil(std::log2(OriginLattice::kEdgeRad * kR / sideM)))));
-    // The sun's axes, in doubles: down-sun forward.
     double S[3] = {sunDir[0], sunDir[1], sunDir[2]};
     const double sl = std::sqrt(S[0] * S[0] + S[1] * S[1] + S[2] * S[2]);
     if (sl < 1e-9) return;
     for (double& v : S) v /= sl;
-    const double F[3] = {-S[0], -S[1], -S[2]};
-    // THE EYE'S GROUND ADDRESS: its direction from the planet's centre, the lattice's own input.
+    // THE EYE'S GROUND ADDRESS: its direction from the planet's centre, the lattice's own input;
+    // and the ground under it, the frame's clamp: the eye's altitude less its clearance.
     const double eye[3] = {cam.px, cam.py, cam.pz};
     double lat = 0.0, lon = 0.0, h = 0.0;
     m_locate(eye, lat, lon, h);
+    const double groundAlt = std::isfinite(eyeClearM) ? h - eyeClearM : 0.0;
     const double d[3] = {std::cos(lat * kDeg) * std::cos(lon * kDeg), std::sin(lat * kDeg), std::cos(lat * kDeg) * std::sin(lon * kDeg)};
     const double P[3] = {d[0] * (kR + h), d[1] * (kR + h), d[2] * (kR + h)};
     for (uint32_t k = 0; k < want; ++k) {
@@ -2236,55 +2243,64 @@ void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double 
         if (lat_.level < 1) break;
         const OriginLattice::Origin cell = lat_.Surface(P);
         const double span = lat_.Spacing(0);
+        const double step = span / 16.0;   // the cube's altitude moves in world steps: a sixteenth of its span
+        bool moved = !L.stood;
         if (!L.stood || !cell.Same(L.cell) || L.lattice != lat_.level) {
-            // A NEW CELL: its point, and the ground's height there asked of the height stack on the
-            // Io lane (a cold raster may take a second; the frame thread does not wait). Until the
-            // ask lands the cube stands on the surface shell; a city's ground is within it.
             L.cell = cell;
             L.lattice = lat_.level;
-            L.stood = true;
-            L.alt = 0.0;
-            L.ask = std::make_shared<GroundAsk>();
-            L.ask->index = cell.index;
-            if (m_ground) {
-                Threads().Submit(Lane::Io, "buildings.sun.ground",
-                                 [ask = L.ask, ground = m_ground, la = cell.anchor.latDeg, lo = cell.anchor.lonDeg] {
-                                     double v = 0.0;
-                                     const std::unique_ptr<PlaceField> f = ground(30.0);
-                                     if (f && f->Read(la, lo, v) && std::isfinite(v)) ask->alt = v;
-                                     ask->state.store(1);
-                                 });
-            } else {
-                L.ask->state.store(1);
+            L.alt = std::round(groundAlt / step) * step;
+            moved = true;
+            Log("[buildings] sun map %u: the eye's cell on lattice level %d is point %lld (%.5f N %.5f E), span %.0f m, texel %.2f m, the cube at %.0f m",
+                k, lat_.level, static_cast<long long>(cell.index), cell.anchor.latDeg, cell.anchor.lonDeg, span, span / double(kSunTexels), L.alt);
+        } else if (std::abs(groundAlt - L.alt) > step) {
+            L.alt = std::round(groundAlt / step) * step;
+            moved = true;
+        }
+        // THE SUN'S AXES are the cast's own and kept with the map: recomputed when the sun has moved
+        // a texel's worth over the cube (half a texel in angle), so the lookup's matrix is always the
+        // matrix the kept map was drawn by.
+        const double dS = std::abs(S[0] - L.S[0]) + std::abs(S[1] - L.S[1]) + std::abs(S[2] - L.S[2]);
+        if (moved || dS > 0.5 / double(kSunTexels)) {
+            for (int i = 0; i < 3; ++i) L.S[i] = S[i];
+            const double F[3] = {-S[0], -S[1], -S[2]};
+            double c[3], c1[3];
+            m_place(L.cell.anchor.latDeg, L.cell.anchor.lonDeg, L.alt, c);
+            m_place(L.cell.anchor.latDeg, L.cell.anchor.lonDeg, L.alt + 100.0, c1);
+            double up[3] = {c1[0] - c[0], c1[1] - c[1], c1[2] - c[2]};
+            const double ul = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+            for (double& v : up) v /= (ul > 0.0 ? ul : 1.0);
+            const double fu = F[0] * up[0] + F[1] * up[1] + F[2] * up[2];
+            const double hint[3] = {std::abs(fu) > 0.99 ? 0.0 : up[0], std::abs(fu) > 0.99 ? 0.0 : up[1], std::abs(fu) > 0.99 ? 1.0 : up[2]};
+            double Rx[3] = {hint[1] * F[2] - hint[2] * F[1], hint[2] * F[0] - hint[0] * F[2], hint[0] * F[1] - hint[1] * F[0]};
+            const double rl = std::sqrt(Rx[0] * Rx[0] + Rx[1] * Rx[1] + Rx[2] * Rx[2]);
+            if (rl < 1e-9) break;
+            for (double& v : Rx) v /= rl;
+            for (int i = 0; i < 3; ++i) {
+                L.R[i] = Rx[i];
+                L.centre[i] = c[i];
             }
-            Log("[buildings] sun map %u: the eye's cell on lattice level %d is point %lld (%.5f N %.5f E), span %.0f m, texel %.2f m",
-                k, lat_.level, static_cast<long long>(cell.index), cell.anchor.latDeg, cell.anchor.lonDeg, span, span / double(kSunTexels));
+            L.U[0] = F[1] * Rx[2] - F[2] * Rx[1];
+            L.U[1] = F[2] * Rx[0] - F[0] * Rx[2];
+            L.U[2] = F[0] * Rx[1] - F[1] * Rx[0];
+            moved = true;
         }
-        if (L.ask && L.ask->state.load() == 1) {
-            L.alt = L.ask->alt;
-            L.ask.reset();
+        // THE DRAWN WALK AND THE NEAR CELLS: the solids the cast draws; a new walk or a cell landing
+        // is a new map.
+        if (L.walks != e0.walks || L.cells != m_cellsVersion) {
+            L.walks = e0.walks;
+            L.cells = m_cellsVersion;
+            moved = true;
         }
-        // The cell's centre in the flat frame, lifted to its ground; the zenith there as the up hint.
-        double c[3], c1[3];
-        m_place(L.cell.anchor.latDeg, L.cell.anchor.lonDeg, L.alt, c);
-        m_place(L.cell.anchor.latDeg, L.cell.anchor.lonDeg, L.alt + 100.0, c1);
-        double up[3] = {c1[0] - c[0], c1[1] - c[1], c1[2] - c[2]};
-        const double ul = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
-        for (double& v : up) v /= (ul > 0.0 ? ul : 1.0);
-        const double fu = F[0] * up[0] + F[1] * up[1] + F[2] * up[2];
-        const double hint[3] = {std::abs(fu) > 0.99 ? 0.0 : up[0], std::abs(fu) > 0.99 ? 0.0 : up[1], std::abs(fu) > 0.99 ? 1.0 : up[2]};
-        double Rx[3] = {hint[1] * F[2] - hint[2] * F[1], hint[2] * F[0] - hint[0] * F[2], hint[0] * F[1] - hint[1] * F[0]};
-        const double rl = std::sqrt(Rx[0] * Rx[0] + Rx[1] * Rx[1] + Rx[2] * Rx[2]);
-        if (rl < 1e-9) break;
-        for (double& v : Rx) v /= rl;
-        const double U[3] = {F[1] * Rx[2] - F[2] * Rx[1], F[2] * Rx[0] - F[0] * Rx[2], F[0] * Rx[1] - F[1] * Rx[0]};
+        L.cast = L.cast || moved;
+        L.stood = true;
         // THE BOUNDARY: the centre less the eye in doubles, cast once. The camera on the sun's side,
         // half a span out, looking down the sun; near = span (the far face -> 0), far = 0 (the sun's
-        // face -> 1): reversed, as the frame's depth is.
-        const double rel[3] = {c[0] - cam.px, c[1] - cam.py, c[2] - cam.pz};
-        const XMVECTOR pos = XMVectorSet(float(rel[0] + S[0] * 0.5 * span), float(rel[1] + S[1] * 0.5 * span), float(rel[2] + S[2] * 0.5 * span), 1.0f);
-        const XMVECTOR fwd = XMVectorSet(float(F[0]), float(F[1]), float(F[2]), 0.0f);
-        const XMVECTOR upv = XMVectorSet(float(U[0]), float(U[1]), float(U[2]), 0.0f);
+        // face -> 1): reversed, as the frame's depth is. Rebuilt every frame (it is eye-relative)
+        // from the kept axes and centre, so it is the kept map's cast.
+        const double rel[3] = {L.centre[0] - cam.px, L.centre[1] - cam.py, L.centre[2] - cam.pz};
+        const XMVECTOR pos = XMVectorSet(float(rel[0] + L.S[0] * 0.5 * span), float(rel[1] + L.S[1] * 0.5 * span), float(rel[2] + L.S[2] * 0.5 * span), 1.0f);
+        const XMVECTOR fwd = XMVectorSet(float(-L.S[0]), float(-L.S[1]), float(-L.S[2]), 0.0f);
+        const XMVECTOR upv = XMVectorSet(float(L.U[0]), float(L.U[1]), float(L.U[2]), 0.0f);
         const XMMATRIX viewM = XMMatrixLookToLH(pos, fwd, upv);
         const XMMATRIX proj = XMMatrixOrthographicLH(float(span), float(span), float(span), 0.0f);
         XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4*>(L.vp), XMMatrixMultiply(viewM, proj));
@@ -2299,10 +2315,10 @@ void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double 
     if (!m_sunPlanSaid && m_sunLevels) {   // the instrument: once, the cascade that stands
         m_sunPlanSaid = true;
         Log("[buildings] sun maps planned: %u levels from lattice level %d (span %.0f m, texel %.2f m) to %d (span %.0f m, texel %.1f m), "
-            "%u texels a side each, sun %.3f %.3f %.3f%s",
+            "%u texels a side each, sun %.3f %.3f %.3f, the ground under the eye %.0f m%s",
             m_sunLevels, m_sun[0].lattice, double(m_sun[0].side), double(m_sun[0].side) / kSunTexels,
             m_sun[m_sunLevels - 1].lattice, double(m_sun[m_sunLevels - 1].side), double(m_sun[m_sunLevels - 1].side) / kSunTexels,
-            kSunTexels, S[0], S[1], S[2], view ? "; the view instrument is on" : "");
+            kSunTexels, S[0], S[1], S[2], groundAlt, view ? "; the view instrument is on" : "");
     }
 }
 
@@ -2355,7 +2371,8 @@ void BuildingLayer::RenderSunMap(const FrameContext& ctx) {
                                                   "buildings.sun.L3", "buildings.sun.L4", "buildings.sun.L5"};
     for (uint32_t k = 0; k < m_sunLevels; ++k) {
         SunLevel& L = m_sun[k];
-        if (!L.on || L.dsv == UINT32_MAX) continue;
+        if (!L.on || !L.cast || L.dsv == UINT32_MAX) continue;   // kept: its inputs stand where they were
+        L.cast = false;
         // The map is the pass's own target; the frame's targets, root and viewport are set by the
         // renderer after every layer's Simulate (Renderer::RenderFrame), so nothing is put back here.
         ctx.cmd->Barrier(L.tex, D3D12_RESOURCE_STATE_DEPTH_WRITE);
