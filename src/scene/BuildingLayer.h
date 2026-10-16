@@ -137,17 +137,25 @@ public:
 
     size_t ResidentCells() const { return m_cells.size(); }
 
-    // THE SUN MAP (scene render.buildingShadowM; shaders/TerrainRay.hlsli SunMapClear). The solids
-    // this layer draws for the eye's own world are drawn once more each frame, depth only, as the
-    // SUN sees them: an orthographic cast along the sun over a square `sideM` wide about `focus`
-    // (the eye's ground focus, flat frame), its depth the distance toward the sun over the same
-    // span, so a 2048-texel map a side holds the city at a metre. PlanSunMap (the frame loop, after
-    // the surface rows are filled) makes the cast from the camera and the sun and writes b2's rows
-    // (ComposedSurfaceCb::shadow.w, sunMapU, sunVP); Simulate records the pass. The map's centre is
-    // snapped to its own texel grid, so an eye moving within a texel moves no shadow edge. sideM
-    // <= 0: no map, the rows say none, and nothing is drawn.
-    void PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, const double focus[3], ComposedSurfaceCb& cb);
+    // THE SUN MAPS: A CASCADE ON THE ORIGIN LATTICE (scene render.buildingShadowM, buildingShadowLevels;
+    // shaders/TerrainRay.hlsli SunMapClear; docs/VISIBILITY_FIELD.md 9). The solids this layer draws
+    // for the eye's own world are drawn once more each frame per LEVEL, depth only, as the SUN sees
+    // them: an orthographic cast along the sun over a cube the span of one CELL of the origin lattice
+    // (core/OriginLattice.h) -- the eye's ground address at the finest level whose cells are no wider
+    // than `sideM`, then that cell's parents, the span doubling each level, `levels` of them. Every
+    // level has kSunTexels a side, so the grain grows with the cell as a pixel's footprint grows with
+    // its distance from the eye. A cell's map stands on the cell's own point, lifted to the ground
+    // there (asked of the height stack once per cell, on the Io lane): it is the cell's, not the
+    // eye's, so it has no hysteresis and no snapping -- an eye moving within its cell moves no shadow
+    // edge, and the set of cells changes only when the eye's address does. PlanSunMap (the frame
+    // loop, after the surface rows are filled) makes the casts and writes b2's rows
+    // (ComposedSurfaceCb::shadow.w, sunMapU, sunSrv, sunVP); Simulate records the passes, one
+    // ExecuteIndirect walk per level. A lit point takes the FINEST map that holds it (the floor of
+    // its address). sideM <= 0 or levels <= 0: no maps, the rows say none, nothing is drawn.
+    // `view`: the instrument (render.buildingShadowView) -- the faces drawn as their maps' clear.
+    void PlanSunMap(const Camera& cam, const float sunDir[3], double sideM, int levels, bool view, ComposedSurfaceCb& cb);
     static constexpr uint32_t kSunTexels = 2048;
+    static constexpr uint32_t kSunLevels = 6;   // the cascade's cap: b2's rows (ComposedSurfaceCb::sunSrv, sunVP)
     // THE AIR IN THE WALK'S LAW (2026-10-15; the owner: cull what the atmosphere obscures). A
     // building is drawn when it covers lodPixels of the picture -- but what the picture holds of it
     // is its contrast against the ground, and the air between takes that contrast: a face at range
@@ -158,8 +166,8 @@ public:
     // eye's altitude above a city), so the law can only keep what the air leaves, never cut what
     // it does not. The planet's rows are the scene's (scene/Air.h); set each frame by the loop.
     void SetAir(const AirRows& a) { m_air = a; }
-    // The map as a picture (--dump writes it beside the still): depth toward the sun as grey,
-    // 0 where the sun meets nothing. An instrument; it waits for the GPU.
+    // The maps as pictures (--dump writes them beside the still, one per level: X.sunmap0.png ...):
+    // depth toward the sun as grey, 0 where the sun meets nothing. An instrument; it waits for the GPU.
     void DumpSunMap(const std::wstring& path);
 
     // THE DECKS THE PHYSICS READS (2026-10-12): every bridge deck and ramp ribbon (compose/
@@ -444,23 +452,38 @@ private:
     Ground m_ground;
     hal::RootSignature m_rootSig = nullptr;
     hal::Pso m_pso, m_psoBox, m_psoPoint;   // the cells' prisms, the boxes by vertex, the points
-    // THE SUN MAP's pass: the same four pipelines depth-only, the texture, its views, the cast.
+    // THE SUN MAPS' pass: the same four pipelines depth-only, and per level of the cascade the
+    // texture, its views, the cell and the cast. A level's texture is made when the scene first asks
+    // for that many levels (kSunTexels square, D32: 16 MB each).
     hal::Pso m_psoSun, m_psoSunBox, m_psoSunBoxMesh, m_psoSunShape;
-    GpuTexture m_sunTex;
-    uint32_t m_sunDsv = UINT32_MAX, m_sunSrv = UINT32_MAX;
-    struct SunMap {
-        bool on = false;
+    struct GroundAsk {   // the ground's height at a cell's point, asked of the height stack off the frame thread
+        std::atomic<int> state{0};   // 0 asked, 1 landed
+        double alt = 0.0;
+        int64_t index = -1;
+    };
+    struct SunLevel {
+        bool on = false;                   // cast this frame (the rows name it)
+        bool stood = false;                // a cell is known from a frame before
+        int lattice = 0;                   // the lattice level whose cell this is
+        OriginLattice::Origin cell{};      // the eye's ground address at that level
+        double alt = 0.0;                  // the ground's height at the cell's point (0 until the ask lands)
+        std::shared_ptr<GroundAsk> ask;
+        float side = 0.0f;                 // the cell's span (m): the cube's every edge
         float vp[16] = {};
-        float side = 0.0f;
-        double centre[3] = {0.0, 0.0, 0.0};   // the map's centre, flat frame (the world), snapped
-    } m_sun;
+        GpuTexture tex;
+        uint32_t dsv = UINT32_MAX, srv = UINT32_MAX;
+    };
+    SunLevel m_sun[kSunLevels];
+    uint32_t m_sunLevels = 0;   // how many levels stand this frame
     bool m_sunSaid = false, m_sunPlanSaid = false;
+    bool EnsureSunLevel(uint32_t k);   // the level's texture and views, made once
     AirRows m_air = EarthAir();
     void RenderSunMap(const FrameContext& ctx);
     // THE SOLIDS OF ONE EYE, drawn through the pipelines given: the resident cells (and the ones
     // leaving whose boxes the drawn walk does not hold yet), then each of `worlds` worlds' boxes
     // and shapes -- the frame's draw (Render, three worlds, lit) and the sun's (RenderSunMap, the
-    // eye's own world, depth only) are the one walk over the one set of buffers.
+    // eye's own world, depth only, once per level of the cascade) are the one walk over the one set
+    // of buffers.
     struct Pipes {
         ID3D12PipelineState* cells = nullptr;
         ID3D12PipelineState* box = nullptr;

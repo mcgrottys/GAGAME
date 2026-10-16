@@ -311,14 +311,18 @@ struct ComposedSurfaceCb {
     // rankG, rank k + 1's ground (m) at mip 0, the pyramid's own -- appended at the END.
     float rankG[8];
     // THE SUN'S RAY OVER THE GROUND AND THE BUILDINGS (shaders/TerrainRay.hlsli; scene
-    // render.shadowSteps / shadowRangeM / reflectLand / buildingShadowM), appended at the END:
-    // x = the march's samples (0 = off), y = its range (m), z = the mirror's land (1 on), w = the
-    // sun map's side (m; 0 = none). sunMapU: x the sun map's heap slot (~0 = none), y its texels a
-    // side. sunVP: the eye's own world, eye-relative, to the map (BuildingLayer::PlanSunMap).
-    // Written every frame by FrameLoop::ShadowRows for every view's surface, after Fill.
+    // render.shadowSteps / shadowRangeM / reflectLand / buildingShadowM / buildingShadowLevels),
+    // appended at the END: x = the march's samples (0 = off), y = its range (m), z = the mirror's
+    // land (1 on), w = the finest sun map's side (m; 0 = none). sunMapU: x how many levels of the
+    // sun maps' cascade stand (0 = none), y their texels a side, z the instrument's flag
+    // (render.buildingShadowView). sunSrv: each level's heap slot (~0 = none). sunVP: each level's
+    // cast -- the eye's own world, eye-relative, to that level's map (BuildingLayer::PlanSunMap),
+    // BuildingLayer::kSunLevels of them. Written every frame by FrameLoop::ShadowRows for every
+    // view's surface, after Fill.
     float shadow[4];
     uint32_t sunMapU[4];
-    float sunVP[16];
+    uint32_t sunSrv[8];
+    float sunVP[96];
 };
 
 // M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and

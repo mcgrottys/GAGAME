@@ -341,9 +341,10 @@ private:
     // its place, its own reflection down the corridor included.
     void PublishHulls();
     void PublishBuildingWorlds();
-    // THE SUN'S ROWS ON b2 (ComposedSurfaceCb::shadow, sunMapU, sunVP): the scene's terrain-shadow
-    // knobs for every view's surface, and the eye's own sun map planned about its ground focus
-    // (BuildingLayer::PlanSunMap). After every surface is filled, before the frame is recorded.
+    // THE SUN'S ROWS ON b2 (ComposedSurfaceCb::shadow, sunMapU, sunSrv, sunVP): the scene's
+    // terrain-shadow knobs for every view's surface, and the eye's own sun maps planned over the
+    // cells of the origin lattice (BuildingLayer::PlanSunMap). After every surface is filled, before
+    // the frame is recorded.
     void ShadowRows();
     // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
     void DrawGlass(float dt);

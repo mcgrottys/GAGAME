@@ -384,3 +384,80 @@ building's own; the buffer is cap x 48 bytes a walk. A lost device's report (`Du
 says what each walker sent, not which instance the GPU stopped in. The stands' stream is
 saturated for the whole of a 300-frame run at the city (512 a frame, 196k made): its order and
 its rate are the next cost on the pool.
+
+
+## 9. The sun maps as a cascade on the origin lattice (2026-10-15)
+
+The owner, after PR 94: the building shadows showed in a square in the middle of the frame with a
+hard edge that jumped as he flew; and could the camera's local origin and the buildings' floating
+origin both serve the shadows? One map stood about the eye's ground focus, 2 km a side (1 m a
+texel), its centre held with a quarter-side hysteresis: inside it the shadows were exact, outside
+it `SunMapClear` returned 1, and the edge moved whenever the focus had wandered far enough.
+
+**The objects.** The cells of the origin lattice are the floors of the eye's address (section 3):
+at level L the eye's ground point names one cell eps_L R across, and that cell's parent at L - 1
+is twice as wide, nesting outward. The cascade is one cast per cell -- the eye's cell at the finest
+level whose span is no wider than `render.buildingShadowM` (2000 m: level 12, 1,722 m), then its
+parents, `render.buildingShadowLevels` of them (5: out to 27.6 km), every one `kSunTexels` (2048)
+a side -- so the grain grows with the cell (0.84, 1.7, 3.4, 6.7, 13.5 m a texel) as a pixel's
+footprint grows with its distance from the eye (9 m at the city 8.5 km off, 1.3 m at the harbour's
+towers). A cell's map is the CELL'S: its centre is the cell's point lifted to the ground there (the
+height stack asked once per cell on the Io lane; the surface shell until it lands), never the eye's,
+so there is no hysteresis and nothing to snap. An eye moving within its cell moves no shadow edge,
+and the set of cells changes only when the eye's address does -- the one event the lattice already
+defines. The ground's own origin (`OriginLattice::Surface`) is used, not the eye's shell: a cube
+centred 3 km up would hold no city.
+
+**One law, parametrised by the grain.** A lit point takes the finest map that holds it (its uv
+within the cell's cast and its depth within the cube), and from there `SunMapClear` runs unchanged
+on that level's matrix alone: the blocker search, the disc, the receiver plane and the texel's
+margin are all stated in the map's own units, so each scales with the cell's span and no level has
+a case of its own. The seam between two levels is a change of grain, not of law. The casts draw the
+same walk buffer the frame draws -- `DrawSolids` with the sun pipelines through ExecuteIndirect,
+one call per level, each its own depth target.
+
+**The rows on b2.** `ComposedSurfaceCb::sunMapU` (x how many levels stand, y texels, z the
+instrument's flag), `sunSrv[8]` (two uint4 rows: each level's heap slot) and `sunVP[96]` (six
+row-major float4x4) against Common.hlsli's `gCsSunMapU`, `gCsSunSrv[2]`, `gCsSunVP[GA_SUN_LEVELS]`;
+`--selftest` cb parity x5 PASS (size and row layout by name).
+
+**The instrument.** `render.buildingShadowView` draws every building face as its maps' clear
+share (red) over a blue mark, before the light and the air, so a still can be counted: building
+pixels, and the share of them with sun under 1, by thirds of the frame. `--dump` writes every
+level's map beside the still (`X.sunmap0.png` ...).
+
+**Measured.** Before = 0ae26fd (the sibling worktree's binary and shaders), after = this branch.
+The stills as section 8's (`--scale 0 --settle-exact`, 300 frames, the Tokyo clock pinned); the
+coverage by the instrument (after) and by the pixels the map darkens by more than 12 luma against
+the same binary with the maps off (both arms); `--gpu-time` over 600 frames at the city.
+
+| | before | after |
+|---|---|---|
+| maps | 1 of 2,000 m about the focus (0.98 m a texel) | 5: the eye's cells at lattice levels 12..8, 1,722 .. 27,553 m (0.84 .. 13.5 m a texel) |
+| city: pixels the maps darken, by thirds left / mid / right | 0.0 / 0.3 / 0.0 % of the frame (0.12 % in all) | 4.9 / 6.9 / 2.9 % (4.9 % in all); top / centre / bottom 0.0 / 3.2 / 11.5 % |
+| city: building pixels shaded (sun < 1), by thirds | | 22.8 / 46.7 / 36.3 % of 434k building pixels (36.6 % in all) |
+| harbour: pixels the maps darken, by thirds | 0.2 / 0.5 / 0.7 % (0.46 % in all) | 0.6 / 0.9 / 2.6 % (1.38 %) |
+| harbour: building pixels shaded, by thirds | | 67.5 / 62.5 / 52.0 % of 260k (59.6 % in all) |
+| buildings.sun (GPU, mean) | 0.151 ms (one cast) | 0.681 ms (L0..L4: 0.147, 0.113, 0.114, 0.132, 0.142) |
+| buildings (GPU, mean) | 4.17 ms | 4.50 ms (the casts' boxes and shapes count in their rows) |
+| globe (GPU, mean) | 14.23 ms | 14.71 ms (the ground's lookup: up to five matrices a pixel before it is held) |
+| mean frame, city | 20.01 ms | 21.21 ms |
+| Newburyport market vs before | | 98.48 % identical, 6,251 px over 1 LSB: the shadows' EDGES only (the diff is the buildings' outlines), re-gridded from the focus's 0.98 m to the cell's 0.84 m |
+| Haulover city vs before | | 22 px (0.002 %), max 13, on the gate's boxes at the bottom right: the same re-gridding; SSIM 1.0000 |
+
+What it bought: shadows across the whole frame instead of a 2 km square -- at the city the left and
+right thirds went from none to 23 and 36 % of their building pixels shaded, and the far towers 8 km
+off shade their streets at 7-13 m a texel, which is the pixel's own footprint there; at the harbour
+the quays and the two towers' shadows on the water stand in every third. No edge moves with the
+eye: the maps' grids are the cells', and the harbour's shadow edges re-sample only when the eye
+leaves its cell. What it costs: 1.2 ms a frame at the city, of which 0.53 ms are the four more
+casts (each draws the whole walk buffer: 63k boxes and 3k shapes, most of them clipped), 0.33 ms
+their boxes and shapes, 0.47 ms the globe's lookup; five D32 maps of 16 MB.
+
+Open: the casts draw every record of the walk per level; a cull against the cell's cube in the
+classify pass (one list per level) would make a level's cast proportional to what stands in its
+cell. The finest cell is the eye's, so a tower in the next cell over at 1 km takes level 1's
+grain (1.7 m) where the pixel's is finer: the lookup's law is the floor of the point's address,
+and the cascade stands on the eye's address only; the cells the view reaches that are not the
+eye's own chain (the neighbours at each level) are the next form, when the field of section 3 says
+which cells the view holds. A window world's buildings still have no map.

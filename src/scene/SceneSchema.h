@@ -504,11 +504,19 @@ struct RenderSection {
     // The water's mirror ray marched over the same field: where it meets land the reflection
     // is that land, not the sky behind it. A test (2026-10-15), off until the owner's eye says.
     bool reflectLand = false;
-    // THE DRAWN BUILDINGS' SHADOW (shaders/TerrainRay.hlsli SunMapClear; BuildingLayer::RenderSunMap):
-    // the solids drawn about the eye, seen once more from the sun over a square this many metres a
-    // side about the view's ground focus, so a tower shades the street, the quay and the tower
-    // beside it with the sun's own penumbra. 0 = no map, and the buildings cast nothing.
+    // THE DRAWN BUILDINGS' SHADOW (shaders/TerrainRay.hlsli SunMapClear; BuildingLayer::RenderSunMap;
+    // docs/VISIBILITY_FIELD.md 9): the solids drawn about the eye, seen once more from the sun, a
+    // depth map per CELL of the origin lattice -- the eye's ground cell at the finest lattice level
+    // whose cells are no wider than buildingShadowM (2000 m: level 12, 1.7 km), then its parents,
+    // the span doubling each level, buildingShadowLevels of them (5: out to 27 km), every one at
+    // the same texel count, so a tower shades the street, the quay and the tower beside it with the
+    // sun's own penumbra, at a grain that grows with the distance as the pixel's does.
+    // buildingShadowM 0 or buildingShadowLevels 0 = no maps, and the buildings cast nothing.
+    // buildingShadowView: an instrument -- the buildings' faces drawn as their maps' clear share
+    // (red; blue marks a face), for the gate's coverage count.
     double buildingShadowM = 2000.0;
+    int buildingShadowLevels = 5;
+    bool buildingShadowView = false;
 };
 
 // THE DEBUG VIEWS of the globe's surface (shaders/DebugView.hlsl, GlobeLayer.h DebugView): the
