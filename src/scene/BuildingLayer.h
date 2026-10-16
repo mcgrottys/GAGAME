@@ -90,7 +90,7 @@ public:
     // shapePixels its own form. Every form is opaque: a fade between forms, or in as a page
     // lands, left transparent blocks over the imagery, and the owner saw them.
     void ConfigureFar(std::shared_ptr<const BuildingLodFile> lod, double pixels, double shapePixels = 8.0,
-                      double pageMB = 1024.0, double marginDeg = 5.0, double boxPixels = 2.0);
+                      double pageMB = 1024.0, double marginDeg = 5.0, double boxPixels = 2.0, double standMB = 256.0);
 
     const char* Name() const override { return "buildings"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields, hal::RootSignature rootSig) override;
@@ -193,7 +193,8 @@ public:
     // beside it (the detail cells are the fine stream's too, on their own kInFlight).
     static constexpr int kCoarseInFlight = 4, kFineInFlight = 4;
     uint64_t m_pageBudget = 1024ull << 20;   // the loaded pages' budget (CPU): layer.buildings.pageMB
-    static constexpr uint32_t kMaxBoxes = 2000000;
+    // THE RECORDS A WALK MAY NAME (the classify pass's threads, and its buffer's size at 48 bytes each).
+    static constexpr uint32_t kMaxRecords = 2000000;
     // THE SHAPES (GALOD04, compose/BuildingShape.h): a loaded page's footprints in one GPU pool,
     // extruded by Buildings.hlsl MsShape one TASK at a time -- kTaskEdges walls or kTaskTris roof
     // triangles of one building (MIRRORED there).
@@ -217,6 +218,38 @@ public:
         float x[4];          // a box: a1, a2, hz, landed; a shape: asuint(addr), landed, 0, 0
     };
     static_assert(sizeof(Box) == 48, "three float4 rows");
+    // A STAND'S RECORD ON THE GPU (shaders/BuildingsClassify.hlsl; 2026-10-15, the owner: the walk
+    // O(log n), not O(N)). One a building, written ONCE when the stand lands, into a persistent
+    // pool, stated about the stand's own centre (a translator per node, so the record is small
+    // floats wherever the node stands and the walk's origin can move without touching it); the
+    // walk names a node's range, and the classify pass makes a Box of it for the form its size on
+    // screen earns. The same object as a Box plus what the per-building law needs: its size (rho:
+    // 0 claims nothing), the centroid's height over the ground (zc: the shape's ground point),
+    // its shape's pool address, its heading (the box's rotor is the ground frame's turned by it)
+    // and its detail cell. No fold is ever a record: a building is a point, a hexahedron or its
+    // mesh, and a page that has not landed shows nothing (the owner, 2026-10-15).
+    struct StoodRec {
+        float p[3], rho;     // the box's centre about the stand's centre; its radius
+        float q[4];          // the box's rotor (flat x, y, z to its long axis, up, its short axis)
+        float a1, a2, hz, zc;
+        uint32_t addr;       // the shape record's byte address in the shape pool; UINT32_MAX none
+        float heading;       // radians, the long axis from east toward north
+        uint32_t cell;       // the detail cell (iy << 16 | ix as int16s)
+        float landed;        // the page's landing (the layer's clock, s)
+    };
+    static_assert(sizeof(StoodRec) == 64, "four float4 rows");
+    // A NODE OF A WALK (two float4 rows): what the walk emits per visited node that has something
+    // to draw -- O(nodes), never O(buildings) -- expanded on the GPU.
+    struct NodeEntry {
+        float off[3];        // the stand's centre about the walk's origin (the difference taken in doubles)
+        uint32_t poolOff;    // its first record in the stands' pool
+        uint32_t first;      // the node's first thread in the pass (a running sum over the list)
+        uint32_t count;      // its threads: the buildings within the node's size bound
+        float air;           // 1 / T at the node's nearest point: every threshold's factor there
+        uint32_t pad;
+    };
+    static_assert(sizeof(NodeEntry) == 32, "two float4 rows");
+    static constexpr uint32_t kWalkHeader = 8;   // the walk buffer's header rows (Buildings.hlsl)
 
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -244,12 +277,10 @@ private:
         double c[3];                    // the quad's centre AT SEA LEVEL, flat frame (the stand has the ground's)
         float rad;                      // a sphere about it holding the quad and its solids
         bool kids;                      // anything stands under it
-        // THE FOLDS, as the tree filed them: its own buildings' and its descendants' (the
-        // descendants' is drawn at its coverage while the children's page is on its way -- what
-        // stands there is never a hole, only coarser). Stood on the ground by a stand (below).
+        // THE FOLDS, as the tree filed them: its own buildings' and its descendants' -- the node's
+        // size bound and its sphere. Never drawn (the owner, 2026-10-15): a building is its own
+        // point, hexahedron or mesh, and a page on its way shows nothing until it lands.
         LodBox own{}, desc{};
-        float descCover = 0.0f;
-        Key descCell{INT32_MIN, INT32_MIN};   // the detail cell its centroid stands in
     };
     // A node whose stand has not come is tested at the worst of elevations: its sphere grown by
     // this, so a town on a plateau is never culled before its ground is known.
@@ -270,15 +301,16 @@ private:
     // stand is published whole under an atomic pointer, so a walk reads a stand or none, never half
     // of one, and a finer stand replaces a coarser without a race. The cost then follows the view:
     // a page 88 km wide over a cold raster stood its 3,466 buildings in 4.7 s before this.
-    struct StoodBld {
-        RtBox box;
-        double g[3] = {};                 // the ground frame under the centroid: its point...
+    struct StoodFrame {                   // the ground frame under a building's centroid
+        double g[3] = {};                 // its point...
         float e[3] = {}, n[3] = {}, up[3] = {};   // ...east, north, up
     };
+    // A stand's buildings live on the GPU (StoodRec, the pool m_stood): the stand holds the quad's
+    // centre for the walk's node tests and its RANGE in the pool. Published when its records are
+    // copied (Simulate), so a walk that reads a stand reads records the GPU holds.
     struct Stood {
         double c[3] = {};                 // the quad's centre on the ground
-        RtBox own, desc;
-        std::vector<StoodBld> blds;       // the node's own buildings, in the page's order (empty: folds only)
+        uint32_t gpuOff = 0, gpuN = 0;    // its records: one a building (withBlds; none otherwise)
         float grainM = 0.0f;
         bool withBlds = false;
     };
@@ -288,6 +320,17 @@ private:
         bool blds = false;
         double grainM = 1.0;
         double px = 0.0;                  // its worth on screen: the order the stands are made in
+        uint32_t gpuOff = 0, gpuN = 0;    // the pool range StandBatch gave it (the frame thread's)
+    };
+    // THE POOL'S RANGES: free runs of records by offset and by length, taken best-fit, given back
+    // coalesced -- a stand of three records beside one of three thousand, no slot size to waste.
+    struct Ranges {
+        std::map<uint32_t, uint32_t> free;        // offset -> length
+        std::multimap<uint32_t, uint32_t> byLen;  // length -> offset
+        uint32_t total = 0, used = 0;
+        void Reset(uint32_t n);
+        bool Take(uint32_t n, uint32_t& off);
+        void Give(uint32_t off, uint32_t n);
     };
     struct Page {
         int L = 0;
@@ -309,23 +352,33 @@ private:
         uint32_t tooBig = 0;
         float landed = 0.0f;            // the layer's clock (s) when it joined the tree: its boxes fade in from here
     };
-    struct DrawCpu {                    // a walk's shaped instances, as the GPU got them
-        std::vector<Box> inst;
+    // A walk's draw buffer: the header and the three lists the classify pass fills. Born COMMON
+    // (fresh); after its pass it is in kListRead, and stays so through the free list.
+    struct ListBuf {
+        GpuBuffer b;
+        bool fresh = true;
     };
+    static constexpr D3D12_RESOURCE_STATES kListRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                                       D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT | D3D12_RESOURCE_STATE_COPY_SOURCE;
     struct Walked {                     // a walk's answer
         double origin[3];
-        uint32_t count = 0;             // boxes, then insts shaped instances, then points (one buffer, 3 rows each)
-        uint32_t insts = 0, points = 0;
-        GpuBuffer staging, vb;
+        float eo[3] = {};               // the eye about the origin: the classify pass's distances
+        float pixAng = 0.0f;            // a pixel's angle from that eye (rad): the pass's sizes on screen
+        uint32_t named = 0, cap = 0;    // nodes named, records they send (the pass's threads)
+        uint32_t cellsN = 0;            // the resident detail cells listed after the nodes
+        GpuBuffer list;                 // the node list (upload heap: read by the pass as it is)
+        ListBuf out;                    // the header and the lists, kWalkHeader + 3 cap rows
+        std::vector<std::shared_ptr<const Stood>> stands;   // the stands named: their ranges stay until the pass ran
         std::vector<std::pair<double, PageKey>> wants;   // pages asked for, by pixels (largest first)
-        std::vector<StandAsk> stands;   // the stands asked for, the largest on screen first
+        std::vector<StandAsk> asks;     // the stands asked for, the largest on screen first
         std::vector<PageKey> used;
         std::vector<std::shared_ptr<const Page>> hold;   // its pages: their pool ranges stay while it is drawn
-        std::shared_ptr<const DrawCpu> cpu;
-        uint64_t nodes = 0, singles = 0, hidden = 0;   // hidden: nodes the occluder cut
+        uint64_t nodes = 0, singles = 0, hidden = 0;   // singles: buildings sent to the pass; hidden: nodes the occluder cut
         uint64_t aired = 0;   // nodes the air cut: under the threshold through it, not without it
         uint64_t cellsVersion = 0;      // the detail cells it skipped were these
-        double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
+        double msVisit = 0.0, msList = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
+        double msRoots = 0.0, msDrain = 0.0;               // ...and the visit's: the coarse levels, the subtrees' drain (the rest is the merge)
+        uint32_t subtrees = 0, threads = 0;
         uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)
 
         double ms = 0.0;
@@ -341,6 +394,8 @@ private:
             PageKey key{INT32_MIN, 0, 0};
             uint32_t node = 0;
             std::vector<std::pair<uint64_t, std::vector<uint8_t>>> zWrites;   // (the pool's byte offset, the bytes)
+            std::shared_ptr<const Stood> stood;   // the stand, published by Simulate once its records are copied
+            std::vector<uint8_t> recs;            // its records (StoodRec each), for the pool at stood->gpuOff
             double ms = 0.0;
             uint32_t blds = 0;
         };
@@ -348,7 +403,8 @@ private:
         std::atomic<int> inflight{0}, pageInflight{0}, standInflight{0};
         std::atomic<int> walking[kEyes * kWorlds] = {};   // one walk in flight per eye and world
         // THE WALK'S BUFFERS, REUSED: a walk takes a retired one at least its size before it makes one.
-        std::vector<GpuBuffer> freeStaging, freeBoxes;
+        std::vector<GpuBuffer> freeStaging;
+        std::vector<ListBuf> freeBoxes;
         std::atomic<bool> cancel{false};
         // THE EYE, as the frame last saw it (under mx): a cell build asks it whether its cell is still
         // within the keep reach, before and while it builds, and stops when it is not.
@@ -441,18 +497,46 @@ private:
     uint64_t m_cellsVersion = 0, m_pagesVersion = 0;   // what a walk depends on, besides the eye
     struct Drawn {
         double origin[3];
-        GpuBuffer vb;
-        uint32_t count = 0, insts = 0, points = 0;
-        std::shared_ptr<const DrawCpu> cpu;   // its instances, kept for a lost device's report
+        GpuBuffer vb;                   // the walk's buffer: its header holds the counts and the draws' arguments
+        uint32_t named = 0, cap = 0;    // what the walk sent to the GPU (its log line)
     };
-    // TWO DISPATCHES a frame (the boxes, then the shapes): DRED names the one the GPU stopped in,
-    // and DumpChunk reads every instance of that frame's walk from the CPU's copy.
-    struct DrawLog { uint64_t frame = 0; std::shared_ptr<const DrawCpu> cpu; };
-    DrawLog m_drawLog[3];
+    // A lost device: DRED names the dispatch the GPU stopped in; this says what each walker's drawn
+    // walk sent (the instances themselves are the GPU's, made by the classify pass).
     void DumpChunk(uint32_t k) const;
     // THE SHAPE POOL: one buffer, a heap SRV (StructuredBuffer<float4>), its free ranges.
     Gpu* m_gpu = nullptr;
     GpuBuffer m_pool;
+    // THE STANDS' RECORD POOL (StoodRec): the buildings stood, written once; its ranges; the ranges
+    // of stands replaced or dropped, freed once nothing holds them and no pass in flight reads them.
+    GpuBuffer m_stood;
+    uint32_t m_stoodRecords = 0;        // layers.buildings.standMB / 64
+    Ranges m_stoodFree;
+    struct StoodRetired {
+        uint32_t off, n;
+        uint64_t frame;
+        std::weak_ptr<const Stood> stood;
+    };
+    std::vector<StoodRetired> m_stoodRetired;
+    uint64_t m_stoodFull = 0;           // stands that waited for room (the instrument)
+    // THE CLASSIFY PASS (shaders/BuildingsClassify.hlsl): its root, its kernel, and the two command
+    // signatures the forms are drawn through (a mesh dispatch, a draw) from the buffer's header.
+    hal::RootSignatureRef m_clsRs;
+    hal::Pso m_clsPso;
+    hal::CommandSignatureRef m_sigMesh, m_sigDraw;
+    void Classify(const FrameContext& ctx, Walked& w);
+    // THE COUNTS, BROUGHT BACK: the header's first row copied to a ring the CPU reads kCountsLag
+    // frames on, so the walk's log line can say what the GPU drew of what it sent.
+    static constexpr uint32_t kCountsRing = 16, kCountsLag = 3;
+    GpuBuffer m_countsRb;
+    struct CountsPending {
+        uint64_t frame = 0;
+        uint32_t slot = 0, eye = 0;
+        uint64_t walk = 0;
+        uint32_t named = 0, cap = 0;
+        double ms = 0.0;
+    };
+    std::vector<CountsPending> m_countsPending;
+    uint32_t m_countsNext = 0;
     uint32_t m_poolSrv = UINT32_MAX;
     std::vector<uint32_t> m_freeSlots;   // the pool's free slots (a stack)
     struct SlotsRetired {   // a dropped page's slots: free once no walk holds the page, then kRetireFrames on
@@ -485,8 +569,8 @@ private:
         double walkEye[3] = {1e30, 1e30, 1e30}, walkFwd[3] = {0, 0, 0};
         uint64_t walkCells = ~0ull, walkPages = ~0ull;
         uint64_t walks = 0;
-        uint32_t walkInstsMax = 0;      // the largest walk's shaped instances so far (each new largest is logged)
         Drawn drawn;
+        uint32_t lastDrawn[3] = {};     // boxes, shapes, points the GPU counted for its latest walk read back
         std::set<PageKey> drawnUsed;    // the pages the drawn walk reads: not evicted under it
         std::vector<std::shared_ptr<const Page>> drawnHold;   // the drawn walk's pages (their slots wait on them)
         uint64_t drawnCells = 0;        // the cells version the drawn boxes were walked against
@@ -509,13 +593,21 @@ private:
     static constexpr size_t kStandAskMax = 4096;
     std::set<std::pair<PageKey, uint32_t>> m_standPending;
     uint64_t m_lastStandWalk = 0;
+    // The stream's order: every eye's asks merged and sorted when a walk lands, sent from the cursor.
+    std::vector<StandAsk> m_standQueue;
+    size_t m_standNext = 0;
+    bool m_standQueueStale = false;
     void StandBatch(std::vector<std::pair<std::shared_ptr<const Page>, StandAsk>> batch);
     // A box stood on the composed ground at its centroid, on the prisms' own axes; the shape's own
     // frame (the ground under the centroid, east, north, up) beside it when asked.
     static void StandBox(const Place& place, double lat, double lon, double base, double zc, double hz, double a1,
-                         double a2, double hd, RtBox& o, StoodBld* frame);
+                         double a2, double hd, RtBox& o, StoodFrame* frame);
+    // A stood box as its GPU record, about the stand's centre (the rotor and extents the walk made
+    // of it before; rho what it claims on screen, 0 for nothing).
+    static void RecordOf(const RtBox& b, const double c[3], float rho, uint32_t addr, float heading, uint32_t cell,
+                         float landed, float zc, StoodRec& r);
     uint64_t m_stands = 0;
-    double m_standMs = 0.0;
+    double m_standMs = 0.0, m_streamMs = 0.0;   // the jobs' time on the pool; the stream's on the frame thread (the instrument)
     // Every eye's wants as one list, each page once at the most it is worth to any eye.
     std::vector<std::pair<double, PageKey>> Wants() const;
     bool DrawnUses(const PageKey& k) const;

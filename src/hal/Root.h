@@ -106,6 +106,11 @@ public:
                     D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL) {
         return Descriptor(D3D12_ROOT_PARAMETER_TYPE_SRV, reg, space, vis);
     }
+    // A root UAV (a raw or structured buffer): the buildings' classify pass writes its lists through one.
+    RootLayout& Uav(uint32_t reg, uint32_t space = 0,
+                    D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL) {
+        return Descriptor(D3D12_ROOT_PARAMETER_TYPE_UAV, reg, space, vis);
+    }
     RootLayout& Constants(uint32_t reg, uint32_t count, uint32_t space = 0,
                           D3D12_SHADER_VISIBILITY vis = D3D12_SHADER_VISIBILITY_ALL) {
         Param p;

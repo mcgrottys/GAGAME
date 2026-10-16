@@ -96,6 +96,11 @@ cell comes or goes; on the pool, never on the frame):
 - Pages are asked for in order of their nodes' size on screen, the largest first, so the roots
   and the large structures come before the fill.
 
+(2026-10-15: the folds are no longer drawn at all -- not as the far picture, not as a stand-in
+while a page is on its way. The owner wants one hexahedron per BUILDING as the middle state, never
+a node's mass as a box; a page that has not landed shows nothing until it does. The folds stay in
+the tree for the walk's size bound and the node's sphere. docs/VISIBILITY_FIELD.md 8.)
+
 Every decision is per node, by its own distance, so no ring and no tile edge exists to be seen.
 What is drawn is bounded by the screen's pixels (a node smaller than 4 px is one box) and not by
 how many buildings exist. The boxes are one buffer and one draw.

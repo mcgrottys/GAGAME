@@ -115,6 +115,9 @@ public:
     void ComputeSrvAt(uint32_t slot, D3D12_GPU_VIRTUAL_ADDRESS va) {
         m_cl->SetComputeRootShaderResourceView(slot, va);
     }
+    void ComputeUavAt(uint32_t slot, D3D12_GPU_VIRTUAL_ADDRESS va) {
+        m_cl->SetComputeRootUnorderedAccessView(slot, va);
+    }
     // The bindless table: the whole shader-visible heap from slot 0, as the shared root
     // signature declares it (Renderer.h); or a table starting at a given heap slot.
     void GraphicsBindless(uint32_t rootParam) {
@@ -151,6 +154,11 @@ public:
         m_cl->DrawInstanced(3, 1, 0, 0);
     }
     void Dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) { m_cl->Dispatch(x, y, z); }
+    // One draw or dispatch whose arguments the GPU wrote (Gpu::CreateCommandSignature): the
+    // buildings' three forms, counted by the classify pass, drawn without the CPU knowing how many.
+    void ExecuteIndirect(ID3D12CommandSignature* sig, ID3D12Resource* args, uint64_t offset) {
+        m_cl->ExecuteIndirect(sig, 1, args, offset, nullptr, 0);
+    }
     // Mesh shaders (M12 step 3f). DispatchMesh is ID3D12GraphicsCommandList6's; the Gpu keeps
     // the frame list's interface, queried once when the list was created (Gpu::MeshList), and
     // hands it back for this context's list -- null for the upload list or a runtime without

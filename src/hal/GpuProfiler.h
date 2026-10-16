@@ -48,6 +48,9 @@ public:
     void Report(int64_t helmFrom) const;
     // Per-frame rows, one column per pass (blank where the pass did not run that frame).
     bool WriteCsv(const std::string& path) const;
+    // The pass's ms in the latest row that ran it (-1: never): a layer's log line quotes its
+    // own pass without waiting for the report.
+    float LastMs(const char* name) const;
 
 private:
     struct Span { uint32_t pass, begin, end; };

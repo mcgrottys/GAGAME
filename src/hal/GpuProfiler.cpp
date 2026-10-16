@@ -150,6 +150,17 @@ void GpuProfiler::Drain() {
     }
 }
 
+float GpuProfiler::LastMs(const char* name) const {
+    for (uint32_t p = 0; p < m_names.size(); ++p) {
+        if (m_names[p] != name) continue;
+        for (size_t r = m_rows.size(); r-- > 0;) {
+            if (m_rows[r].ms[p] >= 0.0f) return m_rows[r].ms[p];
+        }
+        return -1.0f;
+    }
+    return -1.0f;
+}
+
 void GpuProfiler::Report(int64_t helmFrom) const {
     if (m_names.empty()) { Log("[gpu] --gpu-time: no passes recorded"); return; }
     size_t counted = 0;
