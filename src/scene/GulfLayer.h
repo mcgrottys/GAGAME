@@ -21,9 +21,12 @@ namespace ga {
 
 class GulfLayer : public Layer {
 public:
-    void Configure(const std::wstring& shaderDir, const CurrentModel* currents) {
+    // The field it draws is the one at the scene's place (CurrentModel::FieldAt): in a composite of
+    // many regions the finest field anywhere is another region's.
+    void Configure(const std::wstring& shaderDir, const CurrentModel* currents, const CurrentField* field) {
         m_shaderDir = shaderDir;
         m_currents = currents;
+        m_field = field;
     }
 
     const char* Name() const override { return "gulf"; }
@@ -49,6 +52,7 @@ private:
 
     std::wstring m_shaderDir;
     const CurrentModel* m_currents = nullptr;
+    const CurrentField* m_field = nullptr;
     hal::RootSignature m_rootSig = nullptr;
     hal::Pso m_drawPso;
 

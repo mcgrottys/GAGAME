@@ -34,6 +34,7 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/HeightTree.h"
 #include "compose/TileArchive.h"
 #include "hal/Residency.h"
 #include "core/Lattice.h"
@@ -90,6 +91,16 @@ public:
     // (latMin, latMax, lonMin, lonMax radians, groundResM)
     virtual float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                          uint8_t rgba[4]) = 0;
+    // TILE AT A TIME (2026-10-14): a source that can paint a frame's whole tile faster than texel by
+    // texel -- the work a texel repeats done once a tile -- paints it here, into `out` (texW x texH
+    // RGBA8, alpha the weight quantized) with the per-texel loop's flags. Its bytes must be the
+    // per-texel loop's exactly (the gate is byte identity, Compositor::PaintSourceTile's two
+    // paths). False: not offered, and the per-texel loop paints, as every source did before.
+    virtual bool PaintTile(const Lattice& /*frame*/, const TileRequest&, double /*groundResM*/, PaintCtx&,
+                           std::vector<uint8_t>& /*out*/, bool& /*complete*/, bool& /*anyCover*/,
+                           bool& /*fullCover*/) {
+        return false;
+    }
     // The level it paints on a lattice (DomainSource::OwnMip); -1, every grain.
     virtual int OwnMip(const Lattice&) const { return -1; }
     // The finest level it has anything of its own for, over a box (radians; DomainSource::FinestMip).
@@ -117,6 +128,17 @@ public:
     // layers declare none, so their trees keep the key they were painted under.
     virtual int OwnMip(const Lattice&) const { return -1; }
     virtual bool Footprint(double&, double&, double&, double&) const { return false; }
+    // THE RANGE OVER A BOX (degrees): every value Sample can give at any point of the box, at any
+    // grain, lies in [lo, hi] -- a bound, not an estimate (a sample is a weighted mean of the source's
+    // own values, so it never leaves their range). `full`: the weight is 1 everywhere in the box.
+    // None: the weight is 0 everywhere in it. The default knows only the coverage box.
+    enum class Range { None, Known, Unknown };
+    virtual Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi,
+                          bool& full) {
+        (void)lo; (void)hi; full = false;
+        const SourceInfo& s = Info();
+        return (lon1 < s.lon0 || lon0 > s.lon1 || lat1 < s.lat0 || lat0 > s.lat1) ? Range::None : Range::Unknown;
+    }
 };
 
 // M6v: the two-component fiber -- a WATER-parameter field sample. The value algebra is a
@@ -183,8 +205,25 @@ public:
     // than the data's cell reads the interpolant's facets (bilinear ETOPO at 4.9 km stepped at
     // 1 km rendered the continental slope as terraces).
     double HeightGrainM(int channel, double latRad, double lonRad) const;
+    // THE STACK'S CEILING OVER A BOX (degrees): no SampleHeightStack in the box returns more than `hi`.
+    // The stack is a chain of lerps h += (m - h) w, w in [0, 1], from 0: each step keeps h inside the
+    // range of what came before and the source's own -- or replaces it, where the source owns the box
+    // whole. So the walk goes from the top down to the first source that owns the box (0 if none does),
+    // and stops early, false, once the ceiling passes `limit`. False where a source cannot bound itself.
+    bool HeightStackCeiling(int channel, double lat0, double lon0, double lat1, double lon1, float limit,
+                            float& hi) const;
     float SampleHeightStack(int channel, double latRad, double lonRad,
                             double groundResM) const;
+    // THE ONE READ OF A CHANNEL'S HEIGHT for a CPU reader (compose/HeightTree.h): the tree the GPU
+    // reads when one is bound, else the stack. The stack stays what the tree itself paints from.
+    void BindHeightTree(int channel, std::shared_ptr<HeightTree> tree) { m_channels[channel].heightTree = std::move(tree); }
+    float SampleHeight(int channel, double latRad, double lonRad, double groundResM) const;
+    HeightTree* HeightTreeOf(int channel) const { return m_channels[channel].heightTree.get(); }
+    // THE FRAME THREAD'S READ: what is held, never a paint (HeightTree::SampleResident); the stack
+    // when no tree is bound. HeightLanded counts the tree's loads, so a kept answer can be asked again.
+    float SampleHeightResident(int channel, double latRad, double lonRad, double groundResM,
+                               bool* provisional = nullptr) const;
+    uint64_t HeightLanded(int channel) const;
 
     // The schema table, logged at startup: what feeds each channel, in what structure.
     void LogRegistry() const;
@@ -194,6 +233,7 @@ public:
         std::vector<ColorSource*> color;
         std::vector<HeightSource*> height;
         std::vector<FieldSource*> field;
+        std::shared_ptr<HeightTree> heightTree;   // the tree the GPU reads, when one is bound
         // M9ak: THE GATE. Parallel to `color`. A layer's paint weight is MULTIPLIED by the
         // coverage of its gate, per texel, which is a different composition from the stack's
         // own paint-over: the stack resolves who is on top, a gate resolves whether a layer
@@ -236,6 +276,8 @@ public:
     static void PaintSourceTile(ColorSource* src, const ColorFrame& frame, const TileRequest& r,
                                 const TileBox& box, std::vector<uint8_t>& out, bool& complete,
                                 bool& anyCover, bool& fullCover);
+    // The A/B of the two paths (ColorSource::PaintTile): false paints every source texel by texel.
+    static inline bool s_tilePaint = true;
     uint64_t HeightSubset(const Channel& ch, const TileBox& box,
                           std::vector<size_t>& included) const;
     uint64_t FieldSubset(const Channel& ch, const TileBox& box,

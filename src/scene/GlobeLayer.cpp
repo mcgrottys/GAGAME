@@ -2937,7 +2937,8 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                 GlobeCbData q = cbData;
                 q.keepU[0] = m_classSrv;
                 q.keepU[1] = kept ? 1u : 0u;
-                q.keepU[2] = q.keepU[3] = 0u;
+                q.keepU[2] = uint32_t(ctx.viewIndex) * kClassMax;   // this view's range of the classes
+                q.keepU[3] = 0u;
                 ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
                 const D3D12_RECT r{LONG(ctx.viewX), LONG(ctx.viewY), LONG(ctx.viewX + ctx.width),
                                    LONG(ctx.viewY + ctx.height)};
@@ -2989,9 +2990,11 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                     ctx.cmd->Barrier(K.color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     ctx.cmd->Barrier(K.id, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                     ctx.cmd->Barrier(m_classBuf.Get(), m_classState, D3D12_RESOURCE_STATE_COPY_DEST);
-                    cl->CopyBufferRegion(m_classBuf.Get(), 0, m_classZero.res.Get(), 0, uint64_t(n) * 4u);
+                    cl->CopyBufferRegion(m_classBuf.Get(), uint64_t(ctx.viewIndex) * kClassMax * 4u, m_classZero.res.Get(), 0,
+                                         uint64_t(n) * 4u);
                     ctx.cmd->Barrier(m_classBuf.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    struct { uint32_t a[4]; uint32_t b[4]; } cc{{K.idSrv, K.colorSrv, m_classUav, 0u},
+                    struct { uint32_t a[4]; uint32_t b[4]; } cc{{K.idSrv, K.colorSrv, m_classUav,
+                                                                 uint32_t(ctx.viewIndex) * kClassMax},
                                                                {ctx.viewX, ctx.viewY, ctx.width, ctx.height}};
                     ctx.cmd->ComputeRoot(m_classRs.Get());
                     ctx.cmd->ComputeConstants(0, cc);
@@ -3085,7 +3088,7 @@ void GlobeLayer::EnsureClass(Gpu& gpu) {
     hp.Type = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = uint64_t(kClassMax) * 4u;
+    rd.Width = uint64_t(kClassMax) * (1u + kMaxOtherEyes) * 4u;   // one range a view: each eye keeps its own picture
     rd.Height = 1;
     rd.DepthOrArraySize = 1;
     rd.MipLevels = 1;
@@ -3097,14 +3100,14 @@ void GlobeLayer::EnsureClass(Gpu& gpu) {
                                                    IID_PPV_ARGS(&m_classBuf)));
     m_classBuf->SetName(L"globe keep classes");
     m_classState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    m_classSrv = gpu.CreateStructuredBufferSrv(m_classBuf.Get(), kClassMax, 4);
+    m_classSrv = gpu.CreateStructuredBufferSrv(m_classBuf.Get(), kClassMax * (1u + kMaxOtherEyes), 4);
     std::vector<uint32_t> zeros(kClassMax, 0u);
     m_classZero = gpu.CreateDefaultBuffer(zeros.data(), uint64_t(kClassMax) * 4u, L"globe keep zeros");
     m_classUav = gpu.SrvHeap().Alloc();
     D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
     u.Format = DXGI_FORMAT_UNKNOWN;
     u.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    u.Buffer.NumElements = kClassMax;
+    u.Buffer.NumElements = kClassMax * (1u + kMaxOtherEyes);
     u.Buffer.StructureByteStride = 4;
     gpu.Device()->CreateUnorderedAccessView(m_classBuf.Get(), nullptr, &u, gpu.SrvHeap().Cpu(m_classUav));
 }

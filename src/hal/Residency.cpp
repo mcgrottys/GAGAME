@@ -71,8 +71,11 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
             : static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t0 - job->issuedAt).count());
         g_tileIncomplete = false;   // step 5 E: a tree says here if its answer is not whole
         g_tileMagnified = false;    // PHASE A4: ... or if it is the level above, magnified
+        g_loadTenant = job->tenant;   // whom a source that answers "not now" tells when it can
+        g_loadReq = job->req;
         const bool ok =
             m_tenants[job->tenant].provider(job->req, data, canStream ? &loc : nullptr);
+        g_loadTenant = -1;
         const bool whole = !g_tileIncomplete;
         const bool magnified = g_tileMagnified;
         // M9al: read or paint? The provider does not say, but its clock does -- a 64 KB file
@@ -116,6 +119,13 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
                 // unreachable for the run, as a tile that failed four tries is, and said.
                 job->state = TileState::Failed;
                 job->incomplete = true;   // the version law: retried when the tree next changes
+                if (job->askAgain) {
+                    // Again came while this load ran (a fetch landed in the paint's own tens of ms):
+                    // the source can answer now, so it is asked again at the next turn, as Again asks.
+                    job->askAgain = false;
+                    std::lock_guard<std::mutex> lkInv(m_invMx);
+                    m_againQ.push_back({job->tenant, job->req, false});
+                }
                 ++m_failedLoads;
                 ++m_failEvents;
                 ++incompleteTotal;
@@ -1158,10 +1168,41 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     if (traceRes && m_frame <= kSlotAuditFrames) AuditSlots();
     // M9bb: apply the invalidations the painting threads queued (one tile each).
     {
-        std::vector<Inv> q;
+        std::vector<Inv> q, again;
         {
             std::lock_guard<std::mutex> lk(m_invMx);
             q.swap(m_invQ);
+            again.swap(m_againQ);
+        }
+        // Again: a tile held back not whole is Seen again where it stands; any other is asked as a
+        // change asks (a held tile's version, below).
+        bool reopened = false;
+        if (!again.empty()) {
+            std::lock_guard<std::mutex> lkAgain(m_mx);   // a load's result is written under it
+            for (const Inv& a : again) {
+                Tracked* tr = Find(a.tenant, a.req);
+                if (!tr) continue;   // let go since: a reader that names it again tracks it anew
+                if (tr->state == TileState::Loading || tr->state == TileState::Loaded) {
+                    tr->askAgain = true;   // its paint may have run before the source could answer
+                    continue;
+                }
+                if (tr->state == TileState::Failed && tr->incomplete && !tr->magnified) {
+                    tr->state = TileState::Seen;
+                    tr->incomplete = false;
+                    tr->retries = 0;
+                    if (tr->rec != UINT32_MAX) m_rec[tr->rec].flags &= uint8_t(~kDeadBit);
+                    ++m_failEvents;   // an event for the order: its pass runs and finds it
+                    reopened = true;
+                    continue;
+                }
+                if (tr->state == TileState::Mapped) q.push_back(a);
+            }
+        }
+        // A reader's standing statement was made while the tile was refused, and names neither it
+        // nor the column under it: the tile stood Seen and unwanted (measured: 163 colour tiles in a
+        // held z17 still). Every reader speaks anew at its next turn, its walk naming them again.
+        if (reopened) {
+            for (int s = 0; s < kMaxSamplers; ++s) m_stBroken[s] = true;
         }
         bool compact = false;
         turn.invalidations = static_cast<uint32_t>(q.size());
@@ -1927,17 +1968,21 @@ void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
             const Tracked* at = nullptr;
             if (ParentGate(m_tenants[tr->tenant], tr, &at) != Gate::Wait) continue;
             if (++waiting > 6) continue;
-            char b[320];
+            char b[480];
             if (!at) {
                 snprintf(b, sizeof(b), " %s under an UNTRACKED parent;", TileName(MakeKey(tr->tenant, tr->req)).c_str());
             } else {
                 const Tenant& t = m_tenants[at->tenant];
                 const size_t idx = StampIndex(t, at->req.face, at->req.mip, at->req.x, at->req.y);
-                snprintf(b, sizeof(b), " %s under %s (state %d, landed %d, retries %d, wanted now %d, pos %s);",
+                const OrdRec* pr = at->rec != UINT32_MAX ? &m_rec[at->rec] : nullptr;
+                snprintf(b, sizeof(b), " %s under %s (state %d, landed %d, retries %d, wanted now %d, pos %s; its record %s, "
+                         "flags %u, bucket %u, standing %d, first P %d);",
                          TileName(MakeKey(tr->tenant, tr->req)).c_str(),
                          TileName(MakeKey(at->tenant, at->req)).c_str(), int(at->state), int(at->landed),
                          int(at->retries), int((t.stamp[idx] >> 1) == m_frame),
-                         at->pos == UINT32_MAX ? "untracked" : "tracked");
+                         at->pos == UINT32_MAX ? "untracked" : "tracked", pr ? "kept" : "none",
+                         pr ? unsigned(pr->flags) : 0u, pr ? unsigned(pr->bucket) : 0u,
+                         pr ? int(StandingAny(*pr, m_frame)) : 0, int(at->firstP == m_passFrame));
             }
             named += b;
         }

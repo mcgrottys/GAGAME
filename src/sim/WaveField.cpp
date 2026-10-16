@@ -432,8 +432,10 @@ struct Memo {
 };
 static bool g_solveAudit = false;
 
+// `phiOut`, when given: each component's EIKONAL phase, the real number before it is packed as a spinor
+// (nComp planes of nx*ny, component-major) -- the field the blend between tide buckets interpolates.
 void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& table,
-           Memo* memo) {
+           Memo* memo, std::vector<float>* phiOut = nullptr) {
     const auto t0 = std::chrono::steady_clock::now();
     const WaveFieldConfig& cfg = in.cfg;
     const int nx = cfg.nx, ny = cfg.ny;
@@ -799,6 +801,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     uint8_t* px = &atlas[arow + size_t(i) * 4];
                     px[1] = Quant8(kbuf[row + i], kMax);
                     const double ph = phibuf[row + i];
+                    if (phiOut) (*phiOut)[size_t(ic) * cells + row + i] = float(ph);
                     px[2] = Quant8(std::cos(ph) * 0.5 + 0.5, 1.0);
                     px[3] = Quant8(std::sin(ph) * 0.5 + 0.5, 1.0);
                     eta[row + i] += double(aPlane[row + i]) * std::cos(ph);
@@ -922,9 +925,11 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         nUp ? roundsMin.load() : 0, roundsMax.load(), secs - secsDisp - secsEik);
 }
 
+// `phi`: the eikonal phase planes, after the inputs, flagged in the head's pad0 (bit 0) -- a reader
+// that stops at the inputs (the python checker) never sees them.
 bool WriteCache(const char* path, uint64_t key, const Inputs& in,
                 const std::vector<uint8_t>& atlas, const WaveField::GpuTable& table,
-                bool withInputs) {
+                bool withInputs, const std::vector<float>* phi = nullptr) {
     CreateDirectoryA("cache", nullptr);
     CreateDirectoryA("cache\\wave", nullptr);
     FILE* f = fopen(path, "wb");
@@ -943,6 +948,7 @@ bool WriteCache(const char* path, uint64_t key, const Inputs& in,
     hd.ny = table.ny;
     hd.nComp = uint32_t((std::min)(in.cfg.nComp, WaveField::kMaxComp));
     hd.hasInputs = withInputs ? 1u : 0u;
+    hd.pad0 = (phi && !phi->empty()) ? 1u : 0u;
     hd.hs = in.hs;
     hd.tp = in.tp;
     hd.mwdDeg = in.mwdFromDeg;
@@ -965,6 +971,7 @@ bool WriteCache(const char* path, uint64_t key, const Inputs& in,
         ok = ok && fwrite(in.u.data(), sizeof(float), cells, f) == cells;
         ok = ok && fwrite(in.v.data(), sizeof(float), cells, f) == cells;
     }
+    if (phi && !phi->empty()) ok = ok && fwrite(phi->data(), sizeof(float), phi->size(), f) == phi->size();
     fclose(f);
     if (ok) {
         Log("[wave] cached %s (%zu KB%s)", path, (sizeof(hd) + sizeof(table) + atlas.size()) >> 10,
@@ -977,7 +984,7 @@ bool WriteCache(const char* path, uint64_t key, const Inputs& in,
 }
 
 bool ReadCache(const char* path, uint64_t key, const WaveFieldConfig& cfg,
-               std::vector<uint8_t>& atlas, WaveField::GpuTable& table) {
+               std::vector<uint8_t>& atlas, WaveField::GpuTable& table, std::vector<float>* phi = nullptr) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
     CacheHead hd;
@@ -999,6 +1006,16 @@ bool ReadCache(const char* path, uint64_t key, const WaveFieldConfig& cfg,
     atlas.resize(size_t(wantW) * size_t(wantH) * 4);
     bool ok = fread(&table, sizeof(table), 1, f) == 1;
     ok = ok && fread(atlas.data(), 1, atlas.size(), f) == atlas.size();
+    if (phi) {
+        phi->clear();
+        if (ok && (hd.pad0 & 1u)) {
+            const size_t cells = size_t(hd.nx) * size_t(hd.ny);
+            if (hd.hasInputs) ok = _fseeki64(f, int64_t(3 * cells * sizeof(float)), SEEK_CUR) == 0;
+            phi->resize(size_t(nc) * cells);
+            ok = ok && fread(phi->data(), sizeof(float), phi->size(), f) == phi->size();
+            if (!ok) phi->clear();
+        }
+    }
     fclose(f);
     ok = ok && table.nx == hd.nx && table.ny == hd.ny;
     if (!ok) Log("[wave] cache %s failed validation -- re-solving", path);
@@ -1032,7 +1049,13 @@ void WaveField::Configure(const WaveFieldConfig& cfg, const Compositor* comp, in
         cfg.tideBucketM, cfg.currentBucketMs);
 }
 
-uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts) const {
+double WaveField::LevelRaw(double simUnix) const {
+    double latC = 0.0, lonC = 0.0;
+    m_cfg.PlaceOfCell(0.5 * m_cfg.nx, 0.5 * m_cfg.ny, latC, lonC);
+    return m_atlas ? m_atlas->MslNavd(latC, lonC) + m_atlas->Level(latC, lonC, simUnix) : 0.0;
+}
+
+uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts, double levelAt) const {
     // FNV-1a over everything that touches the answer -- the compositor's identity-is-content
     // law: solver version, window geometry, the two buckets, the raw spectrum bytes, and the
     // height stack's signature (if the bed data changes shape, the field must change with it).
@@ -1055,11 +1078,7 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
     mixD(m_cfg.gammaHs);
     mixD(m_cfg.minSamplesPerLambda);
 
-    double latC = 0.0, lonC = 0.0;
-    m_cfg.PlaceOfCell(0.5 * m_cfg.nx, 0.5 * m_cfg.ny, latC, lonC);
-    const double levelRaw =
-        m_atlas ? m_atlas->MslNavd(latC, lonC) + m_atlas->Level(latC, lonC, simUnix) : 0.0;
-    mixD(std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM);
+    mixD(std::isnan(levelAt) ? std::round(LevelRaw(simUnix) / m_cfg.tideBucketM) * m_cfg.tideBucketM : levelAt);
     const double sRaw = (m_currents && m_actSta >= 0 &&
                          size_t(m_actSta) < m_currents->Count())
                             ? m_currents->SignedSpeed(size_t(m_actSta), simUnix)
@@ -1074,6 +1093,8 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
             mixBytes("|", 1);
             mixBytes(hs->Info().structure.data(), hs->Info().structure.size());
         }
+        // the bed read through the height TREE when one is bound (compose/HeightTree.h): another field
+        if (m_comp->HeightTreeOf(m_hgtCh)) mixBytes("height tree v2", 14);
     }
     return hsh;
 }
@@ -1197,9 +1218,10 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix, bool block) {
     });
 }
 
-WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
-                                      const std::vector<PartParam>& parts) const {
-    wavecore::Inputs in;
+// The question a solve answers at an instant: the level and current buckets, the spectrum, the bed, the
+// flow -- SolveNow's own inputs, made once (the blend's midpoint test asks them at three levels).
+void WaveField::BuildInputs(double simUnix, const std::vector<PartParam>& parts, wavecore::Inputs& in,
+                            double levelAt) const {
     in.cfg = m_cfg;
     const int nx = m_cfg.nx, ny = m_cfg.ny;
     const size_t cells = size_t(nx) * size_t(ny);
@@ -1219,7 +1241,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
     const double levelRaw = mslNavd + tideNavd;
     Log("[wave] solve datum at %.4f,%.4f t %.0f: MslNavd %+.3f + tide %+.3f = %+.3f m",
         latC, lonC, simUnix, mslNavd, tideNavd, levelRaw);
-    in.level = std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM;
+    in.level = std::isnan(levelAt) ? std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM : levelAt;
 
     const double sRaw = (m_currents && m_actSta >= 0 &&
                          size_t(m_actSta) < m_currents->Count())
@@ -1246,7 +1268,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
                                 180.0);
     }
 
-    // bed: the ONE composed height stack, sampled at texel centers at the cell's own
+    // bed: the ONE composed height (the tree when bound, compose/HeightTree.h), at texel centers at the cell's own
     // resolution -- the same per-texel math the renderer's tiles run (sources are stateless;
     // the residency workers already paint through this stack concurrently).
     in.bed.resize(cells);
@@ -1259,7 +1281,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
                     m_cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
                     const double latR = la * (kPiW / 180.0), lonR = lo * (kPiW / 180.0);
                     in.bed[row + i] =
-                        m_comp->SampleHeightStack(m_hgtCh, latR, lonR, m_cfg.cellM);
+                        m_comp->SampleHeight(m_hgtCh, latR, lonR, m_cfg.cellM);
                 }
             }
         });
@@ -1274,10 +1296,20 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
         wavecore::BuildCurrentPlanes(m_cfg, in.level, in.currentMs, in.bed, in.u, in.v);
     }
 
+}
+
+WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
+                                      const std::vector<PartParam>& parts, double levelAt) const {
+    wavecore::Inputs in;
+    BuildInputs(simUnix, parts, in, levelAt);
+    const int nx = m_cfg.nx, ny = m_cfg.ny;
+    (void)nx;
+    (void)ny;
     Solved out;
     out.key = key;
     if (!m_memo) m_memo = std::make_shared<wavecore::Memo>();
-    wavecore::Solve(in, out.atlas, out.table, m_memo.get());
+    out.phi.assign(size_t((std::min)(m_cfg.nComp, kMaxComp)) * size_t(m_cfg.nx) * size_t(m_cfg.ny), 0.0f);
+    wavecore::Solve(in, out.atlas, out.table, m_memo.get(), &out.phi);
     if (wavecore::g_solveAudit) {   // F25: the same question cold, and the cache's answer
         Solved cold;
         wavecore::Solve(in, cold.atlas, cold.table, nullptr);
@@ -1304,7 +1336,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
     // input-less writer for callers that only have a Solved.
     char path[128];
     CachePathFor(key, path, sizeof(path));
-    wavecore::WriteCache(path, key, in, out.atlas, out.table, true);
+    wavecore::WriteCache(path, key, in, out.atlas, out.table, true, &out.phi);
     return out;
 }
 
@@ -1491,33 +1523,6 @@ bool WaveField::ConvergeCache(const std::string& arg) {
     return true;
 }
 
-void WaveField::SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts) {
-    WaitForSolve();   // a finished, already-consumed solve
-    m_inFlight.store(true);
-    m_result = Solved{};
-    m_solveRunning.store(true, std::memory_order_release);
-    Log("[wave] bucket rolled -> background solve (key %016llx)",
-        static_cast<unsigned long long>(key));
-    // Lane::Long (F13; was Compute): this runs for seconds. Not Io, which would hold one of the
-    // twelve loader slots for the whole solve; not Compute, whose queue the frame's short work
-    // shares -- the predicted walk's join waited 60-190 ms behind the rows. Its own ParallelRows
-    // is a nested ParallelFor on the same lane, safe because that caller does its own share.
-    Threads().Submit(Lane::Long, "wave.solve", [this, key, simUnix, p = std::move(parts)]() {
-        Solved s;
-        if (!wavecore::g_solveAudit && LoadCache(key, s)) {   // F13: the cache first, on this worker (294 MB a read)
-            s.key = key;
-            Log("[wave] cache hit %016llx -- read on a worker, offered without a solve",
-                static_cast<unsigned long long>(key));
-        } else {
-            s = SolveNow(key, simUnix, p);
-            PruneWaveCache(key);   // a solve just wrote ~294 MB; keep the budget (here, not on the frame)
-        }
-        m_result = std::move(s);
-        m_resultReady.store(true, std::memory_order_release);
-        m_solveRunning.store(false, std::memory_order_release);
-    });
-}
-
 // What join() used to do. Main thread only -- Configure and Update -- so it cannot be the
 // thread the solve is waiting for.
 void WaveField::WaitForSolve() {
@@ -1546,14 +1551,41 @@ WaveField::GpuTable WaveField::DisplayTable(const GpuTable& raw) const {
 
 void WaveField::AdoptTable(const GpuTable& t) { m_table = DisplayTable(t); }
 
-void WaveField::Offer(Solved&& s, const char* how) {
-    const uint64_t key = s.key;
+void WaveField::Offer(Solved&& s, const char* how) { OfferShared(std::make_shared<const Solved>(std::move(s)), how); }
+
+void WaveField::OfferShared(std::shared_ptr<const Solved> s, const char* how) {
+    const uint64_t key = s->key;
+    {
+        std::lock_guard<std::mutex> lk(m_offeredMx);
+        m_offered.push_back(s);
+        while (m_offered.size() > 3) m_offered.erase(m_offered.begin());
+    }
     m_nextKey = key;
-    std::atomic_store(&m_next, std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s))));
+    std::atomic_store(&m_next, std::move(s));
     char buf[160];
     snprintf(buf, sizeof(buf), "wave %ux%u key %016llx (%s, pages pending)", m_cfg.nx, m_cfg.ny,
              static_cast<unsigned long long>(key), how);
     stats = buf;
+}
+
+void WaveField::PublishKey(uint64_t key) {
+    std::shared_ptr<const Solved> n = Next();
+    if (n && n->key == key) {
+        Publish();
+        return;
+    }
+    const std::shared_ptr<const Solved> s = SolvedFor(key);
+    if (!s || (Live() && Live()->key == key)) return;
+    // an older offer: it goes live, and the newer next stays next
+    std::shared_ptr<const Solved> keep = Next();
+    const uint64_t keepKey = m_nextKey;
+    std::atomic_store(&m_next, s);
+    m_nextKey = key;
+    Publish();
+    if (keep) {
+        std::atomic_store(&m_next, keep);
+        m_nextKey = keepKey;
+    }
 }
 
 void WaveField::Publish() {
@@ -1597,7 +1629,7 @@ void WaveField::Publish() {
 bool WaveField::LoadCache(uint64_t key, Solved& out) const {
     char path[128];
     CachePathFor(key, path, sizeof(path));
-    if (!wavecore::ReadCache(path, key, m_cfg, out.atlas, out.table)) return false;
+    if (!wavecore::ReadCache(path, key, m_cfg, out.atlas, out.table, &out.phi)) return false;
     out.key = key;
     return true;
 }
@@ -1624,7 +1656,14 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         WaitForSolve();   // the job stores m_resultReady before it clears m_solveRunning
         m_resultReady.store(false);
         m_inFlight.store(false);
-        Offer(std::move(m_result), "solved");   // (the prune of the cache ran on the solve's worker)
+        std::shared_ptr<const Solved> r = std::move(m_result);
+        if (r) {
+            Log("[wave] a worker's field %016llx (%s, level %+.3f m): %s%s", static_cast<unsigned long long>(r->key),
+                r->transient ? "a blend" : "a bucket's solve", double(r->table.level), m_resultOffer ? "offered" : "",
+                m_resultHold ? (m_resultOffer ? " and held" : "held") : "");
+        }
+        if (r && m_resultHold) Hold(r);
+        if (r && m_resultOffer) OfferShared(r, r->transient ? "blended" : "solved");
     }
 
     // F17: THE KEY IS CONTENT, AND THE FLOW IS PART OF IT. A key formed before the solver's first
@@ -1639,7 +1678,15 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         }
         return false;
     }
-    const uint64_t key = BucketKey(simUnix, parts, nParts);
+    // THE TIDE BETWEEN TWO BUCKETS: the floor and ceiling buckets of the live level, its place between
+    // them in kBlendSteps; at a step of 0 or kBlendSteps the field IS a bucket's solve.
+    const double dB = m_cfg.tideBucketM;
+    const double lvl = LevelRaw(simUnix);
+    const double L0 = std::floor(lvl / dB) * dB;
+    const int step = int(std::lround((lvl - L0) / dB * kBlendSteps));
+    const uint64_t k0 = BucketKey(simUnix, parts, nParts, L0);
+    const uint64_t k1 = BucketKey(simUnix, parts, nParts, L0 + dB);
+    const uint64_t key = step <= 0 ? k0 : step >= kBlendSteps ? k1 : BlendKey(k0, k1, step);
     if (key != NextKey() && !m_inFlight.load()) {
         // A FIELD IS SOLVED FOR A READER. The key is content and rolls when the content does;
         // the solve is work and is done when someone will read the answer -- the window at a
@@ -1660,29 +1707,392 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         // 294 MB in 65-130 ms at the helm, the roll's hitch whenever a bucket came back. The
         // asynchronous path looks the key up on its worker first and solves only on a miss; the
         // blocking path (the dump frames) reads here as before.
-        Solved s;
-        if (block && !wavecore::g_solveAudit && LoadCache(key, s)) {
-            // a cache hit is offered like a solve: its pages swap in, then it is live.
-            s.key = key;
-            Offer(std::move(s), "cache");
-            Log("[wave] cache hit %016llx -- offered without a solve",
-                static_cast<unsigned long long>(key));
-        } else if (block) {
-            // headless determinism: the dump frames must see the field, so eat the
-            // ~3 s here, once per bucket. Interactive runs keep the async path.
+        if (s_blendTest) {   // --tool wave-blend-test: the first solve's question, at three levels
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
-            Solved s2 = SolveNow(key, simUnix, pcopy);
-            s2.key = key;
-            Offer(std::move(s2), "solved now");
-            PruneWaveCache(key);   // the blocking solve wrote a cache entry too
+            std::exit(BlendMidpointTest(simUnix, pcopy) ? 0 : 1);
+        }
+        std::vector<PartParam> pcopy;
+        if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
+        const bool real = step <= 0 || step >= kBlendSteps;
+        const bool needPhi = !real;
+        // what this decision still lacks: the real solve(s), nearest first, then the blend
+        const double w = double(step) / double(kBlendSteps);
+        const uint64_t want[2] = {w < 0.5 ? k0 : k1, w < 0.5 ? k1 : k0};
+        const double wantL[2] = {w < 0.5 ? L0 : L0 + dB, w < 0.5 ? L0 + dB : L0};
+        std::shared_ptr<const Solved> h0 = Held(k0, needPhi), h1 = Held(k1, needPhi);
+        if (real) {
+            const std::shared_ptr<const Solved> h = step <= 0 ? h0 : h1;
+            if (h) {
+                OfferShared(h, "held");
+            } else if (block) {
+                if (auto f = Fetch(key, simUnix, pcopy, step <= 0 ? L0 : L0 + dB, false)) {
+                    Hold(f);
+                    OfferShared(f, "fetched now");
+                }
+            } else {
+                WaitForSolve();
+                m_inFlight.store(true);
+                m_resultOffer = true;
+                m_resultHold = true;
+                m_solveRunning.store(true, std::memory_order_release);
+                const double L = step <= 0 ? L0 : L0 + dB;
+                Threads().Submit(Lane::Long, "wave.solve", [this, key, simUnix, L, p = std::move(pcopy)]() {
+                    m_result = Fetch(key, simUnix, p, L, false);
+                    m_resultReady.store(true, std::memory_order_release);
+                    m_solveRunning.store(false, std::memory_order_release);
+                });
+            }
+        } else if (h0 && h1) {
+            // both neighbours held with their phase: the blend
+            if (block) {
+                Solved b;
+                if (BlendSolves(*h0, *h1, w, key, m_cfg.nComp, b)) {
+                    Log("[wave] blended %016llx and %016llx at %.3f (the level %+.3f m; memory only)",
+                        static_cast<unsigned long long>(k0), static_cast<unsigned long long>(k1), w, lvl);
+                    OfferShared(std::make_shared<const Solved>(std::move(b)), "blended now");
+                }
+                else OfferShared(w < 0.5 ? h0 : h1, "held (fans differ: no blend)");
+            } else {
+                WaitForSolve();
+                m_inFlight.store(true);
+                m_resultOffer = true;
+                m_resultHold = false;
+                m_solveRunning.store(true, std::memory_order_release);
+                const int nComp = m_cfg.nComp;
+                Threads().Submit(Lane::Long, "wave.blend", [this, h0, h1, w, key, nComp]() {
+                    Solved b;
+                    const auto t0 = std::chrono::steady_clock::now();
+                    if (BlendSolves(*h0, *h1, w, key, nComp, b)) {
+                        Log("[wave] blended %016llx and %016llx at %.3f in %.2f s on a worker (memory only)",
+                            static_cast<unsigned long long>(h0->key), static_cast<unsigned long long>(h1->key), w,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+                        m_result = std::make_shared<const Solved>(std::move(b));
+                    } else {
+                        m_result = w < 0.5 ? h0 : h1;
+                    }
+                    m_resultReady.store(true, std::memory_order_release);
+                    m_solveRunning.store(false, std::memory_order_release);
+                });
+            }
         } else {
-            std::vector<PartParam> pcopy;
-            if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
-            SolveAsync(key, simUnix, std::move(pcopy));
+            // a neighbour is missing: fetch the nearer first (shown at once when nothing is), then the other
+            for (int n = 0; n < 2; ++n) {
+                if (Held(want[n], true)) continue;
+                if (block) {
+                    if (auto f = Fetch(want[n], simUnix, pcopy, wantL[n], true)) Hold(f);
+                    continue;
+                }
+                WaitForSolve();
+                m_inFlight.store(true);
+                // the nearer is drawn the moment it lands (a flow's change shows as fast as it always did);
+                // the farther is held for the blend that replaces it
+                m_resultOffer = n == 0;
+                m_resultHold = true;
+                m_solveRunning.store(true, std::memory_order_release);
+                const uint64_t kk = want[n];
+                const double L = wantL[n];
+                Threads().Submit(Lane::Long, "wave.solve", [this, kk, simUnix, L, p = pcopy]() {
+                    m_result = Fetch(kk, simUnix, p, L, true);
+                    m_resultReady.store(true, std::memory_order_release);
+                    m_solveRunning.store(false, std::memory_order_release);
+                });
+                break;
+            }
+            if (block) {
+                h0 = Held(k0, true);
+                h1 = Held(k1, true);
+                Solved b;
+                if (h0 && h1 && BlendSolves(*h0, *h1, w, key, m_cfg.nComp, b)) {
+                    Log("[wave] blended %016llx and %016llx at %.3f (the level %+.3f m; memory only)",
+                        static_cast<unsigned long long>(k0), static_cast<unsigned long long>(k1), w, lvl);
+                    OfferShared(std::make_shared<const Solved>(std::move(b)), "blended now");
+                } else if (h0 || h1) {
+                    OfferShared(h0 ? h0 : h1, "held (no blend)");
+                }
+            }
         }
     }
     return m_inFlight.load();
+}
+
+// ---- THE TIDE BETWEEN TWO BUCKETS --------------------------------------------------------------
+std::shared_ptr<const WaveField::Solved> WaveField::Held(uint64_t key, bool needPhi) const {
+    std::lock_guard<std::mutex> lk(m_heldMx);
+    for (const auto& s : m_held) {
+        if (s->key == key && (!needPhi || !s->phi.empty())) return s;
+    }
+    return nullptr;
+}
+
+void WaveField::Hold(const std::shared_ptr<const Solved>& s) {
+    if (!s || s->transient) return;
+    std::lock_guard<std::mutex> lk(m_heldMx);
+    std::erase_if(m_held, [&](const std::shared_ptr<const Solved>& h) { return h->key == s->key; });
+    m_held.push_back(s);
+    while (m_held.size() > kHeldMax) m_held.erase(m_held.begin());   // the oldest goes
+}
+
+std::shared_ptr<const WaveField::Solved> WaveField::Fetch(uint64_t key, double simUnix,
+                                                          const std::vector<PartParam>& parts, double levelAt,
+                                                          bool needPhi) const {
+    Solved s;
+    if (!wavecore::g_solveAudit && LoadCache(key, s) && (!needPhi || !s.phi.empty())) {
+        s.key = key;
+        Log("[wave] cache hit %016llx (%+.3f m%s)", static_cast<unsigned long long>(key), levelAt,
+            s.phi.empty() ? "" : ", with its phase");
+        return std::make_shared<const Solved>(std::move(s));
+    }
+    if (needPhi && !s.atlas.empty()) {
+        Log("[wave] cache entry %016llx has no phase (written before the blend): solved again to blend it",
+            static_cast<unsigned long long>(key));
+    }
+    Solved n = SolveNow(key, simUnix, parts, levelAt);
+    n.key = key;
+    PruneWaveCache(key);
+    return std::make_shared<const Solved>(std::move(n));
+}
+
+uint64_t WaveField::BlendKey(uint64_t k0, uint64_t k1, int step) {
+    uint64_t h = 14695981039346656037ull;
+    const auto mix = [&h](uint64_t v) {
+        for (int b = 0; b < 8; ++b) h = (h ^ ((v >> (8 * b)) & 0xFFu)) * 1099511628211ull;
+    };
+    mix(0x626c656e64ull);   // "blend"
+    mix(k0);
+    mix(k1);
+    mix(uint64_t(step));
+    return h;
+}
+
+// THE BLEND (the midpoint test's EIKONAL law): per cell and component, a and k linear, the REAL
+// phase linear and the spinor made from it, the envelope linear; scales the larger of the two, so
+// nothing clips. A component one neighbour gated off fades in from zero with the other's phase.
+bool WaveField::BlendSolves(const Solved& a, const Solved& b, double w, uint64_t key, int nComp, Solved& out) {
+    const GpuTable& ta = a.table;
+    const GpuTable& tb = b.table;
+    if (ta.nx != tb.nx || ta.ny != tb.ny || ta.nUsed != tb.nUsed || a.atlas.size() != b.atlas.size()) return false;
+    const uint32_t nx = ta.nx, ny = ta.ny, nc = ta.nUsed;
+    const size_t cells = size_t(nx) * size_t(ny), aw = size_t(nx) * 2;
+    if (a.phi.size() < size_t(nc) * cells || b.phi.size() < size_t(nc) * cells) return false;
+    for (uint32_t c = 0; c < nc; ++c) {
+        if (ta.sigma[c] != tb.sigma[c] || ta.dirX[c] != tb.dirX[c] || ta.dirZ[c] != tb.dirZ[c]) return false;
+    }
+    (void)nComp;
+    out = Solved{};
+    out.key = key;
+    out.transient = true;
+    out.atlas.assign(a.atlas.size(), 0);
+    GpuTable& t = out.table;
+    t = ta;
+    t.level = float((1.0 - w) * double(ta.level) + w * double(tb.level));
+    const auto dq = [](uint8_t v, double mx) { return (double(v) + 0.5) / 255.0 * mx; };
+    const auto q8 = [](double x, double mx) -> uint8_t {
+        double v = mx > 0.0 ? x / mx : 0.0;
+        v = v > 0.0 ? (v < 1.0 ? v : 1.0) : 0.0;
+        const double f = std::floor(v * 255.0);
+        return uint8_t(f < 255.0 ? f : 255.0);
+    };
+    Threads().ParallelFor(Lane::Long, "wave.blend.comps", int(nc) + 1, 1, [&](int c0, int c1) {
+        for (int ic = c0; ic < c1; ++ic) {
+            const uint32_t c = uint32_t(ic);
+            const size_t sx = size_t(c & 1u) * nx, sy = size_t(c >> 1u) * ny;
+            if (c == nc) {   // the envelope: rms, excess, sum
+                for (uint32_t j = 0; j < ny; ++j) {
+                    for (uint32_t i = 0; i < nx; ++i) {
+                        const size_t o = ((sy + j) * aw + sx + i) * 4;
+                        const uint8_t* pa = &a.atlas[o];
+                        const uint8_t* pb = &b.atlas[o];
+                        uint8_t* d = &out.atlas[o];
+                        d[0] = q8((1 - w) * dq(pa[0], ta.envMax) + w * dq(pb[0], tb.envMax), (std::max)(ta.envMax, tb.envMax));
+                        d[1] = q8((1 - w) * dq(pa[1], ta.excMax) + w * dq(pb[1], tb.excMax), (std::max)(ta.excMax, tb.excMax));
+                        d[2] = q8((1 - w) * dq(pa[2], ta.sumMax) + w * dq(pb[2], tb.sumMax), (std::max)(ta.sumMax, tb.sumMax));
+                    }
+                }
+                continue;
+            }
+            const bool ina = ta.aMax[c] > 0.0f, inb = tb.aMax[c] > 0.0f;
+            if (!ina && !inb) continue;
+            const double aMax = (std::max)(ta.aMax[c], tb.aMax[c]), kMax = (std::max)(ta.kMax[c], tb.kMax[c]);
+            const float* fa = a.phi.data() + size_t(c) * cells;
+            const float* fb = b.phi.data() + size_t(c) * cells;
+            for (uint32_t j = 0; j < ny; ++j) {
+                for (uint32_t i = 0; i < nx; ++i) {
+                    const size_t o = ((sy + j) * aw + sx + i) * 4, idx = size_t(j) * nx + i;
+                    const uint8_t* pa = &a.atlas[o];
+                    const uint8_t* pb = &b.atlas[o];
+                    uint8_t* d = &out.atlas[o];
+                    const double A = (1 - w) * (ina ? dq(pa[0], ta.aMax[c]) : 0.0) + w * (inb ? dq(pb[0], tb.aMax[c]) : 0.0);
+                    const double K = (1 - w) * (ina ? dq(pa[1], ta.kMax[c]) : dq(pb[1], tb.kMax[c])) +
+                                     w * (inb ? dq(pb[1], tb.kMax[c]) : dq(pa[1], ta.kMax[c]));
+                    const double ph = ina && inb ? (1 - w) * double(fa[idx]) + w * double(fb[idx])
+                                                 : double(ina ? fa[idx] : fb[idx]);
+                    d[0] = q8(A, aMax);
+                    d[1] = q8(K, kMax);
+                    d[2] = q8(std::cos(ph) * 0.5 + 0.5, 1.0);
+                    d[3] = q8(std::sin(ph) * 0.5 + 0.5, 1.0);
+                }
+            }
+            t.aMax[c] = float(aMax);
+            t.kMax[c] = float(kMax);
+        }
+    });
+    t.envMax = (std::max)(ta.envMax, tb.envMax);
+    t.excMax = (std::max)(ta.excMax, tb.excMax);
+    t.sumMax = (std::max)(ta.sumMax, tb.sumMax);
+    return true;
+}
+
+// ================================================================================================
+//  THE BLEND'S MIDPOINT TEST (--tool wave-blend-test). Whether a solve between two tide buckets can be
+//  the BLEND of its neighbours instead of a solve of its own: per cell and component the field is one
+//  even element of Cl(2), z = a R with R = e^{B phi} the phase rotor in the e1^e2 plane (`wavefield`,
+//  `cl2`). Three blends are held against the TRUE solve at the midpoint level, the bed, flow and
+//  spectrum held fixed (only the level moves -- the tide's own effect: depth, so k, refraction and
+//  shoaling):
+//    SNAP     -- today: the nearest bucket's field (either neighbour);
+//    CHORD    -- the cl2 law, componentwise: z = (z0 + z1) / 2 (right for neighbouring CELLS, whose
+//                phases differ by little; the chord of an arc is shorter than it by cos(dphi/2));
+//    GEODESIC -- the rotor's own interpolation, R0 (~R0 R1)^(1/2), with the amplitude halfway:
+//                follows the arc, exact while the phase moves less than pi between the neighbours.
+//  The measure is the time-averaged elevation error: sqrt(sum |z - z_true|^2 / sum |z_true|^2) over
+//  wet cells and components (the components' frequencies differ, so the cross terms average out), and
+//  k's relative error. And the phase step between the neighbours, |arg(~R0 R1)|, whose size decides
+//  whether the geodesic is safe. At two spacings: 0.25 m (today's bucket) and 0.5 m.
+// ================================================================================================
+bool WaveField::BlendMidpointTest(double simUnix, const std::vector<PartParam>& parts) const {
+    wavecore::Inputs base;
+    BuildInputs(simUnix, parts, base);
+    if (!(base.hs > 0.0)) {
+        Log("[wave-blend] no sea to solve (Hs %.2f): nothing to test", base.hs);
+        return false;
+    }
+    const int nx = m_cfg.nx, ny = m_cfg.ny;
+    const size_t aw = size_t(nx) * 2;
+    struct Field {
+        std::vector<uint8_t> atlas;
+        GpuTable t{};
+        std::vector<float> phi;   // the eikonal phase, component-major
+    };
+    const auto solveAt = [&](double level, Field& f) {
+        wavecore::Inputs in = base;
+        in.level = level;
+        const auto t0 = std::chrono::steady_clock::now();
+        f.phi.assign(size_t(m_cfg.nComp) * size_t(m_cfg.nx) * size_t(m_cfg.ny), 0.0f);
+        wavecore::Solve(in, f.atlas, f.t, nullptr, &f.phi);
+        Log("[wave-blend] solved at %+.3f m NAVD in %.1f s", level,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    };
+    // the decoded component at a cell: amplitude, wavenumber, spinor (cos, sin)
+    const auto at = [&](const Field& f, uint32_t c, int i, int j, double& a, double& k, double& cs, double& sn) {
+        const size_t sx = size_t(c & 1u) * size_t(nx) + size_t(i), sy = size_t(c >> 1u) * size_t(ny) + size_t(j);
+        const uint8_t* b = &f.atlas[(sy * aw + sx) * 4];
+        a = (double(b[0]) + 0.5) / 255.0 * double(f.t.aMax[c]);
+        k = (double(b[1]) + 0.5) / 255.0 * double(f.t.kMax[c]);
+        cs = (double(b[2]) + 0.5) / 255.0 * 2.0 - 1.0;
+        sn = (double(b[3]) + 0.5) / 255.0 * 2.0 - 1.0;
+        const double n = std::sqrt(cs * cs + sn * sn);
+        if (n > 1e-9) { cs /= n; sn /= n; }
+    };
+    bool ok = true;
+    const double L = base.level;
+    for (const double spacing : {0.25, 0.5}) {
+        Field lo, mid, hi;
+        solveAt(L - 0.5 * spacing, lo);
+        solveAt(L, mid);
+        solveAt(L + 0.5 * spacing, hi);
+        // the fan must be one fan: the same components, frequencies and directions
+        bool sameFan = lo.t.nUsed == mid.t.nUsed && hi.t.nUsed == mid.t.nUsed;
+        for (uint32_t c = 0; sameFan && c < mid.t.nUsed; ++c) {
+            sameFan = lo.t.sigma[c] == mid.t.sigma[c] && hi.t.sigma[c] == mid.t.sigma[c] &&
+                      lo.t.dirX[c] == mid.t.dirX[c] && hi.t.dirX[c] == mid.t.dirX[c];
+        }
+        if (!sameFan) {
+            Log("[wave-blend] spacing %.2f m: the three solves' fans differ -- a blend has no meaning here", spacing);
+            ok = false;
+            continue;
+        }
+        double eTrue = 0.0, eSnapLo = 0.0, eSnapHi = 0.0, eChord = 0.0, eGeo = 0.0, ePlant = 0.0;
+        double eTrueE = 0.0, eEik = 0.0, eEikPlant = 0.0, eSnapE = 0.0;   // on the eikonal phase
+        std::vector<double> dPhiE;
+        const size_t cells = size_t(nx) * size_t(ny);
+        std::vector<double> kErr, dPhi;
+        size_t wet = 0;
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                for (uint32_t c = 0; c < mid.t.nUsed; ++c) {
+                    if (!(mid.t.aMax[c] > 0.0f) || !(lo.t.aMax[c] > 0.0f) || !(hi.t.aMax[c] > 0.0f)) continue;
+                    double a0, k0, c0, s0, am, km, cm, sm, a1, k1, c1, s1;
+                    at(lo, c, i, j, a0, k0, c0, s0);
+                    at(mid, c, i, j, am, km, cm, sm);
+                    at(hi, c, i, j, a1, k1, c1, s1);
+                    if (am < 1e-4 && a0 < 1e-4 && a1 < 1e-4) continue;   // dry in all three
+                    ++wet;
+                    const double zmR = am * cm, zmI = am * sm;
+                    const double z0R = a0 * c0, z0I = a0 * s0, z1R = a1 * c1, z1I = a1 * s1;
+                    eTrue += zmR * zmR + zmI * zmI;
+                    eSnapLo += (z0R - zmR) * (z0R - zmR) + (z0I - zmI) * (z0I - zmI);
+                    eSnapHi += (z1R - zmR) * (z1R - zmR) + (z1I - zmI) * (z1I - zmI);
+                    const double chR = 0.5 * (z0R + z1R), chI = 0.5 * (z0I + z1I);
+                    eChord += (chR - zmR) * (chR - zmR) + (chI - zmI) * (chI - zmI);
+                    // ~R0 R1: the rotor carrying R0 onto R1; its angle is the phase step
+                    const double rR = c0 * c1 + s0 * s1, rI = c0 * s1 - s0 * c1;
+                    const double step = std::atan2(rI, rR);
+                    if (a0 > 1e-4 && a1 > 1e-4) dPhi.push_back(std::abs(step));
+                    const double h = 0.5 * step, ag = 0.5 * (a0 + a1);
+                    const double gc = c0 * std::cos(h) - s0 * std::sin(h), gs = s0 * std::cos(h) + c0 * std::sin(h);
+                    const double gR = ag * gc, gI = ag * gs;
+                    eGeo += (gR - zmR) * (gR - zmR) + (gI - zmI) * (gI - zmI);
+                    // THE PLANT: the geodesic turned the wrong way, R0 e^{-B step/2}
+                    const double pc = c0 * std::cos(h) + s0 * std::sin(h), ps = s0 * std::cos(h) - c0 * std::sin(h);
+                    ePlant += (ag * pc - zmR) * (ag * pc - zmR) + (ag * ps - zmI) * (ag * ps - zmI);
+                    if (km > 1e-6) kErr.push_back(std::abs(0.5 * (k0 + k1) - km) / km);
+                    // EIKONAL: the real phases, halfway, and the amplitude halfway -- then the rotor
+                    const size_t pi_ = size_t(c) * cells + size_t(j) * size_t(nx) + size_t(i);
+                    const double p0 = lo.phi[pi_], pm = mid.phi[pi_], p1 = hi.phi[pi_];
+                    const double tR = am * std::cos(pm), tI = am * std::sin(pm);
+                    eTrueE += tR * tR + tI * tI;
+                    const double pb = 0.5 * (p0 + p1);
+                    eEik += (ag * std::cos(pb) - tR) * (ag * std::cos(pb) - tR) + (ag * std::sin(pb) - tI) * (ag * std::sin(pb) - tI);
+                    eSnapE += 0.5 * ((a0 * std::cos(p0) - tR) * (a0 * std::cos(p0) - tR) + (a0 * std::sin(p0) - tI) * (a0 * std::sin(p0) - tI) +
+                                     (a1 * std::cos(p1) - tR) * (a1 * std::cos(p1) - tR) + (a1 * std::sin(p1) - tI) * (a1 * std::sin(p1) - tI));
+                    // THE PLANT: the eikonal phase blended with the neighbours swapped in weight (a third and two thirds)
+                    const double pp = (2.0 * p0 + p1) / 3.0;
+                    eEikPlant += (ag * std::cos(pp) - tR) * (ag * std::cos(pp) - tR) + (ag * std::sin(pp) - tI) * (ag * std::sin(pp) - tI);
+                    if (a0 > 1e-4 && a1 > 1e-4) dPhiE.push_back(std::abs(p1 - p0));
+                }
+            }
+        }
+        const auto rel = [&](double e) { return eTrue > 0.0 ? std::sqrt(e / eTrue) : 0.0; };
+        const auto q = [](std::vector<double>& v, double f) {
+            if (v.empty()) return 0.0;
+            std::nth_element(v.begin(), v.begin() + ptrdiff_t(f * double(v.size() - 1)), v.end());
+            return v[size_t(f * double(v.size() - 1))];
+        };
+        size_t overHalfPi = 0;
+        for (double d : dPhi) overHalfPi += d > 1.5707963 ? 1 : 0;
+        const double snap = 0.5 * (rel(eSnapLo) + rel(eSnapHi));
+        Log("[wave-blend] spacing %.2f m (the midpoint %+.3f m between %+.3f and %+.3f), %zu wet component-cells: "
+            "the elevation error relative to the true solve -- SNAP %.4f (low %.4f, high %.4f), CHORD %.4f, "
+            "GEODESIC %.4f; k's error median %.4f, p95 %.4f",
+            spacing, L, L - 0.5 * spacing, L + 0.5 * spacing, wet, snap, rel(eSnapLo), rel(eSnapHi), rel(eChord),
+            rel(eGeo), q(kErr, 0.5), q(kErr, 0.95));
+        Log("[wave-blend] spacing %.2f m: the phase step between the neighbours |arg(~R0 R1)| median %.4f rad, "
+            "p95 %.4f, p99 %.4f, max %.4f; over pi/2 at %.3f %% of component-cells",
+            spacing, q(dPhi, 0.5), q(dPhi, 0.95), q(dPhi, 0.99), q(dPhi, 1.0),
+            dPhi.empty() ? 0.0 : 100.0 * double(overHalfPi) / double(dPhi.size()));
+        const auto relE = [&](double e) { return eTrueE > 0.0 ? std::sqrt(e / eTrueE) : 0.0; };
+        Log("[wave-blend] spacing %.2f m, ON THE EIKONAL PHASE (the real phi, unwrapped by the solve): SNAP %.4f, "
+            "EIKONAL BLEND %.4f; the real phase step |phi1 - phi0| median %.3f rad, p95 %.3f, max %.3f -- "
+            "PLANT (weights a third / two thirds) %.4f: %s",
+            spacing, relE(eSnapE), relE(eEik), q(dPhiE, 0.5), q(dPhiE, 0.95), q(dPhiE, 1.0), relE(eEikPlant),
+            relE(eEikPlant) > relE(eEik) ? "CAUGHT" : "NOT CAUGHT");
+        ok &= relE(eEikPlant) > relE(eEik);
+        Log("[wave-blend] spacing %.2f m: PLANT the geodesic turned the wrong way: %.4f -- %s", spacing, rel(ePlant),
+            rel(ePlant) > rel(eGeo) ? "CAUGHT" : "NOT CAUGHT: this instrument cannot see a blend gone wrong");
+        ok &= rel(ePlant) > rel(eGeo);
+    }
+    return ok;
 }
 
 WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const {

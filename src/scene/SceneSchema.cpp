@@ -379,6 +379,14 @@ const Schema& StreamingSchema() {
                   "finer is four times the tiles (14 = the source as it was; any other value "
                   "paints its own tree)",
                   R)
+            .Bind("fetchThreads", p.fetchThreads, Q::Dimensionless, "1",
+                  "the Google fetch threads off the loaders: a tile not on disk is queued and the paint goes on "
+                  "without it; -1 = four in a window, none headless; 0 = the fetch in the paint", H)
+            .Bind("offline", p.offline,
+                  "no network this run: the cached tiles serve and nothing is asked (also what a run "
+                  "without a session falls back to)", R)
+            .Bind("tilePaint", p.tilePaint,
+                  "sources paint a tile at a time where they can; false = texel by texel (the A/B: byte for byte one)", H)
             .Bind("predictEvery", p.predictEvery, Q::Dimensionless, "frames", "prefetch-walk cadence (--predict-every)", H)
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)

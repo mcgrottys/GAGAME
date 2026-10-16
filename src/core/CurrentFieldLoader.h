@@ -31,6 +31,7 @@
 #include "core/FieldLoader.h"
 #include "core/Json.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -39,10 +40,34 @@ namespace ga {
 
 class CurrentFieldLoader : public FieldLoader {
 public:
+    // The registry's form: the file's one `field` (a composite's is its finest).
     static std::unique_ptr<FieldLoader> Open(const std::string& path, const GeoRef* declared) {
+        const JsonValue root = ReadRoot(path);
+        const JsonValue* jf = root.Get("field");
         auto self = std::unique_ptr<CurrentFieldLoader>(new CurrentFieldLoader());
-        return self->Init(path, declared) ? std::unique_ptr<FieldLoader>(self.release())
-                                          : nullptr;
+        return jf && self->Init(path, *jf, declared) ? std::unique_ptr<FieldLoader>(self.release()) : nullptr;
+    }
+    // EVERY FIELD of a file, one loader each, coarsest first: a composite's `fields` (docs/FIDELITY.md),
+    // each its own box and grain, or a file of one's `field`. A reader that composes a page adds them
+    // all, in this order, so the finer stand over the coarser where they overlap -- the stack's law --
+    // and a page no field reaches is answered by none.
+    static std::vector<std::unique_ptr<FieldLoader>> OpenAll(const std::string& path) {
+        std::vector<std::unique_ptr<FieldLoader>> out;
+        const JsonValue root = ReadRoot(path);
+        std::vector<const JsonValue*> jfs;
+        if (const JsonValue* fs = root.Get("fields"); fs && fs->type == JsonValue::Type::Array) {
+            for (const JsonValue& f : fs->arr) jfs.push_back(&f);
+        } else if (const JsonValue* jf = root.Get("field")) {
+            jfs.push_back(jf);
+        }
+        std::stable_sort(jfs.begin(), jfs.end(), [](const JsonValue* a, const JsonValue* b) {
+            return a->Num("grain_m", 0) > b->Num("grain_m", 0);
+        });
+        for (const JsonValue* jf : jfs) {
+            auto self = std::unique_ptr<CurrentFieldLoader>(new CurrentFieldLoader());
+            if (self->Init(path, *jf, nullptr)) out.push_back(std::unique_ptr<FieldLoader>(self.release()));
+        }
+        return out;
     }
 
     const char* Name() const override { return m_name.c_str(); }
@@ -116,7 +141,7 @@ private:
         return false;
     }
 
-    bool Init(const std::string& path, const GeoRef* declared) {
+    static JsonValue ReadRoot(const std::string& path) {
         std::string text;
         if (FILE* f = fopen(path.c_str(), "rb")) {
             char buf[8192];
@@ -124,16 +149,14 @@ private:
             while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
             fclose(f);
         }
-        if (text.empty()) return false;
         std::string err;
-        const JsonValue root = JsonParser::Parse(text, &err);
-        if (!err.empty()) {
-            Log("[loader] %s: %s", path.c_str(), err.c_str());
-            return false;
-        }
-        const JsonValue* jf = root.Get("field");
-        if (!jf) return false;
+        JsonValue root = JsonParser::Parse(text, &err);
+        if (!err.empty()) Log("[loader] %s: %s", path.c_str(), err.c_str());
+        return root;
+    }
 
+    bool Init(const std::string& path, const JsonValue& field, const GeoRef* declared) {
+        const JsonValue* jf = &field;
         const int nx = static_cast<int>(jf->Num("nx", 0));
         const int ny = static_cast<int>(jf->Num("ny", 0));
         if (nx <= 0 || ny <= 0) {

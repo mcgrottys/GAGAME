@@ -48,9 +48,13 @@ public:
     // 256 x 128 tiles), each texel the stack at its centre with that rung's ground, through the one
     // quantization -- a function of the place alone, at the grain the rings a hull stands in read
     // (the rung whose texel the finest ring's is: WaterBankLayer's base texel).
-    HeightPage(const Compositor* comp, int channel, uint32_t rung)
+    // `stack`: read the stack at each texel's centre, never the tree -- for a reader on a loader thread
+    // that must not wait on a tree's paint (the buildings' stands, Lane::Io: a cold tree tile paints its
+    // children first, and the stands then held the very lane the buildings' pages load on -- Tokyo,
+    // 2026-10-15: 17.9 ms a stand, 811 pages wanted and not asked, no buildings drawn).
+    HeightPage(const Compositor* comp, int channel, uint32_t rung, bool stack = false)
         : m_comp(comp), m_ch(channel), m_cube(Lattice::Cube(Lattice::kFaceDim << 17, 256, 128)),
-          m_rung(int(rung)) {}
+          m_rung(int(rung)), m_stack(stack) {}
     int Rung() const { return m_rung; }
 
     bool Read(double latDeg, double lonDeg, double& value) const override {
@@ -99,9 +103,19 @@ private:
         const TileRequest r{face, mip, ix / lat.texW, iy / lat.texH};
         double latR = 0.0, lonR = 0.0;
         lat.Texel(r, ix % lat.texW, iy % lat.texH, latR, lonR);
-        const float h = m_comp->SampleHeightStack(m_ch, latR, lonR, lat.GroundRes(mip));
+        // The height TREE's texel when one is bound (compose/HeightTree.h): the bytes the GPU loads, a fold
+        // of the texels beneath where a source's own level is finer -- which the stack read at the centre
+        // was not (the probe: 49 % equal at the 38 m level).
+        // The tree is read RESIDENT: the finest level held at or coarser than the rung, a miss asked of a
+        // loader and answered on a later read -- the GPU's own rule, so the hull stands on the bed the
+        // drawn sea stands on, and never waits. Measured 2026-10-15 (Mark's travel run): read through
+        // Sample() on the frame thread, the hull's bed at each new place waited 15.9 s on 335 cold
+        // tiles, frames of 75-340 ms. A provisional answer is not memoised: the next read asks again.
+        bool provisional = false;
+        const float h = m_stack ? m_comp->SampleHeightStack(m_ch, latR, lonR, lat.GroundRes(mip))
+                                : m_comp->SampleHeightResident(m_ch, latR, lonR, lat.GroundRes(mip), &provisional);
         const float q = HalfToFloat(tree_detail::F2H(h));   // the one quantization: the GPU's
-        m_memo.emplace(key, q);
+        if (!provisional) m_memo.emplace(key, q);
         return q;
     }
 
@@ -109,6 +123,7 @@ private:
     int m_ch = -1;
     Lattice m_cube;    // the pyramid
     int m_rung = 0;    // the rung the twin reads
+    bool m_stack = false;   // the stack, not the tree (a loader thread's reader)
     mutable std::unordered_map<uint64_t, float> m_memo;
 };
 

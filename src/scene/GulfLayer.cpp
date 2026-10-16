@@ -20,10 +20,10 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
                      hal::RootSignature rootSig) {
     (void)fields;
     m_rootSig = rootSig;
-    if (!m_currents || !m_currents->Field().Valid()) {
+    if (!m_currents || !m_field || !m_field->Valid()) {
         throw std::runtime_error("GulfLayer needs a current field");
     }
-    const CurrentField& f = m_currents->Field();
+    const CurrentField& f = (*m_field);
 
     if (!BuildDrawPso(gpu, sc)) throw std::runtime_error("gulf draw PSO failed");
 
@@ -84,7 +84,7 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
     // ---- numeric gate: field at the buoy vs its ADCP
     float mu = 0, mv = 0;
     char buf[160];
-    if (placed && m_currents->Field().Sample(bLon, bLat, mu, mv)) {
+    if (placed && (*m_field).Sample(bLon, bLat, mu, mv)) {
         const double ms = std::sqrt(mu * mu + mv * mv);
         const double toward = std::fmod(std::atan2(mu, mv) * 180.0 / kPi + 360.0, 360.0);
         if (m_currents->adcpValid) {
@@ -131,7 +131,7 @@ void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
         "VelGrad kernel");
     m_csPso->SetName(L"CsVelGrad");
 
-    const CurrentField& f = m_currents->Field();
+    const CurrentField& f = (*m_field);
     struct { uint32_t nx, ny; float cx, cy; } c{};
     c.nx = static_cast<uint32_t>(f.nx);
     c.ny = static_cast<uint32_t>(f.ny);

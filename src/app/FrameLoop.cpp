@@ -1133,16 +1133,17 @@ std::optional<int> FrameLoop::Session() {
             while (std::getline(in, tok, ',')) if (!tok.empty()) m_cycleAt.push_back(uint32_t(std::stoul(tok)));
             std::sort(m_cycleAt.begin(), m_cycleAt.end());
         }
-        if (const char* at = std::getenv("GAGAME_TRAVEL_AT")) {   // the travel harness: "frame,lat,lon"
-            std::istringstream in(at);
-            std::string tok;
-            std::vector<double> v;
-            while (std::getline(in, tok, ',')) if (!tok.empty()) v.push_back(std::stod(tok));
-            if (v.size() == 3) {
-                m_travelAt = uint32_t(v[0]);
-                m_travelAtLat = v[1];
-                m_travelAtLon = v[2];
+        if (const char* at = std::getenv("GAGAME_TRAVEL_AT")) {   // the travel harness: "frame,lat,lon[;...]"
+            std::istringstream hops(at);
+            std::string hop;
+            while (std::getline(hops, hop, ';')) {
+                std::istringstream in(hop);
+                std::string tok;
+                std::vector<double> v;
+                while (std::getline(in, tok, ',')) if (!tok.empty()) v.push_back(std::stod(tok));
+                if (v.size() == 3) m_travelAt.push_back({uint32_t(v[0]), v[1], v[2]});
             }
+            std::sort(m_travelAt.begin(), m_travelAt.end(), [](const auto& a, const auto& b) { return a.frame < b.frame; });
         }
     }
     startUnix = simUnix;
@@ -2063,11 +2064,13 @@ bool FrameLoop::TravelTo(double toLat, double toLon) {
     // top of the water-over-bed stack, the seat's surface, at the planet's grain). The carry
     // keeps a body's height about the centre, and Entity::Carry then seats the keel by the live
     // surfaces where they answer. (A click on dry land used to put the vehicle under it.) Part of
-    // the record: a peer rebuilds the same exit.
+    // the record: a peer rebuilds the same exit. Read RESIDENT (never a paint on the frame thread: the
+    // far place is cold by definition, and its 2 m tile painted there held the click's frame 200-740 ms,
+    // 2026-10-15): the finest level held, which the carry's seat then corrects by the live surfaces.
     auto topAt = [&](double lat, double lon) {
         const double d2r = 3.14159265358979323846 / 180.0;
         const double g = (m_A.hgtCh >= 0)
-                             ? double(m_A.compositor.SampleHeightStack(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
+                             ? double(m_A.compositor.SampleHeightResident(m_A.hgtCh, lat * d2r, lon * d2r, 2.0))
                              : 0.0;
         return (std::max)(g, 0.0);
     };
@@ -2159,9 +2162,10 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         m_cycleAt.erase(m_cycleAt.begin());
         CycleVehicle(+1);
     }
-    if (m_travelAt != 0u && m_frame >= m_travelAt) {   // the travel harness (GAGAME_TRAVEL_AT)
-        m_travelAt = 0u;
-        TravelTo(m_travelAtLat, m_travelAtLon);
+    if (!m_travelAt.empty() && m_frame >= m_travelAt.front().frame) {   // the travel harness (GAGAME_TRAVEL_AT)
+        const TravelHop h = m_travelAt.front();
+        m_travelAt.erase(m_travelAt.begin());
+        TravelTo(h.lat, h.lon);
     }
     scene::FrameInfo fi;
     fi.simUnix = m_simUnix;
@@ -2986,6 +2990,12 @@ bool FrameLoop::Frame() {
         }
     }
 
+    // The Google fetches queued for loads the frame no longer names (about 2 s, the residency's
+    // glance) leave the queue unsent; their loads are asked again if they come back.
+    m_A.googleTiles.PruneQueue(
+        [&](int t, const TileRequest& r) { return m_A.resMgr.NamedWithin(t, r, 60u); },
+        [&](int t, const TileRequest& r) { m_A.resMgr.Again(t, r); });
+
     // ---- M9bi: THE SUN, PLACED. One conformal point at the origin of the
     // heliocentric frame, carried into THIS frame by the versor chain in Ephemeris.h
     // and handed to the renderer as the scene's single light. Everything that shades
@@ -3518,7 +3528,8 @@ bool FrameLoop::Frame() {
                     resMgr.Reload(waveT);   // F13: the held tiles hold until their replacements land
                     m_waveStaleSince = frame;   // the instrument: how long old pages stay drawn
                     m_waveStaleAt = simUnix;
-                    waveField->Publish();   // ONE SWAP: the twin and the bank's table flip with the pages
+                    waveField->PublishKey(wavePendingKey);   // ONE SWAP: the twin and the bank's table flip with
+                                                             // the pages -- the field they were painted from
                     Log("[wave] bucket %016llx -> tree %s: %u tiles prefilled (%u planes, "
                         "every mip) in %.2f s on a worker -- the frame did not wait",
                         static_cast<unsigned long long>(wavePendingKey),
@@ -3543,11 +3554,17 @@ bool FrameLoop::Frame() {
                     const ColorFrame wf = waveFrame.color;
                     WaveFieldSource* wsrc = waveSrc.get();
                     const uint32_t planes = wavePendingPlanes;
+                    // A BLEND's pages live in memory only (sim/WaveField.h): a root of its own under mem:,
+                    // given back when the tree is replaced; a bucket's solve keeps its tree on disk.
+                    static std::atomic<uint32_t> s_memTree{0};
+                    const std::string root = waveField->Next()->transient
+                                                 ? "mem:\\wave." + std::to_string(s_memTree.fetch_add(1))
+                                                 : std::string();
                     Threads().Submit(Lane::Long, "wave.prefill",
                                      [&wavePending, &wavePrefillDone, &wavePendingTiles,
-                                      &wavePendingSec, wf, wsrc, planes, tx0, ty0, tx1, ty1]() {
+                                      &wavePendingSec, wf, wsrc, planes, tx0, ty0, tx1, ty1, root]() {
                         const auto tp0 = Clock::now();
-                        auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4);
+                        auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4, nullptr, root);
                         wavePendingTiles = fresh->Prefill(wf, 0u, planes, 0u, tx0, ty0, tx1, ty1);
                         wavePendingSec =
                             std::chrono::duration<double>(Clock::now() - tp0).count();
@@ -5422,6 +5439,18 @@ int FrameLoop::Finish() {
             m_A.googleTiles.Refused(), m_A.googleTiles.Budget(), m_A.googleTiles.Fetched());
     }
 
+    // The CPU's reads of the height tree (compose/HeightTree.h): tiles taken from the tree and the time
+    // inside those reads (a cold tile is painted there), and the texels answered.
+    if (HeightTree* ht = m_A.compositor.HeightTreeOf(m_A.hgtCh)) {
+        Log("[height-tree] the frame thread read %llu of them, waiting %.1f s", static_cast<unsigned long long>(HeightTree::tlReads),
+            double(HeightTree::tlReadUs) * 1e-6);
+        Log("[height-tree] %llu tiles read from the tree in %.1f s (%llu answered not now), %zu tiles held",
+            static_cast<unsigned long long>(ht->tileReads.load()), double(ht->readUs.load()) / 1.0e6,
+            static_cast<unsigned long long>(ht->transient.load()), ht->Held());
+    }
+    // The trees in memory (tree_detail::MemStore: the wave field's blends), what they hold at the end.
+    Log("[tiletree] in memory at the end: %.1f MB (the wave field's blends between tide buckets; never on disk)",
+        double(tree_detail::MemBytes()) / 1048576.0);
     // The rasters read by being files: the windows their reads decoded and the time in the decoder.
     Log("[raster] %llu windows decoded this run, %.1f s in the decoder",
         static_cast<unsigned long long>(RasterFileSource::s_decodes.load()),

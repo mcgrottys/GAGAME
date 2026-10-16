@@ -34,6 +34,11 @@ inline thread_local bool g_tileMagnified = false;
 struct TileRequest {
     uint32_t face = 0, mip = 0, x = 0, y = 0;
 };
+// THE LOAD THIS THREAD IS MAKING (2026-10-14): the residency manager names its tenant and tile
+// around its provider call, so a source that cannot answer now (a fetch queued on the network,
+// GoogleTileProvider) can say whom to tell when it can. -1: no load (a tool, a CPU reader).
+inline thread_local int g_loadTenant = -1;
+inline thread_local TileRequest g_loadReq{};
 // M9ai: WHERE A TILE IS, instead of what it contains.
 //
 // A provider that finds its tile in an archive fills this and returns true WITHOUT touching
