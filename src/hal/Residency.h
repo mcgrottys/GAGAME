@@ -61,6 +61,9 @@
 
 namespace ga {
 
+class MaxLane;          // hal/MaxLane.h
+class ShaderCompiler;   // hal/Shader.h
+
 class ResidencyManager {
 public:
     static constexpr uint32_t kPoolChunkTiles = 128;     // 8 MB heap chunks
@@ -383,6 +386,14 @@ public:
     // One call per frame, on the frame command list (mapping updates are queue-side and land
     // before this list executes). Records CopyTiles + barriers + residency-map uploads.
     void ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl);
+
+    // THE MAX LANE (hal/MaxLane.h): a scalar tenant keeps, beside its pages, the maximum of every
+    // 16 x 16 block of every resident mip, folded up the mips and across the ranks, rebuilt on the
+    // GPU from the tiles each turn changes (RecordLanes). False when the device or the tenant's
+    // tiles cannot carry it; the reader then marches. MaxLaneSrv is ~0 without a lane.
+    bool EnableMaxLane(int tenant, Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
+    uint32_t MaxLaneSrv(int tenant) const;
+    const MaxLane* Lane(int tenant) const;
 
     // ---- field tenants (adapters; physics policies stay where they are) ---------------------
     // Registered for the unified stats line and the grade-signature registry only.
@@ -793,6 +804,9 @@ private:
         // (kNoRung for a slice that declared no ground); and the exact hold's lost tail.
         std::vector<int> sliceRung0;
         uint32_t exLost = 0;
+        // THE MAX LANE (EnableMaxLane): null without one; primed once every held tile is built.
+        std::shared_ptr<MaxLane> lane;
+        bool lanePrimed = false;
         // F1 (HIERARCHY 4.1): the coarsest mip each slice HOLDS, its chain's end -- the array's
         // coarsest (mips - 1) for every slice but a window, whose FLOOR is its mip 3: the same
         // ground in the rank above answers beyond it, so its mips above are neither wanted nor
@@ -1072,6 +1086,12 @@ private:
         m_edgeNotes.push_back({tenant, r});   // H2's closure, by events
     }
     void ApplyChanged();
+    // The max lanes' jobs from the turn's changed slots (before ApplyChanged clears them): each
+    // held slot that changed, every alias of its address, the tiles beside it (their blocks' rims
+    // read its texels), and every held ancestor -- up the slice's mips, across a rank's floor to the
+    // slots of the same address in the rank above, from rank 1's floor into the cube -- each with
+    // the four slots that hold its children's lanes.
+    void RecordLanes(Gpu& gpu, ID3D12GraphicsCommandList* cl);
     // LAW 9: the map born saying nothing, then written from the boot's held floor and sent to the
     // GPU on an upload that waits, so no reader ever meets the zeroed copy (finding 66).
     void BirthMap(Gpu& gpu, int tenant);

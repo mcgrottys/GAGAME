@@ -17,66 +17,265 @@
 
 // THE GROUND'S OWN SHADOW, AND THE MIRROR'S LAND (scene render.shadowSteps / shadowRangeM /
 // reflectLand). PlanetShadow asks whether the SPHERE stands between a point and the sun; this asks
-// the same of the GROUND on it -- the composed height field, read along the ray from the point --
-// and one march serves two askers. The sun's asker wants the worst of the terrain's rise above the
-// ray, the rim of the hill that eclipses the disc, in the sine units SunDiscClear takes, so a
-// ridge's shadow has the sun's own penumbra and no edge of its own; the mirror's asker wants the
-// FIRST sample where the ground stands above the ray, refined by one secant between the two
-// samples that bracket it, and the land there is what the water reflects.
+// the same of the GROUND on it -- the composed height field along the ray from the point -- and one
+// cast serves two askers. The sun's asker wants the worst of the terrain's rise above the ray, the
+// rim of the hill that eclipses the disc, in the sine units SunDiscClear takes, so a ridge's shadow
+// has the sun's own penumbra and no edge of its own; the mirror's asker wants the FIRST place the
+// ground stands above the ray, refined by one secant, and the land there is what the water reflects.
 //
 // The ray is made in small numbers, as the refracted cast is (WaterPixelColor): from the point's
-// altitude a0 at its zenith upT, the ray's point at s is an altitude and a direction,
-//     alt(s) = a0 + s mu + s^2 |tPerp|^2 / 2 (R + a0),   dir(s) = normalize(upT + s / (R + alt) tPerp),
-// the sphere to second order in s / R (the third-order term is 2 mm at 8 km). The ground under it
-// is read at the level's own point through that level's windows (ComposedHeightAt), at the level a
-// step's length wants (two texels a step) and never finer than the pixel's own, so the march reads
-// what the picture reads. The samples are log-spaced from twice the pixel's footprint to the
-// range: a dune a metre off is seen as surely as a ridge eight kilometres off, and the march costs
-// the same at every altitude. Its first sample stands two footprints out, so the pixel's own
-// texel cannot shade itself. R is the asker's planet radius (the globe's gGlo.x, the buildings'
-// gSkyLut.y: each stage's own name for the one sphere).
+// altitude a0 at its zenith upT, the ray's point at t is an altitude
+//     alt(t) = a0 + t mu + t^2 |tPerp|^2 / 2 (R + a0),
+// the sphere to second order in t / R (the third-order term is 2 mm at 8 km), and the ground under
+// it is addressed through the level's own windows at the level's own point (geo + upT a0 + t ray).
+// The cast starts two footprints out, so the pixel's own texel cannot shade itself. R is the
+// asker's planet radius (the globe's gGlo.x, the buildings' gSkyLut.y: each stage's own name for
+// the one sphere).
 struct TerrainHit {
     float s;       // the ray's length to the ground, < 0 when it meets none within the range
     float3 dirP;   // the planet direction of the hit
     float3 pL;     // the hit in the level's own frame (the windows' address)
     float alt;     // its altitude above the geoid
 };
+
+// ---- THE CAST: the question asked of the height's MAX LANE (MaxLane.hlsl). It replaced a march that
+// read the height at twelve log-spaced points, each at a mip a step's length wanted: a coarse mip is a
+// MEAN, so a ridge between two samples, or narrower than the texel a far sample read, was not there
+// for it. The lane holds, for each 16 x 16 block of every resident mip of every page, the maximum
+// any bilinear read at that mip or a finer resident one can return there; so a block the ray passes
+// above can raise nothing, whatever lies inside it, and is passed whole. The cast is the maximum-
+// mipmap traversal (Tevs, Ihrke, Seidel 2008): pass a block whose lane cannot reach the rim, step up
+// a level after each pass; descend where it can; at the finest level the pixel may read, read the
+// height itself, texel by texel, across the block. The result is the march's own quantity -- the
+// worst rise of the ground above the ray, in sines, through SunDiscClear -- at every texel of the
+// resident level instead of twelve of them, so the penumbra and every asker are unchanged.
+//
+// THE LADDER is the pages' own: the cube's mips G = 6..0, then rank k's mips 2..0 at G = -3k - 1 ..
+// -3k - 3 (rank k's mip 3 is rank k - 1's mip 0, the same pyramid level, and is never read here). A
+// level is taken at the ray's point where its slice holds the point (a rank's box) and has it resident
+// (the map's conservative floor, the read the picture takes): only there is its lane a bound.
+//
+// THE BLOCK'S EXIT IS EXACT: every cell boundary of a face-plane window, and of a cube face, is a
+// plane through the body's centre, and the ray is straight in the level's frame, so the texel
+// coordinate along it is a ratio of two linear functions of the ray's length, X(t) = N(t) / D(t),
+// and the length at which it reaches a boundary Xb is one division: t + (Xb D - N) / (dN - Xb dD).
+//
+// THE BLOCK'S BOUND IS CLOSED: the rise of height M above the ray at t, in the march's sines, is
+// f(t) cos e with f(t) = (M - a0) / t - mu - k t, k = |tPerp|^2 / 2 (R + a0). Above the point's own
+// altitude f falls with t, so its largest value over a crossing [ta, tb] is at ta; below, f is concave
+// with its top at t* = sqrt((a0 - M) / k), clamped into the crossing.
+float CastBound(float M, float ta, float tb, float a0, float mu, float k, float cosE) {
+    const float dM = M - a0;
+    float tq = ta;
+    if (dM < 0.0f) tq = (k > 0.0f) ? clamp(sqrt(-dM / k), ta, tb) : tb;
+    return (dM / tq - mu - k * tq) * cosE;
+}
+// The length along the ray at which a projective coordinate X = N / D (N = n + t dn, D = d + t dd, at
+// the current t: n, d) leaves the block [b S, (b + 1) S) it is in; 3e38 when it never does.
+float CastExit(float t, float n, float dn, float d, float dd, float S) {
+    const float X = n / d;
+    const float b = floor(X / S);
+    const float rate = dn * d - n * dd;   // the sign of dX/dt (D > 0)
+    if (abs(rate) < 1e-20f) return 3.0e38f;
+    const float Xb = (rate > 0.0f ? b + 1.0f : b) * S;
+    const float den = dn - Xb * dd;
+    if (abs(den) < 1e-20f) return 3.0e38f;
+    const float dt = (Xb * d - n) / den;
+    return (dt > 0.0f) ? t + dt : 3.0e38f;
+}
+// A level's cell at the ray's point: whether the level may be read there, its slice and mip, the
+// block, the block's exit, the ground texel (m) and what a fine read needs.
+struct CastCell {
+    bool ok;
+    bool cube;
+    uint slice;
+    uint mip;
+    int2 blk;
+    float tExit;
+    float texM;
+    float2 uv;     // a window's address (wrap)
+    float3 dirP;   // a cube read's direction (planet frame)
+    float have;    // the finest mip of the slot held under the point (the map's conservative floor)
+};
+// The cube face's three rows (HpCubeFace's ratios): s = cu.P / cw.P, t = cv.P / cw.P.
+void CastFaceRows(uint f, out float3 cw, out float3 cu, out float3 cv) {
+    cw = float3(1, 0, 0); cu = float3(0, 0, -1); cv = float3(0, -1, 0);
+    if (f == 1u) { cw = float3(-1, 0, 0); cu = float3(0, 0, 1); cv = float3(0, -1, 0); }
+    else if (f == 2u) { cw = float3(0, 1, 0); cu = float3(1, 0, 0); cv = float3(0, 0, 1); }
+    else if (f == 3u) { cw = float3(0, -1, 0); cu = float3(1, 0, 0); cv = float3(0, 0, -1); }
+    else if (f == 4u) { cw = float3(0, 0, 1); cu = float3(1, 0, 0); cv = float3(0, -1, 0); }
+    else if (f == 5u) { cw = float3(0, 0, -1); cu = float3(-1, 0, 0); cv = float3(0, -1, 0); }
+}
+static const float kCastBlock = 16.0f;   // MIRRORS MaxLane.hlsl kBlock and hal::MaxLane::kBlock
+CastCell CastCellAt(int G, float t, uint s, float3 p0, float3 P0, float3 rayT, float3 rayP) {
+    CastCell c = (CastCell)0;
+    c.tExit = 3.0e38f;
+    if (G >= 0) {
+        // THE CUBE: the direction of the ray's point, its face, the face's gnomonic ratios.
+        const float3 P = CsToPlanet(P0 + t * rayT);
+        c.dirP = normalize(P);
+        float2 cuv;
+        const uint f = HpCubeFace(c.dirP, cuv);
+        const float have = CsHaveCubeArr(gCsU2.y, c.dirP);
+        c.have = have;
+        c.ok = have <= float(G) + 0.01f;
+        c.cube = true;
+        c.slice = f;
+        c.mip = uint(G);
+        const float dim = kPageDim / exp2(float(G));
+        float3 cw, cu, cv;
+        CastFaceRows(f, cw, cu, cv);
+        // X = dim/2 (1 + cu.P / cw.P) = (dim/2)(cw + cu).P / cw.P; Y likewise with cv.
+        const float d = dot(cw, P), dd = dot(cw, rayP);
+        const float nx = 0.5f * dim * dot(cw + cu, P), dnx = 0.5f * dim * dot(cw + cu, rayP);
+        const float ny = 0.5f * dim * dot(cw + cv, P), dny = 0.5f * dim * dot(cw + cv, rayP);
+        c.blk = int2(floor(cuv * dim / kCastBlock));
+        c.tExit = min(CastExit(t, nx, dnx, d, dd, kCastBlock), CastExit(t, ny, dny, d, dd, kCastBlock));
+        c.texM = gCsGround.x * exp2(float(G));
+        return c;
+    }
+    // A WINDOW: rank k's mip m, at the ray's point in the level's own frame.
+    const uint k = uint(-G - 1) / 3u;
+    const int m = G + 3 * int(k + 1u);
+    if (k >= CsWinK(s)) return c;
+    const uint r = 1u + 4u * k;
+    const float4 U = WtWinRow(s, r), V = WtWinRow(s, r + 1u), W = WtWinRow(s, r + 2u);
+    const float3 p = p0 + t * rayT;
+    const float nx = dot(p, U.xyz) + U.w, ny = dot(p, V.xyz) + V.w, d = dot(p, W.xyz) + W.w;
+    c.uv = float2(nx, ny) / (d * kPageDim);
+    const float2 b = c.uv + CsWinOff(s, k);
+    if (any(b < 0.0f) || any(b >= 1.0f)) return c;   // past the rank's box: its level is not here
+    c.slice = CsWinSlice(s, k);
+    c.mip = uint(m);
+    const float have = CsHaveWindow(gCsU6.y, c.uv, c.slice);
+    c.have = have;
+    c.ok = have <= float(m) + 0.01f;
+    const float S0 = kCastBlock * exp2(float(m));   // a block, in mip-0 texels
+    c.blk = int2(floor(float2(nx, ny) / (d * S0)));
+    c.tExit = min(CastExit(t, nx, dot(rayT, U.xyz), d, dot(rayT, W.xyz), S0),
+                  CastExit(t, ny, dot(rayT, V.xyz), d, dot(rayT, W.xyz), S0));
+    c.texM = CsBlockGround(k) * exp2(float(m));
+    return c;
+}
+// The block's (maximum, minimum) from the lane.
+float2 CastLane(CastCell c) {
+    const int dimB = int(kPageDim / kCastBlock) >> c.mip;
+    const int2 b = c.blk & (dimB - 1);   // a window's page is the lattice modulo itself
+    return gTexArr[gCsU2.z].Load(int4(b, int(c.slice), int(c.mip))).xy;
+}
+// The level read at length t (cube lod: the windows are below 0): the pixel's own, or the sun's disc
+// there, whichever is coarser; and the level the traversal stops at for it, the one just coarser.
+float CastRead(float lodPix, float discK, float t, int gMin) {
+    return clamp(max(lodPix, log2(max(discK * t, 1e-30f))), float(gMin), 6.0f);
+}
+int CastStop(float lodPix, float discK, float t, int gMin) {
+    return clamp(int(ceil(CastRead(lodPix, discK, t, gMin) - 1e-3f)), gMin, 6);
+}
 float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float footM, float lodPix, float R,
                  bool wantHit, out TerrainHit hit) {
     hit.s = -1.0f;
     hit.dirP = CsToPlanet(upT);
     hit.pL = geo;
     hit.alt = a0;
-    const uint steps = uint(gCsShadow.x);
-    if (steps == 0u) return 1.0f;
+    // Off (render.shadowSteps 0), or no lane to cast on: a height cube alone, as Mars has, carries
+    // none, and its ground casts no shadow.
+    if (gCsShadow.x < 0.5f || gCsU2.z == 0xFFFFFFFFu || gCsU6.x == 0xFFFFFFFFu) return 1.0f;
     const float mu = dot(rayT, upT);
     const float3 tPerp = rayT - mu * upT;
     const float tPerp2 = dot(tPerp, tPerp);
     const float cosE = sqrt(tPerp2);
-    const float twoR = 2.0f * (R + a0);
-    const float s0 = max(2.0f * footM, 0.5f);
-    if (s0 >= gCsShadow.y) return 1.0f;   // from orbit the first sample is past the range: no ground to march
-    const float ratio = pow(max(gCsShadow.y / s0, 1.0f), 1.0f / max(float(steps) - 1.0f, 1.0f));
-    float worst = -1.0f;   // in sines: nothing stands above the ray yet
-    float sP = s0, prevS = 0.0f, prevGap = 1.0e9f;
-    [loop] for (uint k = 0u; k < steps; ++k) {
-        const float altP = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;
-        const float3 dirP = normalize(upT + (sP / (R + altP)) * tPerp);
-        const float lodP = max(lodPix, ComposedHeightLod(0.5f * sP * (ratio - 1.0f), 1.0f));
-        const float3 pL = geo + upT * a0 + sP * rayT;
-        const float gap = altP - ComposedHeightAt(CsToPlanet(dirP), pL, lodP, s);   // the ray's clearance
-        worst = max(worst, -gap * cosE / sP);
-        if (wantHit && gap < 0.0f) {
-            const float sH = prevS + (sP - prevS) * prevGap / max(prevGap - gap, 1e-6f);
-            hit.s = sH;
-            hit.alt = (a0 + sH * mu) + sH * sH * tPerp2 / twoR;
-            hit.dirP = CsToPlanet(normalize(upT + (sH / (R + hit.alt)) * tPerp));
-            hit.pL = geo + upT * a0 + sH * rayT;
-            break;
+    const float kq = tPerp2 / (2.0f * (R + a0));
+    const float t0 = max(2.0f * footM, 0.5f);
+    const float tMax = gCsShadow.y;
+    if (t0 >= tMax) return 1.0f;
+    const float3 p0 = geo + upT * a0;            // the point in the level's frame (the windows' address)
+    const float3 P0 = upT * (R + a0);            // ...and about the planet's centre, tangent axes (the cube's)
+    const float3 rayP = CsToPlanet(rayT);
+    const int gMin = max(int(kCsHeightLodFloor), -3 * int(CsWinK(s)));
+    const float lodF0 = clamp(lodPix, float(gMin), 6.0f);
+    // THE GRAIN THE SUN CAN SEE: a rise narrower than the sun's disc at its distance covers only part
+    // of the disc, which is the penumbra's own business, so the ground at length t is read at the
+    // finest level whose texel is no wider than the disc there, t 2 kSunDiscR (0.94 % of t: 9.4 m at a
+    // kilometre). One law, continuous in t: the pixel's own grain near the point, the disc's beyond.
+    // The mirror's ray sees no disc and keeps the pixel's grain.
+    const float discK = wantHit ? 1e-30f : 2.0f * kSunDiscR / gCsGround.x;   // the disc over the cube's texel, a metre out
+    // The level read at length t, CONTINUOUS (a trilinear read between two mips, as the picture's own):
+    // the traversal stops at the level just coarser, whose lane folds the finer one's and so bounds
+    // the blend; an integer level here stepped the shade where a pixel's level crossed a half.
+    // Start where a block is about the first sample's length: finer is pointless, coarser fails.
+    int gHere = CastStop(lodF0, discK, t0, gMin);   // the level the traversal stops at, here
+    int G = max(clamp(int(floor(log2(t0 / (kCastBlock * gCsGround.x)))), gMin, 6), gHere);
+    float worst = -1.0f;
+    float t = t0;
+    float prevT = 0.0f, prevGap = 1.0e9f;
+    const uint cap = max(uint(gCsShadow.x), 8u);   // render.shadowSteps: the traversal's cap
+    [loop] for (uint it = 0u; it < cap; ++it) {
+        if (t >= tMax) break;
+        const CastCell c = CastCellAt(G, t, s, p0, P0, rayT, rayP);
+        if (!c.ok) {
+            if (G >= 6) break;   // nothing resident at all here: nothing to cast on
+            ++G;
+            gHere = G;
+            continue;
         }
-        prevS = sP;
-        prevGap = gap;
-        sP *= ratio;
+        const float tb = min(c.tExit, tMax);
+        const float2 lane = CastLane(c);
+        const float laneM = lane.x;
+        // THE MINIMUM, the bound from below: the ground in the block stands at least this high, so its
+        // rise over the crossing at least this much -- a value the true worst cannot fall under. It
+        // raises the threshold every later block is passed against, and where it alone covers the
+        // whole disc nothing further can give the sun back.
+        if (!wantHit) {
+            worst = max(worst, CastBound(lane.y, t, tb, a0, mu, kq, cosE));
+            if (worst >= kSunDiscR) return 0.0f;
+        }
+        if (CastBound(laneM, t, tb, a0, mu, kq, cosE) <= (wantHit ? 0.0f : max(worst, -kSunDiscR))) {
+            t = tb + max(1e-4f * tb, 1e-3f);
+            G = min(G + 1, 6);
+            gHere = CastStop(lodF0, discK, t, gMin);
+            continue;
+        }
+        if (G > gHere) { --G; continue; }
+        // THE FINEST LEVEL THIS PIXEL MAY READ: the height itself, a texel at a time across the block.
+        // The read's mip within the slot: the continuous level less the slot's offset, never finer than
+        // what is held under the point, nor than the slot's own mip 0 (a finer rank is another slice).
+        const float mOff = float(c.mip) - float(G);
+        const float mLo = max(c.have, max(float(c.mip) - 1.0f, 0.0f));
+        const float dt = c.texM * exp2(clamp(CastRead(lodF0, discK, t, gMin) + mOff, mLo, float(c.mip)) - float(c.mip)) /
+                         max(cosE, 0.05f);
+        const uint r = c.cube ? 1u : 1u + 4u * (uint(-G - 1) / 3u);   // the rank's planes (unused on the cube)
+        const float4 U = WtWinRow(s, r), V = WtWinRow(s, r + 1u), W = WtWinRow(s, r + 2u);
+        [loop] for (float tf = t; tf < tb; tf += dt) {
+            float H;
+            const float mip = clamp(CastRead(lodF0, discK, tf, gMin) + mOff, mLo, float(c.mip));
+            if (c.cube) {
+                const float3 dirP = CsToPlanet(normalize(P0 + tf * rayT));
+                H = gTexCubeArr[gCsU2.x].SampleLevel(sLinearClamp, float4(dirP, 0.0f), mip).x;
+            } else {
+                const float2 uv = PageTexelUv(p0 + tf * rayT, U, V, W);
+                H = gTexArr[gCsU6.x].SampleLevel(sLinearWrap, float3(uv, c.slice), mip).x;
+            }
+            const float alt = a0 + tf * mu + tf * tf * kq;
+            const float gap = alt - H;
+            worst = max(worst, -gap * cosE / tf);
+            if (wantHit && gap < 0.0f) {
+                const float sH = prevT + (tf - prevT) * prevGap / max(prevGap - gap, 1e-6f);
+                hit.s = sH;
+                hit.alt = a0 + sH * mu + sH * sH * kq;
+                hit.dirP = CsToPlanet(normalize(upT + (sH / (R + hit.alt)) * tPerp));
+                hit.pL = geo + upT * a0 + sH * rayT;
+                return SunDiscClear(-worst);
+            }
+            if (!wantHit && worst >= kSunDiscR) return 0.0f;   // the disc is gone: nothing can give it back
+            prevT = tf;
+            prevGap = gap;
+            // The rest of the block, from here: the same closed bound, now from a later t (the ray has
+            // risen, and the threshold may have too). Once it cannot reach, nothing left in the block can.
+            if (CastBound(laneM, tf, tb, a0, mu, kq, cosE) <= (wantHit ? 0.0f : max(worst, -kSunDiscR))) break;
+        }
+        t = tb + max(1e-4f * tb, 1e-3f);
+        G = min(G + 1, 6);
+        gHere = CastStop(lodF0, discK, t, gMin);
     }
     return SunDiscClear(-worst);
 }

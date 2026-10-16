@@ -330,7 +330,7 @@ private:
 // that samples a planet's composed channels (M12 step 4g), so no two can disagree on the math.
 struct ComposedSurfaceCb {
     uint32_t u[4];    // color cube SRV, color cube residency map, window SRV, window res map
-    uint32_t u2[4];   // height cube SRV + residency map, height WINDOW SRV + residency map
+    uint32_t u2[4];   // height cube SRV + residency map, the height's max lane SRV (hal/MaxLane.h), spare
     uint32_t u3[4];   // GIS survey stencil: window SRV (R8G8 coast,river), global SRV (R8)
     float f[4];       // color cube on, window on, height on, planet radius (m)
     float g[4];       // height cube max lod, height texel arc (rad), height window max lod,
@@ -340,10 +340,10 @@ struct ComposedSurfaceCb {
     float r2[4];
     float ground[4];  // M12 step 4f: ground texel (m) at the cube's mip 0 (Lattice::GroundRes(0));
                       // yzw spare (PHASE B3: the pages' grounds are gone).
-    uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV; zw spare (PHASE B3).
+    uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV; zw the building field's array.
                       // u5[0] == ~0 means the old three-tenant path.
-    uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV; zw spare
-                      // (PHASE B3). u6[0] == ~0: a height cube alone (Mars).
+    uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV; zw the building
+                      // field's cube views. u6[0] == ~0: a height cube alone (Mars).
     // THE CAMERA'S EYE (plan_address.md), appended at the END: the eye in the tangent axes less
     // (0, R, 0), from doubles (SurfaceFrame::eye) -- CsPointOfDir's. PHASE B3: the Mercator
     // anchor's other rows (eyeA, eyeE, eyeN, eyeU, eyePx) and merc, u4, det are deleted.

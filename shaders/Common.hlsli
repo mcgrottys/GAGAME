@@ -326,7 +326,7 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // the sea and the GIS vectors each embedded them in their own cbuffer.
 #define GA_COMPOSED_CB_ROWS \
     uint4  gCsU;    /* color cube SRV, color cube residency, window SRV, window residency */ \
-    uint4  gCsU2;   /* height cube SRV + residency, height WINDOW SRV + residency */ \
+    uint4  gCsU2;   /* height cube SRV + residency, the height's max lane SRV (hal/MaxLane.h), spare */ \
     uint4  gCsU3;   /* M9ay survey MASK PAGES: array SRV, array residency, cube SRV, cube \
                        residency (r = water coverage, b = edited, a = surveyed) */ \
     float4 gCsF;    /* color cube on, window on, height on, planet radius (m) */ \
@@ -337,10 +337,10 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     float4 gCsR2; \
     float4 gCsGround; /* M12 step 4f: ground texel (m) at the cube's mip 0 (Lattice::GroundRes(0)); \
                          yzw spare (PHASE B3: the pages' grounds are gone) */ \
-    uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV; zw spare (PHASE B3: \
-                       the page slices). x == ~0 means the old three-tenant path. */ \
-    uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV; zw spare \
-                       (PHASE B3). x == ~0: a height cube alone (Mars). */
+    uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV; zw the building \
+                       field's array. x == ~0 means the old three-tenant path. */ \
+    uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV; zw the building \
+                       field's cube views. x == ~0: a height cube alone (Mars). */
 // THE CAMERA'S EYE (plan_address.md), appended at the END: for a stage with only a direction
 // (CsPointOfDir), the point VsOut.geo is relative to, in doubles on the CPU (SurfaceFrame::Fill).
 // PHASE B3: the Mercator anchor's other rows (eyeA/E/N/U, eyePx) are deleted.
@@ -352,9 +352,8 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     float4 gCsRankG[2];
 // THE SUN'S RAY OVER THE GROUND AND THE BUILDINGS (TerrainRay.hlsli; scene render.shadowSteps,
 // shadowRangeM, reflectLand, buildingShadowM), appended at the END: on b2 because the ground AND
-// the buildings ask the same two questions of the same sun -- x = the march's samples (0 = off),
-// y = its range (m), z = 1 when the water's mirror reflects the land it meets, w = the finest sun
-// map's side (m; 0 = no map). THE SUN MAPS ARE A CASCADE ON THE ORIGIN LATTICE (VISIBILITY_FIELD 9):
+// the buildings ask the same two questions of the same sun -- x = the cast's step cap (0 = off),
+// y = its range (m), z = 1 when the water's mirror reflects the land it meets, w spare. THE SUN MAPS ARE A CASCADE ON THE ORIGIN LATTICE (VISIBILITY_FIELD 9):
 // gCsSunMapU.x = how many levels stand (0 = none), .y = their texels a side, .z = the instrument's
 // flag (the faces drawn as their clear). gCsSunSrv holds each level's heap slot (~0 = none) and
 // gCsSunVP[k] takes an eye-relative point of the eye's own world to level k's map

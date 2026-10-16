@@ -1,6 +1,6 @@
 {
   "_readme": [
-    "THE TERRAIN SHADOW'S INSTRUMENT (Globe.hlsl TerrainRay; scene render.shadowSteps, shadowRangeM): the",
+    "THE TERRAIN SHADOW'S INSTRUMENT (TerrainRay.hlsli, the cast over the max lane; scene render.shadowSteps, shadowRangeM): the",
     "Sawatch Range of Colorado from 40 km, looking north along the Arkansas valley in the late afternoon, the sun",
     "low in the west, so every ridge throws its shadow east across the next valley. The relief is ETOPO 2022 at",
     "15 arcseconds (about 450 m a texel), which is what the planet carries everywhere; the shadows are what that",
@@ -8,7 +8,7 @@
     "",
     "  build/bin/gagame.exe scenes/debug/terrain_shadow.json",
     "  ... --set render.shadowSteps=0        the same instant without the shadow",
-    "  ... --set render.shadowSteps=24       twice the march",
+    "  ... --set render.shadowSteps=512      the cast with four times its step cap (must not change a pixel)",
     "The instant is fixed, so a still repeats (--scale 0 --settle-exact)."
   ],
   "base": "scenes/demos/earth.json",

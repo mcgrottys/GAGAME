@@ -1101,10 +1101,13 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
                          PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x);
     // ...and by the buildings drawn about the eye (SunMapClear), where the water is the eye's own
     // world's: a tower on the quay shades the water at its foot as it shades the quay.
-    float sunVis = (sunSph > 0.0f)
+    // Asked only where a normal that takes the sun faces it: the body's (nSmooth) or the glint's (nPix);
+    // everywhere else the answer is multiplied by zero.
+    const bool facesSunW = dot(nSmooth, GA_SUN_DIR) > 0.0f || dot(nPix, GA_SUN_DIR) > 0.0f;
+    float sunVis = (sunSph > 0.0f && facesSunW)
                        ? sunSph * TerrainRay(upT, lvlW + dispW, geo, lvl, GA_SUN_DIR, footPx, lod, gGlo.x, false, sunHit)
                        : 0.0f;
-    if (lvl == 0u && sunVis > 0.0f) sunVis *= SunMapClear(rel, upT);
+    if (lvl == 0u && sunVis > 0.0f && facesSunW) sunVis *= SunMapClear(rel, upT);
     const float3 hv = normalize(v + GA_SUN_DIR);
     const float ch = saturate(dot(hv, nPix));
     const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
@@ -1613,19 +1616,24 @@ float4 PsSurface(VsOut i, out float land) {
     // ...and by THE BUILDINGS drawn about the eye (SunMapClear): the eye's own world has the sun
     // map; a window's world is drawn from its own eye and has none of its own yet, so its ground
     // takes the planet's and the terrain's shadow alone.
+    const bool fieldOn = CsBuildingFieldOn() && landness > 0.0f && gStreamF.z < 0.5f;
+    const float2 bf = fieldOn ? CsBuildingField(up, pA CS_WC) : float2(0.0f, 0.0f);
+    // A SURFACE TURNED FROM THE SUN TAKES NONE OF IT, whatever stands between: the ray is asked only
+    // of a pixel something in it faces the sun -- its ground (n) or the field's walls (lambda_f > 0,
+    // which face the eye and are lit below by sunLand too). The answer is multiplied by zero
+    // everywhere else, so leaving it 1 there changes no pixel and spares the ray.
+    const bool facesSun = dot(n, GA_SUN_DIR) > 0.0f || bf.y > 0.0f;
     TerrainHit sunHit;
-    float sunLand = (landness > 0.0f && sunVis > 0.0f)
+    float sunLand = (landness > 0.0f && sunVis > 0.0f && facesSun)
                         ? sunVis * TerrainRay(upT, hp, i.geo, i.lvl, GA_SUN_DIR, footPxW, lod, gGlo.x, false, sunHit)
                         : sunVis;
-    if (ownLvl && sunLand > 0.0f) sunLand *= SunMapClear(i.rel, n);
+    if (ownLvl && sunLand > 0.0f && facesSun) sunLand *= SunMapClear(i.rel, n);
     // THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h), read once here for both of their laws
     // below: lambda_p (the roofs' share of the ground) and lambda_f (the walls' frontal area per
     // ground area), a Boolean field of obstacles. THE SUN'S RAY THROUGH THAT FIELD: a ray from the
     // ground between the buildings at the sun's zenith angle z meets a wall with probability
     // 1 - exp(-lambda_f tan z / (1 - c)) -- the law the eye's ray is given below, asked of the
     // sun's -- so the street floor of a city is in the shade the roofs are not.
-    const bool fieldOn = CsBuildingFieldOn() && landness > 0.0f && gStreamF.z < 0.5f;
-    const float2 bf = fieldOn ? CsBuildingField(up, pA CS_WC) : float2(0.0f, 0.0f);
     const float openF = max(1.0f - bf.x, 0.05f);
     float fieldSun = 1.0f;
     if (fieldOn && gCsShadow.x > 0.0f) {   // the one knob: the sun's ray meets the ground and what stands on it

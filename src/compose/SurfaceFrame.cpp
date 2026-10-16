@@ -686,7 +686,9 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm,
                      : UINT32_MAX;
     cb.u2[1] = hgtOn ? (hpages ? rm.ResidencySrvCube(heightCube) : rm.ResidencySrv(heightCube))
                      : UINT32_MAX;
-    cb.u2[2] = cb.u2[3] = UINT32_MAX;
+    // THE HEIGHT'S MAX LANE (hal/MaxLane.h; TerrainRay.hlsli's cast): u2.z, the row's spare half.
+    cb.u2[2] = hpages ? rm.MaxLaneSrv(heightCube) : UINT32_MAX;
+    cb.u2[3] = UINT32_MAX;
     // M9ay: the survey MASK PAGES (gis.landsea's tree as a page tenant): array SRV + residency
     // for the windows, cube views for the faces. r = water coverage, b = edited, a = surveyed.
     // UINT32_MAX = no survey: the classifier uses the height sign.

@@ -64,6 +64,7 @@ add_executable(gagame
   src/core/ImageLoader.cpp
   src/hal/TileAtlas.cpp
   src/hal/Residency.cpp
+  src/hal/MaxLane.cpp
   src/hal/ResidencyAudit.cpp
   src/hal/ResidencyOrder.cpp
   src/hal/ResidencyTest.cpp

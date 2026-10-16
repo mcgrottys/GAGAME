@@ -350,9 +350,10 @@ const Schema& RenderSchema() {
             .Bind("keepTideGrainM", p.keepTideGrainM, Q::Length, "m",
                   "the tide's grain for the kept frame: the globe is redrawn when the water level has moved by more", H)
             .Bind("shadowSteps", p.shadowSteps, Q::Dimensionless, "1",
-                  "the terrain shadow's march toward the sun, in samples over the composed height field (0 = none)", H)
+                  "the terrain shadow's cast toward the sun over the height's max lane: the traversal's cap in "
+                  "steps (0 = no terrain shadow)", H)
             .Bind("shadowRangeM", p.shadowRangeM, Q::Length, "m",
-                  "how far the terrain shadow's march reaches from the lit point", H)
+                  "how far the terrain shadow's cast reaches from the lit point", H)
             .Bind("reflectLand", p.reflectLand,
                   "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H)
             .Bind("buildingShadowM", p.buildingShadowM, Q::Length, "m",
