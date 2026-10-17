@@ -145,6 +145,31 @@ sessions building on the same machine:
    strip over 1,024 rows, with the measured reason in the message; a self-test writes one (deflate as
    stored zlib blocks, one row a strip) and reads the refusal, and the same pixels in 256-row strips.
 
+**The fold against the direct paint, texel by texel** (the old cube16k tile still in the real cache against
+the pyramid's mip 17 it now adopts; RGB and the coverage byte):
+
+| texel | direct paint (area mean of the file) | fold (the pyramid's mip 17) |
+|---|---|---|
+| (39,45) | 76 85 66, cover 73 | 59 71 50, cover 66 |
+| (40,45) | 117 118 104, cover **211** | 109 111 98, cover **152** |
+| (41,45) | nothing | 99 105 90, cover 1 |
+| (39,46) | 128 125 112, cover 209 | 125 122 109, cover 201 |
+| (40,46) | 116 113 97, cover 141 | 106 104 87, cover 144 |
+| (41,46) | nothing | 76 81 49, cover 2 |
+| (39,47) | nothing | 74 76 63, cover 1 |
+
+The direct paint's coverage is at or above the fold's on every texel both hold (211 against 152 on the
+one the ortho mostly fills), and it drops the three slivers. Fourteen byte-rounded folds explain a few
+counts, not 59. The conjecture, not yet measured: a cube texel is askew on the ground ("0.6 to 1.3 of
+GroundRes and askew", Lattice.h), and the direct paint takes the texel's box to the file as an
+axis-aligned rectangle in the file's CRS with a margin for the bend, so ortho area that lies in the
+neighbouring texel is counted here too, while the fold sums the children's exact 4.7 cm texels and
+conserves area. The test is conservation: the sum over texels of coverage times the texel's ground area
+(Lattice::TexelGround) against the ortho's valid area, 0.466 km^2, for each path. If the conjecture
+holds, every coarse level painted straight from a fine file over-counts at its edges -- the heights'
+cube16k at boot still takes that path (the lidar's and the bed's edges), the colour pyramids no longer
+do. Proposed as its own session.
+
 Lines: TileTree.h +33, RasterFileSource.cpp +45/-13 (with the instrument), RasterFileSource.h +9/-2,
 ImageLoader.cpp +28, ImageLoader.h +3, the self-test +78/-9. Not done: the heights' pyramid is still not
 ingested at boot (their cube16k is painted from the file, cheap at 25-62 Mpx today); the own-mip tiles
