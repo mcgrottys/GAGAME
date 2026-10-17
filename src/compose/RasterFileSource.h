@@ -92,8 +92,9 @@ struct RasterEntry {
 class RasterFileSource : public ColorSource, public HeightSource {
 public:
     // THE INSTRUMENT: windows decoded from files (cache misses) and the time in the decoder, every
-    // source summed -- a reader that is slow somewhere cold reads these before and after.
-    static std::atomic<uint64_t> s_decodes, s_decodeUs;
+    // source summed -- a reader that is slow somewhere cold reads these before and after; and the
+    // data edges built (WindowEdge) with their time, the same way.
+    static std::atomic<uint64_t> s_decodes, s_decodeUs, s_edges, s_edgeUs;
 
 public:
     RasterFileSource();
@@ -162,7 +163,16 @@ private:
     };
     std::shared_ptr<const Edge> WindowEdge(size_t file, uint32_t wx, uint32_t wy);
     float EdgeAt(size_t file, int x, int y);
-    bool Absent(size_t file, int x, int y);   // the texel, or the ground under it in another file
+    // The windows one edge build reads, each fetched once (Window) and held for the build: the seed
+    // asks 100k+ texels, and the per-texel path (Texel's four recent windows, then the LRU behind the
+    // mutex) thrashed across fifteen threads -- measured 2026-10-17 as an ingest that finished no tile
+    // in half an hour.
+    struct WinCache {
+        std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> held;
+        uint64_t lastKey = ~0ull;
+        const std::vector<uint8_t>* last = nullptr;
+    };
+    bool Absent(size_t file, int x, int y, WinCache& wc);   // the texel, or the ground under it in another file
     bool Tiled() const;                       // the files cover the set's box
     void BoxIntegral(size_t file, double u0, double u1, double v0, double v1, double& value, double& have);
     float Feathered(double x, double y) const;

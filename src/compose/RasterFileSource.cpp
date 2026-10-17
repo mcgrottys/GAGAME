@@ -19,7 +19,8 @@
 
 namespace ga {
 
-std::atomic<uint64_t> RasterFileSource::s_decodes{0}, RasterFileSource::s_decodeUs{0};
+std::atomic<uint64_t> RasterFileSource::s_decodes{0}, RasterFileSource::s_decodeUs{0}, RasterFileSource::s_edges{0},
+    RasterFileSource::s_edgeUs{0};
 
 namespace {
 
@@ -531,11 +532,13 @@ std::shared_ptr<const RasterFileSource::Edge> RasterFileSource::WindowEdge(size_
     const int reach = (std::max)(1, int(std::ceil(m_feather / (std::min)(m_gx, m_gy))));
     const int P = int(kWin) + 2 * reach, X0 = int(wx * kWin) - reach, Y0 = int(wy * kWin) - reach;
     constexpr double kFar = 1e30;   // (`far` is a Windows macro)
+    const auto tEdge = std::chrono::steady_clock::now();
     std::vector<double> g(size_t(P) * P, kFar), d(size_t(P) * P);
     bool any = false;
+    WinCache wc;
     for (int j = 0; j < P; ++j) {
         for (int i = 0; i < P; ++i) {
-            if (Absent(file, X0 + i, Y0 + j)) {
+            if (Absent(file, X0 + i, Y0 + j, wc)) {
                 g[size_t(j) * P + i] = 0.0;
                 any = true;
             }
@@ -560,6 +563,9 @@ std::shared_ptr<const RasterFileSource::Edge> RasterFileSource::WindowEdge(size_
             }
         }
     }
+    s_edges.fetch_add(1, std::memory_order_relaxed);
+    s_edgeUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tEdge).count()),
+                       std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(m_cacheMx);
     auto it = m_edgeIndex.find(key);
     if (it != m_edgeIndex.end()) return it->second->second;
@@ -575,7 +581,7 @@ std::shared_ptr<const RasterFileSource::Edge> RasterFileSource::WindowEdge(size_
 // A texel of this file is absent where it holds NaN (a height) or alpha 0 (a colour). Ground beyond
 // this file's edge is the texel of the file of the set that holds it, absent where none does -- and
 // present beyond the set's box, whose edge is Feathered's.
-bool RasterFileSource::Absent(size_t file, int x, int y) {
+bool RasterFileSource::Absent(size_t file, int x, int y, WinCache& wc) {
     const File& f = *m_files[file];
     if (x < 0 || y < 0 || x >= int(f.w) || y >= int(f.h)) {
         const double X = f.x0 + (x + 0.5) / f.kx;
@@ -586,11 +592,18 @@ bool RasterFileSource::Absent(size_t file, int x, int y) {
             if (j == file || X < o.x0 || X >= o.x1 || Y < o.yLo || Y >= o.yHi) continue;
             const int u = std::clamp(int((X - o.x0) * o.kx), 0, int(o.w) - 1);
             const int v = std::clamp(int((o.down ? o.yHi - Y : Y - o.yLo) * o.ky), 0, int(o.h) - 1);
-            return Absent(j, u, v);
+            return Absent(j, u, v, wc);
         }
         return true;
     }
-    const uint8_t* p = Texel(file, x, y);
+    const uint64_t key = (uint64_t(file) << 48) | (uint64_t(y / kWin) << 24) | uint64_t(x / kWin);
+    if (key != wc.lastKey) {
+        auto it = wc.held.find(key);
+        if (it == wc.held.end()) it = wc.held.emplace(key, Window(file, uint32_t(x / kWin), uint32_t(y / kWin))).first;
+        wc.lastKey = key;
+        wc.last = it->second.get();
+    }
+    const uint8_t* p = &(*wc.last)[(size_t(y % kWin) * kWin + x % kWin) * 4];
     if (!m_height) return p[3] == 0;
     float t;
     std::memcpy(&t, p, 4);
@@ -983,6 +996,7 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lat
     // Painted at the own mip, then each level folded from the one below, on the pool.
     const auto t0 = std::chrono::steady_clock::now();
     const uint64_t dec0 = RasterFileSource::s_decodes.load(), us0 = RasterFileSource::s_decodeUs.load();
+    const uint64_t edge0 = RasterFileSource::s_edges.load();
     auto since = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
@@ -1006,8 +1020,10 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lat
                 const uint32_t d = ++done;
                 long long due = nextLog.load();
                 if (since() >= double(due) && nextLog.compare_exchange_strong(due, due + 5)) {
-                    Log("[ingest] %s on %s: mip %u, %u of %zu tiles, %.0f s", node->Name(),
-                        tag.c_str(), m, d, total, since());
+                    Log("[ingest] %s on %s: mip %u, %u of %zu tiles, %.0f s; %llu windows decoded, %llu data edges built",
+                        node->Name(), tag.c_str(), m, d, total, since(),
+                        static_cast<unsigned long long>(RasterFileSource::s_decodes.load() - dec0),
+                        static_cast<unsigned long long>(RasterFileSource::s_edges.load() - edge0));
                 }
             }
         });
