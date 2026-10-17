@@ -2191,6 +2191,26 @@ blocks from the sources' footprints and grains.
 - **The decoder does not show a GeoTIFF's own overviews** (measured: a file of two
   directories decodes as one frame). The law below does not need them.
 
+**Where the data ends inside the box** (2026-10-17). The 1 m lidar's bare earth over the
+1.5 m channel survey showed a wall along the beach: the lidar is nodata where the laser saw
+no bottom, and the entry's `feather` softened its weight only against the bounding box of
+the whole set, so at a hole's edge the stack stepped from one survey to the other across one
+texel. A source ends at its box, and it ends again at every texel it lacks -- a height's
+nodata, a colour's alpha of 0, ground inside the box that no file of the set holds. The
+weight now fades over the same metres from both, by one smoothstep: at the box, of the
+sample point's distance to the box's edge, as before; inside, of each texel's distance to
+the nearest absent texel, one exact Euclidean distance transform a window (Felzenszwalb and
+Huttenlocher's, each axis in its own metres), the neighbouring windows' and files' texels
+within the feather in reach, kept beside the window. A texel's weight is that factor times
+its coverage; the summed-area table carries the factor, so a box of any size reads the same
+law, and the colour's taps read it too (an ortho's torn edge fades, which is right). Its
+limits are the physics: feather 0 is the hard edge the reads had, and a file that lacks no
+texel is byte for byte what it was. The identity names the feather as reaching absence only
+where a file can be absent (the loader says: a nodata value or an alpha band; or the files
+do not tile their box), so a set the law cannot touch keeps its tree. A constant difference
+between two surveys where both have data is not the feather's to hide: `--tool
+rastertest:overlap` prints it, by the coarser survey's depth.
+
 **A source paints its own level, and the tree makes the others.** The owner, 2026-09-29:
 when a raster of any size is inserted, the tree is to make the lower levels, for itself and
 for the rendering. Most of what that needs is in the tree, and one node uses it.

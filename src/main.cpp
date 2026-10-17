@@ -23,6 +23,7 @@
 #include "app/Options.h"
 #include "app/Scene.h"
 #include "app/Tools.h"
+#include "compose/RasterFileSource.h"
 #include "compose/SurfaceFrame.h"
 #include "compose/TileTree.h"
 #include "scene/SceneBuilder.h"
@@ -116,6 +117,15 @@ int main(int argc, char** argv) {
         // One block of --selftest that needs no device: a raster by file and its own level; with
         // `:real`, the real height files against the harvester's grids (slice 3, part C).
         if (const SceneTool* t = S.Tool("rastertest")) {
+            if (t->args == "overlap") {   // the scene's heights by file (not a composite's tiers) against each other
+                std::vector<ga::RasterEntry> entries;
+                for (const scene::SourceProps& s : S.sources) {
+                    if (s.kind != "height") continue;
+                    entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
+                                       s.feather, s.unit, s.datum, s.offset, s.hasOffset});
+                }
+                return ga::RunHeightOverlapReport(entries) ? 0 : 1;
+            }
             return (t->args == "real" ? ga::RunRealHeightsCheck() : ga::RunRasterFileSelfTest()) ? 0 : 1;
         }
 

@@ -258,7 +258,13 @@ public:
     std::mutex m_mx;
     RowFile m_rows;
     bool m_dataBand = false, m_height = false, m_signed = false;
+    bool m_alpha = false;   // a fourth band the file calls alpha (TIFF ExtraSamples 1 or 2, a PNG's)
     UINT m_bits = 32;
+
+public:
+    // A height's nodata or NaN, a colour's nodata value or its alpha 0: the texels a window of this
+    // file can lack. A 3-band file, or a 4-band whose fourth is data, lacks none.
+    bool MayBeAbsent() const override { return m_height || m_ref.hasNoData || m_alpha; }
 };
 
 // A VERTICAL CRS (GeoKey 4096) as the unit and datum UnitSpec reads (core/GaUnits.h); 4099, where the
@@ -407,6 +413,7 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
                       std::to_string(bpp) + " bits: a height is one channel of 32-bit float or 16-bit integer");
     }
     L->m_height = height;
+    L->m_alpha = chan == 4;          // a TIFF's data band takes it back below
     L->m_bits = height ? bpp : 32;   // a colour window is the converter's RGBA8
     if (!colour && !height) {
         return refuse(std::to_string(chan) + " channels in " + std::to_string(bpp) +
@@ -477,6 +484,7 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
         // A FOURTH BAND is alpha only where ExtraSamples (338) says 1 or 2.
         const std::vector<uint16_t> extra = QueryShorts(q.Get(), L"/ifd/{ushort=338}");
         L->m_dataBand = chan == 4 && (extra.empty() || (extra[0] != 1 && extra[0] != 2));
+        L->m_alpha = chan == 4 && !L->m_dataBand;
         // THIN COMPRESSED STRIPS are refused by name (2026-10-17): a 20,700 x 17,200 RGBA written as
         // deflate with ONE row a strip (what Pillow writes for a row wider than its 64 KB strip
         // budget) gave the ingest no tile in eight minutes, where the same pixels in one raw strip
@@ -643,6 +651,7 @@ std::vector<std::unique_ptr<FieldLoader>> OpenManifest(const std::string& path, 
                 path.c_str(), file.c_str(), px, px, nc);
             continue;
         }
+        L->m_alpha = nc == 4;
         GeoRef& g = L->m_ref;
         g.provenance = CrsProvenance::Declared;
         g.epsg = epsg;
