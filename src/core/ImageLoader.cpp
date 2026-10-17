@@ -348,6 +348,22 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
     bool indexed = false;
     const uint64_t own = ContentHash(path, &indexed);   // the file's bytes, not held
     if (own == 0) return refuse("the file cannot be read");
+    {
+        // BIGTIFF IS REFUSED BY NAME (2026-10-17). WIC decodes classic TIFF (version word 42) and
+        // has no decoder for BigTIFF (43): it answers WINCODEC_ERR_COMPONENTNOTFOUND, which the
+        // generic line below reports as "cannot decode it" -- and the Town Neck Beach 25 cm DSM,
+        // deflate + float predictor + 256 tiles like the lidar that loads, was refused that way in
+        // every run of its scene while its doc said it stood on the tree. The pixels are not the
+        // trouble, the container is: rewritten classic (same bytes, same tags) it loads.
+        std::ifstream hf(path, std::ios::binary);
+        unsigned char hd[4] = {0, 0, 0, 0};
+        hf.read(reinterpret_cast<char*>(hd), 4);
+        const bool le = hd[0] == 'I' && hd[1] == 'I', be = hd[0] == 'M' && hd[1] == 'M';
+        if ((le && hd[2] == 0x2B && hd[3] == 0x00) || (be && hd[2] == 0x00 && hd[3] == 0x2B)) {
+            return refuse("BigTIFF (version 43): WIC decodes classic TIFF (42) alone -- rewrite it classic with the "
+                          "same pixels and tags (tifffile.imwrite(..., bigtiff=False) did for the Town Neck Beach DSM)");
+        }
+    }
     static thread_local const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     (void)co;   // RPC_E_CHANGED_MODE: the thread's COM is someone else's, and WIC still works
     auto L = std::make_unique<ImageLoader>();

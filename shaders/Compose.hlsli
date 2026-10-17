@@ -357,35 +357,53 @@ float2 CsEditMask(float3 dir, float3 p CS_WC_PARAM) {
     return float2(1.0f - m.r / a, m.b / a);
 }
 
-// ONE MASK READ FOR THE LANDNESS AND THE EDIT FLOOR. ComposedLandness read the mask twice (the survey,
-// then the edits) and the geometry's edit floor a third time, the same pages at the same point: a
-// vertex paid three CsMaskSample walks for one answer. One read; the two answers formed from it
-// exactly as the three readers formed theirs (no opinion: lm -1, me 0; else lm = 1 - r/a,
-// me = (1 - r/a, b/a)). ComposedLandness is this with the edit dropped; the mesh stage takes both.
-float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel, out float editLand) {
+// ONE MASK READ FOR THE LANDNESS, THE WET SHARE AND THE EDIT FLOOR. ComposedLandness read the mask
+// twice (the survey, then the edits), the geometry's edit floor a third time and the wet sand a
+// fourth, the same pages at the same point. One read; every answer formed from it exactly as the
+// readers formed theirs (no opinion: lm -1, me 0; else lm = 1 - r/a, me = (1 - r/a, b/a)).
+//
+// THE WATER'S EDGE, BY THE FINEST WITNESS (2026-10-17). Two sources can say whether a point is wet:
+// the survey -- gis.landsea's rings, exact to the scene's survey grain (streaming.gisGrainM) -- and
+// the height tree against the live level. Which answers is the compose ladder's own rule (PageWins:
+// the finest answer wins), asked of data instead of rungs: the survey where it is the finer, the
+// height's sign where a height layer finer than the survey HAS A VALUE at the texel. That fact is
+// painted into the survey's own texel (GisMaskSource: g differs from r there, g = r everywhere else,
+// so every mask tree on disk is untouched), and the pixel and the vertex read it with the one mask
+// fetch they already make. The limits are exact: where no finer height exists (the shipped
+// Merrimack: CUDEM 13.7 m, the edits 5 m, the survey 1 m) the survey answers as it always has; over
+// a 25 cm drone survey the height does, and the shore is the data's contour at the live level, not
+// a rasterized ring. The hand edits are law over both.
+//   dryOver: the pixel stage's "water cannot stand above its own surface" -- the mesh's drawn face
+//   over the waterline (Globe.hlsl i.dry / dryBand) -- rides the survey's side only: it is a witness
+//   at the mesh's cell, and where the height is the finer, its own excess at the pixel already says
+//   it (at 600 m the 6-12 m cells drew a stair of red teeth over a 1.19 m survey: --lens mix).
+//   wet: the water's share by the same witness, for the wet-sand law (wet only where the data says
+//   water), so the classifier and the material cannot disagree.
+float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel, float dryOver,
+                           out float editLand, out float wet) {
     float4 m;
     const bool op = CsMaskSample(dir, p CS_WC, m);
     const float a = max(m.a, 0.001f);
     const float lm = op ? (1.0f - m.r / a) : -1.0f;
     const float2 me = op ? float2(1.0f - m.r / a, m.b / a) : float2(0.0f, 0.0f);
-    float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f)
-                              : ((hp > waterLevel) ? 1.0f : 0.0f);
+    const float finer = op ? saturate(abs(m.g - m.r) / a) : 0.0f;   // the height's witness; 0 on every tile painted before it
+    const float hLand = (hp > waterLevel) ? 1.0f : 0.0f;
+    const float hWet = (hp < waterLevel) ? 1.0f : 0.0f;
+    float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f) : hLand;
+    float landH = hLand;
     editLand = 0.0f;
     if (gCsU3.x != 0xFFFFFFFFu) {
         // M6p: HAND EDITS ARE LAW. A flagged texel's mask value overrides survey and the live tide
         // alike (the survey shoreline predates the jetties); bilinear g blends the override's edge.
-        land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f, smoothstep(0.2f, 0.8f, me.y));
-        editLand = smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
+        const float ed = smoothstep(0.2f, 0.8f, me.y);
+        const float ev = (me.x > 0.5f) ? 1.0f : 0.0f;
+        land = lerp(land, ev, ed);
+        landH = lerp(landH, ev, ed);
+        editLand = ed * ev;
     }
-    return land;
-}
-float ComposedLandness(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel) {
-    float editLand;
-    return ComposedLandnessEdit(dir, p CS_WC, hp, waterLevel, editLand);
-}
-// The binary view, for consumers that ARE bits (the sea's discard).
-bool ComposedIsLand(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel) {
-    return ComposedLandness(dir, p CS_WC, hp, waterLevel) > 0.5f;
+    land = max(land, dryOver);
+    wet = lerp((lm >= 0.0f) ? (1.0f - lm) : hWet, hWet, finer);
+    return lerp(land, landH, finer);
 }
 
 

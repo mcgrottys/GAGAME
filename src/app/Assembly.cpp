@@ -1121,8 +1121,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
                     gisMask.Load("data/gis/", S.streaming.gisLand, S.data.edits)) {
-                    srcGisMask.Refresh();   // the rings are loaded: declare the real box
                     srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
+                    // The height's witness: a height layer finer than that grain draws the water's
+                    // edge where it has a value (GisMask.h SetHeight; the shipped scenes have none).
+                    if (hgtCh >= 0) srcGisMask.SetHeight(&compositor, hgtCh);
+                    srcGisMask.Refresh();   // the rings are loaded: declare the real box and the finer layers
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
                     if (S.Tool("gis-sweep-test")) tools::RunGisSweepTest(gisMask);   // F15
                     colorStack.push_back(&srcGisMask);

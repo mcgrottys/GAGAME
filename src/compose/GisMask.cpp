@@ -797,9 +797,19 @@ void GisMaskSource::Refresh() {
     const GisVectorMask* mask = (m_mask && m_mask->Ready()) ? m_mask : nullptr;
     double lon0 = -180, lat0 = -90, lon1 = 180, lat1 = 90;
     if (mask) mask->Bounds(lon0, lat0, lon1, lat1);
+    // IDENTITY IS THE INPUTS: the height layers finer than the survey's grain decide texels of this
+    // tree (Sample's g byte), so they ride its identity by name and bytes -- and only when some
+    // exist, so a scene without one keeps the tree it has, byte for byte.
+    std::string finer;
+    if (m_comp && m_hgtCh >= 0 && m_grainM > 0.0) {
+        for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
+            const SourceInfo& s = hs->Info();
+            if (s.cmPerPixel > 0.0 && s.cmPerPixel * 0.01 < m_grainM) finer += " + finer " + s.name + " (" + s.structure + ")";
+        }
+    }
     m_info = {"gis.landsea",
               "vector rings, even-odd by great-arc meet, no raster, value+flags: " +
-                  (mask ? mask->Fingerprint() : std::string("none")),
+                  (mask ? mask->Fingerprint() : std::string("none")) + finer,
               "EPSG:4326 (rings are the authority; the .raw parity fills are a realization)",
               1000.0,
               lon0,
@@ -818,6 +828,19 @@ void GisMaskSource::BeginTile(double latMin, double latMax, double lonMin, doubl
     ctx.sLat1 = latMax;
     ctx.sLon0 = lonMin;
     ctx.sLon1 = lonMax;
+    // Does a height layer finer than the survey meet this tile at all? Its box (degrees) against
+    // the tile's; the texels ask the witness only when one does.
+    ctx.finerHeight = false;
+    if (m_comp && m_hgtCh >= 0 && m_grainM > 0.0) {
+        const double a0 = latMin / kD2R, a1 = latMax / kD2R, o0 = lonMin / kD2R, o1 = lonMax / kD2R;
+        for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
+            const SourceInfo& s = hs->Info();
+            if (s.cmPerPixel <= 0.0 || s.cmPerPixel * 0.01 >= m_grainM) continue;
+            if (s.lon1 < o0 || s.lon0 > o1 || s.lat1 < a0 || s.lat0 > a1) continue;
+            ctx.finerHeight = true;
+            break;
+        }
+    }
 }
 
 float GisMaskSource::Sample(double latRad, double lonRad, double, const PaintCtx& ctx,
@@ -838,7 +861,14 @@ float GisMaskSource::Sample(double latRad, double lonRad, double, const PaintCtx
     // gate multiplies by the value (ComposeTree.h GateSource); the classifier reads the pages.
     if (!(fl & 1u)) return 0.0f;
     rgba[0] = g;
-    rgba[1] = g;
+    // THE HEIGHT'S WITNESS (2026-10-17): g was r's duplicate. It differs from r exactly where a height
+    // layer finer than the survey's grain has a value at this texel -- a 25 cm drone DSM where it was
+    // flown; not a 13.7 m CUDEM, not a 1 m lidar against a 1 m survey, not that DSM's nodata over the
+    // bay -- so the classifier (Compose.hlsli ComposedLandnessEdit) can let the height's sign against
+    // the live level answer there and the survey everywhere else. A tile no finer layer meets paints
+    // g = r as it always did: every mask tree on disk keeps its bytes.
+    const bool finer = ctx.finerHeight && m_comp->FinerHeightAt(m_hgtCh, latRad, lonRad, m_grainM);
+    rgba[1] = finer ? static_cast<uint8_t>(255u - g) : g;
     rgba[2] = (fl & 2u) ? 255 : 0;
     rgba[3] = 255;
     return 1.0f;

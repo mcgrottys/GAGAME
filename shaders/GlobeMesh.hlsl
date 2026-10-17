@@ -108,20 +108,22 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // (PHASE A2) that hold its undisplaced point geo (above), relative to that level's eye. PHASE B2:
     // the height reads it too.
     const WalkChain wc = CsChain(geo, rec.level);
-    // The morph's second height only where the morph is on (lerp(a, b, 0) is a); the classifier's
-    // coarser height is this one where its lod is no coarser.
+    // The morph's second height only where the morph is on (lerp(a, b, 0) is a).
     const float hA = ComposedHeightChain(dir, vl CS_WC);
     const float h = (k > 0.0f) ? lerp(hA, ComposedHeightChain(dir, vlP CS_WC), k) : hA;
-    const float vlC = max(vl, -4.0f);
-    const float hC = (vlC == vl) ? hA : ComposedHeightChain(dir, vlC CS_WC);
     // Geometry obeys the same classifier the pixels use: WATER rides ~2 m BELOW the live
     // waterline (not the geoid -- at low tide the geoid stands PROUD of the real sea and
     // buries the FFT surface; this was the M6j flat-sea bug). Land keeps its height.
     // M6n: the mix is ANALOG (ComposedLandness): a half-emerged flat sits halfway between
     // the drowned plane and its true height, so streaming height data slides shorelines
     // smoothly instead of popping plateau edges (the flats speckle, geometry side).
-    float editLand;
-    const float landness = ComposedLandnessEdit(dir, pA CS_WC, hC, gWavesB.w, editLand);
+    // The classifier's height is the vertex's own, the one it is displaced by (the ~38 m read it
+    // took, a residency-stable level for the height-alone case, is gone with the pixel's): where
+    // the height is the finer witness a vertex above the level stands at its height and one below
+    // rides the water, so the drawn shore is the pixels' shore. No drawn-face override at a
+    // vertex (the pixel stage's i.dry is made from this landness).
+    float editLand, wetV;
+    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, gWavesB.w, 0.0f, editLand, wetV);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the
