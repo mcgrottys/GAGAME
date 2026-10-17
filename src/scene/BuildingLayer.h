@@ -390,7 +390,7 @@ private:
         double msVisit = 0.0, msList = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
         double msRoots = 0.0, msDrain = 0.0;               // ...and the visit's: the coarse levels, the subtrees' drain (the rest is the merge)
         uint32_t subtrees = 0, threads = 0;
-        uint32_t eye = 0;               // whose walk it is (ctx.viewIndex)
+        uint32_t eye = 0;               // whose walk it is: the walker's id (Eye::id), wherever it stands now
 
         double ms = 0.0;
     };
@@ -412,7 +412,7 @@ private:
         };
         std::vector<StandDone> standDone;
         std::atomic<int> inflight{0}, pageInflight{0}, standInflight{0};
-        std::atomic<int> walking[kEyes * kWorlds] = {};   // one walk in flight per eye and world
+        std::atomic<int> walking[kEyes * kWorlds] = {};   // one walk in flight per walker, by its id
         // THE WALK'S BUFFERS, REUSED: a walk takes a retired one at least its size before it makes one.
         std::vector<GpuBuffer> freeStaging;
         std::vector<ListBuf> freeBoxes;
@@ -558,7 +558,7 @@ private:
     GpuBuffer m_countsRb;
     struct CountsPending {
         uint64_t frame = 0;
-        uint32_t slot = 0, eye = 0;
+        uint32_t slot = 0, eye = 0;     // eye: the walker's id
         uint64_t walk = 0;
         uint32_t named = 0, cap = 0;
         double ms = 0.0;
@@ -591,6 +591,7 @@ private:
     // eye, so a camera moving inside the cell moves one float3 in the constants and not a buffer of
     // instances; the walk itself is asked again only when the eye has moved 2 % of its height.
     struct Eye {
+        uint32_t id = 0;                // the walker's own name: its walks and their counts come home to it
         OriginLattice::Origin walkOrigin{};
         bool walkOriginSet = false;
         // The last walk's inputs: a new one starts when they have moved.
@@ -605,8 +606,13 @@ private:
         // The pages the last walk asked for, coarsest level first (the two streams read it each frame).
         std::vector<std::pair<double, PageKey>> wants;
         std::vector<StandAsk> stands;   // the stands it asked for, the largest on screen first
-    } m_eyes[kEyes * kWorlds];          // walker (eye, world) at eye * kWorlds + world
+    } m_eyes[kEyes * kWorlds];          // the walker drawing (eye, world) at eye * kWorlds + world
     static uint32_t WalkerOf(uint32_t eye, uint32_t world) { return eye * kWorlds + world; }
+    // Where the walker of id `id` stands now (its slot); a walk lands there, wherever it was asked.
+    uint32_t SlotOf(uint32_t id) const {
+        for (uint32_t s = 0; s < kEyes * kWorlds; ++s) if (m_eyes[s].id == id) return s;
+        return 0;
+    }
     std::vector<WorldEye> m_worlds[kEyes];
     std::shared_ptr<const Occluder> m_occ[kEyes];
     // What the occluder hid, the last walk of each walker (the instrument).
