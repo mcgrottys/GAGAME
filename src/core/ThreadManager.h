@@ -94,18 +94,18 @@ private:
     struct Job {
         std::function<void()> fn;
         Lane lane;
-        const char* tag;
+        std::string tag;   // copied: a caller's tag need not outlive its job
         std::chrono::steady_clock::time_point queued;
     };
     // THE LEDGER: per (lane, tag), the jobs run, their time in the queue and their time running --
-    // what holds a lane, said at Shutdown (under m_mx; tags are literals, keyed by pointer).
+    // what holds a lane, said at Shutdown (under m_mx).
     struct TagLedger {
         int lane = 0;
-        const char* tag = "";
+        std::string tag;
         uint64_t jobs = 0, waitUs = 0, runUs = 0;
     };
     std::vector<TagLedger> m_ledger;
-    void LedgerAdd(int lane, const char* tag, uint64_t waitUs, uint64_t runUs);
+    void LedgerAdd(int lane, const std::string& tag, uint64_t waitUs, uint64_t runUs);
     void Worker();
     void Fold(Lane lane, const char* tag);
 

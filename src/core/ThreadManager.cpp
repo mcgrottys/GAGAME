@@ -2,7 +2,6 @@
 #include "core/CrashTrace.h"
 
 #include <algorithm>
-#include <cstring>
 
 #include <objbase.h>
 
@@ -52,7 +51,7 @@ void ThreadManager::Shutdown() {
     for (size_t i = 0; i < m_ledger.size() && i < 10; ++i) {
         const TagLedger& t = m_ledger[i];
         Log("[jobs] %-7s %-22s %8llu jobs, running %9.1f s (%.2f ms each), queued %.2f ms each",
-            kLane[t.lane], t.tag, static_cast<unsigned long long>(t.jobs), t.runUs / 1.0e6,
+            kLane[t.lane], t.tag.c_str(), static_cast<unsigned long long>(t.jobs), t.runUs / 1.0e6,
             t.runUs / 1000.0 / double(t.jobs), t.waitUs / 1000.0 / double(t.jobs));
     }
     Log("[jobs] pool joined; %llu jobs submitted, hash %016llx",
@@ -60,9 +59,9 @@ void ThreadManager::Shutdown() {
         static_cast<unsigned long long>(m_hash.load()));
 }
 
-void ThreadManager::LedgerAdd(int lane, const char* tag, uint64_t waitUs, uint64_t runUs) {
+void ThreadManager::LedgerAdd(int lane, const std::string& tag, uint64_t waitUs, uint64_t runUs) {
     for (TagLedger& t : m_ledger) {
-        if (t.lane == lane && (t.tag == tag || std::strcmp(t.tag, tag) == 0)) {
+        if (t.lane == lane && t.tag == tag) {
             ++t.jobs;
             t.waitUs += waitUs;
             t.runUs += runUs;
@@ -118,7 +117,7 @@ void ThreadManager::Worker() {
     for (;;) {
         std::function<void()> fn;
         int lane = -1;
-        const char* tag = "";
+        std::string tag;
         std::chrono::steady_clock::time_point queued;
         {
             std::unique_lock<std::mutex> lk(m_mx);
@@ -135,7 +134,7 @@ void ThreadManager::Worker() {
             for (int L = 0; L < int(Lane::kCount); ++L) {
                 if (m_q[L].empty() || !MayStart(L)) continue;
                 fn = std::move(m_q[L].front().fn);
-                tag = m_q[L].front().tag;
+                tag = std::move(m_q[L].front().tag);
                 queued = m_q[L].front().queued;
                 m_q[L].pop_front();
                 ++m_active[L];
@@ -221,7 +220,8 @@ void ThreadManager::ParallelFor(Lane lane, const char* tag, int n, int grain,
     if (helpers > 0) {
         {
             std::lock_guard<std::mutex> lk(m_mx);
-            for (int i = 0; i < helpers; ++i) m_q[int(lane)].push_back({drain, lane});
+            const auto now = std::chrono::steady_clock::now();
+            for (int i = 0; i < helpers; ++i) m_q[int(lane)].push_back({drain, lane, tag ? tag : "", now});
         }
         m_cv.notify_all();
     }

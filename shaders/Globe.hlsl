@@ -638,7 +638,7 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
     const float ndl = saturate(dot(nW, GA_SUN_DIR)) * sunVis;
     float3 col = alb * (SkyAmbient(nW, upT, h) + ndl * SunAt(upT, h) * 1.15f);
     col += spec * SunAt(upT, h) * 0.85f;
-    col += SkyRadianceDirDiscless(rDir, SkyDay(day)) * (fres * 0.9f * (1.0f - foam));
+    col += SkyRadianceDirDiscless(rDir, upT) * (fres * 0.9f * (1.0f - foam));
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
     return col;
 }
@@ -1125,7 +1125,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // straight down it returns 0.02 and the endpoint is the water body. No new constant, no
     // branch -- the law already in this function, applied once more.
     // M10: the sky it sees -- the hour rides the gradient only; the march already has it.
-    const float3 skyLit = SkyRadianceDirDiscless(rSky, SkyDay(day));
+    const float3 skyLit = SkyRadianceDirDiscless(rSky, upT);
     const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
     float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     // THE MIRROR'S LAND (scene render.reflectLand): the reflected ray marched over the same height
@@ -1145,7 +1145,12 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
                                        : Hypsometric(max(mh.alt, 0.0f), radians(latDeg));
             const float ndlL = saturate(dot(upT, GA_SUN_DIR)) * PlanetShadow(upT, GA_SUN_DIR, mh.alt, gGlo.x);
             const float3 landLit = landAlb * (SkyAmbient(upT, upT, mh.alt) + ndlL * SunAt(upT, mh.alt) * 1.15f);
-            mirror = AerialPerspective(landLit, rDir, mh.s);
+            // The air along the reflected ray, marched from where that ray starts: the water's own
+            // zenith and radius, not the eye's (AerialPerspective's, a ray FROM the eye).
+            float3 airT;
+            float airG;
+            const float3 airL = SkyAir(rDir, upT, GA_SUN_DIR, gSkyLut.y + max(lvlW, 0.0f), mh.s, airT, airG);
+            mirror = landLit * airT + airL;
         }
     }
     float3 col = bodyLit * (1.0f - fres);
