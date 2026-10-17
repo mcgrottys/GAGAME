@@ -84,10 +84,14 @@ namespace ga::scene {
 // three sections, with the quantity and unit the field is in, the doc its declaration carries
 // (SceneConfig.h's comments) and Hot|Restart. One per type (a Flyweight), built over a prototype
 // whose values ARE the declared defaults -- which is what a key the file no longer carries
-// reverts to. It agrees key for key, type for type, unit for unit and flag for flag with the
-// `water` section's own table (SceneSchema.h's WavefieldSchema / ClosuresSchema / FleetSchema);
-// [scene] holds them equal, because the two bind different structs and could otherwise drift.
+// reverts to. It is the ONLY table of these keys: the scene file's `water` section nests the same
+// three sections (SceneSchema.cpp) over the document's own WaterSceneConfig, so a key, its unit,
+// its default and its Hot/Restart flag are said once. (Until 2026-10-17 the section bound copies
+// of them over four structs nothing read, held equal by a test.)
 const Schema& WaterSchema();
+const Schema& WavefieldTable();   // water.wavefield
+const Schema& ClosuresTable();    // water.closures
+const Schema& FleetTable();       // water.fleet (and its boats)
 
 class WaterComponent final : public Component {
 public:

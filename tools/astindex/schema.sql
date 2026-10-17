@@ -53,6 +53,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS ast_fields_u ON ast_fields(type_usr, ord, file
 CREATE TABLE IF NOT EXISTS ast_includes(file TEXT, included TEXT, lang TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS ast_includes_u ON ast_includes(file, included);
 
+-- tools/codemap's three: the conditions code runs under, the values fields and variables take, and
+-- the calls that name something by a string (a scene key, a registry name, a shader entry). An
+-- expression `expr` / `cond` / `args` is JSON: a number, true/false, null, a string literal, or a
+-- list -- ["f"|"g"|"l"|"p"|"fn", usr] (field, global, local, parameter, function), [op, a, b] for
+-- == != < <= > >= && || + - * / ! neg, ["call", callee usr, object or null, args...],
+-- ["?:", c, a, b], ["[]", a, i], ["{}", items...] (a braced list), ["?"] for what is not modelled.
+--
+-- A REGION is a span of source that runs only when `cond` is true (pol 1) or false (pol -1): an if's
+-- branches, a ?: arm, the right side of && and ||, a while body, a switch case's statements, and
+-- the rest of a block after `if (c) return;`. pol 0 marks a loop body (cond "loop"): not a guard,
+-- a multiplicity. Regions nest, so a site's condition is every region that contains it.
+CREATE TABLE IF NOT EXISTS ast_regions(file TEXT, l0 INTEGER, c0 INTEGER, l1 INTEGER, c1 INTEGER,
+                                       cond TEXT, pol INTEGER, container TEXT, lang TEXT);
+CREATE INDEX IF NOT EXISTS ast_regions_file ON ast_regions(file);
+-- A VALUE a declaration may take: kind default (a field's in-class initializer), init (a global's
+-- initializer), local (a local's initializer; detail 'const' when it is const, 'ref' when it is a
+-- reference: the name it is initialized from is what its writes write), assign (x = e,
+-- x op= e, ++x: expr ["?"] unless plain '='), byref (passed to a non-const reference parameter,
+-- detail = the callee's name; or its address taken, detail '&'; or a non-const member called on it,
+-- detail = the member: ptr.reset(), name.clear()), aggregate (usr = a record initialized from a braced list: every field
+-- of it may be written). detail for an assign through a subscript: the index, e.g. '[0]'.
+CREATE TABLE IF NOT EXISTS ast_values(usr TEXT, file TEXT, line INTEGER, kind TEXT, expr TEXT,
+                                      container TEXT, detail TEXT, lang TEXT);
+CREATE INDEX IF NOT EXISTS ast_values_usr ON ast_values(usr);
+CREATE INDEX IF NOT EXISTS ast_values_file ON ast_values(file);
+-- A call with at least one string literal among its arguments: Schema::Bind("shadowSteps", p.x),
+-- Register("car.baja", MakeCarBaja), S.Tool("ingest"), Compile(L"Globe.hlsl", L"PsSurface", ...).
+CREATE TABLE IF NOT EXISTS ast_litcalls(callee TEXT, name TEXT, file TEXT, line INTEGER, col INTEGER,
+                                        container TEXT, args TEXT, lang TEXT);
+CREATE INDEX IF NOT EXISTS ast_litcalls_callee ON ast_litcalls(callee);
+CREATE INDEX IF NOT EXISTS ast_litcalls_file ON ast_litcalls(file);
+
 -- HLSL: entry points (a function in a .hlsl named by a string literal in src/), and which
 -- functions each entry reaches through the call graph of its own file's AST.
 CREATE TABLE IF NOT EXISTS ast_hlsl_entries(file TEXT, entry TEXT, profile TEXT, usr TEXT,

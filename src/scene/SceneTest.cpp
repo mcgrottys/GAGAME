@@ -42,8 +42,7 @@
 //      non-identity); the implication laws of ParseArgs reach the sets (--rail-flood: headless,
 //      1200 frames, the orbit view, the flood rail); a still's flags reach the active view.
 //  10. [water] (M12 step 5c) THE ONE APPLY and the reload law, on an in-memory document: the
-//      component's table agrees with the `water` section's own key for key, type for type, unit
-//      for unit and Hot/Restart for Hot/Restart (two tables over two structs, one vocabulary);
+//      `water` section of the scene file nests the component's own table (one table, said once);
 //      a key the document no longer carries reverts to its DECLARED DEFAULT and not to the value
 //      the run was carrying (the step's second deliberate change); an unknown key refuses with
 //      its path and the previous set stands; a Restart-flagged key that changed is reported and
@@ -1024,12 +1023,10 @@ bool RunSceneSelfTest() {
 
     // ---- 10. [water] the one Apply and the reload law (M12 step 5c) --------------------------
     {
-        // (A) TWO TABLES, ONE VOCABULARY. The component binds the live WaterSceneConfig; the
-        // scene file's `water` section binds its own structs. Different layouts, so they cannot
-        // be one Schema -- and they must not drift, because a file written against one is read
-        // by the other. Key, type, field width, quantity, canonical unit, datum and the
-        // Hot/Restart flag are held equal; the doc strings are not (the section's are the
-        // one-liners --print-scene prints, the component's the declaration's own comments).
+        // (A) ONE TABLE. The scene file's `water` section nests the component's own three
+        // sections over the document's WaterSceneConfig, so a key, its unit, default and
+        // Hot/Restart flag are said once. (Until 2026-10-17 the section bound copies of them over
+        // structs nothing read, and this test held the two equal.)
         const PropDecl* waterDecl = SceneFileSchema().Find("water");
         g.True(waterDecl && waterDecl->sub, "[water] the scene file has a water section");
         int compared = 0;
@@ -1037,24 +1034,9 @@ bool RunSceneSelfTest() {
             for (const char* section : {"wavefield", "closures", "fleet"}) {
                 const PropDecl* a = WaterSchema().Find(section);
                 const PropDecl* b = waterDecl->sub->Find(section);
-                g.True(a && a->sub && b && b->sub, "[water] both tables carry the section");
-                if (!a || !a->sub || !b || !b->sub) continue;
-                g.True(a->sub->Decls().size() == b->sub->Decls().size(),
-                       "[water] the section's key count agrees");
-                for (const PropDecl& da : a->sub->Decls()) {
-                    const PropDecl* db = b->sub->Find(da.key);
-                    if (!db) {
-                        g.True(false, "[water] the section's key is in both tables");
-                        continue;
-                    }
-                    ++compared;
-                    g.True(da.type == db->type && da.field == db->field,
-                           "[water] the key's type and field width agree");
-                    g.True(da.quantity == db->quantity, "[water] the key's quantity agrees");
-                    g.Same(da.unit.toCanonical, db->unit.toCanonical, "[water] the key's unit agrees");
-                    g.Same(da.unit.datumShiftM, db->unit.datumShiftM, "[water] the key's datum agrees");
-                    g.True(da.reload == db->reload, "[water] the key's Hot/Restart flag agrees");
-                }
+                g.True(a && a->sub && b && b->sub && a->sub == b->sub,
+                       "[water] the section IS the component's table");
+                if (a && a->sub) compared += static_cast<int>(a->sub->Decls().size());
             }
         }
 
@@ -1148,7 +1130,7 @@ bool RunSceneSelfTest() {
         g.True(live.fleetCount == WaterSceneConfig{}.fleetCount &&
                    live.fleet[2].offsetS == WaterSceneConfig{}.fleet[2].offsetS,
                "[water] the boats -- a LIST, beside the set -- follow the same law");
-        Log("[water] two tables held equal on %d keys; the reload law, the Restart refusal, the "
+        Log("[water] one table of %d keys, the scene file's and the component's; the reload law, the Restart refusal, the "
             "unknown-key and unit refusals and idempotence on in-memory documents; boot set "
             "FNV-1a %016llx",
             compared, static_cast<unsigned long long>(bootHash));

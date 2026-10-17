@@ -11,6 +11,7 @@
 // ================================================================================================
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -27,6 +28,24 @@ inline thread_local bool g_tileIncomplete = false;
 // finer than every source's own level, so the level above magnified -- no bytes; the manager
 // maps nothing for it and the reader's residency byte names the parent.
 inline thread_local bool g_tileMagnified = false;
+// THE BOOT'S QUESTION (2026-10-17): set by the residency manager around its synchronous load of a
+// tenant's coarsest tiles. A tile tree then answers only what it HOLDS (a file, an archive, its
+// memory) and returns "not now" for anything it would have to paint, compose or fold. The boot was
+// written for "a handful of cache-first tiles"; on a tree identity never built (the helm recipe's
+// colour, its seafloor relief painting its own fine level and folding up) one coarse tile pulled a
+// whole fine window through the main thread: 45 minutes with nothing logged. Not now is the boot's
+// honest path: the map says nothing there and the async load paints it.
+inline thread_local bool g_tileHeldOnly = false;
+// THE LOADER'S STOP (2026-10-17): a loader points this at its own quit flag around a provider call
+// (ResidencyManager::RunLoad, HeightTree's jobs). Once it is set the tree paints, composes and folds
+// nothing more and answers "not now", so a load composing a cold pyramid -- minutes of work in one
+// job -- leaves at once instead of holding the loader's Shutdown / Close (the helm bench's exit sat
+// there). What the load already wrote stands: a tile on disk is whole, the next run resumes there.
+inline thread_local const std::atomic<bool>* g_tileStop = nullptr;
+// May a tree paint now? Not under the boot's question, not for a loader that is leaving.
+inline bool TreeMayPaint() {
+    return !g_tileHeldOnly && !(g_tileStop && g_tileStop->load(std::memory_order_relaxed));
+}
 
 // A provider fills one 64KB tile's worth of LINEAR data for a texture tenant. Runs on a worker
 // thread; must be self-contained and cache-first (HTTP providers throttle themselves and honor

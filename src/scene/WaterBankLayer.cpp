@@ -686,6 +686,22 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     for (int m = 0; m < kMips; ++m) {
         const double texel = m_baseTexelM * (1 << m);
         const double tileSpan = kTileTexels * texel;
+        // THE RING'S CORNERS, each asked once a frame. A corner of the ring's lattice is one place
+        // shared by up to four tiles; asked per tile it cost four atlas level sums and four bed
+        // reads (1.5 ms of a 1.9 ms list on the storm rail), and the tiles asked it at positions a
+        // float's rounding apart, so two tiles need not have agreed on their shared corner. Now
+        // the lattice point is the tile origin's own spelling, float(org + i span), asked once.
+        float cLvl[kRingTiles + 1][kRingTiles + 1], cBed[kRingTiles + 1][kRingTiles + 1];
+        bool cHave[kRingTiles + 1][kRingTiles + 1] = {};
+        auto corner = [&](int i, int j, float& lvl, float& bed) {
+            if (!cHave[j][i]) {
+                CornerParams(static_cast<float>(m_orgX[m] + i * tileSpan),
+                             static_cast<float>(m_orgZ[m] + j * tileSpan), cLvl[j][i], cBed[j][i]);
+                cHave[j][i] = true;
+            }
+            lvl = cLvl[j][i];
+            bed = cBed[j][i];
+        };
         for (int ty = 0; ty < kRingTiles; ++ty) {
             for (int tx = 0; tx < kRingTiles; ++tx) {
                 if (!m_wet[m][ty * kRingTiles + tx]) continue;
@@ -698,7 +714,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 for (int k = 0; k < 4; ++k) {
                     const double cx = t.orgXZ[0] + (k & 1) * tileSpan;
                     const double cz = t.orgXZ[1] + ((k >> 1) & 1) * tileSpan;
-                    CornerParams(cx, cz, t.lvl[k], t.bed[k]);
+                    corner(tx + (k & 1), ty + ((k >> 1) & 1), t.lvl[k], t.bed[k]);
                     // M8: under a --storm override the grid is STALE by definition -- the
                     // law answers 1 (the storm IS the reference). M7j/THE LOST LINE: every
                     // corner is written unconditionally; a tile that shipped 0 once flattened

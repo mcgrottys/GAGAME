@@ -26,6 +26,24 @@ constexpr Reload R = Reload::Restart;
 WaterSceneConfig kCfg;
 WaterSceneConfig::Boat kBoat;
 
+const Schema& BoatTable() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("water.fleet.boat", &kBoat);
+        sc->Bind("speed", kBoat.speed, Q::Velocity, "m/s", "AIS per-class mean SOG", H)
+            .Bind("halfLen", kBoat.halfLen, Q::Length, "m", "half length", H)
+            .Bind("wakeAmp", kBoat.wakeAmp, Q::Length, "m", "wake amplitude", H)
+            .Bind("offsetS", kBoat.offsetS, Q::Length, "m",
+                  "starting arc-length offset along the lane", H)
+            .Bind("dir", kBoat.dir, Q::Dimensionless, "1", "+1 outbound, -1 inbound", H);
+        return sc;
+    }();
+    return *s;
+}
+
+}  // namespace
+
+// THE THREE SECTIONS: the component's reload and the scene file's `water` section read the
+// same tables (SceneSchema.cpp nests them over the document's WaterSceneConfig).
 const Schema& WavefieldTable() {
     static const Schema* s = [] {
         Schema* sc = new Schema("water.wavefield", &kCfg);
@@ -107,20 +125,6 @@ const Schema& ClosuresTable() {
     return *s;
 }
 
-const Schema& BoatTable() {
-    static const Schema* s = [] {
-        Schema* sc = new Schema("water.fleet.boat", &kBoat);
-        sc->Bind("speed", kBoat.speed, Q::Velocity, "m/s", "AIS per-class mean SOG", H)
-            .Bind("halfLen", kBoat.halfLen, Q::Length, "m", "half length", H)
-            .Bind("wakeAmp", kBoat.wakeAmp, Q::Length, "m", "wake amplitude", H)
-            .Bind("offsetS", kBoat.offsetS, Q::Length, "m",
-                  "starting arc-length offset along the lane", H)
-            .Bind("dir", kBoat.dir, Q::Dimensionless, "1", "+1 outbound, -1 inbound", H);
-        return sc;
-    }();
-    return *s;
-}
-
 const Schema& FleetTable() {
     static const Schema* s = [] {
         Schema* sc = new Schema("water.fleet", &kCfg);
@@ -130,6 +134,8 @@ const Schema& FleetTable() {
     }();
     return *s;
 }
+
+namespace {
 
 // The declared scalars of a table, counting through its nested sections (a List is not one).
 int CountFields(const Schema& s) {

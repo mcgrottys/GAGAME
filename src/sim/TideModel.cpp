@@ -1,6 +1,7 @@
 #include "sim/TideModel.h"
 
 #include "core/Common.h"
+#include "core/FileText.h"
 #include "core/Json.h"
 
 #include <cmath>
@@ -10,25 +11,8 @@
 
 namespace ga {
 
-namespace {
-
-std::string ReadFile(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return {};
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
-
-std::string DirOf(const std::string& path) {
-    const size_t slash = path.find_last_of("/\\");
-    return (slash == std::string::npos) ? std::string(".") : path.substr(0, slash);
-}
-
-}  // namespace
-
 bool TideModel::Load(const std::string& jsonPath) {
-    const std::string text = ReadFile(jsonPath);
+    const std::string text = ReadFileText(jsonPath);
     if (text.empty()) {
         Log("[tide] cannot read %s", jsonPath.c_str());
         return false;

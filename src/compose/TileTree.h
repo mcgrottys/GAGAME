@@ -753,6 +753,7 @@ public:
                 return true;
             }
             const Status st = Tile(frame, tag, r, out, loc);
+            if (st == Status::Transient && !TreeMayPaint()) return false;   // not now: a later load
             if (st != Status::Content) {
                 out.assign(65536, 0);
                 if (loc) *loc = TileLoc{};
@@ -1109,6 +1110,7 @@ private:
             lap(usFold, nFold);
             return s;
         }
+        if (!TreeMayPaint()) return Status::Transient;   // the boot's question, or a loader leaving
         // HIERARCHY 4.20: A SOURCE PAINTS ITS OWN LEVEL, AND THE TREE MAKES THE OTHERS. Above the
         // node's own mip a tile is the fold of its four children, kept, and never painted: its
         // bytes are a function of the file, not of what was flown or in what order. A tile the
@@ -1763,6 +1765,7 @@ private:
                 return st;
             }
         }
+        if (!TreeMayPaint()) return Status::Transient;   // not held: composing is a later load's
         // Gather. A child's answer here is authoritative, so the key is rebuilt from it.
         std::vector<std::vector<uint8_t>> tiles(inc.size());
         std::vector<Held> got(inc.size(), Held::Void);
@@ -1900,6 +1903,7 @@ private:
                 return st;
             }
         }
+        if (!TreeMayPaint()) return Status::Transient;   // not held: gating is a later load's
         TileTree& layer = *m_kids[0];
         TileTree& gate = *m_kids[1];
         std::vector<uint8_t> lt, gt;

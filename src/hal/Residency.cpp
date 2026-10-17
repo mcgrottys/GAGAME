@@ -73,8 +73,10 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         g_tileMagnified = false;    // PHASE A4: ... or if it is the level above, magnified
         g_loadTenant = job->tenant;   // whom a source that answers "not now" tells when it can
         g_loadReq = job->req;
+        g_tileStop = &m_quit;   // a Shutdown mid-load: the tree stops painting and the job leaves
         const bool ok =
             m_tenants[job->tenant].provider(job->req, data, canStream ? &loc : nullptr);
+        g_tileStop = nullptr;
         g_loadTenant = -1;
         const bool whole = !g_tileIncomplete;
         const bool magnified = g_tileMagnified;
@@ -368,7 +370,10 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
                 for (uint32_t x = 0; x < tw; ++x) {
                     TileRequest r{f, coarsest, x, y};
                     std::vector<uint8_t> data;
-                    if (tn.provider(r, data, nullptr) && !data.empty()) {
+                    g_tileHeldOnly = true;   // what the trees hold; painting is the async load's
+                    const bool held = tn.provider(r, data, nullptr) && !data.empty();
+                    g_tileHeldOnly = false;
+                    if (held) {
                         boot.push_back({r, AcquirePoolTile(gpu), std::move(data)});
                     } else {
                         // Honest "nothing": overwrite this tile's residency span with 255
@@ -383,8 +388,8 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
                                 tn.resCpu[f][static_cast<size_t>(my) * rdim + mx] = 255;
                             }
                         }
-                        Log("[residency] %S: coarsest tile f%u (%u,%u) failed at boot -- "
-                            "left NULL (map says nothing; async retry queued)",
+                        Log("[residency] %S: coarsest tile f%u (%u,%u) not held at boot -- "
+                            "left NULL (map says nothing; the async load paints it)",
                             tn.name.c_str(), f, x, y);
                         failedBoot.push_back(r);
                     }
