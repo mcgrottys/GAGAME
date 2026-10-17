@@ -26,7 +26,10 @@ namespace {
 constexpr double kPi = 3.14159265358979323846, kD2R = kPi / 180.0;
 constexpr double kR = 6378137.0;   // WGS84 a: Web Mercator's sphere, and a degree's metres of arc
 constexpr uint32_t kWin = 256;     // a decoded window's side, texels
-constexpr size_t kWindows = 256;   // the windows a source keeps: 64 MB
+constexpr size_t kWindows = 1024;  // the windows a source keeps: 256 MB at most, and only what was touched.
+// MEASURED 2026-10-17 at 256: a cold view over a 62 Mpx bed (980 windows) and 25 lidar files (400) decoded
+// 12,971 windows for 934 tile loads of 1.4 s each -- fourteen decodes a load, the same windows over and
+// over, the picture never settling; the cache held a fifth of the working set.
 
 bool Fail(std::string* why, std::string w) {
     if (why) *why = std::move(w);

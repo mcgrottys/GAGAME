@@ -171,11 +171,56 @@ cube16k at boot still takes that path (the lidar's and the bed's edges), the col
 do. Proposed as its own session.
 
 Lines: TileTree.h +33, RasterFileSource.cpp +45/-13 (with the instrument), RasterFileSource.h +9/-2,
-ImageLoader.cpp +28, ImageLoader.h +3, the self-test +78/-9. Not done: the heights' pyramid is still not
-ingested at boot (their cube16k is painted from the file, cheap at 25-62 Mpx today); the own-mip tiles
-still visit in the walk's order (the window guard made the order moot for the decoder).
+ImageLoader.cpp +28, ImageLoader.h +3, the self-test +78/-9. Later the same evening: the heights' pyramid
+IS ingested at boot (section 3d; `Assembly.cpp`, on the lattice the Float root's children answer in,
+`TileTree::KidFrame`'s 256 x 128), and the window cache is 1,024. The own-mip tiles still visit in the
+walk's order (the window guard made the order moot for the decoder).
+
+### 3d. The heights at frame time: Mark's "the lighting on the water is like 2 fps"
+
+Mark ran the HQ scene windowed and saw the water's lighting update in half-second steps while the frame
+rate read fine. The first jetty still of 3a had shown the mechanism (loads of 111 ms behind a fresh
+ingest); the clean measurement is three cold runs of one scene -- the shipped Merrimack plus the 1.5 m
+bed and the 1 m lidar, no extra colour -- at the `mouth` view on an empty tree root, frozen clock,
+3,000 frames each, other sessions building on the same machine:
+
+| arm | heights at boot | window cache | windows decoded in the frames | residency loads | mapped of 18,703 wanted at 3,000 frames |
+|---|---|---|---|---|---|
+| before | cube16k only ("whole") | 256 | 12,053 (131 s in the decoder) | 928, **1,222 ms each**, queued 3.3 s | 965 (never settled) |
+| pyramid at boot | + the pyramid, 7,849 + 6,964 + 1,666 tiles in 9 + 6 + 2 s | 256 | 12,971 (229 s) | 934, 1,451 ms each | 967 (never settled) |
+| + window cache 1,024 | the same | 1,024 | **1,531 (53 s)** | **21,787, 88 ms each**, queued 0.2 s | 13,827 and climbing 2,400 a 600 frames |
+
+Read it this way:
+
+- **The loads were decoding the source files, not reading tiles.** 934 loads of 1.4 s each is the frame
+  loop starved: the GPU's height pages near the eye sit at pyramid mips 6-7, below the bed's own level
+  (8) and at the lidar's (7), and for a source asked BELOW its own level `TileTree::LeafTile` paints by
+  magnifying the source's own texels -- from the file, a window decode a tap -- so the pyramid's folds
+  (which fix the levels ABOVE) changed nothing for them: the second arm equals the first.
+- **The window cache held a fifth of the working set.** 256 windows against a 980-window bed and 25
+  lidar files decoded the same windows fourteen times a load; at 1,024 the decodes fall 8.5x and a load
+  costs 88 ms. The cap is 256 MB a source and only what was touched (`RasterFileSource.cpp`).
+- **What remains is the law's third clause, unapplied:** below the own level the tree should magnify the
+  KEPT own tile, never the file (HIERARCHY 4.20, "finer = the level above magnified"). Proposed as its
+  own session; with it a cold view costs the boot ingest and nothing at frame time. Until then the
+  first visit of an area streams heights at about 140 tiles a second and the picture fills over a
+  minute or two; the second visit is warm. The heights' pyramid at boot is kept (`Assembly.cpp`): cheap
+  (17 s for the three sources here), and it is what makes the coarse levels folds.
+- The buildings were missing from the HQ scene because its base has none; the layer and sources of
+  `newburyport_buildings.json` are now in it. The 19 MassGIS tiles' ingest is section 3e.
 
 ### 3a. Stills and frame cost, A (no rasters) against B (five rasters), one take each
+
+**A correction, found by Mark's eye the same evening.** A scene's `sources` array REPLACES the base's;
+it does not merge by name as `views` and `layers` do. The first merrimack_hq.json listed only its five
+rasters, so every B run below ran WITHOUT the shipped MassGIS 15 cm orthos, the highlights overlay and
+the ETOPO 15-second height ring, while every A run had them: the B stills' Google-only imagery
+(blurred houses) and some of the A/B pixel difference are that, not the five rasters. The scene now
+repeats the three shipped entries, the 2011 low-tide orthos are out of it (section 1: under today's
+water they painted the photographed water as the bed), and the buildings of newburyport_buildings.json
+are in. The table stands as the record of what ran; the frame-cost reading (B at or under A) is not
+weakened by it -- B carried less imagery, not more -- and the ingest numbers of section 3 are per
+source and untouched.
 
 Frozen clock (`--scale 0 --settle-exact --frames 300`, `time.start` 2026-10-17T15:00:00 in both
 scenes), `--gpu-time` on, 1600 x 900, the RTX 5060 Laptop. "held" is how many frames the still waited
