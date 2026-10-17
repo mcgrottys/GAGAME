@@ -22,6 +22,9 @@
 //  window at the far corner in 3 or 11 ms at a 9 MB peak; a PNG decodes from its first row for
 //  every window (0.49 s, and again for its neighbour). So a PNG or a JPEG is decoded once, in
 //  bands, to raw rows under cache\sources named by its content's hash, and read by a seek.
+//  A compressed TIFF of THIN STRIPS (under 16 rows a strip, over 1,024 rows) is refused by name:
+//  MEASURED 2026-10-17, a 20,700 x 17,200 ortho written as deflate with one row a strip gave the
+//  ingest no tile in eight minutes; the same pixels in one raw strip decoded a window in 76 ms.
 //
 //  THE PROJECTIONS come from the code and are never guessed: EPSG 4326, and NAD83's 4269 and
 //  6318 as it (about 1 m, said once per file); 3857; UTM north and south on WGS84 (326zz, 327zz),

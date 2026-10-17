@@ -76,7 +76,35 @@ struct TiffImage {
     uint32_t subfile;   // NewSubfileType: 1 = a reduced-resolution copy (an overview)
     int extra = 2;      // ExtraSamples of a fourth band: 2 unassociated alpha, 0 data, -1 absent
     int fmt = 1;        // SampleFormat (339): 1 unsigned, 2 signed, 3 float
+    uint32_t rowsPerStrip = 0;   // 0 = one strip; else strips of so many rows
+    uint16_t compression = 1;    // 1 none; 8 deflate, written as STORED zlib blocks (bytes as they are)
 };
+
+// A zlib stream whose deflate blocks are stored, not compressed: what a TIFF of compression 8
+// carries, without a compressor in the test.
+std::vector<uint8_t> ZlibStored(const uint8_t* p, size_t n) {
+    std::vector<uint8_t> z{0x78, 0x01};
+    size_t at = 0;
+    do {
+        const size_t len = (std::min)(n - at, size_t(65535));
+        const bool last = at + len >= n;
+        z.push_back(last ? 1 : 0);
+        z.push_back(uint8_t(len & 255));
+        z.push_back(uint8_t(len >> 8));
+        z.push_back(uint8_t(~len & 255));
+        z.push_back(uint8_t((~len >> 8) & 255));
+        z.insert(z.end(), p + at, p + at + len);
+        at += len;
+    } while (at < n);
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < n; ++i) {
+        a = (a + p[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    const uint32_t adler = (b << 16) | a;
+    for (int s = 24; s >= 0; s -= 8) z.push_back(uint8_t(adler >> s));
+    return z;
+}
 struct GeoTags {
     std::vector<double> scale, tie;
     std::vector<uint16_t> keys;
@@ -108,18 +136,31 @@ bool WriteTiff(const std::string& path, const std::vector<TiffImage>& imgs, cons
             else v = blob(p, n);
             e.push_back({tag, type, count, v});
         };
-        const uint32_t data = blob(im.px.data(), im.px.size());
+        // The pixels in strips: one strip of the whole image, or rowsPerStrip rows each; a deflate
+        // strip is a stored zlib stream of its rows.
+        const uint32_t rps = im.rowsPerStrip ? (std::min)(im.rowsPerStrip, im.h) : im.h;
+        const size_t rowBytes = size_t(im.w) * im.spp * (im.bps / 8);
+        std::vector<uint32_t> offs, cnts;
+        for (uint32_t y0 = 0; y0 < im.h; y0 += rps) {
+            const uint32_t rows = (std::min)(rps, im.h - y0);
+            const uint8_t* src = im.px.data() + size_t(y0) * rowBytes;
+            std::vector<uint8_t> strip;
+            if (im.compression == 8) strip = ZlibStored(src, rows * rowBytes);
+            else strip.assign(src, src + rows * rowBytes);
+            offs.push_back(blob(strip.data(), strip.size()));
+            cnts.push_back(uint32_t(strip.size()));
+        }
         const std::vector<uint16_t> bits(im.spp, uint16_t(im.bps));
         e.push_back({254, 4, 1, im.subfile});
         e.push_back({256, 4, 1, im.w});
         e.push_back({257, 4, 1, im.h});
         arr(258, 3, im.spp, bits.data(), bits.size() * 2);
-        e.push_back({259, 3, 1, 1});                        // no compression
+        e.push_back({259, 3, 1, im.compression});           // 1 none, 8 deflate
         e.push_back({262, 3, 1, im.spp >= 3 ? 2u : 1u});    // RGB, or black is zero
-        e.push_back({273, 4, 1, data});
+        arr(273, 4, uint32_t(offs.size()), offs.data(), offs.size() * 4);
         e.push_back({277, 3, 1, im.spp});
-        e.push_back({278, 4, 1, im.h});
-        e.push_back({279, 4, 1, uint32_t(im.px.size())});
+        e.push_back({278, 4, 1, rps});
+        arr(279, 4, uint32_t(cnts.size()), cnts.data(), cnts.size() * 4);
         e.push_back({284, 3, 1, 1});
         if (im.spp == 4 && im.extra >= 0) e.push_back({338, 3, 1, uint32_t(im.extra)});
         if (im.fmt != 1) e.push_back({339, 3, 1, uint32_t(im.fmt)});
@@ -692,6 +733,33 @@ bool RunRasterFileSelfTest() {
         Check(got.size() == 1 && got[0]->Info().name == "folder" && got[0]->Files() == 1,
               "a folder of two, one refused: the set goes on with the other (%zu source(s)%s%s)",
               got.size(), got.empty() ? "" : ": ", got.empty() ? "" : got[0]->Info().name.c_str());
+        // THIN COMPRESSED STRIPS (2026-10-17): Pillow's default for a row wider than 64 KB is one row
+        // a strip; deflate-compressed so, a 1.4 GB ortho gave the ingest no tile in eight minutes.
+        // Refused by name under 16 rows a strip over 1,024 rows; the same pixels in 256-row deflate
+        // strips load.
+        {
+            const uint32_t tw = 64, th = 2048;
+            std::vector<uint8_t> px(size_t(tw) * th * 3);
+            for (size_t i = 0; i < px.size(); ++i) px[i] = uint8_t((i * 7) & 255);
+            const Raster thin = Make(32617, 0.5, "out/rastertest/thin_strips.tif");
+            TiffImage im{tw, th, 3, 8, px, 0};
+            im.extra = -1;
+            im.rowsPerStrip = 1;
+            im.compression = 8;
+            WriteTiff(thin.file, {im}, TagsOf(thin, 32617));
+            RasterFileSource t1;
+            why.clear();
+            const bool tookThin = t1.Load(reg, thin.file, none, &why);
+            Check(!tookThin && why.find("strips are 1 row") != std::string::npos,
+                  "a deflate TIFF of one-row strips over 2048 rows is refused by name: %s", why.c_str());
+            const Raster thick = Make(32617, 0.5, "out/rastertest/thick_strips.tif");
+            im.rowsPerStrip = 256;
+            WriteTiff(thick.file, {im}, TagsOf(thick, 32617));
+            RasterFileSource t2;
+            why.clear();
+            const bool tookThick = t2.Load(reg, thick.file, none, &why);
+            Check(tookThick, "the same pixels in 256-row deflate strips load: %s", tookThick ? "yes" : why.c_str());
+        }
         const Raster hr = Make(4326, 0.5, "out/rastertest/height16.tif");
         WriteTiff(hr.file, {{kW, kW, 1, 16, std::vector<uint8_t>(size_t(kW) * kW * 2, 7), 0}}, TagsOf(hr, 4326));
         RasterFileSource h;

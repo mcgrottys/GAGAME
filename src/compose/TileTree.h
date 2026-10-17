@@ -705,6 +705,39 @@ public:
         return PeekAt(Base(tag, r) + "_" + tree_detail::Hex8(KeyOf(inc, held)));
     }
 
+    // ---- HIERARCHY 4.20 ACROSS REALIZATIONS (2026-10-17) -------------------------------------
+    // Two realizations of one tree whose levels have the same texel grid -- the same kind and tile
+    // shape, the same texels a face -- hold the SAME tiles at those levels: a fold is a function
+    // of the file, not of the folder it is kept in. So a coarse realization takes those tiles from
+    // the finer one, bytes for bytes, instead of asking the source for an area mean of the whole
+    // of it: cube16k's mip 0 is the pyramid's mip 17 (kFaceDim 16384 = 2^31 / 2^17), and painting
+    // it from a 1.4 GB ortho cost 40.7 s a tile where the pyramid's fold was already on disk.
+    // The level of `other` whose grid is `lattice`'s `mip`, or -1 where there is none.
+    static int PartnerMip(const Lattice& lattice, uint32_t mip, const Lattice& other) {
+        if (lattice.kind != Lattice::Kind::Cube || other.kind != Lattice::Kind::Cube) return -1;
+        if (lattice.texW != other.texW || lattice.texH != other.texH) return -1;
+        if (mip > lattice.MaxMip()) return -1;
+        const uint32_t texels = lattice.faceDim >> mip;
+        for (uint32_t k = 0; k <= other.MaxMip(); ++k) {
+            if ((other.faceDim >> k) == texels) return int(k);
+        }
+        return -1;
+    }
+    // The tile at `r` of this tree's realization `tag`, taken from the partner realization's tile
+    // (the same face, x and y at `otherMip`): its bytes written here as content, its void as void.
+    Status Adopt(const std::string& tag, const TileRequest& r, const Lattice& other,
+                 const std::string& otherTag, uint32_t otherMip, std::vector<uint8_t>& out) {
+        const TileRequest o{r.face, otherMip, r.x, r.y};
+        const Status s = Tile(other, otherTag, o, out, nullptr);
+        const std::string base = Base(tag, r);
+        if (s == Status::Content && out.size() == TileBytes()) {
+            tree_detail::WriteTile(base + ".bin", out);
+        } else if (s == Status::Void) {
+            tree_detail::Touch(base + ".void");
+        }
+        return s;
+    }
+
     // ---- the tile ---------------------------------------------------------------------------
     // M9ao: `loc`, when given, lets a tile that lives in an archive be answered as a PLACE --
     // path, offset, size -- and the bytes never enter this process: Content with `out` empty and

@@ -1,0 +1,68 @@
+{
+  "_readme": [
+    "THE MERRIMACK AT EVERY GRAIN THE PUBLIC RECORD HOLDS (2026-10-17): the shipped scene plus five raster",
+    "sources dropped onto the one tree by file, no C++ per dataset (HIERARCHY 4.20: a source paints its own",
+    "level, the tree folds the rest). Coarse to fine, the ladder this scene exercises:",
+    "  450 m   ETOPO 15 arc-second (inherited)      10 m  CUDEM 1/9 arc-second (data.bathy, the solver's grid)",
+    "  1.5 m   noaa.inlethq: BlueTopo 4 m + USACE eHydro Newburyport Harbor channel surveys of 2025-09-08 (CS)",
+    "          and 2025-10-07 (XC), cell means at 1.5 m, NAVD88 (harvest hqbathy; the eHydro index holds no",
+    "          newer survey on 2026-10-17). Geographic NAD83, no vertical GeoKey: unit and datum declared here.",
+    "  1 m     usace.ncmp2018: the 2018 USACE NCMP CZMIL topobathy lidar, bare earth, 25 of its 1 km tiles",
+    "          around the mouth (19TCH 50-53 E, 38-46 N), UTM 19N, NAVD88 by GeoKey 5703; nodata where the",
+    "          laser saw no bottom, so the HQ bed shows through the channel.",
+    "  0.5 m   noaa.iocm2011.mllw: NOAA IOCM orthomosaic of 2011-06-19 flown at LOW water (the bars dry),",
+    "          RGB, nine 2.5 km tiles (NCEI accession 0103944, CC0). Sits UNDER the 15 cm MassGIS orthos by grain.",
+    "  0.15 m  massgis.coq2023 (inherited, two 1.5 km tiles at the mouth).",
+    "  0.05 m  usgs.tnb2025.ortho: the nearest PUBLIC drone orthomosaic to the Merrimack -- USGS Woods Hole UAS",
+    "          flight of 2025-06-02 at Town Neck Beach, Sandwich MA (Cape Cod Bay, 120 km south), 5 cm SfM,",
+    "          UTM 19N; the RGBA copy makes the flight's white border transparent (alpha is fiber).",
+    "          No public drone ortho of the Merrimack exists on 2026-10-17: USGS's PIEPR flights (2017-2019,",
+    "          Plum Island marsh 5 km south of the mouth) released raw photos and GCPs only. See docs/",
+    "          CONTENT_SCALING_2026-10-17.md for what was searched.",
+    "  0.25 m  usgs.tnb2025.dsm: the same flight's lidar surface model, NAVD88 declared (no vertical GeoKey).",
+    "Stack order is StackOrder's default (`over` 0 for all: the coarser grain under the finer), so where the",
+    "2018 lidar has a bottom it stands over the 2025 channel survey; the channel itself is lidar nodata.",
+    "Fixed time.start so that A/B stills against scenes/merrimack.json (run with the same --set time.start)",
+    "compare one instant. Views: the shipped `sea` (jetty tip), `mouth` and `bar` over the inlet, `tnb_high`",
+    "and `tnb_low` over the drone flight."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "merrimack-hq"},
+  "time": {"start": "2026-10-17T15:00:00"},
+  "sources": [
+    {"name": "noaa.inlethq", "kind": "height", "file": "D:/DataCache/GAGAME/refbathy/inlethq_navd88.tif",
+     "unit": "m", "datum": "NAVD88"},
+    {"name": "usace.ncmp2018", "kind": "height", "folder": "D:/DataCache/GAGAME/lidar/ncmp2018_ma", "match": "*.tif"},
+    {"name": "noaa.iocm2011.mllw", "folder": "D:/DataCache/GAGAME/iocm/2011_mllw_rgb", "match": "*.tif", "feather": 10},
+    {"name": "usgs.tnb2025.ortho", "file": "D:/DataCache/GAGAME/uas/tnb_2025/2025015FA_TNB_MAP61_SfM_Ortho_5cm_rgba.tif",
+     "feather": 2},
+    {"name": "usgs.tnb2025.dsm", "kind": "height", "file": "D:/DataCache/GAGAME/uas/tnb_2025/2025015FA_TNB_WLDR_DSM_25cm.tif",
+     "unit": "m", "datum": "NAVD88"}
+  ],
+  "views": [
+    {
+      "name": "mouth",
+      "_at": "the inlet from 500 m over the north tip of Plum Island, looking NNE across both jetties",
+      "at": {"x": 300, "alt": 500, "z": -600, "az": 20, "pitch": -50},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    },
+    {
+      "name": "bar",
+      "_at": "35 m over the water just seaward of the north jetty tip, looking back WNW at the jetty and the shoals",
+      "at": {"x": 560, "alt": 35, "z": -40, "az": 300, "pitch": -40},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    },
+    {
+      "name": "tnb_high",
+      "_at": "Town Neck Beach from 600 m, nearly straight down: the whole 1 km drone flight in frame",
+      "at": {"lat": 41.7662, "lon": -70.4812, "alt": 600, "heading": 0, "tilt": 15},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    },
+    {
+      "name": "tnb_low",
+      "_at": "30 m over the beach, looking NE along it: the 5 cm grain against the sea",
+      "at": {"lat": 41.7650, "lon": -70.4830, "alt": 30, "heading": 60, "tilt": 70},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    }
+  ]
+}

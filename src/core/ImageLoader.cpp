@@ -88,6 +88,20 @@ std::vector<uint16_t> QueryShorts(IWICMetadataQueryReader* q, const wchar_t* nam
     PropVariantClear(&v);
     return out;
 }
+// A tag that is SHORT or LONG by the writer's choice (RowsPerStrip, Compression, TileWidth), as numbers.
+std::vector<uint32_t> QueryUints(IWICMetadataQueryReader* q, const wchar_t* name) {
+    std::vector<uint32_t> out;
+    PROPVARIANT v;
+    PropVariantInit(&v);
+    if (SUCCEEDED(q->GetMetadataByName(name, &v))) {
+        if (v.vt == VT_UI2) out.push_back(v.uiVal);
+        else if (v.vt == VT_UI4) out.push_back(v.ulVal);
+        else if (v.vt == (VT_VECTOR | VT_UI2)) out.assign(v.caui.pElems, v.caui.pElems + v.caui.cElems);
+        else if (v.vt == (VT_VECTOR | VT_UI4)) out.assign(v.caul.pElems, v.caul.pElems + v.caul.cElems);
+    }
+    PropVariantClear(&v);
+    return out;
+}
 std::string QueryText(IWICMetadataQueryReader* q, const wchar_t* name) {
     std::string out;
     PROPVARIANT v;
@@ -463,6 +477,20 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
         // A FOURTH BAND is alpha only where ExtraSamples (338) says 1 or 2.
         const std::vector<uint16_t> extra = QueryShorts(q.Get(), L"/ifd/{ushort=338}");
         L->m_dataBand = chan == 4 && (extra.empty() || (extra[0] != 1 && extra[0] != 2));
+        // THIN COMPRESSED STRIPS are refused by name (2026-10-17): a 20,700 x 17,200 RGBA written as
+        // deflate with ONE row a strip (what Pillow writes for a row wider than its 64 KB strip
+        // budget) gave the ingest no tile in eight minutes, where the same pixels in one raw strip
+        // ingested at the pyramid's pace and 256 x 256 tiles faster still. The window reader asks
+        // WIC for 256 rows at a time; a compressed file of thin strips pays that read strip by strip.
+        const std::vector<uint32_t> comp = QueryUints(q.Get(), L"/ifd/{ushort=259}");
+        const std::vector<uint32_t> rows = QueryUints(q.Get(), L"/ifd/{ushort=278}");
+        const std::vector<uint32_t> tileW = QueryUints(q.Get(), L"/ifd/{ushort=322}");
+        if (tileW.empty() && !comp.empty() && comp[0] != 1 && !rows.empty() && rows[0] < 16 && h > 1024) {
+            return refuse("its strips are " + std::to_string(rows[0]) + " row(s) each and compressed (TIFF "
+                          "compression " + std::to_string(comp[0]) + ") over " + std::to_string(h) +
+                          " rows: a file so written gave the ingest no tile in eight minutes; write it "
+                          "tiled (gdal_translate -co TILED=YES) or in strips of 16 rows or more");
+        }
     }
     std::vector<uint8_t> sb;
     if (!affine) {
