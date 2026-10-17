@@ -1464,6 +1464,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     // here instead, and was measured unsound under the colour's anisotropic sampler; it is
     // not staged.
     turn.changed = static_cast<uint32_t>(m_changed.size());
+    RecordLanes(gpu, cl);   // the max lanes, from the slots that changed (before they are cleared)
     ApplyChanged();   // law 1: every footprint that changed, from the held set
     uint64_t mapStage = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536;
     for (auto& t : m_tenants) {

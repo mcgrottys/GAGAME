@@ -248,8 +248,15 @@ float ComposedHeightChain(float3 dir, float lod CS_WC_PARAM) {
         return gTexCube[gCsU2.x].SampleLevel(sLinearClamp, dir, max(lod, CsHaveCube(gCsU2.y, dir))).x;
     }
     const float haveC = CsHaveCubeArr(gCsU2.y, dir);
-    float h = PageSampleLevelCube(gTexCubeArr[gCsU2.x], sLinearClamp, dir, lod, haveC).x;
     float ground = PageGroundM(CsGroundM().x, haveC);
+    // THE LADDER DECIDES, THEN ONE READ: the rung that wins last is the one read, so the ladder
+    // chooses the slice, the address and the level, and the texture is sampled once, at the winner.
+    // (It sampled the cube and then every winning rung, each overwriting the last: up to six fetches
+    // for the one that was kept, on a function a land pixel calls twenty times.)
+    bool win = false;
+    uint wsl = 0u;
+    float2 wuv = float2(0.0f, 0.0f);
+    float wlod = 0.0f;
     [unroll] for (uint k = 0; k < GA_BLOCK_RANKS; ++k) {
         if (k >= wc.n) break;
         const float want = lod + 3.0f * float(k + 1u);
@@ -260,11 +267,15 @@ float ComposedHeightChain(float3 dir, float lod CS_WC_PARAM) {
         if (haveB > kCsHeightWindowFloor) continue;
         const float gB = PageGroundM(CsBlockGround(k), haveB);
         if (PageWins(gB, ground)) {
-            h = PageSampleLevel(gTexArr[gCsU6.x], sLinearWrap, buv, sl, max(want, 0.0f), haveB).x;
+            win = true;
+            wsl = sl;
+            wuv = buv;
+            wlod = max(max(want, 0.0f), haveB);   // PageSampleLevel's max(want, have)
             ground = gB;
         }
     }
-    return h;
+    if (win) return gTexArr[gCsU6.x].SampleLevel(sLinearWrap, float3(wuv, wsl), wlod).x;
+    return PageSampleLevelCube(gTexCubeArr[gCsU2.x], sLinearClamp, dir, lod, haveC).x;
 }
 // ...at a point of level s: its own chain there.
 float ComposedHeightAt(float3 dir, float3 p, float lod, uint s) {

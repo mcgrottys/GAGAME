@@ -504,11 +504,12 @@ struct RenderSection {
     bool keep = true;
     double keepSunGrainDeg = 0.01;
     double keepTideGrainM = 0.001;
-    // THE SUN'S RAY OVER THE GROUND (Globe.hlsl TerrainRay): the composed height field marched
-    // toward the sun from every lit point, so a hillside, a dune or a jetty shades what stands
-    // behind it. `shadowSteps` is the march's length in samples (0 = no terrain shadow),
-    // log-spaced from the pixel's own footprint to `shadowRangeM`.
-    int shadowSteps = 12;
+    // THE SUN'S RAY OVER THE GROUND (shaders/TerrainRay.hlsli; hal/MaxLane.h): the ray from every lit
+    // point cast toward the sun over the height's max lane, so a hillside, a dune or a jetty shades
+    // what stands behind it -- every texel of the level the pixel may read, passed a block at a time
+    // where nothing in the block can reach the ray. `shadowSteps` caps the traversal's steps
+    // (0 = no terrain shadow); `shadowRangeM` is how far the ray reaches.
+    int shadowSteps = 128;
     double shadowRangeM = 8000.0;
     // The water's mirror ray marched over the same field: where it meets land the reflection
     // is that land, not the sky behind it. A test (2026-10-15), off until the owner's eye says.

@@ -988,6 +988,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // M9bb: a fold or a drop below changed a root tile: the tenant refetches that
                 // address (the tree's tag names the slice) -- the one law, Tenant::Bind.
                 if (heightTree) heightTenant.Bind(*heightTree);
+                // THE HEIGHT'S MAX LANE (hal/MaxLane.h): what the terrain shadow's cast reads.
+                if (S.render.shadowSteps > 0) {
+                    resMgr.EnableMaxLane(hgtTenant, gpu, renderer.Shaders(), shaderDir);
+                }
                 // PHASE B2 (D4): the solver's bed is the standing window's chain.
                 if (swe.Ready() && surface.standingRank) {
                     const Placement own = surface.StandingFrame();

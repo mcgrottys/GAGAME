@@ -4231,6 +4231,47 @@ bool FrameLoop::Frame() {
             }
         }
     }
+    // THE SUN'S RAY IS A READER (shaders/TerrainRay.hlsli). Its cast reads the ground at length t no
+    // finer than the sun's disc spans there, t 2 kSunDiscR, so rung r is read over the band where its
+    // texel is the disc's, t_r = texel_r / (2 kSunDiscR) and on to twice that, by the lit points within
+    // t_r of the eye; what it reads lies within 1.5 t_r of the point 1.5 t_r sunward of the eye. Asked
+    // of the windows like every reader's ground (WantGround), so the pages hold the tiles the ray
+    // needs instead of the ray making do with whatever the eye's own walk left resident.
+    if (hgtTenant >= 0 && S.render.shadowSteps > 0) {
+        const int sampSun = resMgr.Sampler("sun ray");
+        constexpr double kSunDiscR = 0.0047;   // MIRRORS Common.hlsli kSunDiscR
+        const SurfaceFrame& sf = m_A.surface;
+        double E[3];
+        const double camP[3] = {cam.px, cam.py, cam.pz};
+        PlanetOf(sf, camP, E);
+        float sd[3];
+        renderer.SunDir(sd);
+        double sP[3], up[3], h[3];
+        const double rE = std::sqrt(E[0] * E[0] + E[1] * E[1] + E[2] * E[2]);
+        for (int k = 0; k < 3; ++k) {
+            sP[k] = sf.east[k] * sd[0] + sf.up[k] * sd[1] + sf.north[k] * sd[2];
+            up[k] = E[k] / rE;
+        }
+        const double mu = sP[0] * up[0] + sP[1] * up[1] + sP[2] * up[2];
+        for (int k = 0; k < 3; ++k) h[k] = sP[k] - mu * up[k];
+        const double hl = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+        for (int k = 0; k < 3; ++k) h[k] = hl > 1e-6 ? h[k] / hl : 0.0;   // a sun at the zenith: about the eye
+        std::vector<uint8_t> dg;
+        putBytes(dg, E, sizeof(E)); putBytes(dg, h, sizeof(h));
+        putBytes(dg, &hgtTenant, sizeof(hgtTenant)); putBytes(dg, &m_windowTold, sizeof(m_windowTold));
+        if (mu > -0.1 && !(dg == m_sunRayDigest && resMgr.Repeat(sampSun))) {
+            for (int rung = 3; rung <= 9; ++rung) {   // the cube below rung 3; the height's floor at 9
+                const double tr = sf.cube.GroundRes(0) / double(1 << rung) / (2.0 * kSunDiscR);
+                if (tr > 2.0 * S.render.shadowRangeM) continue;
+                double Q[3];
+                for (int k = 0; k < 3; ++k) Q[k] = E[k] + 1.5 * tr * h[k];
+                WantGround(resMgr, sf, sampSun, hgtTenant, Q, 1.5 * tr, rung);
+            }
+            m_sunRayDigest = std::move(dg);
+        } else if (mu > -0.1) {
+            ++m_wantsRepeated;
+        }
+    }
     PROF_END(11);
     // Phase B0: the two-worlds probe's height and exposure lanes read the exposure's own views; the
     // windows' floors are ~0 while neither tenant has windows (Phase B2 gives them).

@@ -9,12 +9,14 @@
 // releases are all made. HELD is Mapped and landed: the boot's fill, a ring fill of a whole tile,
 // a DirectStorage batch whose fence signalled -- the manager's own claim rule, and the audit's.
 #include "hal/Residency.h"
+#include "hal/MaxLane.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace ga {
 
@@ -122,6 +124,172 @@ void ResidencyManager::ApplyChanged() {
         ++t.gen;
     }
     m_changed.clear();
+}
+
+// ---- THE MAX LANE (hal/MaxLane.h) ----------------------------------------------------------------
+bool ResidencyManager::EnableMaxLane(int tenant, Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
+    if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return false;
+    Tenant& t = m_tenants[tenant];
+    if (t.fmt != DXGI_FORMAT_R16_FLOAT || t.srv == UINT32_MAX) {
+        Log("[maxlane] %ls: not a scalar page tenant (R16F with an array view): no lane", t.name.c_str());
+        return false;
+    }
+    auto lane = std::make_shared<MaxLane>();
+    // R16F's standard 64 KB tile is 256 x 128 texels.
+    if (!lane->Init(gpu, sc, shaderDir, t.name, t.faces, t.faceDim, t.mips, 256, 128, t.srv)) return false;
+    t.lane = std::move(lane);
+    t.lanePrimed = false;
+    return true;
+}
+uint32_t ResidencyManager::MaxLaneSrv(int tenant) const {
+    if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return UINT32_MAX;
+    const Tenant& t = m_tenants[tenant];
+    return (t.lane && t.lane->Ready()) ? t.lane->Srv() : UINT32_MAX;
+}
+const MaxLane* ResidencyManager::Lane(int tenant) const {
+    if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return nullptr;
+    return m_tenants[tenant].lane.get();
+}
+
+void ResidencyManager::RecordLanes(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
+    // The cube's mip 0 is the pyramid's mip 17 (BlockBinding::kFinestRung: 2^31 >> 17 = the face's
+    // 16384), so a window slot whose address sits at mip 17 is rank 1's floor over a cube tile.
+    constexpr uint32_t kCubePyramidMip = 17;
+    for (size_t ti = 0; ti < m_tenants.size(); ++ti) {
+        Tenant& t = m_tenants[ti];
+        if (!t.lane || !t.lane->Ready()) continue;
+        std::vector<MaxLane::Job> jobs;
+        {
+            std::lock_guard<std::mutex> lk(m_mx);   // the loads write Tracked::state under it
+            const auto held = [&](const TileRequest& r) {
+                return r.face < t.faces && r.mip < t.mips && HeldInSlots(&t, r.face, r.mip, r.x, r.y);
+            };
+            // Every held slot of an address (its aliases: one pool page, every slot a mapping of it).
+            const auto slotsOf = [&](const TileRequest& g, auto&& fn) {
+                const auto it = t.held.find(AddressKey(g));
+                if (it == t.held.end()) return;
+                for (const Tracked* s : it->second.slots) {
+                    if (s && s->state == TileState::Mapped && s->landed) fn(s->req);
+                }
+            };
+            std::unordered_set<uint64_t> seen;
+            std::vector<TileRequest> work;
+            const auto add = [&](const TileRequest& r) {
+                if (!held(r)) return;
+                const uint64_t k = (uint64_t(r.face) << 56) | (uint64_t(r.mip) << 48) |
+                                   (uint64_t(r.y & 0xFFFFFFu) << 24) | uint64_t(r.x & 0xFFFFFFu);
+                if (seen.insert(k).second) work.push_back(r);
+            };
+            // THE SEEDS: what changed this turn (a release is not held and drops out), or, once,
+            // everything held when the lane is first asked.
+            std::vector<TileRequest> seeds;
+            if (!t.lanePrimed) {
+                for (const auto& tr : t.tracked) seeds.push_back(tr->req);
+                t.lanePrimed = true;
+            }
+            for (const auto& [k, r] : m_changed) {
+                if (size_t(k) == ti) seeds.push_back(r);
+            }
+            // THE LANE'S BACKING follows what is held: a lane tile is backed while any held slot lies
+            // under it, before any job below writes into it.
+            for (const TileRequest& r : seeds) {
+                if (r.face < t.faces && r.mip < t.mips) t.lane->Hold(gpu, r.face, r.mip, r.x, r.y, held(r));
+            }
+            // ...each with every alias of its address (a refill writes the page every alias maps),
+            std::vector<TileRequest> base;
+            for (const TileRequest& r : seeds) {
+                if (r.face >= t.faces || r.mip > TopOf(t, r.face) || !held(r)) continue;   // past a window's floor: never read
+                base.push_back(r);
+                TileRequest g;
+                if (t.globalOf && t.globalOf(r, g)) slotsOf(g, [&](const TileRequest& a) { base.push_back(a); });
+            }
+            // ...and the tiles beside each, whose blocks' rims read its edge texels. A window's page
+            // wraps (its box is the page, its seam anywhere in it); a cube face ends at its edge.
+            for (const TileRequest& r : base) {
+                add(r);
+                const auto& tl = t.tilings[r.face * t.mips + r.mip];
+                const int64_t W = tl.WidthInTiles, H = tl.HeightInTiles;
+                const bool wrap = bool(t.globalOf) && r.face >= 6u;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (!dx && !dy) continue;
+                        int64_t nx = int64_t(r.x) + dx, ny = int64_t(r.y) + dy;
+                        if (wrap) {
+                            nx = (nx + W) % W;
+                            ny = (ny + H) % H;
+                        } else if (nx < 0 || ny < 0 || nx >= W || ny >= H) {
+                            continue;
+                        }
+                        add(TileRequest{r.face, r.mip, uint32_t(nx), uint32_t(ny)});
+                    }
+                }
+            }
+            // THE ANCESTORS, held ones only (a level not held is not read, nor anything under it):
+            // up the slice's mips; at a window's floor, the slots of the same address (the rank above
+            // holds it at its mip 0); from rank 1's floor, the cube's tile.
+            for (size_t i = 0; i < work.size(); ++i) {
+                const TileRequest r = work[i];
+                if (r.mip < TopOf(t, r.face)) {
+                    add(TileRequest{r.face, r.mip + 1, r.x >> 1, r.y >> 1});
+                    continue;
+                }
+                TileRequest g;
+                if (!(t.globalOf && t.globalOf(r, g))) continue;   // the cube's top: nothing above
+                slotsOf(g, [&](const TileRequest& a) { add(a); });
+                if (g.mip == kCubePyramidMip) add(TileRequest{g.face, 0, g.x, g.y});
+            }
+            // THE JOBS: each slot with the four that hold its children's lanes -- the slice's own
+            // mip below, or, at a floor, a held slot of each child address (pyramid mip one finer).
+            jobs.reserve(work.size());
+            for (const TileRequest& r : work) {
+                MaxLane::Job j;
+                j.slice = r.face;
+                j.mip = r.mip;
+                j.x = r.x;
+                j.y = r.y;
+                TileRequest g;
+                const bool win = t.globalOf && t.globalOf(r, g);
+                j.wrap = win ? 1u : 0u;
+                j.level = win ? g.mip : kCubePyramidMip + r.mip;
+                for (uint32_t c = 0; c < 4; ++c) {
+                    j.child[c][0] = UINT32_MAX;
+                    j.child[c][1] = j.child[c][2] = j.child[c][3] = 0;
+                    const uint32_t i = c & 1u, k = c >> 1;
+                    TileRequest kid{};
+                    bool have = false;
+                    if (r.mip > 0) {
+                        kid = TileRequest{r.face, r.mip - 1, 2 * r.x + i, 2 * r.y + k};
+                        have = held(kid);
+                    } else {
+                        TileRequest gk;
+                        bool ok = true;
+                        if (win) {
+                            ok = g.mip > 0;
+                            gk = TileRequest{g.face, g.mip - 1, 2 * g.x + i, 2 * g.y + k};
+                        } else {
+                            gk = TileRequest{r.face, kCubePyramidMip - 1, 2 * r.x + i, 2 * r.y + k};
+                        }
+                        if (ok) {
+                            slotsOf(gk, [&](const TileRequest& a) {
+                                if (!have) {
+                                    kid = a;
+                                    have = true;
+                                }
+                            });
+                        }
+                    }
+                    if (have) {
+                        j.child[c][0] = kid.face;
+                        j.child[c][1] = kid.mip;
+                        j.child[c][2] = kid.x;
+                        j.child[c][3] = kid.y;
+                    }
+                }
+                jobs.push_back(j);
+            }
+        }
+        t.lane->Record(gpu, cl, jobs);
+    }
 }
 
 void ResidencyManager::BirthMap(Gpu& gpu, int tenant) {

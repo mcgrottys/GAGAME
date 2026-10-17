@@ -393,7 +393,10 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
     GpuProfiler* prof = m_prof.get();
     if (prof) prof->BeginFrame(cl, gpuFrameLabel);
     // Step 5 E, law 8: the residency turn, first in the frame's list, before any layer reads.
-    if (atFrameHead) atFrameHead(cmd);
+    if (atFrameHead) {
+        GpuScope gscope(prof, cl, "residency");   // the turn's copies, maps and the max lanes it builds
+        atFrameHead(cmd);
+    }
     // THE OCCLUDERS DELIVERED: what this frame slot's previous frame copied, with the cameras it
     // was drawn by (hal::RegionReadback: the ring already waited; nothing stalls here).
     if (m_occRead.Ready()) {
