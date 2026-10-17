@@ -119,22 +119,43 @@ void CsClassify(uint3 id : SV_DispatchThreadID) {
         }
         return;
     }
+    // THE WAVE COUNTS ITSELF (REVIEW 2026-10-17 finding 31a). Every record used to add 1 to one of
+    // three words -- N atomics on three addresses, the hottest in the city walk. A wave counts its
+    // records of each form in registers (WaveActiveCountBits) and its first lane adds the count
+    // once; in pass 3 the wave takes its run of slots the same way and each lane's slot is the
+    // wave's base plus the records of its form before it in the wave (WavePrefixCountBits). The
+    // counts are sums and the lists hold the same records: a list's ORDER was already the
+    // atomics' order, which no reader depends on. No lane returns before the wave ops: a thread
+    // past the cap, or a record that stands nothing, is kNone and counts toward no form.
     const Verdict v = Classify(id.x);
-    if (v.form == kNone) return;
-    uint old;
+    const bool isBox = v.form == 0u, isShape = v.form == 1u, isPoint = v.form == 2u;
+    const uint nBox = WaveActiveCountBits(isBox), nShape = WaveActiveCountBits(isShape),
+               nPoint = WaveActiveCountBits(isPoint);
     if (pass == 1u) {
-        if (v.form == 0u) InterlockedAdd(gOut[0].x, 1u, old);
-        else if (v.form == 1u) InterlockedAdd(gOut[0].y, 1u, old);
-        else InterlockedAdd(gOut[0].z, 1u, old);
+        if (WaveIsFirstLane()) {
+            uint old;
+            if (nBox != 0u) InterlockedAdd(gOut[0].x, nBox, old);
+            if (nShape != 0u) InterlockedAdd(gOut[0].y, nShape, old);
+            if (nPoint != 0u) InterlockedAdd(gOut[0].z, nPoint, old);
+        }
         return;
     }
     // pass 3: the record into its form's list, the lists packed in form order
+    const uint pBox = WavePrefixCountBits(isBox), pShape = WavePrefixCountBits(isShape),
+               pPoint = WavePrefixCountBits(isPoint);
+    uint wBox = 0u, wShape = 0u, wPoint = 0u;   // the wave's first slot in each form's list
+    if (WaveIsFirstLane()) {
+        if (nBox != 0u) InterlockedAdd(gOut[5].x, nBox, wBox);
+        if (nShape != 0u) InterlockedAdd(gOut[5].y, nShape, wShape);
+        if (nPoint != 0u) InterlockedAdd(gOut[5].z, nPoint, wPoint);
+    }
+    wBox = WaveReadLaneFirst(wBox);
+    wShape = WaveReadLaneFirst(wShape);
+    wPoint = WaveReadLaneFirst(wPoint);
+    if (v.form == kNone) return;
     const uint3 n = gOut[0].xyz;
-    uint base;
-    if (v.form == 0u) { InterlockedAdd(gOut[5].x, 1u, old); base = 0u; }
-    else if (v.form == 1u) { InterlockedAdd(gOut[5].y, 1u, old); base = n.x; }
-    else { InterlockedAdd(gOut[5].z, 1u, old); base = n.x + n.y; }
-    const uint row = kHeader + (base + old) * 3u;
+    const uint slot = isBox ? wBox + pBox : (isShape ? n.x + wShape + pShape : n.x + n.y + wPoint + pPoint);
+    const uint row = kHeader + slot * 3u;
     gOut[row] = v.r0;
     gOut[row + 1u] = v.r1;
     gOut[row + 2u] = v.r2;

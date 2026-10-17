@@ -797,7 +797,13 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     hal::MeshPipelineDesc d;
     d.rootSig = m_rootSig;
     d.ms = sc.Compile(path, L"MsMain", L"ms_6_5");
-    d.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5");
+    // THE WATER'S RADIOMETRY IN 16 BITS (REVIEW 2026-10-17 finding 32): this pixel stage alone is
+    // compiled with 16-bit types, so Globe.hlsl's `half` -- the water's colours, mixes and Fresnel
+    // weights, and Atmosphere.hlsli's table lerp -- is float16_t here and float in every other
+    // compile of the same file (the VS fallback's ps_6_0, the dxtest's). Addresses, heights, depths
+    // and ray points are float in the source and untouched by the switch.
+    const std::vector<std::wstring> fp16 = {L"-enable-16bit-types"};
+    d.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5", {}, fp16);
     if (!d.ms.Valid() || !d.ps.Valid()) return false;
     // Back faces culled: MsMain winds every triangle, bands included, one way about the surface's
     // outward normal, whichever way the cube face orients its uv (the VS fallback above still mixes
@@ -814,7 +820,7 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     m_msPso = pso;
     {   // THE KEPT FRAME's twin (Keep): the same mesh stage, PsMainKeep writing the cache beside the frame.
         hal::MeshPipelineDesc k = d;
-        k.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMainKeep", L"ps_6_5");
+        k.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMainKeep", L"ps_6_5", {}, fp16);
         k.numRenderTargets = 3;
         k.rtvFormat1 = DXGI_FORMAT_R16G16B16A16_FLOAT;
         k.rtvFormat2 = DXGI_FORMAT_R32_UINT;

@@ -12,7 +12,8 @@ void ShaderCompiler::Init() {
 
 ShaderBlob ShaderCompiler::Compile(const std::wstring& path, const wchar_t* entry,
                                    const wchar_t* target,
-                                   const std::vector<std::wstring>& defines) {
+                                   const std::vector<std::wstring>& defines,
+                                   const std::vector<std::wstring>& extra) {
     ShaderBlob out;
 
     Com<IDxcBlobEncoding> source;
@@ -36,6 +37,7 @@ ShaderBlob ShaderCompiler::Compile(const std::wstring& path, const wchar_t* entr
     };
     for (const auto& d : defines) { argStore.push_back(L"-D"); argStore.push_back(d); }
     for (const auto& d : m_always) { argStore.push_back(L"-D"); argStore.push_back(d); }
+    for (const auto& a : extra) argStore.push_back(a);
 
     std::vector<const wchar_t*> args;
     args.reserve(argStore.size());
@@ -92,9 +94,13 @@ ShaderBlob ShaderCompiler::Compile(const std::wstring& path, const wchar_t* entr
             h *= 1099511628211ull;
         }
         const size_t name = path.find_last_of(L"/\\");
+        std::string tag = (defines.empty() && m_always.empty()) ? "" : " (with defines)";
+        for (const auto& a : extra) {   // the switches this compile added, so a flag is seen to arrive
+            tag += " ";
+            for (const wchar_t c : a) tag.push_back(static_cast<char>(c));
+        }
         Log("[shader] %S %S %S: DXIL %016llx, %u bytes%s", path.c_str() + (name == std::wstring::npos ? 0 : name + 1),
-            entry, target, static_cast<unsigned long long>(h), bytes,
-            (defines.empty() && m_always.empty()) ? "" : " (with defines)");
+            entry, target, static_cast<unsigned long long>(h), bytes, tag.c_str());
         break;
     }
     return out;

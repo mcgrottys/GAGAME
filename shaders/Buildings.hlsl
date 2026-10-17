@@ -235,7 +235,9 @@ struct ShapePayload {
     uint triStart[64];    // roof triangles before it
 };
 groupshared ShapePayload sPay;
-groupshared uint sScanE[64], sScanT[64];
+// The waves' totals (REVIEW 2026-10-17 finding 31b): one slot a wave, 64 / WaveGetLaneCount() of
+// them -- two of 32 on NVIDIA, one of 64 on AMD, up to sixteen on a 4-lane part.
+groupshared uint sWaveE[16], sWaveT[16];
 
 [numthreads(64, 1, 1)]
 void AsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
@@ -248,23 +250,31 @@ void AsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
         edges = (flags & 4u) ? 4u * (max(nV, 1u) - 1u) : nV;   // a ribbon of n points: n - 1 segments, four faces each
         tris = w0 >> 16;
     }
-    // Exclusive running counts over the 64, a Hillis-Steele scan in groupshared (two waves or one).
-    sScanE[gi] = edges;
-    sScanT[gi] = tris;
-    GroupMemoryBarrierWithGroupSync();
-    [unroll] for (uint d = 1u; d < 64u; d <<= 1) {
-        const uint e = gi >= d ? sScanE[gi - d] : 0u, t = gi >= d ? sScanT[gi - d] : 0u;
-        GroupMemoryBarrierWithGroupSync();
-        sScanE[gi] += e;
-        sScanT[gi] += t;
-        GroupMemoryBarrierWithGroupSync();
+    // Exclusive running counts over the 64: each wave scans its run of instances in registers
+    // (WavePrefixSum, exclusive) and publishes its total; a lane adds the totals of the waves
+    // before its own. The group's lanes fill the waves in SV_GroupIndex order (the one assumption,
+    // and the one every wave scan makes), so a wave IS a run of instances. Two barriers where the
+    // Hillis-Steele scan in groupshared took thirteen; the sums are the same integers.
+    const uint waveN = WaveGetLaneCount();
+    const uint wave = gi / waveN;
+    const uint eIn = WavePrefixSum(edges), tIn = WavePrefixSum(tris);
+    const uint eTot = WaveActiveSum(edges), tTot = WaveActiveSum(tris);
+    if (WaveIsFirstLane()) {
+        sWaveE[wave] = eTot;
+        sWaveT[wave] = tTot;
     }
-    sPay.edgeStart[gi] = sScanE[gi] - edges;   // inclusive -> exclusive
-    sPay.triStart[gi] = sScanT[gi] - tris;
-    if (gi == 63u) {
+    GroupMemoryBarrierWithGroupSync();
+    uint eBefore = 0u, tBefore = 0u;
+    for (uint k = 0u; k < wave; ++k) {   // at most one turn on a 32-lane wave, none on a 64
+        eBefore += sWaveE[k];
+        tBefore += sWaveT[k];
+    }
+    sPay.edgeStart[gi] = eBefore + eIn;
+    sPay.triStart[gi] = tBefore + tIn;
+    if (gi == 63u) {   // the last lane of the last wave: everything before it plus its own wave
         sPay.instBase = gid.x * 64u;
-        sPay.edgeTotal = sScanE[63];
-        sPay.triTotal = sScanT[63];
+        sPay.edgeTotal = eBefore + eTot;
+        sPay.triTotal = tBefore + tTot;
         sPay.pad = 0u;
     }
     GroupMemoryBarrierWithGroupSync();

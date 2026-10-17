@@ -1670,6 +1670,28 @@ model (or a textbook) would hold → what this project measured → the law now 
     rides the survey's side, and where the height is the finer witness its own excess at the pixel
     is the finer statement of the same face.
 
+48. **A frozen clock that starts at "now" is a different instant every run.** Prior (and the memory's
+    own law): `--scale 0 --settle-exact` makes a headless still reproducible. Measured (2026-10-17,
+    merrimack.json's sea view, two runs three minutes apart): 58.8 % of pixels differed (SSIM 0.939,
+    the halo and the glint) with every residency hash EQUAL, and `globe.water` read 8.9 vs 6.8 ms --
+    the scene's `time.start` is "now" and its sun is the ephemeris, so the clock froze at two
+    instants with the sun at +8.26 and +7.77 deg, and the sun's terrain march came and went with the
+    elevation. Pinned (`--set time.start=2026-10-17T15:00:00`) the same pair is bit-identical and the
+    pass's spread is 0.01 ms. Law: a still's instant is part of its recipe; `--scale 0` holds the
+    clock, it does not choose it.
+
+49. **fp16 is not twice the ALU rate here, and the water pixel is not its ALU.** Prior (finding 32 of
+    REVIEW 2026-10-17, and every GPU text since Turing): the radiometry in 16 bits runs at twice the
+    rate. Measured (RTX 5060 Laptop, Blackwell GB206, whose non-tensor fp16 rate is listed at its fp32
+    rate; the water's colours, mixes, Fresnel weights and the sky table's lerp moved to `half` with
+    `-enable-16bit-types` on the mesh pipeline's pixel stage alone): `globe.water` 6.676 / 6.676 ms
+    (two floor runs) -> 6.604, 1.1 % of the pass and 0.5 % of the frame, for a still one LSB apart on
+    1.03 % of its pixels (never more) against a bit-identical floor. The pass's time is its two sky
+    marches, its two terrain casts and the bed cast -- latency, not arithmetic. Law: a precision
+    change is argued from the hardware's own rate table and gated beside an A/A floor that can see
+    1 %; and what it buys on this part is registers, which only a shader at its occupancy limit can
+    spend.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.
