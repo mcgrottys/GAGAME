@@ -203,6 +203,9 @@ struct Assembly {
     // The scene's `sources`: rasters that are colour sources by being files (the plane orthos
     // and the overlays among them, scenes/merrimack.json).
     std::vector<std::unique_ptr<RasterFileSource>> sceneSources;
+    // THE CAPTURE LEVEL (compose/Sources.h LevelGateSource): one gate per photo that declares the
+    // water level it was flown at, the ground above that level; the colour tree wears it.
+    std::vector<std::unique_ptr<LevelGateSource>> levelGates;
     GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
     // M9ak: the SAME survey, as rings rather than as a parity fill -- the compositor's
     // land/sea gate. Neither .raw mask is opened by this one.

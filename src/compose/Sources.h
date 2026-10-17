@@ -187,6 +187,49 @@ private:
     SourceInfo m_info;
 };
 
+// THE CAPTURE LEVEL (2026-10-17): an ortho's pixel is a picture of the GROUND only where the ground
+// stood above the water when the picture was taken, and under today's water the tree may show only
+// such pixels. NOAA's 2011 low-water orthomosaic of the Merrimack painted its channel black and its
+// bars sand as the BED under today's water (Mark: "the water imagery is hijacking the water"), and
+// Google's and MassGIS's water pixels do the same more quietly everywhere. So a colour source may
+// declare the water level it was flown at (the scene entry's captureLevel / captureDatum, resolved
+// at the place as the tides are), and this node is the gate that level makes: a layer of the colour
+// channel that PAINTS NOTHING, whose value at a texel is the weight the ground earns there -- 1
+// above the level, 0 below, a smoothstep across the height's own uncertainty between -- read from
+// the height tree at the texel's grain (Compositor::SampleHeight: the tree the GPU reads, the stack
+// where none is bound). GateSource multiplies the layer's weight by it (ComposeTree.h; the tree's
+// GateTile does it per texel), the same edge the survey gates the seafloor with: the pixel's COLOUR
+// is never touched, only its weight.
+//   ONE CONTINUOUS LAW, its limits the physics. The uncertainty is half the spread of the four
+// texels the tree's bilinear stands between (HeightTree::Sample): nought on a flat bed, where the
+// gate is a step at the level; one grain of the level read times the slope on a slope, the
+// shoreline's own uncertainty said as a height; wide where only a coarse level holds the point. A
+// source that declares no level has no gate: today's weight, byte for byte.
+//   ITS IDENTITY folds the height stack's (every height layer's name|structure), so an edited bed
+// repaints the gated tiles and nothing else; the gated source's own tree never moves. Its footprint
+// is its layer's: inside it an opinion at every texel (weight 1, r = the factor, the mask's
+// encoding); outside, none.
+class LevelGateSource : public ColorSource {
+public:
+    // `layer`: the source gated (its footprint and its name); `levelM` on kHeightFrame (m NAVD88);
+    // `said`: the level as the scene declared it, for the log and the identity.
+    void Load(const ColorSource& layer, const Compositor* comp, int hgtChannel, double levelM,
+              const std::string& said);
+    const SourceInfo& Info() const override { return m_info; }
+    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
+                 uint8_t rgba[4]) override;
+    // THE LAW as a function: the weight of ground at height h against the level, with the height's
+    // uncertainty s (metres, >= 0). Public so the selftest pins it beside the painted tile.
+    static float Weight(float h, float level, float s);
+    double LevelM() const { return m_level; }
+
+private:
+    const Compositor* m_comp = nullptr;
+    int m_hgtCh = -1;
+    double m_level = 0.0;
+    SourceInfo m_info;
+};
+
 class EditsHeightSource : public HeightSource {
 public:
     bool Load(const std::string& geojsonPath, float crestNavd = 2.5f);
