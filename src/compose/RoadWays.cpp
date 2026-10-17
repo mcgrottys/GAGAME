@@ -5,6 +5,7 @@
 #include "compose/RoadWays.h"
 
 #include "core/Common.h"
+#include "core/FileText.h"
 #include "core/Json.h"
 
 #include <algorithm>
@@ -18,17 +19,6 @@
 namespace ga {
 
 namespace {
-
-std::string ReadAll(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return {};
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-}
-
-bool EndsWith(const std::string& s, const char* tail) {
-    const size_t n = std::strlen(tail);
-    return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
-}
 
 // A record's point count or part count past this is a corrupt file, not a road: refuse the cell
 // rather than allocate what the bytes say.
@@ -48,7 +38,7 @@ bool OpenHarvest(const std::string& path, const char* magicWant, const char* tai
         return false;
     };
     if (!EndsWith(path, tail)) return refuse(std::string("not a ") + tail + " manifest: " + path);
-    const std::string text = ReadAll(path);
+    const std::string text = ReadFileText(path);
     if (text.empty()) return refuse("cannot read " + path);
     std::string err;
     h.manifest = JsonParser::Parse(text, &err);

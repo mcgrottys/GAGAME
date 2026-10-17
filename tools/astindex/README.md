@@ -89,10 +89,13 @@ The step runs only when `gagame` relinks, which is when there is anything new to
 
 ## Why these choices
 
-- **libclang, not clangd.** clangd is a language server: without an LSP client its index is not
-  queryable. Its background index is per-file binary shards in `.cache/clangd/index`, readable only
-  by clangd; `clangd-indexer` + `dexp` (a separate download) can answer find / lookup / refs, but
-  not layouts, not read-vs-write, and not HLSL.
+- **libclang here, clangd beside it.** clangd's index (`clangd-indexer`, read by
+  tools/codemap/riff.py) now carries the call graph of tools/codemap: every reference with the
+  function it sits in, and the override relations. It has no layouts, no read-vs-write, no
+  conditions and no HLSL, and it drops references to functions seen only in their own .cpp; those
+  stay this indexer's, which also writes the three tables tools/codemap reads (`ast_regions`,
+  `ast_values`, `ast_litcalls`: the condition each line runs under, the values each declaration
+  may take, the calls that name something by a string).
 - **libclang through the pip wheel, not a full LLVM install.** The wheel's clang 18 parses the
   MSVC 14.51 STL with three shims (`_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH`, and
   `__builtin_verbose_trap`, `__is_layout_compatible`, `__is_pointer_interconvertible_base_of`

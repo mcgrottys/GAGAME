@@ -1,5 +1,6 @@
-# tools/astindex/launch.py -- the post-build hook. Starts astindex.py in the background and returns
-# at once, so the build never waits on the index.
+# tools/astindex/launch.py -- the post-build hook. Starts tools/codemap/run.py (this index, then
+# clangd's, then the code map in build/codemap/) in the background and returns at once, so the build
+# never waits on them.
 #
 #   py -3 tools/astindex/launch.py <build dir>
 #
@@ -25,21 +26,21 @@ BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 
 def main():
     build = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "..", "build"))
-    path = os.path.join(build, "astindex.log")
+    path = os.path.join(build, "codemap.log")
     big = os.path.exists(path) and os.path.getsize(path) > 1 << 20
     log = open(path, "w" if big else "a", encoding="utf-8")   # append: a run may still be writing it
-    cmd = [sys.executable, os.path.join(HERE, "astindex.py"), "--cc", os.path.join(build, "compile_commands.json"),
-           "--lock", os.path.join(build, "astindex.lock"), "--jobs", str(min(8, os.cpu_count() or 1))]
+    cmd = [sys.executable, os.path.join(HERE, "..", "codemap", "run.py"), build,
+           "--jobs", str(min(8, os.cpu_count() or 1))]
     base = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS
     for flags in (base | CREATE_BREAKAWAY_FROM_JOB, base):
         try:
             subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                              creationflags=flags, close_fds=True, cwd=build)
-            print(f"[astindex] indexing in the background; log: {os.path.join(build, 'astindex.log')}")
+            print(f"[codemap] indexing and mapping in the background; log: {path}")
             return
         except OSError:
             continue
-    print("[astindex] could not start the indexer (the build is unaffected)")
+    print("[codemap] could not start the indexer (the build is unaffected)")
 
 
 if __name__ == "__main__":

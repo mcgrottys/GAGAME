@@ -1,6 +1,7 @@
 #include "sim/SeaState.h"
 
 #include "core/Common.h"
+#include "core/FileText.h"
 #include "core/Json.h"
 
 #include <algorithm>
@@ -13,14 +14,6 @@ namespace ga {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
-
-std::string ReadFile(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return {};
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
-}
 
 // Unit-amplitude spectral shapes. The absolute level comes from the numeric normalisation in
 // BuildParams, so only the SHAPE matters here -- and it must match OceanCompute.hlsl exactly.
@@ -46,7 +39,7 @@ double ShapeOf(const PartParam& p, double f) {
 
 std::vector<std::pair<double, double>> SeaState::PointsOf(const std::string& jsonPath) {
     std::vector<std::pair<double, double>> out;
-    const std::string text = ReadFile(jsonPath);
+    const std::string text = ReadFileText(jsonPath);
     std::string err;
     const JsonValue root = JsonParser::Parse(text, &err);
     if (const JsonValue* pts = root.Get("points"); pts && pts->type == JsonValue::Type::Array) {
@@ -56,7 +49,7 @@ std::vector<std::pair<double, double>> SeaState::PointsOf(const std::string& jso
 }
 
 bool SeaState::Load(const std::string& jsonPath, int point) {
-    const std::string text = ReadFile(jsonPath);
+    const std::string text = ReadFileText(jsonPath);
     if (text.empty()) {
         Log("[sea] cannot read %s", jsonPath.c_str());
         return false;

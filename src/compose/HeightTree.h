@@ -145,6 +145,7 @@ public:
     // No load starts after this, and it returns when none is running: the tree a load reads must not
     // die under it (the Assembly closes this before its height TileTree destructs).
     void Close() {
+        m_stop = true;   // a load composing a cold pyramid stops painting and leaves
         std::unique_lock<std::mutex> lk(m_mx);
         m_closed = true;
         m_idle.wait(lk, [&] { return m_inflight == 0; });
@@ -441,7 +442,11 @@ private:
                     if (!run) letGo.fetch_add(1, std::memory_order_relaxed);
                 }
             }
-            if (run) Shared(key, r);
+            if (run) {
+                g_tileStop = &m_stop;
+                Shared(key, r);
+                g_tileStop = nullptr;
+            }
             {
                 std::lock_guard<std::mutex> lk(m_mx);
                 m_pending.erase(key);
@@ -521,6 +526,7 @@ private:
     std::vector<std::pair<uint64_t, TileRequest>> m_asks;     // ... in the order asked (newest last)
     uint32_t m_inflight = 0;
     bool m_closed = false;
+    std::atomic<bool> m_stop{false};   // Close() said: a running load stops painting (g_tileStop)
     std::atomic<uint64_t> m_landed{0};
     std::list<std::pair<uint64_t, Tile>> m_lru;
     std::unordered_map<uint64_t, std::list<std::pair<uint64_t, Tile>>::iterator> m_index;

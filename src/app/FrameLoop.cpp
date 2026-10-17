@@ -3531,8 +3531,11 @@ bool FrameLoop::Frame() {
                 PROF_BEGIN();
                 // F13: the blocking path (the field read or solved ON the frame) is for the runs
                 // whose frames must see it -- a dump, a rail, a settle -- not for every headless
-                // run: a measurement of the frame's cost wants the frame the player gets.
-                const bool waveBlock = S.capture.headless &&
+                // run: a measurement of the frame's cost wants the frame the player gets. A rail
+                // flown under --bench captures nothing, so it is a measurement too: on the storm
+                // rail the first solve blocked ONE frame for 24 s and was 20 of the loop's 45 ms
+                // mean (2026-10-17), a cost no player pays (theirs solves behind the frame).
+                const bool waveBlock = S.capture.headless && !opt.bench &&
                                        (!S.capture.dump.empty() || !S.capture.hdr.empty() ||
                                         !S.capture.mp4.empty() || !S.capture.railDir.empty() ||
                                         S.capture.settle.sync || S.capture.settle.hold ||

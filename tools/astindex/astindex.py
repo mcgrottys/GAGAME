@@ -36,6 +36,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normcase(os.path.abspath(os.path.join(HERE, "..", "..")))
 DB = os.path.join(ROOT, "tools", "Scriptorium", "scriptorium.db")
 SCHEMA = os.path.join(HERE, "schema.sql")
+with open(os.path.abspath(__file__), "rb") as _fh:
+    SELF_HASH = hashlib.sha1(_fh.read()).hexdigest()
 DXC_DEFAULT = r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\dxc.exe"
 
 
@@ -130,6 +132,23 @@ DECL_KINDS = FN_KINDS | {"STRUCT_DECL", "CLASS_DECL", "UNION_DECL", "ENUM_DECL",
 REF_EXPRS = {"DECL_REF_EXPR", "MEMBER_REF_EXPR"}
 PASS_THROUGH = {"UNEXPOSED_EXPR", "PAREN_EXPR"}
 RECORD_KINDS = {"STRUCT_DECL", "CLASS_DECL", "UNION_DECL"}
+# tools/codemap's regions and values (parse_tu's guards / ex)
+CASTS = {"UNEXPOSED_EXPR", "PAREN_EXPR", "CSTYLE_CAST_EXPR", "CXX_STATIC_CAST_EXPR",
+         "CXX_FUNCTIONAL_CAST_EXPR", "CXX_CONST_CAST_EXPR"}
+TYPEISH = {"TYPE_REF", "TEMPLATE_REF", "NAMESPACE_REF"}
+OPS = {"==", "!=", "<", "<=", ">", ">=", "&&", "||", "+", "-", "*", "/", "%", "&", "|", "^"}
+EXIT_KINDS = {"RETURN_STMT", "BREAK_STMT", "CONTINUE_STMT", "GOTO_STMT", "CXX_THROW_EXPR"}
+LOOP_KINDS = {"WHILE_STMT", "FOR_STMT", "CXX_FOR_RANGE_STMT", "DO_STMT"}
+# clang's CXBinaryOperatorKind / CXUnaryOperatorKind (clang-c/Index.h)
+BIN_OPS = {3: "*", 4: "/", 5: "%", 6: "+", 7: "-", 8: "<<", 9: ">>", 11: "<", 12: ">", 13: "<=", 14: ">=",
+           15: "==", 16: "!=", 17: "&", 18: "^", 19: "|", 20: "&&", 21: "||", 22: "=", 23: "*=", 24: "/=",
+           25: "%=", 26: "+=", 27: "-=", 28: "<<=", 29: ">>=", 30: "&=", 31: "^=", 32: "|=", 33: ","}
+STL_BUILDS = {"emplace_back", "emplace", "emplace_front", "emplace_hint", "try_emplace", "make_unique",
+              "make_shared", "make_optional", "construct_at"}
+UN_OPS = {1: "++", 2: "--", 3: "++", 4: "--", 5: "&", 6: "*", 7: "+", 8: "-", 9: "~", 10: "!"}
+CPP_TABLES = ("ast_decls", "ast_refs", "ast_layouts", "ast_fields", "ast_includes", "ast_regions",
+              "ast_values", "ast_litcalls")
+GUARD_KINDS = {"IF_STMT", "CONDITIONAL_OPERATOR", "BINARY_OPERATOR", "SWITCH_STMT", "COMPOUND_STMT"} | LOOP_KINDS
 
 
 def parse_tu(job):
@@ -174,12 +193,24 @@ def parse_tu(job):
         return b
 
     def text_between(r, a, b):
-        """The source between two offsets: how an operator is told apart (the clang 18 bindings
-        have no binary_operator), e.g. '=' from '==' between an assignment's two sides."""
+        """The source between two offsets (a fallback; bin_op / un_op ask clang first)."""
         s = src(r)
         if 0 <= a <= b <= len(s) and b - a < 64:
             return s[a:b].decode("utf-8", "replace").strip()
         return ""
+
+    # An operator's kind from clang itself (the C API has had it since clang 17; the Python
+    # bindings of 18 do not wrap it). Reading the source between the operands, as this did before,
+    # fails inside a macro's arguments: GA_CHECK(q->GetTimestampFrequency(&freq)) read `&freq` as a
+    # plain read, so the write through the pointer was invisible.
+    def bin_op(c, r, ch):
+        k = lib.clang_getCursorBinaryOperatorKind(c)
+        return BIN_OPS.get(k) or text_between(r, ch[0].extent.end.offset, ch[1].extent.start.offset)
+
+    def un_op(c, r, ch):
+        k = lib.clang_getCursorUnaryOperatorKind(c)
+        return UN_OPS.get(k) or (text_between(r, c.extent.start.offset, ch.extent.start.offset)
+                                 or text_between(r, ch.extent.end.offset, c.extent.end.offset))
 
     decls, refs, layouts, fields = [], [], [], []
     files_seen = set()
@@ -212,6 +243,11 @@ def parse_tu(job):
     lib.clang_getOverloadedDecl.restype = ci.Cursor
     lib.clang_getOverloadedDecl.errcheck = ci.Cursor.from_result
 
+    lib.clang_getCursorBinaryOperatorKind.argtypes = [ci.Cursor]
+    lib.clang_getCursorBinaryOperatorKind.restype = ctypes.c_int
+    lib.clang_getCursorUnaryOperatorKind.argtypes = [ci.Cursor]
+    lib.clang_getCursorUnaryOperatorKind.restype = ctypes.c_int
+
     def candidates(c):
         return [lib.clang_getOverloadedDecl(c, i) for i in range(lib.clang_getNumOverloadedDecls(c))]
 
@@ -228,9 +264,362 @@ def parse_tu(job):
         # rest; asked of the syntax instead, the answer is the same from every TU.
         return c.is_definition() or (kn in FN_KINDS and kn != "FUNCTION_TEMPLATE" and c.is_default_method())
 
+    # ---- tools/codemap: the conditions code runs under, the values declarations take, and the calls
+    # that name something by a string (schema.sql: ast_regions, ast_values, ast_litcalls).
+    regions, values, litcalls = [], [], []
+
+    def span(r, a, b):
+        s = src(r)
+        return s[a:b].decode("utf-8", "replace") if 0 <= a <= b <= len(s) else ""
+
+    def peel(c):
+        """Through parentheses, casts and the implicit wrappers clang 18 leaves unexposed, as long
+        as each holds exactly one expression."""
+        while c.kind.name in CASTS:
+            ch = [x for x in c.get_children() if x.kind.name not in TYPEISH]
+            if len(ch) != 1:
+                return c
+            c = ch[0]
+        return c
+
+    def first_token(c):
+        for t in c.get_tokens():
+            return t.spelling
+        return None
+
+    def ex(c, d=0):
+        """An expression as JSON-ready data (the grammar in schema.sql)."""
+        c = peel(c)
+        kn = c.kind.name
+        if d > 8:
+            return ["?"]
+        if kn == "INTEGER_LITERAL":
+            t = (first_token(c) or "").rstrip("uUlL").replace("'", "")
+            try:
+                return int(t, 0)
+            except ValueError:
+                return ["?"]
+        if kn == "FLOATING_LITERAL":
+            try:
+                return float((first_token(c) or "").rstrip("fFlL"))
+            except ValueError:
+                return ["?"]
+        if kn == "CXX_BOOL_LITERAL_EXPR":
+            return first_token(c) == "true"
+        if kn == "CXX_NULL_PTR_LITERAL_EXPR":
+            return None
+        if kn == "STRING_LITERAL":
+            parts = [t.spelling for t in c.get_tokens()]
+            out = []
+            for p in parts:
+                m = re.match(r'^(?:L|u8|u|U)?"(.*)"$', p, re.S)
+                if m:
+                    out.append(m.group(1).replace('\\"', '"').replace("\\\\", "\\"))
+            return "".join(out)
+        if kn in REF_EXPRS:
+            t = c.referenced
+            if t is None:
+                return ["?"]
+            tk = t.kind.name
+            if tk == "FIELD_DECL":
+                return ["f", t.get_usr()]
+            if tk == "VAR_DECL":
+                p = t.semantic_parent
+                return ["l" if p is not None and p.kind.name in FN_KINDS else "g", t.get_usr()]
+            if tk == "PARM_DECL":
+                return ["p", t.get_usr()]
+            if tk == "ENUM_CONSTANT_DECL":
+                return t.enum_value
+            if tk in FN_KINDS:
+                return ["fn", t.get_usr()]
+            return ["?"]
+        ch = list(c.get_children())
+        if kn == "BINARY_OPERATOR" and len(ch) == 2:
+            op = bin_op(c, r_cur[0], ch)
+            return [op, ex(ch[0], d + 1), ex(ch[1], d + 1)] if op in OPS else ["?"]
+        if kn == "UNARY_OPERATOR" and len(ch) == 1:
+            op = {"!": "!", "-": "neg", "&": "&", "*": "*"}.get(un_op(c, r_cur[0], ch[0]))
+            return [op, ex(ch[0], d + 1)] if op else ["?"]
+        if kn == "CONDITIONAL_OPERATOR" and len(ch) == 3:
+            return ["?:"] + [ex(x, d + 1) for x in ch]
+        if kn == "ARRAY_SUBSCRIPT_EXPR" and len(ch) == 2:
+            return ["[]", ex(ch[0], d + 1), ex(ch[1], d + 1)]
+        if kn == "INIT_LIST_EXPR" and len(ch) <= 32:      # BindEnum's names: {"chart", "world", "gulf"}
+            return ["{}"] + [ex(x, d + 1) for x in ch]
+        if kn == "CALL_EXPR":
+            t = c.referenced
+            if t is None:
+                return ["?"]
+            obj, args = call_parts(c, t, ch)
+            name = t.spelling
+            if t.kind.name == "CONSTRUCTOR" and len(args) == 1:
+                return ex(args[0], d + 1)                    # a conversion: std::string("mars")
+            if name.startswith("operator"):
+                op = name[8:].strip()
+                xs = ([obj] if obj is not None else []) + args
+                if op in OPS and len(xs) == 2:
+                    return [op, ex(xs[0], d + 1), ex(xs[1], d + 1)]
+                if op == "!" and len(xs) == 1:
+                    return ["!", ex(xs[0], d + 1)]
+                if op == "bool" and len(xs) == 1:
+                    return ["bool", ex(xs[0], d + 1)]
+                if op in ("->", "*") and len(xs) == 1:
+                    return ex(xs[0], d + 1)
+            return ["call", t.get_usr(), ex(obj, d + 1) if obj is not None else None] + [ex(a, d + 1) for a in args]
+        return ["?"]
+
+    def call_parts(c, t, ch):
+        """(object, arguments) of a call: the callee expression is dropped (a member call's object
+        is the child of its MEMBER_REF_EXPR), an operator call's operands are its arguments."""
+        tusr = t.get_usr()
+        obj, args, seen, before = None, [], False, 0
+        for x in ch:
+            u = peel(x)
+            if not seen and u.kind.name in REF_EXPRS and u.referenced is not None and u.referenced.get_usr() == tusr:
+                seen, before = True, len(args)
+                sub = [y for y in u.get_children() if y.kind.name not in TYPEISH]
+                if u.kind.name == "MEMBER_REF_EXPR" and sub:
+                    obj = sub[0]
+                continue
+            args.append(x)
+        # An operator called on an object -- `find(a, b)` with find a lambda, `m[k]`, `a == b` as a
+        # member -- lists the object FIRST, before the operator's own reference (or with no such
+        # reference at all for operator()). Set aside, the arguments line up with the parameters
+        # (a by-reference out-parameter was read one place off before).
+        if obj is None and args and t.kind.name == "CXX_METHOD" and not t.is_static_method() \
+                and t.spelling.startswith("operator") and (before > 0 or not seen):
+            obj = args.pop(0)
+        return obj, args
+
+    def targets(c):
+        """Every (usr, detail) an lvalue may name: `(side == 0 ? aP : aS) = a` writes either arm."""
+        c = peel(c)
+        if c.kind.name == "CONDITIONAL_OPERATOR":
+            ch = list(c.get_children())
+            if len(ch) == 3:
+                return targets(ch[1]) + targets(ch[2])
+        return [target(c)]
+
+    def target(c):
+        """(usr, detail) of the declaration an lvalue names: the field at the end of a.b.c, a
+        variable, either through a subscript (detail '[i]')."""
+        c = peel(c)
+        kn = c.kind.name
+        if kn == "ARRAY_SUBSCRIPT_EXPR":
+            ch = list(c.get_children())
+            if len(ch) == 2:
+                u, _ = target(ch[0])
+                i = ex(ch[1])
+                return u, f"[{i}]" if isinstance(i, int) else "[?]"
+        if kn == "CALL_EXPR" and c.referenced is not None and c.referenced.spelling in ("operator[]", "operator*", "operator->"):
+            obj, args = call_parts(c, c.referenced, list(c.get_children()))
+            if obj is not None:
+                return target(obj)[0], "[?]"
+        if kn in REF_EXPRS and c.referenced is not None and c.referenced.kind.name in ("FIELD_DECL", "VAR_DECL"):
+            return c.referenced.get_usr(), ""
+        return None, ""
+
+    def value(usr, c, kind, expr, container, r, detail=""):
+        if isinstance(usr, list):          # targets(): every arm
+            for u, det in usr:
+                value(u, c, kind, expr, container, r, det or detail)
+            return
+        if usr:
+            values.append((usr, r, c.location.line, kind, json.dumps(expr, separators=(",", ":")),
+                           container, detail, "cpp"))
+
+    def init_expr(c):
+        """A declaration's initializer, or None. The children alone cannot say (`float a[4];` has the
+        4 as a child): the source after the name must open one with '=', '{' or '('."""
+        tail = span(r_cur[0], c.location.offset, c.extent.end.offset)
+        if not re.match(r"^[\w:~]*\s*(?:\[[^\]]*\]\s*)*[={(]", tail):
+            return None
+        ch = [x for x in c.get_children() if x.kind.name not in TYPEISH and x.kind.name != "PARM_DECL"]
+        return ch[-1] if ch else None
+
+    def region(r, a, b, cond, pol, container):
+        regions.append((r, a.line, a.column, b.line, b.column,
+                        json.dumps(cond, separators=(",", ":")), pol, container, "cpp"))
+
+    def exits(c):
+        kn = c.kind.name
+        if kn in EXIT_KINDS:
+            return True
+        if kn == "COMPOUND_STMT":
+            ch = list(c.get_children())
+            return bool(ch) and exits(ch[-1])
+        if kn == "IF_STMT":
+            p = if_parts(c)
+            return p is not None and p[2] is not None and exits(p[1]) and exits(p[2])
+        return False
+
+    def if_parts(c):
+        """(cond, then, else-or-None) of an if, with or without an init statement. The children
+        alone are ambiguous at three (init, cond, then | cond, then, else): an `else` between the
+        last two decides."""
+        ch = list(c.get_children())
+        if len(ch) < 2:
+            return None
+        r = r_cur[0]
+        has_else = len(ch) >= 3 and re.search(r"\belse\b", span(r, ch[-2].extent.end.offset, ch[-1].extent.start.offset))
+        if has_else:
+            return ch[-3], ch[-2], ch[-1]
+        return ch[-2], ch[-1], None
+
+    def cond_of(c):
+        """A condition: an expression, or a declared condition variable (`if (auto* x = f())`)."""
+        if c.kind.name == "VAR_DECL":
+            return ["l", c.get_usr()]
+        return ex(c)
+
+    def guards(c, kn, container, r):
+        """The regions a statement or expression opens (schema.sql ast_regions)."""
+        if kn == "IF_STMT":
+            p = if_parts(c)
+            if p:
+                cond = cond_of(p[0])
+                region(r, p[1].extent.start, p[1].extent.end, cond, 1, container)
+                if p[2] is not None:
+                    region(r, p[2].extent.start, p[2].extent.end, cond, -1, container)
+        elif kn == "CONDITIONAL_OPERATOR":
+            ch = list(c.get_children())
+            if len(ch) == 3:
+                cond = ex(ch[0])
+                region(r, ch[1].extent.start, ch[1].extent.end, cond, 1, container)
+                region(r, ch[2].extent.start, ch[2].extent.end, cond, -1, container)
+        elif kn == "BINARY_OPERATOR":
+            ch = list(c.get_children())
+            if len(ch) == 2:
+                op = bin_op(c, r, ch)
+                if op in ("&&", "||"):
+                    region(r, ch[1].extent.start, ch[1].extent.end, ex(ch[0]), 1 if op == "&&" else -1, container)
+        elif kn in LOOP_KINDS:
+            ch = list(c.get_children())
+            if ch:
+                body = ch[0] if kn == "DO_STMT" else ch[-1]
+                region(r, body.extent.start, body.extent.end, "loop", 0, container)
+                if kn == "WHILE_STMT" and len(ch) >= 2:
+                    region(r, body.extent.start, body.extent.end, cond_of(ch[-2]), 1, container)
+        elif kn == "SWITCH_STMT":
+            ch = list(c.get_children())
+            if len(ch) >= 2 and ch[-1].kind.name == "COMPOUND_STMT":
+                sel = cond_of(ch[-2])
+                vals, live, dflt = [], False, False
+                for s in ch[-1].get_children():
+                    stmt = s
+                    if s.kind.name in ("CASE_STMT", "DEFAULT_STMT"):
+                        if not live:
+                            vals, dflt = [], False
+                        live = True
+                        while stmt is not None and stmt.kind.name in ("CASE_STMT", "DEFAULT_STMT"):
+                            sc = list(stmt.get_children())
+                            if stmt.kind.name == "CASE_STMT":
+                                vals.append(ex(sc[0]) if sc else ["?"])
+                            else:
+                                dflt = True
+                            stmt = sc[-1] if len(sc) >= (2 if stmt.kind.name == "CASE_STMT" else 1) else None
+                    if stmt is None or not live:
+                        continue
+                    if not dflt:           # `default:` runs for what no case named: left unguarded
+                        region(r, stmt.extent.start, stmt.extent.end, ["in", sel] + vals, 1, container)
+                    if exits(stmt):
+                        live = False
+        elif kn == "COMPOUND_STMT":
+            ch = list(c.get_children())
+            for i in range(len(ch) - 1):
+                if ch[i].kind.name != "IF_STMT":
+                    continue
+                p = if_parts(ch[i])
+                if not p:
+                    continue
+                te, ee = exits(p[1]), p[2] is not None and exits(p[2])
+                if te != ee:       # one arm leaves the block: the rest runs only on the other
+                    region(r, ch[i + 1].extent.start, c.extent.end, cond_of(p[0]), -1 if te else 1, container)
+
+    r_cur = [None]       # the file being walked, for ex()'s operator spelling
+
     def visit(c, ctx, container, r):
         kn = c.kind.name
         children = None
+        r_cur[0] = r
+        if container and kn in GUARD_KINDS:
+            guards(c, kn, container, r)
+        if kn == "VAR_DECL":
+            e = init_expr(c)
+            p = c.semantic_parent
+            if e is not None:
+                local = p is not None and p.kind.name in FN_KINDS
+                # 'ref': `auto& mode = m_mode;` -- a write through it is a write to what it names
+                tk = c.type.kind
+                ref = tk in (ci.TypeKind.LVALUEREFERENCE, ci.TypeKind.RVALUEREFERENCE)
+                value(c.get_usr(), c, "local" if local else "init", ex(e), container, r,
+                      "ref" if ref else "const" if c.type.is_const_qualified() else "")
+        elif kn == "FIELD_DECL" and not c.is_bitfield():
+            e = init_expr(c)
+            if e is not None:
+                value(c.get_usr(), c, "default", ex(e), container, r)
+        elif kn == "CONSTRUCTOR" and c.is_definition():
+            ch = list(c.get_children())
+            for i, x in enumerate(ch[:-1]):
+                if x.kind.name == "MEMBER_REF" and x.referenced is not None:
+                    value(x.referenced.get_usr(), x, "assign", ex(ch[i + 1]), c.get_usr(), r)
+        elif kn == "INIT_LIST_EXPR":
+            # canonical: push_back({...}) types the list as the container's value_type, a typedef
+            d = c.type.get_canonical().get_declaration()
+            if d is not None and d.kind.name in RECORD_KINDS and any(True for _ in c.get_children()):
+                value(d.get_usr(), c, "aggregate", ["?"], container, r)
+        elif kn == "CALL_EXPR":
+            t = c.referenced
+            if t is not None and t.kind.name in FN_KINDS:
+                ch = list(c.get_children())
+                obj, args = call_parts(c, t, ch)
+                name = t.spelling
+                if name == "operator=" or (name.startswith("operator") and name.endswith("=") and name[8:] not in ("==", "!=", "<=", ">=")):
+                    xs = ([obj] if obj is not None else []) + args
+                    if len(xs) == 2:
+                        value(targets(xs[0]), c, "assign", ex(xs[1]) if name == "operator=" else ["?"], container, r)
+                else:
+                    # a non-const member call may change its object (ptr.reset(), name.clear())
+                    if obj is not None and t.kind.name != "CONSTRUCTOR" and not t.is_const_method() \
+                            and not t.is_static_method():
+                        value(targets(obj), c, "byref", ["?"], container, r, name)
+                    try:
+                        params = list(t.get_arguments())
+                    except Exception:
+                        params = []
+                    for a, p in zip(args, params):
+                        pt = p.type
+                        if pt.kind == ci.TypeKind.LVALUEREFERENCE and not pt.get_pointee().is_const_qualified():
+                            value(targets(a), a, "byref", ["?"], container, r, name)
+                # A record built INSIDE the STL from arguments -- v.emplace_back(a, b),
+                # make_unique<T>(a), m.try_emplace(k, a) -- gets its fields where no repo code
+                # writes them: every record among the template arguments counts as built.
+                if name in STL_BUILDS and args:
+                    ty = (c.type if name.startswith("make_") or obj is None else obj.type).get_canonical()
+                    for k_ in range(max(0, ty.get_num_template_arguments())):
+                        d = ty.get_template_argument_type(k_).get_canonical().get_declaration()
+                        if d is not None and d.kind.name in RECORD_KINDS:
+                            value(d.get_usr(), c, "aggregate", ["?"], container, r, name)
+                if any(peel(a).kind.name == "STRING_LITERAL" for a in args):
+                    loc = c.location
+                    litcalls.append((t.get_usr(), name, r, loc.line, loc.column, container,
+                                     json.dumps([ex(a) for a in args], separators=(",", ":")), "cpp"))
+        elif kn == "COMPOUND_ASSIGNMENT_OPERATOR":
+            ch = list(c.get_children())
+            if len(ch) == 2:
+                value(targets(ch[0]), c, "assign", ["?"], container, r)
+        elif kn == "BINARY_OPERATOR":
+            ch = list(c.get_children())
+            if len(ch) == 2 and bin_op(c, r, ch) == "=":
+                value(targets(ch[0]), c, "assign", ex(ch[1]), container, r)
+        elif kn == "UNARY_OPERATOR":
+            ch = list(c.get_children())
+            if len(ch) == 1:
+                op = un_op(c, r, ch[0])
+                if op in ("++", "--"):
+                    value(targets(ch[0]), c, "assign", ["?"], container, r)
+                elif op == "&":       # its address taken: it may be written through the pointer
+                    value(targets(ch[0]), c, "byref", ["?"], container, r, "&")
         if kn in DECL_KINDS:
             loc = c.location
             parent = c.semantic_parent
@@ -325,7 +714,7 @@ def parse_tu(job):
                 lhs, rhs = children
                 write = kn == "COMPOUND_ASSIGNMENT_OPERATOR"
                 if not write:
-                    write = text_between(r, lhs.extent.end.offset, rhs.extent.start.offset) == "="
+                    write = bin_op(c, r, children) == "="
                 visit(lhs, "write" if write else None, container, r)
                 visit(rhs, None, container, r)
                 return
@@ -333,9 +722,7 @@ def parse_tu(job):
             children = list(c.get_children())
             if len(children) == 1:
                 ch = children[0]
-                pre = text_between(r, c.extent.start.offset, ch.extent.start.offset)
-                post = text_between(r, ch.extent.end.offset, c.extent.end.offset)
-                op = pre or post
+                op = un_op(c, r, ch)
                 sub = "write" if op in ("++", "--") else "addr" if op == "&" else None
                 visit(ch, sub, container, r)
                 return
@@ -386,6 +773,7 @@ def parse_tu(job):
         "errors_in_repo": [d for d in diags if d[0] >= 3 and d[1] and rel(d[1])],
         "diags": len(diags), "deps": sorted(deps), "files": sorted(files_seen),
         "decls": decls, "refs": refs, "layouts": layouts, "fields": fields, "includes": includes,
+        "regions": regions, "values": values, "litcalls": litcalls,
     }
 
 
@@ -557,6 +945,11 @@ def parse_hlsl_dump(text, out):
                 continue
             name, ftype = nm.group(1), nm.group(2)
             usr = f"hlsl:{name} {ftype}"
+            # A function defined in a .hlsl belongs to that shader alone, and eleven shaders each
+            # define PsMain(VsOut): without the file in its usr they were one row, the last dumped.
+            # A .hlsli's functions are shared by name, so they keep the plain usr.
+            if own[0].endswith(".hlsl"):
+                usr = f"hlsl:{os.path.basename(own[0])}#{name} {ftype}"
             if kind == "CXXMethodDecl" and struct_name:
                 usr = f"hlsl:{struct_name}::{name} {ftype}"
             addr[a] = (usr, name)
@@ -642,6 +1035,7 @@ def index_hlsl(db, dxc, jobs, full):
     stamps = {f: stamp(os.path.join(shader_dir, f)) for f in files}
     stamps["#defines"] = sorted((k, sorted(v)) for k, v in defines.items())
     stamps["#literals"] = hashlib.sha1(json.dumps(sorted(literals)).encode()).hexdigest()
+    stamps["#self"] = SELF_HASH
     key = json.dumps(stamps, sort_keys=True)
     row = db.execute("SELECT value FROM ast_meta WHERE key='hlsl_stamps'").fetchone()
     if row and row[0] == key and not full:
@@ -779,8 +1173,7 @@ def run(argv):
     with open(SCHEMA, encoding="utf-8") as fh:
         db.executescript(fh.read())
     if full:
-        for t in ("ast_tus", "ast_decls", "ast_refs", "ast_layouts", "ast_fields", "ast_includes",
-                  "ast_hlsl_entries", "ast_hlsl_reach"):
+        for t in ("ast_tus", "ast_hlsl_entries", "ast_hlsl_reach") + CPP_TABLES:
             db.execute(f"DELETE FROM {t}")
         db.execute("DELETE FROM ast_meta WHERE key='hlsl_stamps'")
     db.commit()
@@ -821,7 +1214,9 @@ def run(argv):
             continue
         cur_tus.add(r)
         args = clang_args(e["command"], include)
-        h = hashlib.sha1("\0".join(args).encode()).hexdigest()
+        # the indexer's own source is part of the key: a changed walk re-reads every TU, so a new
+        # table never holds only the TUs that happened to change since
+        h = hashlib.sha1(("\0".join(args) + "\0" + SELF_HASH).encode()).hexdigest()
         prev = old.get(r)
         if prev and prev[0] == h and all(st(p) == s for p, s in prev[1]):
             continue
@@ -844,7 +1239,7 @@ def run(argv):
 
     def clear(files):
         for f in sorted(files - cleared):
-            for t in ("ast_decls", "ast_refs", "ast_layouts", "ast_fields", "ast_includes"):
+            for t in CPP_TABLES:
                 db.execute(f"DELETE FROM {t} WHERE file=? AND lang='cpp'", (f,))
             cleared.add(f)
 
@@ -867,6 +1262,11 @@ def run(argv):
             db.executemany("INSERT OR IGNORE INTO ast_layouts VALUES(?,?,?,?,?,?,?,?)", res["layouts"])
             db.executemany("INSERT OR IGNORE INTO ast_fields VALUES(?,?,?,?,?,?,?,?,?)", res["fields"])
             db.executemany("INSERT OR IGNORE INTO ast_includes VALUES(?,?,?)", res["includes"])
+            # a header's rows come from every TU that includes it: kept once (they are identical)
+            for t, n in (("regions", 9), ("values", 8), ("litcalls", 8)):
+                fresh = [x for x in res[t] if (t, x) not in ref_seen]
+                ref_seen.update((t, x) for x in fresh)
+                db.executemany(f"INSERT INTO ast_{t} VALUES({','.join('?' * n)})", fresh)
             db.execute("INSERT OR REPLACE INTO ast_tus VALUES(?,?,?,?,?,?)",
                        (res["tu"], hashes[res["path"]], json.dumps([[p, st(p)] for p in res["deps"]]),
                         round(res["total_s"], 3), res["errors"], res["diags"]))
@@ -882,7 +1282,7 @@ def run(argv):
         f"{sum(t for t, _, _ in per_tu) / n:.2f}s (parse {sum(p for _, p, _ in per_tu) / n:.2f}s), "
         f"slowest {per_tu[0][0]:.2f}s {per_tu[0][2]}; {n_err} errors / {n_diag} diagnostics, system headers included")
     counts = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-              for t in ("ast_decls", "ast_refs", "ast_layouts", "ast_fields", "ast_includes")}
+              for t in CPP_TABLES}
     log("rows: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
 
 

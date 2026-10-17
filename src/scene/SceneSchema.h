@@ -16,7 +16,8 @@
 //      water      {pixelWater, foam, edgePx, heightScale, swe{...}, bank{...},
 //                  wavefield{...}, closures{...}, fleet{...}}   -- the last three are what
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
-//                  authored if absent, never clobbered, hot-reloaded)
+//                  authored if absent, never clobbered, hot-reloaded), and their table is
+//                  WaterComponent's own (scene/WaterComponent.h), nested over `wave`
 //      streaming  {tileBudget, dayTiles, dayBytes, googleZoom, predictEvery, directStorage,
 //                  colorTrees, gisGate, seafloor, exposure, holdMargin, treeRoot}
 //                                                -- scene state: they change the picture
@@ -71,6 +72,7 @@
 #pragma once
 
 #include "core/Registry.h"
+#include "core/SceneConfig.h"
 #include "core/Space.h"
 #include "scene/Props.h"
 
@@ -190,46 +192,14 @@ struct BankProps {
     bool flatBed = false;
     float flatBedNavd = -30.0f;
 };
-struct WavefieldProps {
-    bool enabled = true;
-    double orgX = -1400.0, orgZ = -800.0;   // PHASE C4: the window's SW corner about place.anchor (m)
-    int nx = 1600, ny = 1000;
-    double cellM = 2.0;
-    int comps = 32;
-    double spreadDeg = 26.0, barNormalDeg = 285.0;
-    double gammaHs = 0.60, minSamplesPerLambda = 8.0;
-    double tideBucketM = 0.25, currentBucketMs = 0.10;
-    float featherM = 120.0f, chop = 1.1f, exag = 1.15f;
-    float bankTexelM = 1.2f;          // Restart: ring construction
-};
-struct ClosuresProps {
-    float shedSteepCap = 0.44f, shedMssCeil = 0.09f;
-    float churnGain = 0.12f;
-    float crestLo = 0.28f, crestHi = 0.80f;
-    float depthLo = 1.05f, depthHi = 1.95f;
-    float foamOpacity = 0.72f;
-    float ringBlendTexels = 48.0f;
-    float bandFoldWeight = 1.0f, windSeaFill = 1.0f;
-    float buoyAssimAgeH = 6.0f, buoyAssimGainMax = 1.8f;
-    float causticStrength = 0.6f;
-    bool waterOptics = true;
-    float jettyCrestNavd = -99.0f;
-};
-struct FleetBoat {
-    double speed = 4.86, halfLen = 7.5, wakeAmp = 0.55, offsetS = 0.0;
-    int dir = 1;
-};
-struct FleetProps {
-    bool enabled = false;             // boats: List(FleetBoat), unnamed
-};
 struct WaterSection {
     bool pixelWater = true;
     float foam = 1.0f, edgePx = 12.0f, heightScale = 1.15f;
     SweProps swe;
     BankProps bank;
-    WavefieldProps wavefield;
-    ClosuresProps closures;
-    FleetProps fleet;
+    // wavefield, closures, fleet: the struct WaterComponent reads, under WaterComponent's own three
+    // tables (scene/WaterComponent.h), nested here as views of it -- one table of those keys.
+    WaterSceneConfig wave;
 };
 struct StreamingSection {
     uint32_t tileBudget = 1000, predictEvery = 3;

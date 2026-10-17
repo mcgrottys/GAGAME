@@ -1,6 +1,7 @@
 #include "compose/BuildingSolids.h"
 
 #include "core/Common.h"
+#include "core/FileText.h"
 #include "core/Json.h"
 
 #include <algorithm>
@@ -12,17 +13,6 @@
 namespace ga {
 
 namespace {
-
-std::string ReadAll(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return {};
-    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-}
-
-bool EndsWith(const std::string& s, const char* tail) {
-    const size_t n = std::strlen(tail);
-    return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
-}
 
 // ---- the harvest: <stem>.buildings.json (the manifest and its cell index) + <stem>.buildings.bin.
 // One cell's `n` records from `offset`, keeping those whose first point lies in the box.
@@ -104,7 +94,7 @@ void AddPolygon(const JsonValue& poly, BuildingSolid& s) {
 
 bool LoadGeoJson(const std::string& path, std::vector<BuildingSolid>& out, std::string* why) {
     std::string err;
-    const std::string text = ReadAll(path);
+    const std::string text = ReadFileText(path);
     if (text.empty()) {
         if (why) *why = "cannot read " + path;
         return false;
@@ -239,7 +229,7 @@ void BuildingStack::Open(std::vector<BuildingSourceSpec> specs, const BuildingDe
         std::string why;
         if (EndsWith(sp.path, ".buildings.json")) {
             std::string err;
-            const JsonValue m = JsonParser::Parse(ReadAll(sp.path), &err);
+            const JsonValue m = JsonParser::Parse(ReadFileText(sp.path), &err);
             const JsonValue* cells = m.Get("cells");
             src.cellDeg = m.Get("cellDeg") ? m.Get("cellDeg")->number : 0.0;
             src.bin = sp.path.substr(0, sp.path.size() - 5) + ".bin";

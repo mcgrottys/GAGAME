@@ -1,6 +1,8 @@
 // SceneSchema - the sections' schemas, built once over static prototypes (M12 step 5a).
 #include "scene/SceneSchema.h"
 
+#include "scene/WaterComponent.h"
+
 namespace ga::scene {
 
 namespace {
@@ -10,7 +12,6 @@ namespace {
 // prototypes of their own.
 SceneDocument kDoc;
 IncludeEntry kInclude;
-FleetBoat kBoat;
 ViewProps kView;   // its viewport and follow prototypes live INSIDE it (Nest takes the address)
 RailKey kRailKey;
 PortalProps kPortal;
@@ -248,78 +249,10 @@ const Schema& BankSchema() {
     }();
     return *s;
 }
-const Schema& WavefieldSchema() {
-    static const Schema* s = [] {
-        auto& p = kDoc.water.wavefield;
-        Schema* sc = new Schema("water.wavefield", &p);
-        sc->Bind("enabled", p.enabled, "the solved wave field", H)
-            .Bind("orgX", p.orgX, Q::Length, "m", "window origin east of place.anchor, in its tangent plane", H)
-            .Bind("orgZ", p.orgZ, Q::Length, "m", "window origin north of place.anchor, in its tangent plane", H)
-            .Bind("nx", p.nx, Q::Dimensionless, "1", "cells east", H)
-            .Bind("ny", p.ny, Q::Dimensionless, "1", "cells north", H)
-            .Bind("cellM", p.cellM, Q::Length, "m", "cell size", H)
-            .Bind("comps", p.comps, Q::Dimensionless, "1", "spectral components", H)
-            .Bind("spreadDeg", p.spreadDeg, Q::Angle, "deg", "directional spread", H)
-            .Bind("barNormalDeg", p.barNormalDeg, Q::Angle, "deg", "the entrance bar's normal, compass", H)
-            .Bind("gammaHs", p.gammaHs, Q::Dimensionless, "1", "Hs <= gamma * h", H)
-            .Bind("minSamplesPerLambda", p.minSamplesPerLambda, Q::Dimensionless, "1", "upload gate", H)
-            .Bind("tideBucketM", p.tideBucketM, Q::Length, "m", "re-solve quantization", H)
-            .Bind("currentBucketMs", p.currentBucketMs, Q::Velocity, "m/s", "re-solve quantization", H)
-            .Bind("featherM", p.featherM, Q::Length, "m", "window edge blend", H)
-            .Bind("chop", p.chop, Q::Dimensionless, "1", "Gerstner horizontal displacement", H)
-            .Bind("exag", p.exag, Q::Dimensionless, "1", "display exaggeration on the solved comps", H)
-            .Bind("bankTexelM", p.bankTexelM, Q::Length, "m", "ring-0 texel (ring construction)", R);
-        return sc;
-    }();
-    return *s;
-}
-const Schema& ClosuresSchema() {
-    static const Schema* s = [] {
-        auto& p = kDoc.water.closures;
-        Schema* sc = new Schema("water.closures", &p);
-        sc->Bind("shedSteepCap", p.shedSteepCap, Q::Dimensionless, "1", "Miche cap on the shed slope variance", H)
-            .Bind("shedMssCeil", p.shedMssCeil, Q::Dimensionless, "1", "storm-sea mss ceiling", H)
-            .Bind("churnGain", p.churnGain, Q::Dimensionless, "1", "churn read gain (0 = off)", H)
-            .Bind("crestLo", p.crestLo, Q::Dimensionless, "1", "crest gate, eta/rms", H)
-            .Bind("crestHi", p.crestHi, Q::Dimensionless, "1", "crest gate, eta/rms", H)
-            .Bind("depthLo", p.depthLo, Q::Dimensionless, "1", "depth-excess trigger band", H)
-            .Bind("depthHi", p.depthHi, Q::Dimensionless, "1", "depth-excess trigger band", H)
-            .Bind("foamOpacity", p.foamOpacity, Q::Dimensionless, "1", "peak foam opacity", H)
-            .Bind("ringBlendTexels", p.ringBlendTexels, Q::Dimensionless, "1", "bank ring cross-fade width", H)
-            .Bind("bandFoldWeight", p.bandFoldWeight, Q::Dimensionless, "1", "the fold's per-band wavelength follows the spectrum", H)
-            .Bind("windSeaFill", p.windSeaFill, Q::Dimensionless, "1", "gain on the synthesised wind sea", H)
-            .Bind("buoyAssimAgeH", p.buoyAssimAgeH, Q::Time, "h", "buoy assimilation: max observation age", H)
-            .Bind("buoyAssimGainMax", p.buoyAssimGainMax, Q::Dimensionless, "1", "and its gain clamp", H)
-            .Bind("causticStrength", p.causticStrength, Q::Dimensionless, "1", "bed dapple (0 = off)", H)
-            .Bind("waterOptics", p.waterOptics, "K_d and the deep colour from the ocean-colour fields", H)
-            .Bind("jettyCrestNavd", p.jettyCrestNavd, Q::Length, "m NAVD88", "edit-land floor; <= -90 = auto", H);
-        return sc;
-    }();
-    return *s;
-}
-const Schema& FleetBoatSchema() {
-    static const Schema* s = [] {
-        Schema* sc = new Schema("water.fleet.boat", &kBoat);
-        sc->Bind("speed", kBoat.speed, Q::Velocity, "m/s", "AIS per-class mean SOG", H)
-            .Bind("halfLen", kBoat.halfLen, Q::Length, "m", "half length", H)
-            .Bind("wakeAmp", kBoat.wakeAmp, Q::Length, "m", "wake amplitude", H)
-            .Bind("offsetS", kBoat.offsetS, Q::Length, "m", "starting arc-length offset along the lane", H)
-            .Bind("dir", kBoat.dir, Q::Dimensionless, "1", "+1 outbound, -1 inbound", H);
-        return sc;
-    }();
-    return *s;
-}
-const Schema& FleetSchema() {
-    static const Schema* s = [] {
-        auto& p = kDoc.water.fleet;
-        Schema* sc = new Schema("water.fleet", &p);
-        sc->Bind("enabled", p.enabled, "the AIS-lane floats", H)
-            .List("boats", &FleetBoatSchema(), "the boats, in lane order", false);
-        return sc;
-    }();
-    return *s;
-}
-const Schema& WaterSchema() {
+// THE WATER SECTION. Its wavefield, closures and fleet are WaterComponent's own tables nested over
+// the document's WaterSceneConfig (`wave`): the component reads that struct, so the section and the
+// component cannot say two different things about one key.
+const Schema& WaterSectionSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.water;
         Schema* sc = new Schema("water", &p);
@@ -329,9 +262,9 @@ const Schema& WaterSchema() {
             .Bind("heightScale", p.heightScale, Q::Dimensionless, "1", "wave vertical exaggeration (--height-scale)", H)
             .Nest("swe", SweSchema(), &p.swe, "the shallow-water solver")
             .Nest("bank", BankSchema(), &p.bank, "the water bank")
-            .Nest("wavefield", WavefieldSchema(), &p.wavefield, "the solved wave field's window (data/wave_scene.json)")
-            .Nest("closures", ClosuresSchema(), &p.closures, "the kernel closures (data/wave_scene.json)")
-            .Nest("fleet", FleetSchema(), &p.fleet, "the AIS fleet (data/wave_scene.json)");
+            .Nest("wavefield", WavefieldTable(), &p.wave, "the solved wave field's window (data/wave_scene.json)")
+            .Nest("closures", ClosuresTable(), &p.wave, "the kernel closures (data/wave_scene.json)")
+            .Nest("fleet", FleetTable(), &p.wave, "the AIS fleet (data/wave_scene.json)");
         return sc;
     }();
     return *s;
@@ -922,7 +855,7 @@ const Schema& SceneFileSchema() {
             .Nest("sun", SunSchema(), &kDoc.sun, "the sun")
             .Nest("air", AirSchema(), &kDoc.air, "the air of the day: its aerosol, the picture's white")
             .Nest("sea", SeaSchema(), &kDoc.sea, "the sea state and the datum")
-            .Nest("water", WaterSchema(), &kDoc.water, "the water")
+            .Nest("water", WaterSectionSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
             .Nest("render", RenderSchema(), &kDoc.render, "the renderer: the kept frame and its grains")
             .Nest("debug", DebugSchema(), &kDoc.debug, "the debug views of the globe's surface")

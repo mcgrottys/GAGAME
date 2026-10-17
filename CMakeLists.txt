@@ -237,13 +237,14 @@ if (DXIL_DLL)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DXIL_DLL} $<TARGET_FILE_DIR:gagame>)
 endif()
 
-# The AST index (tools/astindex): after every link, libclang + dxc re-read what changed and update
-# the ast_* tables of tools/Scriptorium/scriptorium.db for the Scriptorium's refs / callers /
-# callees / layout / cbuffer_reads / includes tools. launch.py starts it DETACHED and returns in
-# well under a second, so the build never waits on it; the run logs to build/astindex.log and,
-# without the libclang wheel, writes one line saying so and indexes the HLSL only.
+# The AST index and the code map: after every link, tools/astindex/launch.py starts
+# tools/codemap/run.py DETACHED and returns in well under a second, so the build never waits on it.
+# The run re-reads what changed -- libclang + dxc into the ast_* tables, clangd-indexer into cd_*,
+# both in tools/Scriptorium/scriptorium.db -- and rewrites build/codemap/ (the map of the code laid
+# out like the code, the scene-to-code-path summaries, architecture.html; tools/codemap/README.md).
+# It logs to build/codemap.log; without libclang or clangd it says so there and does what it can.
 # GA_ASTINDEX=OFF turns it off.
-option(GA_ASTINDEX "Update the AST index after each build (tools/astindex)" ON)
+option(GA_ASTINDEX "Update the AST index and the code map after each build (tools/codemap)" ON)
 find_program(GA_PY_LAUNCHER py)
 if(GA_ASTINDEX AND GA_PY_LAUNCHER)
   add_custom_command(TARGET gagame POST_BUILD

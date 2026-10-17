@@ -465,7 +465,8 @@ static class McpServer
           {"name":"callees","description":"AST index: the functions fn calls (C++ or HLSL), engine functions only (not std:: or the SDK), with where each is declared.","inputSchema":{"type":"object","properties":{"fn":{"type":"string"}},"required":["fn"]}},
           {"name":"layout","description":"AST index: a record's memory layout -- fields, byte offsets, sizes, total size and alignment as clang lays it out for MSVC x64 -- and, beside it, the HLSL cbuffer or StructuredBuffer struct that mirrors it (same name, else the most field names in common), flagging every offset or size that differs. type: C++ type name / qualified name, or an HLSL cbuffer or struct name. HLSL offsets are COMPUTED from the packing rules, not read from DXC reflection.","inputSchema":{"type":"object","properties":{"type":{"type":"string"}},"required":["type"]}},
           {"name":"cbuffer_reads","description":"AST index (HLSL): which shader functions read which cbuffer fields and COMPONENTS. arg: a field (gMisc), a field and component (gWavesB.z), a cbuffer (SceneCb), or a function (PsMain) -- a function lists what it and everything it calls reads, and which entry points reach it.","inputSchema":{"type":"object","properties":{"arg":{"type":"string"}},"required":["arg"]}},
-          {"name":"includes","description":"AST index: what a file includes and what includes it (the preprocessor's resolution for C++, #include lines for HLSL). file: a substring of the repo path (Renderer.h, Common.hlsli).","inputSchema":{"type":"object","properties":{"file":{"type":"string"}},"required":["file"]}}
+          {"name":"includes","description":"AST index: what a file includes and what includes it (the preprocessor's resolution for C++, #include lines for HLSL). file: a substring of the repo path (Renderer.h, Common.hlsli).","inputSchema":{"type":"object","properties":{"file":{"type":"string"}},"required":["file"]}},
+          {"name":"codemap","description":"The code map (tools/codemap, rebuilt after every build into build/codemap/): clangd's call graph + libclang's conditions + dxc's shaders, evaluated against a scene. q is a tools/codemap/q.py command line: 'fn NAME [--scene S]' (a function's card), 'callers NAME -d 3', 'callees NAME -d 2', 'path A B [--scene S]', 'why NAME --scene scenes/demos/tokyo.json' (the chain from main with its conditions, or what cuts it and the value that decided), 'scene S [--diff T]', 'key render.shadowSteps [--scene S]', 'ask \"terrain shadow march\"' (full-text over code, scene keys, docs), 'dom NAME', 'file src/app/Assembly.cpp'. Empty q: the list. Short answers by design; build/codemap/INDEX.md says where everything else is.","inputSchema":{"type":"object","properties":{"q":{"type":"string"}}}}
         ]}
         """)!;
 
@@ -523,12 +524,38 @@ static class McpServer
             "layout" => Ast.Guard(() => Ast.Layout(db, args?["type"]?.ToString() ?? "")),
             "cbuffer_reads" => Ast.Guard(() => Ast.CbufferReads(db, args?["arg"]?.ToString() ?? "")),
             "includes" => Ast.Guard(() => Ast.Includes(db, args?["file"]?.ToString() ?? "")),
+            "codemap" => Codemap(repo, args?["q"]?.ToString() ?? ""),
             _ => $"unknown tool '{name}'"
         };
         return new JsonObject
         {
             ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text })
         };
+    }
+
+    // tools/codemap/q.py answers; this passes its command line through. The words are split the way a
+    // shell would (double quotes group), and the call is given a minute: the map loads in about one.
+    static string Codemap(string repo, string q)
+    {
+        var words = Regex.Matches(q, "\"([^\"]*)\"|(\\S+)")
+            .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value);
+        var psi = new System.Diagnostics.ProcessStartInfo("py") {
+            WorkingDirectory = repo, RedirectStandardOutput = true, RedirectStandardError = true,
+            UseShellExecute = false, CreateNoWindow = true,
+            StandardOutputEncoding = System.Text.Encoding.UTF8 };
+        psi.ArgumentList.Add("-3");
+        psi.ArgumentList.Add(Path.Combine(repo, "tools", "codemap", "q.py"));
+        foreach (var w in words) psi.ArgumentList.Add(w);
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(60_000)) { p.Kill(true); return "codemap: no answer within 60 s"; }
+            var text = outTask.Result + (errTask.Result.Length > 0 ? "\n" + errTask.Result : "");
+            return text.Length > 0 ? text : "(no output)";
+        }
+        catch (Exception ex) { return $"codemap: could not run py -3 tools/codemap/q.py ({ex.Message})"; }
     }
 
     static string Reindex(string repo, string dbPath)

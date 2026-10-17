@@ -1,5 +1,7 @@
 #include "hal/DxTest.h"
 
+#include "core/FileText.h"
+
 #include <d3d12shader.h>
 #include <dxcapi.h>
 
@@ -21,14 +23,6 @@
 
 namespace ga {
 namespace {
-
-std::string ReadFile(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return {};
-    return std::string((std::istreambuf_iterator<char>(f)),
-                       std::istreambuf_iterator<char>());
-}
-
 // ---- 1. the C++ side of CB parity: byte-count a CB struct from header text. Our CB style
 // is rows: T name[4] / [8] / [16], plain scalars, and a nested ComposedSurfaceCb (none since
 // M12 step 4g made the surface its own buffer; the case stays, with the prefix rule below).
@@ -268,12 +262,12 @@ bool RunDxSelfTest() {
         Log("[dxtest] FAIL: no IDxcUtils");
         return false;
     }
-    const std::string composed = ReadFile("src/compose/Compositor.h");
+    const std::string composed = ReadFileText("src/compose/Compositor.h");
 
     // ---- 1. CB parity: C++ header bytes vs DXC-reflected cbuffer size.
     for (const CbContract& c : kCbs) {
         bool okC = true;
-        const int cpp = StructBytes(ReadFile(c.cppFile), c.cppStruct, okC, composed);
+        const int cpp = StructBytes(ReadFileText(c.cppFile), c.cppStruct, okC, composed);
         std::wstring wpath(c.hlslFile, c.hlslFile + std::strlen(c.hlslFile));
         // HIERARCHY 4.17: with the standing blocks' rows compiled in (the key's define), so the
         // whole of ComposedSurfaceCb is held; with no key the cbuffer is the rows before them.
@@ -308,7 +302,7 @@ bool RunDxSelfTest() {
         // rows is exactly the failure this exists for.
         std::vector<CbField> rows;
         bool okR = true;
-        StructBytes(ReadFile(c.cppFile), c.cppStruct, okR, composed, &rows, c.rowPrefix);
+        StructBytes(ReadFileText(c.cppFile), c.cppStruct, okR, composed, &rows, c.rowPrefix);
         auto normHlsl = [](std::string n) {
             if (n.size() > 1 && n[0] == 'g' && std::isupper((unsigned char)n[1])) n = n.substr(1);
             std::string o;
@@ -352,7 +346,7 @@ bool RunDxSelfTest() {
     for (const auto& de : std::filesystem::directory_iterator("shaders")) {
         const std::string path = de.path().string();
         if (path.size() < 5 || path.substr(path.size() - 5) != ".hlsl") continue;
-        const std::string text = ReadFile(path);
+        const std::string text = ReadFileText(path);
         // mesh shaders carry [numthreads] too -- their stage has its own rules (and
         // ComposedHeight sampling in the MESH stage empirically works; the proven trap
         // is compute), so the sampler scan skips entries marked [outputtopology]. (A hull
