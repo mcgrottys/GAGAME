@@ -1102,16 +1102,16 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
     }
 
     // Frustum cull: bounding sphere in camera-relative space. Radius covers the node's ground
-    // extent, its relief, and the display exaggeration. (planeCount 0 -- the prefetch walk --
+    // extent and its relief. (planeCount 0 -- the prefetch walk --
     // culls nothing: the predicted view is approximate by nature, M6e.)
-    double radius = arc * 0.75 + 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    double radius = arc * 0.75 + 9000.0;
     if (wp.relief && arc < 50000.0) {
         // M10 (WalkParams::relief): the node's own height, and what one ETOPO cell can hide --
         // 150 m of structure, slope over the node's half-span, a tenth of the relief itself.
         const double h = wp.relief->ElevAt(std::asin(std::clamp(dir[1], -1.0, 1.0)) * 57.29577951308232,
                                            std::atan2(dir[2], dir[0]) * 57.29577951308232);
         const double margin = 150.0 + 0.6 * arc + 0.1 * std::abs(h);
-        radius = arc * 0.75 + (std::abs(h) + margin) * (std::max)(1.0f, wp.reliefExagg);
+        radius = arc * 0.75 + std::abs(h) + margin;
     }
     uint32_t seen = 1u;
     if (wp.worldCount > 0) {
@@ -1123,7 +1123,7 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
                 std::asin(std::clamp(dir[1], -1.0, 1.0)) * 57.29577951308232,
                 std::atan2(dir[2], dir[0]) * 57.29577951308232);
             const double margin = 150.0 + 0.6 * arc + 0.1 * std::abs(h);
-            tight = arc * 0.75 + (std::abs(h) + margin) * (std::max)(1.0f, wp.reliefExagg);
+            tight = arc * 0.75 + std::abs(h) + margin;
         }
         // M13: THE WORLDS' OWN CULLS. A node is walked if any world sees it -- inside its planes,
         // and not wholly inside the cone of the next window it shows (that is a deeper world's).
@@ -1550,12 +1550,12 @@ bool BoxHidden(const double (*planes)[4], int np, const double (*hole)[4], int n
 double GlobeLayer::LeafHeadroom(const WalkParams& wp, int face, double u0, double v0, double size,
                                 double arc) const {
     const GlobeModel* relief = wp.relief ? wp.relief : wp.worldRelief;
-    if (!relief || arc >= 50000.0) return 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    if (!relief || arc >= 50000.0) return 9000.0;
     double d[3];
     CubeDirD(face, u0 + 0.5 * size, v0 + 0.5 * size, d);
     const double h = relief->ElevAt(std::asin(std::clamp(d[1], -1.0, 1.0)) * 57.29577951308232,
                                     std::atan2(d[2], d[0]) * 57.29577951308232);
-    return (std::abs(h) + 150.0 + 0.6 * arc + 0.1 * std::abs(h)) * (std::max)(1.0f, wp.reliefExagg);
+    return std::abs(h) + 150.0 + 0.6 * arc + 0.1 * std::abs(h);
 }
 
 bool GlobeLayer::LeafHidden(const WalkParams& wp, int m, int face, double u0, double v0, double size,
@@ -1739,7 +1739,6 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
         wp.camFace = axis * 2 + (wp.camPlanet[axis] < 0.0 ? 1 : 0);
     }
     wp.planeCount = 0;
-    wp.reliefExagg = reliefExagg;
     wp.maxDepth = m_msPath ? 18 : kMaxDepth;   // M6j/M8h, see WalkNode
     // M9bk: the wave-grain rule rides the mesh path in one-water mode only -- that is where
     // the bank IS the water's geometry. Off elsewhere, so nothing but the helm changes.
@@ -1804,7 +1803,7 @@ void GlobeLayer::DigestWalk(std::vector<uint8_t>& d, const WalkParams& wp) {
     put(wp.frameE, sizeof(wp.frameE)); put(wp.frameU, sizeof(wp.frameU)); put(wp.frameN, sizeof(wp.frameN));
     put(wp.camPos, sizeof(wp.camPos)); put(wp.camPlanet, sizeof(wp.camPlanet));
     putI(wp.camFace); put(wp.frustum, sizeof(wp.frustum)); putI(wp.planeCount);
-    putF(wp.reliefExagg); putI(wp.maxDepth); putF(wp.waveGrainM); putI(wp.waveMaxDepth);
+    putI(wp.maxDepth); putF(wp.waveGrainM); putI(wp.waveMaxDepth);
     putF(wp.pixAng); putI(wp.wants ? 1 : 0);
     putI(wp.surfT); putI(wp.normT); putI(wp.colorT); putI(wp.hgtT); putI(wp.maskT); putI(wp.bldT);
     putI(wp.bldFloorRungs); putI(wp.hgtWindows ? 1 : 0); put(&wp.walkSlot, sizeof(wp.walkSlot));
@@ -1936,7 +1935,7 @@ GlobeLayer::~GlobeLayer() {
 }
 
 // One walk of the root's six faces under `wp` -- the camera's own level (slot 0, the walk this
-// always was) or an M10 Droste level (its eye, planes and exaggeration already in that level's
+// always was) or an M10 Droste level (its eye, planes already in that level's
 // own frame). The real walk's leaf: the wants straight to the manager (this frame's stamp), then
 // the draw records. The prefetch walk's leaf (PredictWorker) records rects instead; both run
 // WalkNode / LeafWants above.
@@ -2163,7 +2162,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         DigestWalk(digest, m_wp);
         putI(static_cast<int>(m_levels.size()));
         for (const DrosteLevel& L : m_levels) {
-            putI(L.rel); put(L.cam, sizeof(L.cam)); putD(L.sigma); put(L.Q, sizeof(L.Q)); putF(L.reliefExagg); putI(L.bankSet);
+            putI(L.rel); put(L.cam, sizeof(L.cam)); putD(L.sigma); put(L.Q, sizeof(L.Q)); putI(L.bankSet);
         }
         putI(static_cast<int>(m_gates.size()));
         for (const GateWorld& G : m_gates) {
@@ -2171,7 +2170,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             put(G.planes, sizeof(G.planes)); put(G.hole, sizeof(G.hole));
         }
         putI(m_viewHoleCount); put(m_viewHole, sizeof(m_viewHole)); put(m_portal, sizeof(m_portal));
-        putI(m_drosteOn ? 1 : 0); putI(m_msPath ? 1 : 0); putI(m_borrowed ? 1 : 0); putF(reliefExagg);
+        putI(m_drosteOn ? 1 : 0); putI(m_msPath ? 1 : 0); putI(m_borrowed ? 1 : 0);
     }
     // The walk never reads what is resident -- the GPU does, from the residency map at the draw --
     // so the residency's generation is no input of it: the records are geometric, and the repeated
@@ -2332,7 +2331,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         if (angR < double(m_wp.pixAng) * 0.5) continue;
         WalkParams wp = m_wp;
         standAt(wp, L.cam, slot);
-        wp.reliefExagg = L.reliefExagg;
         // The wave-grain rule refines toward the bank's fine rings; a level with no ring set
         // is seen from beyond them, so the rule has nothing to reach for there.
         if (L.bankSet < 0) wp.waveGrainM = 0.0f;
@@ -2372,7 +2370,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         const uint32_t slot = gateFirst + uint32_t(gi);
         WalkParams wp = m_wp;
         standAt(wp, G.cam, slot);
-        wp.reliefExagg = reliefExagg;
         if (G.bankSet < 0) wp.waveGrainM = 0.0f;
         pullGate(G, slot, G.cam, wp.worlds[0]);
         wp.worldCount = 1;
@@ -2452,7 +2449,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     const double ry = m_camPos[1] + m_radius;
     const double r = std::sqrt(m_camPos[0] * m_camPos[0] + ry * ry + m_camPos[2] * m_camPos[2]);
     m_cb.glo[0] = static_cast<float>(m_radius);
-    m_cb.glo[1] = reliefExagg;
+    m_cb.glo[1] = 0.0f;   // spare
     // z = the draw's unit count: CDLOD nodes on the fallback, meshlet records on the mesh path
     // (M10: GlobeMesh.hlsl bounds its folded 2-D group id by it). Exact in a float to 2^24.
     m_cb.glo[2] = static_cast<float>(m_msPath ? m_meshlets.size() : m_nodes.size());
@@ -2584,7 +2581,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // constants said. Slots 1..n are the extra levels SetDroste handed over.
     m_levelRows.assign(LevelSlots() * 24u, 0.0f);
     auto fillLevel = [&](uint32_t slot, const double c[3], double sigma, const double Q[3][3],
-                         float exag, const float sun[3], int bank, const float skyUp[3],
+                         const float sun[3], int bank, const float skyUp[3],
                          float skyDay) {
         float* r = m_levelRows.data() + slot * 24u;
         r[0] = static_cast<float>(c[0]);
@@ -2594,7 +2591,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         for (int row = 0; row < 3; ++row) {
             for (int col = 0; col < 3; ++col) r[4 + row * 4 + col] = static_cast<float>(Q[row][col]);
         }
-        r[7] = exag;
+        r[7] = 0.0f;   // spare
         r[11] = static_cast<float>(c[1]);
         r[15] = static_cast<float>(bank);
         r[16] = sun[0];
@@ -2607,16 +2604,16 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     };
     {
         const double I3[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
-        fillLevel(0u, m_camPos, 1.0, I3, reliefExagg, m_camSun, 0, m_camSkyUp, m_camSkyDay);
+        fillLevel(0u, m_camPos, 1.0, I3, m_camSun, 0, m_camSkyUp, m_camSkyDay);
         for (size_t li = 0; li < m_levels.size(); ++li) {
             const DrosteLevel& L = m_levels[li];
-            fillLevel(static_cast<uint32_t>(li + 1), L.cam, L.sigma, L.Q, L.reliefExagg, L.sun,
+            fillLevel(static_cast<uint32_t>(li + 1), L.cam, L.sigma, L.Q, L.sun,
                       L.bankSet, L.skyUp, L.skyDay);
         }
-        // The gate worlds: scale 1, the eye's own exaggeration and its own local day.
+        // The gate worlds: scale 1 and their own local day.
         for (size_t gi = 0; gi < m_gates.size(); ++gi) {
             const GateWorld& G = m_gates[gi];
-            fillLevel(static_cast<uint32_t>(1u + m_levels.size() + gi), G.cam, 1.0, G.Q, reliefExagg,
+            fillLevel(static_cast<uint32_t>(1u + m_levels.size() + gi), G.cam, 1.0, G.Q,
                       G.sun, G.bankSet, G.skyUp, -1.0f);
         }
         if (!m_borrowed) EyeInstruments();   // Phase A0: the levels' blocks logged, the probe's rows
@@ -3212,7 +3209,7 @@ uint64_t GlobeLayer::KeepKey(const FrameContext& ctx, const GlobeCbData& cb, con
 // and no gate worlds of its own, what it walked is moved into that eye's slot, and the first
 // eye's set is put back -- so nothing the first eye's frame reads afterwards has moved.
 void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect,
-                              float viewportH, double simTime, float exagg, const float skyUp[3],
+                              float viewportH, double simTime, const float skyUp[3],
                               bool skyPass, const GateWorld* gates, int n,
                               const double (*hole)[4], int holeN, const EyeRings* rings) {
     if (view == 0 || view > kMaxOtherEyes || !m_res) return;
@@ -3242,7 +3239,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     const float vh0 = m_viewportH;
     const uint32_t drops0 = m_meshletDrops;
     const std::vector<uint32_t> rec0 = levelRecords;
-    const float exagg0 = reliefExagg, own0 = skyOwnAir;
+    const float own0 = skyOwnAir;
     const float up0[3] = {m_camSkyUp[0], m_camSkyUp[1], m_camSkyUp[2]};
     const float day0 = m_camSkyDay;
     const bool drosteOn0 = m_drosteOn;
@@ -3261,9 +3258,8 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     const bool chartOn0 = m_chartOn;
     const int sampler0 = m_sampler;
 
-    // ---- this eye: its own exaggeration, zenith and sampler; its own world and the worlds its own
+    // ---- this eye: its own zenith and sampler; its own world and the worlds its own
     // windows reach (none of the first eye's tower levels)
-    reliefExagg = exagg;
     skyOwnAir = 1.0f;
     for (int i = 0; i < 3; ++i) m_camSkyUp[i] = skyUp[i];
     m_camSkyDay = -1.0f;
@@ -3314,7 +3310,6 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     m_viewportH = vh0;
     m_meshletDrops = drops0;
     levelRecords = rec0;
-    reliefExagg = exagg0;
     skyOwnAir = own0;
     for (int i = 0; i < 3; ++i) m_camSkyUp[i] = up0[i];
     m_camSkyDay = day0;

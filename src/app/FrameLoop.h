@@ -375,12 +375,10 @@ private:
     };
     // sunRoot: the root's sun; sunCam: the sun of the eye's own level (the root's outside a tower).
     EyeSky SkyOf(const Eye& e, const float sunRoot[3], const float sunCam[3]) const;
-    // THE WALK OF AN EYE: the display exaggeration its altitude calls for, the globe's walk of the
-    // planet from it (the first eye's into the layer's working set, another's into its slot; another
+    // THE WALK OF AN EYE: the globe's walk of the planet from it (the first eye's into the layer's working set, another's into its slot; another
     // eye's backdrop is the sky layer's dome when `dome`, the globe's own pass otherwise), and the
     // surface rows (b2) about it -- the first eye's into the renderer's own buffer, kept as the
     // frame's eye; another's into `out`, with both eyes the rows are taken about put back.
-    float ReliefOf(const Eye& e) const;
     // THE WINDOWS OF AN EYE: the gate worlds it reaches, built for the walk, the sky and the hulls.
     struct EyeWindows {   // as long as the chain
         int n = 0;
@@ -403,7 +401,7 @@ private:
     // Its dome (and another eye's windows) handed to the sky layer: the first eye's into the layer's
     // own frame, another's into its view's slot.
     void HandSky(const Eye& e, const EyeSky& es, const EyeWindows* win = nullptr);
-    void WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
+    void WalkEye(const Eye& e, const EyeSky& es, bool dome,
                  const EyeWindows* win = nullptr, const GlobeLayer::EyeRings* rings = nullptr);
     void SurfaceFor(const Eye& e, ComposedSurfaceCb& out);
     EyeWindows m_minimapWin;   // the minimap's windows this frame (MinimapStep), for its claims and its walk
@@ -425,7 +423,6 @@ private:
     std::vector<uint32_t> m_minimapWinSets;
     // Its windows, found in MinimapStep (from its own cone, before the claim) and drawn in MinimapFrame.
     std::vector<scene::WindowLink> m_minimapChain;
-    float m_minimapExagg = 1.0f;
     // The first eye's gate worlds' nearest distances (WindowsOf), for their claims.
     std::vector<double> m_winNearM;
     uint32_t m_liveSetsSaid = 0xFFFFFFFFu, m_claimantsSaid = 0xFFFFFFFFu;   // logged on a change
