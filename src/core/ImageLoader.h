@@ -22,6 +22,8 @@
 //  window at the far corner in 3 or 11 ms at a 9 MB peak; a PNG decodes from its first row for
 //  every window (0.49 s, and again for its neighbour). So a PNG or a JPEG is decoded once, in
 //  bands, to raw rows under cache\sources named by its content's hash, and read by a seek.
+//  A BigTIFF (version 43) is refused by name: WIC has no decoder for it (MEASURED 2026-10-17, a
+//  15 MB float32 DSM; the same bytes as a classic TIFF load).
 //  A compressed TIFF of THIN STRIPS (under 16 rows a strip, over 1,024 rows) is refused by name:
 //  MEASURED 2026-10-17, a 20,700 x 17,200 ortho written as deflate with one row a strip gave the
 //  ingest no tile in eight minutes; the same pixels in one raw strip decoded a window in 76 ms.

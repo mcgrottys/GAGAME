@@ -752,6 +752,17 @@ bool RunRasterFileSelfTest() {
             const bool tookThin = t1.Load(reg, thin.file, none, &why);
             Check(!tookThin && why.find("strips are 1 row") != std::string::npos,
                   "a deflate TIFF of one-row strips over 2048 rows is refused by name: %s", why.c_str());
+            // A BigTIFF header (version 43): refused by name before WIC is asked.
+            {
+                const std::vector<uint8_t> big{'I', 'I', 43, 0, 8, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0};
+                std::ofstream(std::string("out/rastertest/bigtiff.tif"), std::ios::binary | std::ios::trunc)
+                    .write(reinterpret_cast<const char*>(big.data()), std::streamsize(big.size()));
+                RasterFileSource tb;
+                why.clear();
+                const bool tookBig = tb.Load(reg, "out/rastertest/bigtiff.tif", none, &why);
+                Check(!tookBig && why.find("BigTIFF") != std::string::npos,
+                      "a BigTIFF is refused by name, before WIC: %s", why.c_str());
+            }
             const Raster thick = Make(32617, 0.5, "out/rastertest/thick_strips.tif");
             im.rowsPerStrip = 256;
             WriteTiff(thick.file, {im}, TagsOf(thick, 32617));

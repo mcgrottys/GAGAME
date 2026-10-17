@@ -31,9 +31,13 @@ the file's GeoKeys supply CRS, grain, unit and datum, the entry supplies what th
 | `usace.ncmp2018` | height, folder of 25 | nothing | GeoKeys 3072 = 6348, 4096 = 5703 ("m NAVD88"), 4099 = 9001 |
 | `noaa.iocm2011.mllw` | colour, folder of 9 | `feather 10` | EPSG:32619 is in the engine's UTM table |
 | `usgs.tnb2025.ortho` | colour, one file | `feather 2` | the RGBA copy (below) |
-| `usgs.tnb2025.dsm` | height, one file | `unit m`, `datum NAVD88` | 3072 = 6348, no vertical GeoKey; the metadata says NAVD88 metres |
+| `usgs.tnb2025.dsm` | height, one file | `unit m`, `datum NAVD88` | 3072 = 6348, no vertical GeoKey; the metadata says NAVD88 metres. **Refused in every run of the first evening, unnoticed:** USGS wrote it as a BigTIFF (header version 43) and WIC has no decoder for it ("component not found", 0x88982F50). The scene now lists a classic-TIFF copy with the same floats and tags (52 MB raw), and the loader names a BigTIFF before asking WIC. |
 
-**Two file traps, both measured:**
+**Three file traps, all measured:**
+
+0. The drone DSM is a BigTIFF. WIC refused it in every run with only an HRESULT; the loader now says
+   "BigTIFF" by name (`ImageLoader.cpp`, with a self-test), and the classic copy loads. Nothing in
+   3a/3b read the DSM; the probe's levels are the bed's and the lidar's.
 
 1. The drone ortho's flight edge is WHITE (255,255,255) over 47.6 % of its rectangle and the file has no
    alpha, so as published it would paint a white rectangle over Cape Cod Bay. `alpha is fiber`: a copy
@@ -208,6 +212,56 @@ Read it this way:
   (17 s for the three sources here), and it is what makes the coarse levels folds.
 - The buildings were missing from the HQ scene because its base has none; the layer and sources of
   `newburyport_buildings.json` are now in it. The 19 MassGIS tiles' ingest is section 3e.
+
+### 3e. "Higher res imagery than that house": the MassGIS 15 cm around the mouth
+
+The blurred house in Mark's third screenshot was Google at its zoom, magnified: the first HQ scene had
+dropped the MassGIS orthos (3a's correction), and the shipped scene holds only two 1.5 km tiles of them
+at the mouth. MassGIS 2023 is 15 cm statewide (2025 the same, 7.5 cm on Cape Cod only), so the answer
+is coverage, not a new source. Fetched the same evening: the 4 x 6 USNG grid 19TCH 480-525 E x 370-445 N
+(348-354 km E, 4737-4746 km N: the mouth, Newburyport's east end, Salisbury Beach, the north of Plum
+Island), 20 zips present of 24 asked (the rest are sea), decoded by `harvest aerial` (Magick.NET,
+lossless JP2 to RGB mip chains, a minute or two a tile) into 19 tiles, 7.1 GB under data/aerial, one
+manifest. The tree's identity followed the manifest: a sibling session's boot saw it first and paid the
+ingest, 17:58 to 18:11, **384,501 tiles on 16 levels at own mip 5** (9.4 cm a texel, 15 cm content),
+and this branch's `--tool ingest` found it whole. The house is now 15 cm wherever those tiles reach;
+beyond them it is Google again. The stills of 3a were retaken on the whole scene (B2 rows there).
+
+### 3f. The channel that stood dry: the HQ bed's eHydro cells were sign-flipped
+
+Mark, on the corrected mouth still: "the black in the mouth is colour, probably a botched heightmap";
+then "the height is broken too"; then "it's not black, it's the water imagery". All three are one fact.
+At a point in the entrance channel (42.8172 N, 70.8050 W) the HQ bed file says **+5.74 m NAVD88** where
+CUDEM says -8 and the lidar's nearest valid texels -8.25: the channel stands 6 m above the water, so the
+engine draws it as DRY GROUND and paints the ground with the colour tree, which there is the ortho's
+photograph of dark water. The jagged edge is the eHydro survey's footprint. The arm with the shipped
+CUDEM bed never showed it.
+
+The cause is in both harvesters (`HqBathy.cs`, `harvest_hqbathy.py`): eHydro's XYZ carries DEPTHS in US
+survey feet below MLLW, positive down (the entrance channel's thinned file runs 0 to 28 ft, median 11.8,
+in a channel dredged to 15), and the overlay read them as heights: `z * usft - 1.400`. Over the channel,
+12,198 cells of the composite stood above +0.5 m where CUDEM was below -2 (median +3.10 against -6.11);
+with the sign right the same cells land within a metre of CUDEM. The composite's own cross-check could
+not see it: it sampled only cells below -1 m ("wet cells"), which excluded exactly the cells the error
+had lifted above the water -- the instrument's blind spot was the failure's shape. Now `-z * usft -
+1.400`, the check samples the eHydro cells whatever their value, and a median farther than 2.5 m from
+CUDEM's bed refuses to write (`HarvestStop`). The composite was regenerated from the cached surveys and
+the GeoTIFF the scene reads written anew as `inlethq_navd88_2026-10-17.tif` beside the flipped one
+(another session's engine held the old file open, so it could not be replaced in place; the scene points
+at the new name). The regenerated check: the eHydro cells against CUDEM,
+n = 20,000, median +0.011 m, mean +0.073, p5 -1.15, p95 +1.39 (dredging and shoaling since 2014 inside a
+metre either way); the channel point that read +5.74 now reads below -8. The ten stills of 3a and the probe of 3b ran on the flipped bed; their
+frame-cost reading stands, their bed does not.
+
+Tried and reverted the same evening: `over: 1` on noaa.inlethq (the survey over the lidar). It put
+BlueTopo's 4 m ridge over the lidar's 1 m rocks at the jetties, and the jetty tops came out as flat
+faceted slabs in the helm view; the grain order (coarser under finer) is right here, the lidar carries
+the structures and the bars and the survey fills the channel where the laser found no bottom.
+
+On the corrected bed, the whole scene (A = the shipped Merrimack at the same instant): the mouth from
+500 m settled in 2,263 frames at 21.3 ms GPU (A 20.3), 47.6 % of pixels differ, SSIM 0.978 -- the channel
+is water again and the bars read as shading; the jetty view 16.1 ms GPU (A 13.9, the buildings on the
+skyline are new), SSIM 0.942.
 
 ### 3a. Stills and frame cost, A (no rasters) against B (five rasters), one take each
 
