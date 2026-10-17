@@ -40,7 +40,7 @@ class ShaderCompiler;
 class MaxLane {
 public:
     static constexpr uint32_t kBlock = 16;   // MIRRORS shaders/MaxLane.hlsl kBlock, TerrainRay kCastBlock
-    static constexpr uint32_t kMaxMips = 7;
+    static constexpr uint32_t kMaxMips = 8;
     struct Job {
         uint32_t slice = 0, mip = 0, x = 0, y = 0;
         uint32_t wrap = 0;           // 1: a window's page, addressed modulo itself; 0: a cube face
@@ -85,6 +85,7 @@ private:
     std::unordered_map<uint64_t, Tile> m_tiles;
     std::unordered_set<uint64_t> m_held;
     uint32_t m_tileW = 0, m_tileH = 0, m_firstPacked = 0;
+    uint32_t m_texW = 256, m_texH = 128;   // the tenant's tile in texels
     Com<ID3D12Resource> m_res;
     Com<ID3D12RootSignature> m_rs;
     Com<ID3D12PipelineState> m_pso;

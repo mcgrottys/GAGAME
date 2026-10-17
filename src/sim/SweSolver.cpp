@@ -168,7 +168,7 @@ void SweSolver::LogCbFingerprint() {
 void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
                        const BedWindow& w) {
     (void)gpu;
-    m_table.SrvArray(0, heightArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
+    m_table.SrvArray(0, heightArr, heightArr ? heightArr->GetDesc().Format : DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
     m_table.SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
     const SweDomain& d = m_dom;
     m_cb.cellX[0] = static_cast<float>((0.5 - 0.5 * double(d.nx)) * d.dx / d.R);
@@ -214,7 +214,7 @@ bool SweSolver::TraceBed(Gpu& gpu, BedTrace& out, float floorMip) {
                                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                          L"swe.bedtrace (BedAt, mip + 16 slice)");
         m_traceTable = hal::Table::Alloc(gpu, 3, "swe.bedtrace");
-        m_traceTable.SrvArray(0, m_bedArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_bedMips);
+        m_traceTable.SrvArray(0, m_bedArr, m_bedArr->GetDesc().Format, 0, UINT32_MAX, m_bedMips);
         m_traceTable.SrvArray(1, m_bedRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
         m_traceTable.Uav2D(2, m_traceTex.res.Get(), DXGI_FORMAT_R32G32_FLOAT);
     }
@@ -914,7 +914,7 @@ bool SweSolver::TraceWestFace(Gpu& gpu, std::vector<WestFaceRow>& rows) {
                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                         L"swe.westtrace (the Flather face's terms)");
         m_westTable = hal::Table::Alloc(gpu, 7, "swe.westtrace");
-        m_westTable.SrvArray(0, m_bedArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_bedMips);
+        m_westTable.SrvArray(0, m_bedArr, m_bedArr->GetDesc().Format, 0, UINT32_MAX, m_bedMips);
         m_westTable.SrvArray(1, m_bedRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
         m_westTable.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT);
         m_westTable.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);

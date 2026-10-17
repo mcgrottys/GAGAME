@@ -44,9 +44,31 @@ void ThreadManager::Shutdown() {
         if (t.joinable()) t.join();
     }
     m_threads.clear();
+    // What held each lane: the ten tags with the most running time, their queue wait beside it.
+    std::sort(m_ledger.begin(), m_ledger.end(),
+              [](const TagLedger& a, const TagLedger& b) { return a.runUs > b.runUs; });
+    static const char* kLane[] = {"Compute", "Io", "Long"};
+    for (size_t i = 0; i < m_ledger.size() && i < 10; ++i) {
+        const TagLedger& t = m_ledger[i];
+        Log("[jobs] %-7s %-22s %8llu jobs, running %9.1f s (%.2f ms each), queued %.2f ms each",
+            kLane[t.lane], t.tag.c_str(), static_cast<unsigned long long>(t.jobs), t.runUs / 1.0e6,
+            t.runUs / 1000.0 / double(t.jobs), t.waitUs / 1000.0 / double(t.jobs));
+    }
     Log("[jobs] pool joined; %llu jobs submitted, hash %016llx",
         static_cast<unsigned long long>(m_submitted.load()),
         static_cast<unsigned long long>(m_hash.load()));
+}
+
+void ThreadManager::LedgerAdd(int lane, const std::string& tag, uint64_t waitUs, uint64_t runUs) {
+    for (TagLedger& t : m_ledger) {
+        if (t.lane == lane && t.tag == tag) {
+            ++t.jobs;
+            t.waitUs += waitUs;
+            t.runUs += runUs;
+            return;
+        }
+    }
+    m_ledger.push_back({lane, tag, 1, waitUs, runUs});
 }
 
 void ThreadManager::Fold(Lane lane, const char* tag) {
@@ -80,7 +102,7 @@ void ThreadManager::Submit(Lane lane, const char* tag, std::function<void()> fn)
     }
     {
         std::lock_guard<std::mutex> lk(m_mx);
-        m_q[int(lane)].push_back({std::move(fn), lane});
+        m_q[int(lane)].push_back({std::move(fn), lane, tag ? tag : "", std::chrono::steady_clock::now()});
     }
     m_cv.notify_one();
 }
@@ -95,6 +117,8 @@ void ThreadManager::Worker() {
     for (;;) {
         std::function<void()> fn;
         int lane = -1;
+        std::string tag;
+        std::chrono::steady_clock::time_point queued;
         {
             std::unique_lock<std::mutex> lk(m_mx);
             m_cv.wait(lk, [this] {
@@ -110,6 +134,8 @@ void ThreadManager::Worker() {
             for (int L = 0; L < int(Lane::kCount); ++L) {
                 if (m_q[L].empty() || !MayStart(L)) continue;
                 fn = std::move(m_q[L].front().fn);
+                tag = std::move(m_q[L].front().tag);
+                queued = m_q[L].front().queued;
                 m_q[L].pop_front();
                 ++m_active[L];
                 lane = L;
@@ -117,7 +143,9 @@ void ThreadManager::Worker() {
             }
             if (lane < 0) continue;
         }
+        const auto t0 = std::chrono::steady_clock::now();
         fn();
+        const auto t1 = std::chrono::steady_clock::now();
         // A finished job can unblock a lane that was AT ITS CAP -- but only one thread can take
         // the freed slot, and only if there is anything queued for a lane with room. Waking all
         // of them on every job is a thundering herd: ~15000 jobs over a rail, 15 threads woken
@@ -126,6 +154,9 @@ void ThreadManager::Worker() {
         {
             std::lock_guard<std::mutex> lk(m_mx);
             --m_active[lane];
+            LedgerAdd(lane, tag,
+                      uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(t0 - queued).count()),
+                      uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()));
             for (int L = 0; L < int(Lane::kCount); ++L) {
                 if (!m_q[L].empty() && MayStart(L)) {
                     wake = true;
@@ -189,7 +220,8 @@ void ThreadManager::ParallelFor(Lane lane, const char* tag, int n, int grain,
     if (helpers > 0) {
         {
             std::lock_guard<std::mutex> lk(m_mx);
-            for (int i = 0; i < helpers; ++i) m_q[int(lane)].push_back({drain, lane});
+            const auto now = std::chrono::steady_clock::now();
+            for (int i = 0; i < helpers; ++i) m_q[int(lane)].push_back({drain, lane, tag ? tag : "", now});
         }
         m_cv.notify_all();
     }

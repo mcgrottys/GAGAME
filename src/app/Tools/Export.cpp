@@ -77,10 +77,13 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
             for (uint32_t py = 0; py < tileH; ++py) {
                 const size_t row = static_cast<size_t>(ty) * tileH + py;
                 if (height) {
+                    // R32F (the earth's float root) or R16F (a half-float cube), by the tile's own size.
+                    const bool f32 = size_t(tileW) * tileH * 4 == tile.size();
                     const uint16_t* src = reinterpret_cast<const uint16_t*>(tile.data());
+                    const float* srcF = reinterpret_cast<const float*>(tile.data());
                     for (uint32_t px = 0; px < tileW; ++px) {
                         hgtData[row * dim + tx * tileW + px] =
-                            HalfToFloat(src[py * tileW + px]);
+                            f32 ? srcF[py * tileW + px] : HalfToFloat(src[py * tileW + px]);
                     }
                 } else {
                     memcpy(&rgba[(row * dim + tx * tileW) * 4], &tile[py * tileW * 4],

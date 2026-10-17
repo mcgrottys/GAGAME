@@ -114,9 +114,9 @@ private:
         bool provisional = false;
         const float h = m_stack ? m_comp->SampleHeightStack(m_ch, latR, lonR, lat.GroundRes(mip))
                                 : m_comp->SampleHeightResident(m_ch, latR, lonR, lat.GroundRes(mip), &provisional);
-        const float q = HalfToFloat(tree_detail::F2H(h));   // the one quantization: the GPU's
-        if (!provisional) m_memo.emplace(key, q);
-        return q;
+        // The GPU's pages hold the composed value as it is (R32F): no quantization to mirror.
+        if (!provisional) m_memo.emplace(key, h);
+        return h;
     }
 
     const Compositor* m_comp = nullptr;

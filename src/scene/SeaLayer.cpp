@@ -552,7 +552,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         // M9ar: the bed is the height tenant (PHASE B3: its windows' slices), plus its residency map.
         if (m_hgtArr && m_hgtRes) {
             // M9ax: the whole tenant (cube faces + the page); the slice rides the CB.
-            m_churnTable.SrvArray(2, m_hgtArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_hgtMips);
+            m_churnTable.SrvArray(2, m_hgtArr, m_hgtArr->GetDesc().Format, 0, UINT32_MAX, m_hgtMips);
             m_churnTable.SrvArray(3, m_hgtRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
         }
         m_churnSweWired = true;

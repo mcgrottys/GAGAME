@@ -18,7 +18,7 @@
 // folded at compile time; a rank's is it over 8^k (HpRankGround).
 static const float kHpMercCirc = 40075016.686f;   // Web-Mercator equator, m (Lattice::kMercCirc)
 static const float kHpCubeTexelM = kHpMercCirc / (4.0f * kPageDim);   // 611.496..
-static const float kHpMaxMip = 6.0f;           // 7 mips
+static const float kHpMaxMip = 7.0f;           // 8 mips: 16384 -> 128, the float pages' one-tile mip
 
 // THE BED TRACE (an instrument: SweSolver::TraceBed, shaders/Swe.hlsl CsSweBedTrace). Compiled
 // with HP_TRACE defined, the rule below also records what it chose -- the mip it read at and the

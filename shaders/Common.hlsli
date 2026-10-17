@@ -296,15 +296,15 @@ float3 SkyRadianceDir(float3 dir) {
 // a helm-tight lobe would count the sun twice). The aureole stays: the Mie lobe IS the halo.
 //
 // A REFLECTION IS SEEN FROM THE WATER, so the integral starts at the sea's surface (the planet's
-// radius), under the zenith the shader hands it: from the helm that is the eye's own sky to a few
-// metres, and from orbit it is still the sky above the sea -- the eye's own radius would put the
-// mirror's ray above the air, and the sea would reflect black space.
-//
-// `day` is kept for its callers and no longer read: the gradient it dimmed is gone, and the
-// integral carries the hour by itself -- the sky over a set sun is dark, or glowing, because the
-// air is (ALGEBRA priors 45).
-float3 SkyRadianceDirDiscless(float3 dir, float day) {
-    return SkyAlong(dir, GA_SKY_UP, GA_SUN_DIR, gSkyLut.y, 0.0f);
+// radius), under THAT WATER'S OWN ZENITH `up` -- the frame `dir` and the sun are in. It used to take
+// the eye's zenith (GA_SKY_UP) for every pixel: right at the helm, where all the sea in view shares
+// it, and wrong from orbit, where a water pixel a few thousand kilometres from the eye's foot had
+// its reflected ray measured against a zenith tilted by that arc -- past the angle where the ray
+// fell under that foreign horizon, the march met the ground and the sea reflected the ground's
+// bounce instead of sky: a sharp circle about the eye's foot that moved with the camera (Mark,
+// 2026-10-17), and the far sea that stopped reflecting.
+float3 SkyRadianceDirDiscless(float3 dir, float3 up) {
+    return SkyAlong(dir, up, GA_SUN_DIR, gSkyLut.y, 0.0f);
 }
 
 // THE AIR IN FRONT OF A SURFACE: the sky's own integral (SkyAir) along the view ray from the eye to

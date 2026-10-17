@@ -50,7 +50,7 @@ struct TerrainHit {
 // worst rise of the ground above the ray, in sines, through SunDiscClear -- at every texel of the
 // resident level instead of twelve of them, so the penumbra and every asker are unchanged.
 //
-// THE LADDER is the pages' own: the cube's mips G = 6..0, then rank k's mips 2..0 at G = -3k - 1 ..
+// THE LADDER is the pages' own: the cube's mips G = top..0, then rank k's mips 2..0 at G = -3k - 1 ..
 // -3k - 3 (rank k's mip 3 is rank k - 1's mip 0, the same pyramid level, and is never read here). A
 // level is taken at the ray's point where its slice holds the point (a rank's box) and has it resident
 // (the map's conservative floor, the read the picture takes): only there is its lane a bound.
@@ -163,13 +163,15 @@ float2 CastLane(CastCell c) {
     const int2 b = c.blk & (dimB - 1);   // a window's page is the lattice modulo itself
     return gTexArr[gCsU2.z].Load(int4(b, int(c.slice), int(c.mip))).xy;
 }
+// The cube's coarsest mip, the ladder's top (gCsG.x: 7 for the float pages' 8 mips, 6 for a half cube's 7).
+int CastTop() { return int(gCsG.x + 0.5f); }
 // The level read at length t (cube lod: the windows are below 0): the pixel's own, or the sun's disc
 // there, whichever is coarser; and the level the traversal stops at for it, the one just coarser.
 float CastRead(float lodPix, float discK, float t, int gMin) {
-    return clamp(max(lodPix, log2(max(discK * t, 1e-30f))), float(gMin), 6.0f);
+    return clamp(max(lodPix, log2(max(discK * t, 1e-30f))), float(gMin), float(CastTop()));
 }
 int CastStop(float lodPix, float discK, float t, int gMin) {
-    return clamp(int(ceil(CastRead(lodPix, discK, t, gMin) - 1e-3f)), gMin, 6);
+    return clamp(int(ceil(CastRead(lodPix, discK, t, gMin) - 1e-3f)), gMin, CastTop());
 }
 float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float footM, float lodPix, float R,
                  bool wantHit, out TerrainHit hit) {
@@ -192,7 +194,7 @@ float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float fo
     const float3 P0 = upT * (R + a0);            // ...and about the planet's centre, tangent axes (the cube's)
     const float3 rayP = CsToPlanet(rayT);
     const int gMin = max(int(kCsHeightLodFloor), -3 * int(CsWinK(s)));
-    const float lodF0 = clamp(lodPix, float(gMin), 6.0f);
+    const float lodF0 = clamp(lodPix, float(gMin), float(CastTop()));
     // THE GRAIN THE SUN CAN SEE: a rise narrower than the sun's disc at its distance covers only part
     // of the disc, which is the penumbra's own business, so the ground at length t is read at the
     // finest level whose texel is no wider than the disc there, t 2 kSunDiscR (0.94 % of t: 9.4 m at a
@@ -204,7 +206,7 @@ float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float fo
     // the blend; an integer level here stepped the shade where a pixel's level crossed a half.
     // Start where a block is about the first sample's length: finer is pointless, coarser fails.
     int gHere = CastStop(lodF0, discK, t0, gMin);   // the level the traversal stops at, here
-    int G = max(clamp(int(floor(log2(t0 / (kCastBlock * gCsGround.x)))), gMin, 6), gHere);
+    int G = max(clamp(int(floor(log2(t0 / (kCastBlock * gCsGround.x)))), gMin, CastTop()), gHere);
     float worst = -1.0f;
     float t = t0;
     float prevT = 0.0f, prevGap = 1.0e9f;
@@ -213,7 +215,7 @@ float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float fo
         if (t >= tMax) break;
         const CastCell c = CastCellAt(G, t, s, p0, P0, rayT, rayP);
         if (!c.ok) {
-            if (G >= 6) break;   // nothing resident at all here: nothing to cast on
+            if (G >= CastTop()) break;   // nothing resident at all here: nothing to cast on
             ++G;
             gHere = G;
             continue;
@@ -231,7 +233,7 @@ float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float fo
         }
         if (CastBound(laneM, t, tb, a0, mu, kq, cosE) <= (wantHit ? 0.0f : max(worst, -kSunDiscR))) {
             t = tb + max(1e-4f * tb, 1e-3f);
-            G = min(G + 1, 6);
+            G = min(G + 1, CastTop());
             gHere = CastStop(lodF0, discK, t, gMin);
             continue;
         }
@@ -274,7 +276,7 @@ float TerrainRay(float3 upT, float a0, float3 geo, uint s, float3 rayT, float fo
             if (CastBound(laneM, tf, tb, a0, mu, kq, cosE) <= (wantHit ? 0.0f : max(worst, -kSunDiscR))) break;
         }
         t = tb + max(1e-4f * tb, 1e-3f);
-        G = min(G + 1, 6);
+        G = min(G + 1, CastTop());
         gHere = CastStop(lodF0, discK, t, gMin);
     }
     return SunDiscClear(-worst);

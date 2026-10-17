@@ -236,6 +236,8 @@ public:
     // miss only: MEASURED, a counter per texel and a shared_ptr copy per tap -- two cache lines every
     // loader thread writes -- made a warm read 600 ns in the exposure's march, the stack's 160.
     std::atomic<uint64_t> tileReads{0}, readUs{0}, transient{0};   // transient: reads answered "not now"
+    std::atomic<uint64_t> letGo{0};   // asks let go unread: no reader repeated them for kStaleMs
+    static constexpr int64_t kStaleMs = 500;   // an ask not repeated this long is let go (Request)
     // INSTRUMENT: the reads made on the calling thread (any tree), so a frame loop can see what it waited on
     static inline thread_local uint64_t tlReads = 0, tlReadUs = 0;
     size_t Held() const {
@@ -322,9 +324,7 @@ private:
             if (c.blockMax[size_t(lby) * bw + lbx] <= running) return true;   // nothing here can raise it
             Traverse(x0, y0, x1, y1, 1.0, ta, tb, [&](long long ix, long long iy, double tIn, double) {
                 if (ix < 0 || iy < 0 || ix > last || iy > last) return true;
-                uint16_t h;
-                std::memcpy(&h, c.bytes.data() + (size_t(uint64_t(iy) % m_lat.texH) * m_lat.texW + size_t(uint64_t(ix) % m_lat.texW)) * 2, 2);
-                running = (std::max)(running, HalfToFloat(h));
+                running = (std::max)(running, At(c, size_t(uint64_t(iy) % m_lat.texH) * m_lat.texW + size_t(uint64_t(ix) % m_lat.texW)));
                 if (running >= stopAtM && stopT) *stopT = tIn;
                 return running < stopAtM;
             });
@@ -339,8 +339,17 @@ private:
     }
     float TexelIn(const Cached& t, uint32_t ix, uint32_t iy) const {
         if (t.bytes.size() < size_t(m_lat.texW) * m_lat.texH * 2) return 0.0f;   // nothing covers: the stack's 0
+        return At(t, size_t(iy % m_lat.texH) * m_lat.texW + ix % m_lat.texW);
+    }
+    // A root texel: R32F (4 bytes a texel, the earth's float root) or R16F (2), by the tile's size.
+    float At(const Cached& t, size_t i) const {
+        if (t.bytes.size() >= size_t(m_lat.texW) * m_lat.texH * 4) {
+            float f;
+            std::memcpy(&f, t.bytes.data() + i * 4, 4);
+            return f;
+        }
         uint16_t h;
-        std::memcpy(&h, t.bytes.data() + (size_t(iy % m_lat.texH) * m_lat.texW + ix % m_lat.texW) * 2, 2);
+        std::memcpy(&h, t.bytes.data() + i * 2, 2);
         return HalfToFloat(h);
     }
 
@@ -398,28 +407,54 @@ private:
     }
 
     // Ask a loader thread for a tile not held: once while it is asked, never after Close().
+    // NEWEST FIRST, AND ONLY WHILE STILL WANTED (as the Google network queue): a job takes the ask
+    // made last, and an ask no reader has repeated for kStaleMs is let go unread -- its readers have
+    // moved on (every resident reader asks again on each read that misses). MEASURED 2026-10-16 (Mark
+    // flying over Hainan): 5,400 reads at 65 ms each, queued 6.75 s each, held the Io lane the water
+    // bank's mask (7 s) and the buildings' pages (5-7 s) wait in. A let-go ask counts as landed, so a
+    // reader that waits on Landed() reads again and, if it still wants the tile, asks at the front.
     void Request(const TileRequest& r) {
         const uint64_t key = KeyOf(r);
+        const int64_t now = NowMs();
         {
             std::lock_guard<std::mutex> lk(m_mx);
-            if (m_closed || m_index.count(key) || !m_pending.insert(key).second) return;
+            if (m_closed || m_index.count(key)) return;
+            if (!m_pending.insert(key).second) {
+                m_asked[key] = now;   // still wanted
+                return;
+            }
+            m_asked[key] = now;
+            m_asks.push_back({key, r});
             ++m_inflight;
         }
-        Threads().Submit(Lane::Io, "height.tree", [this, key, r] {
-            bool closed;
+        Threads().Submit(Lane::Io, "height.tree", [this] {
+            uint64_t key = 0;
+            TileRequest r{};
+            bool run = false;
             {
                 std::lock_guard<std::mutex> lk(m_mx);
-                closed = m_closed;
+                if (!m_asks.empty()) {   // a job an ask: one is always there for it
+                    key = m_asks.back().first;
+                    r = m_asks.back().second;
+                    m_asks.pop_back();
+                    run = !m_closed && NowMs() - m_asked[key] <= kStaleMs;
+                    if (!run) letGo.fetch_add(1, std::memory_order_relaxed);
+                }
             }
-            if (!closed) Shared(key, r);
+            if (run) Shared(key, r);
             {
                 std::lock_guard<std::mutex> lk(m_mx);
                 m_pending.erase(key);
+                m_asked.erase(key);
                 --m_inflight;
             }
             m_landed.fetch_add(1, std::memory_order_release);
             m_idle.notify_all();
         });
+    }
+    static int64_t NowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
     Tile Shared(uint64_t key, const TileRequest& r) {
@@ -444,10 +479,8 @@ private:
                 c->blockMax.assign(size_t(bw) * bh, -1e30f);
                 for (uint32_t y = 0; y < m_lat.texH; ++y) {
                     for (uint32_t x = 0; x < m_lat.texW; ++x) {
-                        uint16_t h;
-                        std::memcpy(&h, c->bytes.data() + (size_t(y) * m_lat.texW + x) * 2, 2);
                         float& m = c->blockMax[size_t(y / kBlock) * bw + x / kBlock];
-                        m = (std::max)(m, HalfToFloat(h));
+                        m = (std::max)(m, At(*c, size_t(y) * m_lat.texW + x));
                     }
                 }
             }
@@ -484,6 +517,8 @@ private:
     mutable std::mutex m_mx;
     std::condition_variable m_idle;
     std::unordered_set<uint64_t> m_pending;   // tiles asked of a loader and not yet back
+    std::unordered_map<uint64_t, int64_t> m_asked;            // ... and when each was last asked
+    std::vector<std::pair<uint64_t, TileRequest>> m_asks;     // ... in the order asked (newest last)
     uint32_t m_inflight = 0;
     bool m_closed = false;
     std::atomic<uint64_t> m_landed{0};
