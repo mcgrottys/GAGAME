@@ -480,6 +480,7 @@ private:
     };
     SunLevel m_sun[kSunLevels];
     uint32_t m_sunLevels = 0;   // how many levels stand this frame
+    uint32_t m_sunContent = 0;  // maps due to be drawn anew, counted: the kept frame's key (sunMapU[3])
     bool m_sunSaid = false, m_sunPlanSaid = false;
     bool EnsureSunLevel(uint32_t k);   // the level's texture and views, made once
     AirRows m_air = EarthAir();

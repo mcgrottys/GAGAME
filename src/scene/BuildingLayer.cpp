@@ -2333,6 +2333,7 @@ void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double 
             moved = true;
         }
         L.cast = L.cast || moved;
+        if (moved) ++m_sunContent;   // a map due to be drawn anew: the content the readers keep has moved
         L.stood = true;
         // THE BOUNDARY: the centre less the eye in doubles, cast once. The camera on the sun's side,
         // half a span out, looking down the sun; near = span (the far face -> 0), far = 0 (the sun's
@@ -2352,6 +2353,11 @@ void BuildingLayer::PlanSunMap(const Camera& cam, const float sunDir[3], double 
         m_sunLevels = k + 1;
     }
     cb.sunMapU[0] = m_sunLevels;
+    // THE MAPS' CONTENT, counted (no shader reads it): a map drawn anew under the same matrix -- a walk
+    // or a cell landed while the eye stood -- moves no other byte of these rows, and the globe's kept
+    // frame (GlobeLayer::KeepKey hashes them) went on compositing land shaded by the map it replaced:
+    // Mark's dark, striped cell over Tokyo that one camera move cleared (2026-10-17).
+    cb.sunMapU[3] = m_sunContent;
     cb.shadow[3] = m_sunLevels ? m_sun[0].side : 0.0f;
     if (!m_sunPlanSaid && m_sunLevels) {   // the instrument: once, the cascade that stands
         m_sunPlanSaid = true;
