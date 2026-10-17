@@ -81,6 +81,9 @@ struct PaintCtx {
     std::vector<uint8_t> scratch;
     uint32_t scratchDim = 0;
     double sLat0 = 0, sLat1 = 0, sLon0 = 0, sLon1 = 0;   // the box `scratch` spans (radians)
+    // GisMaskSource: a height layer finer than the survey's grain meets this tile's box, so its
+    // texels ask the height's witness (Compositor::FinerHeightAt); false on nearly every tile.
+    bool finerHeight = false;
 };
 
 class ColorSource {
@@ -205,6 +208,13 @@ public:
     // than the data's cell reads the interpolant's facets (bilinear ETOPO at 4.9 km stepped at
     // 1 km rendered the continental slope as terraces).
     double HeightGrainM(int channel, double latRad, double lonRad) const;
+    // THE HEIGHT'S WITNESS AT A POINT (GisMaskSource, 2026-10-17): true where a height layer whose
+    // declared grain is finer than `grainM` HAS A VALUE at the point -- asked of the layer at its own
+    // grain, so a raster's nodata (a lidar's channel, a drone survey's water) answers false and the
+    // point belongs to the layer under it, whatever that one's grain. A footprint alone cannot say
+    // this: the Town Neck Beach DSM's rectangle is 31 % data. Nothing finer declared, or a grain of
+    // 0 (every grain): false.
+    bool FinerHeightAt(int channel, double latRad, double lonRad, double grainM) const;
     // THE STACK'S CEILING OVER A BOX (degrees): no SampleHeightStack in the box returns more than `hi`.
     // The stack is a chain of lerps h += (m - h) w, w in [0, 1], from 0: each step keeps h inside the
     // range of what came before and the source's own -- or replaces it, where the source owns the box

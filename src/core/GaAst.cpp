@@ -324,11 +324,11 @@ void RegisterKnownWaterEdges() {
     // M9ay: the survey is PAGES of its own tree (gis.landsea: rings swept per tile on the
     // shared addresses; r = water coverage, b = edited, a = surveyed), a third page tenant.
     Register({"compose.stack", "mask.pages", "paint survey mask", latlonW, mercPxW, true,
-              "water coverage / edited / surveyed (bytes)", "cube + z14 + z17 pages", 1.0,
-              "TileTree::Provider over gis.landsea (GisMaskSource sweep)"});
-    Register({"mask.pages", "globe.ps", "classifier + edit override", mercPxW, uvSW, false,
-              "land 0..1, edited 0..1, or no opinion", "finest page with an opinion", 1.0,
-              "Compose.hlsli CsMaskSample / ComposedLandness"});
+              "water coverage / finer height (g != r) / edited / surveyed (bytes)", "cube + z14 + z17 pages", 1.0,
+              "TileTree::Provider over gis.landsea (GisMaskSource sweep + Compositor::FinerHeightAt)"});
+    Register({"mask.pages", "globe.ps", "classifier: finest witness + edit override", mercPxW, uvSW, false,
+              "land 0..1, wet 0..1, edited 0..1, or no opinion", "finest page with an opinion", 1.0,
+              "Compose.hlsli CsMaskSample / ComposedLandnessEdit"});
     Register({"globe.ps", "frame.out", "radiance (accepting state)", worldM, worldM,
               false, "linear RGB -> tonemap", "the render", 1.0, "Renderer tonemap"});
 }

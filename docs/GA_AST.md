@@ -46,8 +46,8 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | ocean.fft | chop deriv (pattern) | churn.kernel | patch.wrap +v=N | atlas.texel +v=N | - | jacobian foam | 0..1 | x1 | SeaChurn.hlsl (world - U dt)/patch |
 | swe.solver | uv (blocking) | churn.kernel | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | +-2.5 | x1 | SeaChurn.hlsl suv flip |
 | sea.peakdir | LOS march over the height stack (M9ba) | exposure.node | world.m +v=N | world.m +v=N | - | 0..1 exposure | 0.12..1; rebuilt on dir/level move | x1 | SeaLayer::BuildShadowMask (CPU) |
-| compose.stack | paint survey mask | mask.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | water coverage / edited / surveyed (bytes) | cube + z14 + z17 pages | x1 | TileTree::Provider over gis.landsea (GisMaskSource sweep) |
-| mask.pages | classifier + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandness |
+| compose.stack | paint survey mask | mask.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | water coverage / finer height (g != r) / edited / surveyed (bytes) | cube + z14 + z17 pages | x1 | TileTree::Provider over gis.landsea (GisMaskSource sweep + Compositor::FinerHeightAt) |
+| mask.pages | classifier: finest witness + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, wet 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandnessEdit |
 | globe.ps | radiance (accepting state) | frame.out | world.m +v=N | world.m +v=N | - | linear RGB -> tonemap | the render | x1 | Renderer tonemap |
 | color.pages | bed albedo (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | at the refracted ray's bed hit, 2 secant steps | x1 | Globe.hlsl WaterPixelColor ComposedColor(bedDir) |
 | height.pages | refracted cast (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | 2 secant steps, s clamped 0.3..140 m | x1 | Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(dirP)) |

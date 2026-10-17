@@ -1329,23 +1329,17 @@ float4 PsSurface(VsOut i, out float land) {
     // the sun is up. A hillside leans toward a set sun exactly as a wave face does.
     const float sunVis = PortalShadow(sLvlCamAbs + i.rel - float3(0.0f, gGlo.x, 0.0f)) *
                          PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x);
-    // M6i/M6j/M6n: classification by SURVEY far afield; inside the window the LIVE waterline
-    // decides through an ANALOG shore band (ComposedLandness) -- the binary cut flickered
-    // tile-shaped speckle over the flats whenever the height data's resident level changed
-    // mid-stream. Both shading sides are evaluated and MIXED by landness: a half-emerged flat
-    // is half wet, in color, in glint, and (in the mesh shader) in geometry.
-    // The classifier's INPUT is residency-stable: a fixed ~38 m level (window mip 2, fully
-    // warmed) rather than "finest resident" -- neighbouring tiles streaming at different
-    // depths were reading heights that disagreed by more than the shore band and cutting
-    // hard seams. Fine data still drives shading; only the land/water QUESTION reads the
-    // stable level.
-    // M7f: classification input sharpens one rung, 38 m -> 19 m (window mip 1): the fine
-    // edit mask owns the structures now, so the height-driven shoreline can afford the
-    // finer level -- half the staircase, same residency-stable contract.
-    const float lodC = max(lod, -5.0f);   // the classifier's level: hp itself where no coarser
-    const float hpC = ComposedHeightOn() ? ((lodC == lod) ? hp : ComposedHeightChain(up, lodC CS_WC)) : i.h;
+    // M6i/M6j/M6n: classification by SURVEY where the survey is the finer witness, by the height's
+    // sign against the LIVE waterline where a height layer finer than the survey has a value
+    // (Compose.hlsli ComposedLandnessEdit, 2026-10-17). Both shading sides are evaluated and MIXED
+    // by landness: a half-emerged flat is half wet, in color, in glint, and (in the mesh shader)
+    // in geometry.
+    // The classifier read the height at a residency-stable ~19 m level (M6i/M7f: tiles streaming
+    // at different depths cut seams where the height alone decided). With the survey global
+    // (streaming.gisLand) the height decides only where its data is finer than the survey, so it
+    // reads at the pixel's own level like every other height read here; the 19 m read is gone.
     // WATER CANNOT STAND ABOVE ITS OWN SURFACE: a fragment the mesh drew over the waterline is dry
-    // whatever the mask says of its map point (i.dry, made by SurfaceVertex). At and below the
+    // whatever the survey says of its map point (i.dry, made by SurfaceVertex). At and below the
     // waterline the classifier decides as before; the shore band's 0.4 m grades the edge.
     // A FACE OVERRIDES THE SURVEY ONLY AS FAR AS THE EYE CAN SEE IT (Mark, 2026-10-11: the coast
     // "would not spike like that"). A face `dry` metres tall, seen at elevation e, spans dry cos e
@@ -1354,12 +1348,17 @@ float4 PsSurface(VsOut i, out float land) {
     // centimetres and the band is the 0.4 m it was; from orbit the face is edge-on, the band grows
     // past any drawn height, and the survey decides -- the relief of a coast cell
     // kilometres wide stood its whole cell over the survey's sea, in mesh-cell stair steps.
+    // It is a witness at the mesh's CELL, so it rides the survey's side alone: where the height is
+    // the finer witness, its own excess at this pixel is the finer statement of the same face
+    // (the 6-12 m cells of a 600 m view drew a 10 m stair over a 1.19 m survey).
     const float sinE = saturate(dot(normalize(-i.rel), upT));
     const float cosE = sqrt(max(1.0f - sinE * sinE, 1e-6f));
     const float dryBand = max(0.4f, footPxW / cosE);
+    float editLandPx = 0.0f, wet = 0.0f;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : max(ComposedLandness(up, pA CS_WC, hpC, gWavesB.w), saturate(i.dry / dryBand));
+                            : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
+                                                   editLandPx, wet);
     land = landness;
     float3 n = upT;
     float3 alb;
@@ -1706,16 +1705,13 @@ float4 PsSurface(VsOut i, out float land) {
             const float water = gWavesB.w;
             float3 matAlb = alb;
             // WET ONLY WHERE THE DATA SAYS WATER (Mark, 2026-10-11: "only color what we can confirm
-            // is underwater via the mask or bathymetry"). The classifier's own two witnesses, in its
-            // own order: the survey's water coverage where it has an opinion -- so Tokyo's polders,
-            // below the live waterline but land to the survey, stay dry (2026-10-10) -- and with
-            // no survey the bed below the live waterline. A height band above the water and "no
-            // opinion = wet" were guesses, and painted a sand rim wider than any beach.
-            {
-                const float lmW = ComposedLandMask(up, pA CS_WC);
-                const float sea = (lmW >= 0.0f) ? 1.0f - lmW : ((hp < water) ? 1.0f : 0.0f);
-                matAlb = lerp(alb, float3(0.38f, 0.34f, 0.27f), sea);   // wet sand, where confirmed
-            }
+            // is underwater via the mask or bathymetry"). The classifier's own witnesses, by its own
+            // law (ComposedLandnessEdit's `wet`, the one mask read above): the survey's water coverage
+            // where it is the finer -- so Tokyo's polders, below the live waterline but land to the
+            // survey, stay dry (2026-10-10) -- and the bed below the live waterline where the height
+            // is, or with no survey. A height band above the water and "no opinion = wet" were
+            // guesses, and painted a sand rim wider than any beach.
+            matAlb = lerp(alb, float3(0.38f, 0.34f, 0.27f), wet);   // wet sand, where confirmed
             const float ndlM = saturate(dot(nM, GA_SUN_DIR)) * sunVis;
             // M10 (a pre-existing bug the Droste night found): the sky's ambient here ignored
             // the hour. Every other term in this shader dims its skylight by `day`; this one did
