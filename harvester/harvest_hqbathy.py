@@ -561,7 +561,11 @@ def overlay_ehydro(grid, src, feats):
         pts = parse_xyz(zf.read(member).decode("ascii", errors="replace"))
         # EPSG:2249 usft -> meters FIRST, then the meter-parameter LCC inverse.
         lat, lon = lcc_mass_inverse(pts[:, 0] * USFT, pts[:, 1] * USFT)
-        z_navd = pts[:, 2] * USFT + MLLW_MINUS_NAVD
+        # eHydro's Z is a DEPTH, US survey feet below MLLW, positive down (0..28 ft in the entrance
+        # channel, median 11.8). Taken as a height until 2026-10-17 the channel came out +2..+4 m NAVD88
+        # and the engine drew it dry; the C# twin (HqBathy.cs) carries the same fix and a check that
+        # samples the eHydro cells whatever their value.
+        z_navd = -pts[:, 2] * USFT + MLLW_MINUS_NAVD
         ix = np.floor((lon - LON0) / DLON).astype(np.int64)
         iy = np.floor((LAT1 - lat) / DLAT).astype(np.int64)
         ok = (ix >= 0) & (ix < NX) & (iy >= 0) & (iy < NY)

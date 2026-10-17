@@ -1,0 +1,16 @@
+{
+  "_readme": [
+    "THE A ARM of scenes/demos/merrimack_hq.json: the shipped Merrimack at the same frozen instant with the",
+    "same four extra views and NONE of the five rasters, so that a still or a frame cost taken here and one",
+    "taken on merrimack_hq.json differ by the content alone (docs/CONTENT_SCALING_2026-10-17.md)."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "merrimack-hq-a"},
+  "time": {"start": "2026-10-17T15:00:00"},
+  "views": [
+    {"name": "mouth", "at": {"x": 300, "alt": 500, "z": -600, "az": 20, "pitch": -50}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "bar", "at": {"x": 560, "alt": 35, "z": -40, "az": 300, "pitch": -40}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "tnb_high", "at": {"lat": 41.7662, "lon": -70.4812, "alt": 600, "heading": 0, "tilt": 15}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "tnb_low", "at": {"lat": 41.7650, "lon": -70.4830, "alt": 30, "heading": 60, "tilt": 70}, "fovY": 55, "gauge": "root", "nearZ": 0.25}
+  ]
+}

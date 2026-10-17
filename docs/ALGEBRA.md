@@ -647,6 +647,22 @@ source's tiles change and at no other time. A **gate** (`GateSource`) is a third
 edge: the value is the layer's, only the weight is the product; *absent* (no opinion)
 and *void* (blocks) are different answers.
 
+**The water's edge is a ladder of witnesses** (2026-10-17): two sources can say whether
+a point is wet — the survey (`gis.landsea`'s rings, exact to the scene's declared survey
+grain, `streaming.gisGrainM`) and the height tree against the live level — and the
+finest answers: the channel ladder's `PageWins`, asked of data instead of rungs. "Finer"
+is decided per texel at paint time, where the painter is known: the mask texel's g byte
+(r's duplicate before) differs from r exactly where a height layer finer than the
+survey's grain HAS A VALUE (`Compositor::FinerHeightAt`, asked of the layer at its own
+grain, so a raster's nodata answers false and the layer beneath owns the point). The
+classifier (`ComposedLandnessEdit`) crossfades on |g − r|/a, one mask read serving the
+landness, the wet share and the edit floor. The limits are exact: no finer height — the
+shipped Merrimack's CUDEM 13.7 m and edits 5 m against a 1 m survey — paints g = r and the
+survey answers byte for byte as before (no tree on disk repaints); a 25 cm drone DSM
+answers by its sign at the live level. The mesh's drawn-face override (`i.dry`, "water
+cannot stand above its own surface") is a witness at the mesh's cell and rides the
+survey's side only (priors 48).
+
 Code: `src/compose/Compositor.*`, `Sources.*`, `ComposeTree.h`, `TileTree.h`,
 `GisMask.*`. Gates: `composetest` (paint order, weights, alpha, cache identity,
 addressing vs closed forms), `atlastest`, `--tree-audit` (tree vs incumbent, tile for
@@ -1638,6 +1654,43 @@ model (or a textbook) would hold → what this project measured → the law now 
     Law: what a cache holds is a decision it makes every frame, not one it makes when cornered; and a
     change that only moves WHEN a tile lands is gated on a moving instrument against its own A/A floor,
     never on a settled still, which is defined to hide it.
+48. **A stair in the shoreline is the coarsest WITNESS, not the coarsest texel.** Prior (the brief
+    that asked for this, 2026-10-17): over a 5 cm drone ortho at Town Neck Beach the water's edge was
+    a stair of ~10 m steps, read as the land/sea mask's texel at the eye window's rung. Measured
+    (`--lens residency.landsea`, `--lens residency.height`, `--lens mix` on the settled still, the
+    key swatches read back numerically): the survey AND the height were both read from rank 4 at
+    its mip 3, 1.19 m texels, and the survey's own edge was smooth at that grain; the mix lens drew
+    a red sawtooth along it -- pixels land by landness and water by the survey -- which is the mesh
+    stage's `i.dry` override (landness x (dispLand - level) at the vertices, interpolated across
+    6-12 m cells at 600 m, graded by a 2.7 m band at 15 degrees off nadir) standing a third of each
+    cell over the survey's water. A face a pixel can see is still a statement at the CELL's grain.
+    Law: before naming the texel that made a stair, put the lens on every witness that can draw one
+    -- the survey's page, the height's page, the mesh's cell -- and a witness's grain is what it was
+    sampled at, not the texel it reads. The fix is the ladder of witnesses (`compose`): the override
+    rides the survey's side, and where the height is the finer witness its own excess at the pixel
+    is the finer statement of the same face.
+
+49. **A frozen clock that starts at "now" is a different instant every run.** Prior (and the memory's
+    own law): `--scale 0 --settle-exact` makes a headless still reproducible. Measured (2026-10-17,
+    merrimack.json's sea view, two runs three minutes apart): 58.8 % of pixels differed (SSIM 0.939,
+    the halo and the glint) with every residency hash EQUAL, and `globe.water` read 8.9 vs 6.8 ms --
+    the scene's `time.start` is "now" and its sun is the ephemeris, so the clock froze at two
+    instants with the sun at +8.26 and +7.77 deg, and the sun's terrain march came and went with the
+    elevation. Pinned (`--set time.start=2026-10-17T15:00:00`) the same pair is bit-identical and the
+    pass's spread is 0.01 ms. Law: a still's instant is part of its recipe; `--scale 0` holds the
+    clock, it does not choose it.
+
+50. **fp16 is not twice the ALU rate here, and the water pixel is not its ALU.** Prior (finding 32 of
+    REVIEW 2026-10-17, and every GPU text since Turing): the radiometry in 16 bits runs at twice the
+    rate. Measured (RTX 5060 Laptop, Blackwell GB206, whose non-tensor fp16 rate is listed at its fp32
+    rate; the water's colours, mixes, Fresnel weights and the sky table's lerp moved to `half` with
+    `-enable-16bit-types` on the mesh pipeline's pixel stage alone): `globe.water` 6.676 / 6.676 ms
+    (two floor runs) -> 6.604, 1.1 % of the pass and 0.5 % of the frame, for a still one LSB apart on
+    1.03 % of its pixels (never more) against a bit-identical floor. The pass's time is its two sky
+    marches, its two terrain casts and the bed cast -- latency, not arithmetic. Law: a precision
+    change is argued from the hardware's own rate table and gated beside an A/A floor that can see
+    1 %; and what it buys on this part is registers, which only a shader at its occupancy limit can
+    spend.
 
 ## verification — The gate map: which algebra is pinned where
 

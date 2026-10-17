@@ -26,7 +26,10 @@ namespace {
 constexpr double kPi = 3.14159265358979323846, kD2R = kPi / 180.0;
 constexpr double kR = 6378137.0;   // WGS84 a: Web Mercator's sphere, and a degree's metres of arc
 constexpr uint32_t kWin = 256;     // a decoded window's side, texels
-constexpr size_t kWindows = 256;   // the windows a source keeps: 64 MB
+constexpr size_t kWindows = 1024;  // the windows a source keeps: 256 MB at most, and only what was touched.
+// MEASURED 2026-10-17 at 256: a cold view over a 62 Mpx bed (980 windows) and 25 lidar files (400) decoded
+// 12,971 windows for 934 tile loads of 1.4 s each -- fourteen decodes a load, the same windows over and
+// over, the picture never settling; the cache held a fifth of the working set.
 
 bool Fail(std::string* why, std::string w) {
     if (why) *why = std::move(w);
@@ -316,17 +319,24 @@ bool RasterFileSource::ToLatLon(double x, double y, double& lat, double& lon) co
 }
 
 // ---- BY THE WINDOW: 256 x 256 texels of one file, RGBA8 as the seam gives them (0 where the
-// file said nodata), decoded once and kept while used. Two threads may decode one window at once;
-// the second keeps the first's, and the loader serializes its own decoder.
+// file said nodata), decoded once and kept while used. ONE DECODE A WINDOW (2026-10-17): the loader
+// serializes its decoder, and the ingest's pool threads paint neighbouring tiles, so a window two
+// threads wanted at once was decoded twice behind that lock -- measured as 44,347 decodes of a 5,430-
+// window file, eight times over, with the decoder the whole of the ingest's time. A thread that finds
+// a window being decoded waits for it (m_decoding, m_decoded) rather than decoding it again.
 std::shared_ptr<const std::vector<uint8_t>> RasterFileSource::Window(size_t file, uint32_t wx,
                                                                      uint32_t wy) {
     const uint64_t key = (uint64_t(file) << 48) | (uint64_t(wy) << 24) | wx;
     {
-        std::lock_guard<std::mutex> lk(m_cacheMx);
-        auto it = m_index.find(key);
-        if (it != m_index.end()) {
-            m_lru.splice(m_lru.begin(), m_lru, it->second);
-            return it->second->second;
+        std::unique_lock<std::mutex> lk(m_cacheMx);
+        for (;;) {
+            auto it = m_index.find(key);
+            if (it != m_index.end()) {
+                m_lru.splice(m_lru.begin(), m_lru, it->second);
+                return it->second->second;
+            }
+            if (m_decoding.insert(key).second) break;   // nobody is on it: this thread decodes it
+            m_decoded.wait(lk);                          // another thread is: its window lands below
         }
     }
     auto px = std::make_shared<std::vector<uint8_t>>(size_t(kWin) * kWin * 4, uint8_t(m_height ? 0xFF : 0));
@@ -341,8 +351,8 @@ std::shared_ptr<const std::vector<uint8_t>> RasterFileSource::Window(size_t file
         for (size_t k = 0; k < px->size(); ++k) (*px)[k] = static_cast<uint8_t>(tp.data[k]);
     }
     std::lock_guard<std::mutex> lk(m_cacheMx);
-    auto it = m_index.find(key);
-    if (it != m_index.end()) return it->second->second;
+    m_decoding.erase(key);
+    m_decoded.notify_all();
     m_lru.emplace_front(key, px);
     m_index[key] = m_lru.begin();
     if (m_lru.size() > kWindows) {
@@ -714,7 +724,7 @@ std::vector<std::unique_ptr<RasterFileSource>> LoadRasterSources(
 }
 
 // ---- THE PASS ---------------------------------------------------------------------------------
-IngestStats Ingest(TileTree& tree, const Lattice& lattice) {
+IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lattice>& realized) {
     IngestStats st;
     const DomainSource* node = tree.Node();
     double lo0 = 0, la0 = 0, lo1 = 0, la1 = 0;
@@ -781,24 +791,38 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice) {
     }
     size_t total = 0;
     for (const auto& v : in) total += v.size();
+    // THE PARTNER LEVEL: a level whose texel grid a finer realization of this tree already holds is
+    // taken from it, tile for tile (TileTree::Adopt), and neither painted nor folded here.
+    std::vector<int> partnerMip(top + 1, -1), partnerOf(top + 1, -1);
+    for (uint32_t m = 0; m <= top; ++m) {
+        for (size_t i = 0; i < realized.size() && partnerMip[m] < 0; ++i) {
+            partnerMip[m] = TileTree::PartnerMip(lattice, m, realized[i]);
+            if (partnerMip[m] >= 0) partnerOf[m] = int(i);
+        }
+    }
     // Painted at the own mip, then each level folded from the one below, on the pool.
     const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t dec0 = RasterFileSource::s_decodes.load(), us0 = RasterFileSource::s_decodeUs.load();
     auto since = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
-    std::atomic<uint32_t> done{0};
+    std::atomic<uint32_t> done{0}, adopted{0};
     std::atomic<bool> transient{false};
     std::atomic<long long> nextLog{5};
     for (uint32_t m = uint32_t(st.own); m <= top; ++m) {
         const std::vector<TileRequest>& lv = in[m];
         if (lv.empty()) continue;
         ++st.levels;
+        const int pi = partnerOf[m];
+        const std::string ptag = pi >= 0 ? realized[pi].Tag() : std::string();
         Threads().ParallelFor(Lane::Compute, "ingest", int(lv.size()), 4, [&](int a, int b) {
             std::vector<uint8_t> bytes;
             for (int k = a; k < b; ++k) {
-                if (tree.Tile(lattice, tag, lv[k], bytes, nullptr) == TileTree::Status::Transient) {
-                    transient = true;
-                }
+                const TileTree::Status s =
+                    pi >= 0 ? tree.Adopt(tag, lv[k], realized[pi], ptag, uint32_t(partnerMip[m]), bytes)
+                            : tree.Tile(lattice, tag, lv[k], bytes, nullptr);
+                if (s == TileTree::Status::Transient) transient = true;
+                if (pi >= 0) ++adopted;
                 const uint32_t d = ++done;
                 long long due = nextLog.load();
                 if (since() >= double(due) && nextLog.compare_exchange_strong(due, due + 5)) {
@@ -809,7 +833,10 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice) {
         });
     }
     st.tiles = done.load();
+    st.adopted = adopted.load();
     st.seconds = since();
+    st.windows = RasterFileSource::s_decodes.load() - dec0;
+    st.decodeSec = double(RasterFileSource::s_decodeUs.load() - us0) * 1e-6;
     if (!transient) {
         char b[256];
         snprintf(b, sizeof(b), "{\"tree\": \"%s\", \"own\": %d, \"tiles\": %u, \"levels\": %u}\n",
@@ -829,13 +856,22 @@ void IngestSources(const std::vector<std::unique_ptr<RasterFileSource>>& sources
         if (src->Height()) layer = std::make_shared<HeightLayerSource>(src.get(), kHeightFrame);
         else leaf = NormalizeToSi(layer = std::make_shared<ColorLayerSource>(src.get()));
         TileTree tree(leaf ? leaf.get() : layer.get(), src->Height() ? TileTree::Fmt::FloatW : TileTree::Fmt::Rgba8);
-        for (const Lattice& l : src->Height() ? height : colour) {
-            const IngestStats st = Ingest(tree, l);
+        // The finest lattice first: a coarser one takes its equal-grid levels from the folds the
+        // finer one kept (TileTree::Adopt) instead of asking the file for them.
+        std::vector<Lattice> order = src->Height() ? height : colour;
+        std::stable_sort(order.begin(), order.end(),
+                         [](const Lattice& a, const Lattice& b) { return a.faceDim > b.faceDim; });
+        std::vector<Lattice> realized;
+        for (const Lattice& l : order) {
+            const IngestStats st = Ingest(tree, l, realized);
+            realized.push_back(l);
             if (st.whole) {
                 Log("[ingest] %s on %s: whole (own mip %d)", src->Info().name.c_str(), l.Tag().c_str(), st.own);
             } else if (st.own >= 0) {
-                Log("[ingest] %s on %s: own mip %d, %u tiles on %u levels in %.1f s", src->Info().name.c_str(),
-                    l.Tag().c_str(), st.own, st.tiles, st.levels, st.seconds);
+                Log("[ingest] %s on %s: own mip %d, %u tiles on %u levels in %.1f s (%u taken from a finer "
+                    "realization); %llu windows decoded, %.1f s in the decoder",
+                    src->Info().name.c_str(), l.Tag().c_str(), st.own, st.tiles, st.levels, st.seconds,
+                    st.adopted, static_cast<unsigned long long>(st.windows), st.decodeSec);
             }
         }
     }

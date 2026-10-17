@@ -299,7 +299,13 @@ public sealed class HqBathy : IHarvester
             foreach (var (x, y, z) in pts)
             {
                 var (lat, lon) = Geo.LccMassInverse(x * Usft, y * Usft);
-                var zNavd = z * Usft + MllwMinusNavd;
+                // eHydro's Z is a DEPTH: US survey feet below MLLW, positive down (the entrance channel's
+                // thinned XYZ runs 0..28 ft, median 11.8, in a channel dredged to 15). Taken as a height
+                // (the sign this line carried until 2026-10-17) the channel came out +2..+4 m NAVD88, the
+                // engine drew it DRY, and the orthos' photographed water stood on it as ground -- Mark's
+                // eye found it. The check below (ValidateVsCudem) sampled only cells below -1 m, so it
+                // could not see the cells it had put above the water; it now samples the eHydro cells.
+                var zNavd = -z * Usft + MllwMinusNavd;
                 lonMin = Math.Min(lonMin, lon); lonMax = Math.Max(lonMax, lon); latMin = Math.Min(latMin, lat); latMax = Math.Max(latMax, lat);
                 zMin = Math.Min(zMin, zNavd); zMax = Math.Max(zMax, zNavd);
                 var ix = (int)Math.Floor((lon - Lon0) / Dlon);
@@ -318,19 +324,24 @@ public sealed class HqBathy : IHarvester
         return used;
     }
 
-    (Dictionary<string, object?> rep, double medOut) ValidateVsCudem(float[] grid)
+    (Dictionary<string, object?> rep, double medOut) ValidateVsCudem(float[] grid, byte[] src)
     {
         var meta = Load(Path.Combine(OutDir, "merrimack.json"))!;
         var cud = Bin.ReadF32(Path.Combine(OutDir, "merrimack.f32"));
         int cnx = (int)meta.Num("nx"), cny = (int)meta.Num("ny");
         double clon0 = meta.Num("lon0"), clat1 = meta.Num("lat1"), cdlon = meta.Num("dlon"), cdlat = meta.Num("dlat");
         var rng = new Random(20260831);
-        var dIn = new List<double>(); var dOut = new List<double>();
-        for (var k = 0; k < 1_500_000 && (dIn.Count < 20000 || dOut.Count < 20000); k++)
+        var dIn = new List<double>(); var dOut = new List<double>(); var dEh = new List<double>();
+        for (var k = 0; k < 3_000_000 && (dIn.Count < 20000 || dOut.Count < 20000 || dEh.Count < 20000); k++)
         {
             int iy = rng.Next(NY), ix = rng.Next(NX);
             var v = grid[iy * NX + ix];
-            if (!(v > -9000 && v < -1.0)) continue;
+            var ehydro = src[iy * NX + ix] == 2;
+            // THE BLIND SPOT, closed: a cell the overlay put ABOVE the water is exactly the cell a sign
+            // error makes, so the eHydro cells are sampled whatever their value; the BlueTopo cells keep
+            // the wet-cell filter (their land edge is a different question).
+            if (!(v > -9000)) continue;
+            if (!ehydro && !(v < -1.0)) continue;
             var lat = Lat1 - (iy + 0.5) * Dlat;
             var lon = Lon0 + (ix + 0.5) * Dlon;
             var px = (lon - clon0) / cdlon - 0.5;
@@ -342,10 +353,11 @@ public sealed class HqBathy : IHarvester
             if (!(v00 > -9000 && v01 > -9000 && v10 > -9000 && v11 > -9000)) continue;
             var cv = v00 * (1 - fx) * (1 - fy) + v01 * fx * (1 - fy) + v10 * (1 - fx) * fy + v11 * fx * fy;
             var diff = v - cv;
+            if (ehydro) { if (dEh.Count < 20000) dEh.Add(diff); continue; }
             if (Chan.Contains(lon, lat)) { if (dIn.Count < 20000) dIn.Add(diff); }
             else if (dOut.Count < 20000) dOut.Add(diff);
         }
-        Log("datum cross-check vs CUDEM (inlethq - cudem, wet cells < -1 m):");
+        Log("datum cross-check vs CUDEM (inlethq - cudem; BlueTopo at wet cells < -1 m, the eHydro cells whatever their value):");
         Dictionary<string, object?>? Stats(string tag, List<double> d)
         {
             if (d.Count == 0) return null;
@@ -356,8 +368,13 @@ public sealed class HqBathy : IHarvester
         }
         var rIn = Stats("inside federal channel (dredge/shoal EXPECTED)", dIn);
         var rOut = Stats("outside channel (datum agreement)", dOut);
+        var rEh = Stats("the eHydro cells (the survey against CUDEM: dredging apart, the same bed)", dEh);
+        // THE GATE a sign error cannot pass: the survey's cells lie within a few metres of CUDEM's bed
+        // (the channel is dredged 1-3 m deeper than the 2014 plane in places, never 8 m shallower).
+        if (rEh is not null && Math.Abs((double)rEh["median_m"]!) > 2.5)
+            throw new HarvestStop($"the eHydro cells sit {(double)rEh["median_m"]!:+0.00;-0.00} m from CUDEM's bed at the median: a sign or datum error in the overlay, not dredging; refusing to write");
         var medOut = rOut is not null ? (double)rOut["median_m"]! : 0.0;
-        return (D(("inside_channel", rIn), ("outside_channel", rOut)), medOut);
+        return (D(("inside_channel", rIn), ("outside_channel", rOut), ("ehydro_cells", rEh)), medOut);
     }
 
     void WritePreviews(float[] grid, byte[] src)
@@ -405,7 +422,7 @@ public sealed class HqBathy : IHarvester
         var cover = (double)validN / grid.Length;
         Log($"grid: {100 * cover:0.0}% covered (bluetopo {nBt}, ehydro {nEh} cells), range [{vmin:0.0}, {vmax:0.0}] m NAVD88");
         if (vmin < -60.0 || vmax > 40.0) Log("WARNING: range outside the expected -25..+12 envelope; inspect the preview");
-        var (rep, medOut) = ValidateVsCudem(grid);
+        var (rep, medOut) = ValidateVsCudem(grid, src);
         if (Math.Abs(medOut) > 0.5)
             throw new HarvestStop($"outside-channel median {medOut:+0.000;-0.000} m vs CUDEM exceeds 0.5 m -- a datum or projection sign is wrong (check usft factor, the -1.400 sign, the UTM zone). NOT writing output.");
         if (Math.Abs(medOut) > 0.35) Log($"WARNING: outside-channel median {medOut:+0.000;-0.000} m > 0.35 m -- datums only loosely aligned; shipping, but the waterline gate should re-audit");

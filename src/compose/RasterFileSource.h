@@ -46,6 +46,8 @@
 // ================================================================================================
 #pragma once
 #include <atomic>
+#include <condition_variable>
+#include <unordered_set>
 
 #include "compose/Compositor.h"
 #include "compose/Projections.h"
@@ -157,6 +159,8 @@ private:
     std::mutex m_cacheMx;
     std::list<std::pair<uint64_t, std::shared_ptr<const std::vector<uint8_t>>>> m_lru;
     std::unordered_map<uint64_t, decltype(m_lru)::iterator> m_index;
+    std::unordered_set<uint64_t> m_decoding;   // windows a thread is decoding now (under m_cacheMx)
+    std::condition_variable m_decoded;         // one landed: a thread waiting for it looks again
     std::list<std::pair<uint64_t, std::shared_ptr<const Sat>>> m_satLru;   // under m_cacheMx
     std::unordered_map<uint64_t, decltype(m_satLru)::iterator> m_satIndex;
     std::list<std::pair<uint64_t, std::shared_ptr<const Blocks>>> m_blkLru;   // under m_cacheMx
@@ -192,9 +196,14 @@ struct IngestStats {
     int own = -1;
     uint32_t tiles = 0, levels = 0;
     double seconds = 0.0;
+    uint32_t adopted = 0;      // tiles taken from a finer realization's equal-grid level (TileTree::Adopt)
+    uint64_t windows = 0;      // THE INSTRUMENT: file windows decoded for this lattice, and the
+    double decodeSec = 0.0;    // seconds inside the decoder (summed over the pool's threads)
     bool whole = false;   // the marker was there: nothing was asked
 };
-IngestStats Ingest(TileTree& tree, const Lattice& lattice);
+// `realized`: this tree's lattices ingested before this one (finest first), whose equal-grid
+// levels this lattice takes instead of painting (HIERARCHY 4.20 across realizations).
+IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lattice>& realized = {});
 // Every source's pass on every lattice of its kind, logged: what the boot runs before the first
 // frame and the `ingest` tool runs alone. A height's tree is the height stack's leaf (FloatW).
 void IngestSources(const std::vector<std::unique_ptr<RasterFileSource>>& sources,

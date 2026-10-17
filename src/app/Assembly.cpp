@@ -353,9 +353,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
     TileTree::SetTreeRoot(S.streaming.treeRoot);
     if (S.streaming.colorTrees || S.Tool("ingest")) {
+        // The heights' pyramid at boot too (2026-10-17): a height source's own level and its folds, on
+        // the lattice the Float root's children answer in (TileTree::KidFrame: the pyramid twice as
+        // wide a tile). Painted on demand, each coarse level the terrain or the solver asked for was
+        // an area mean of the whole file -- 655 ms a height read, cold, at the jetty with a 62 Mpx bed
+        // and a 25 Mpx lidar on the tree, against 2 ms warm; folds kept at boot make it the read of
+        // a tile. (PHASE B3 deleted the z14 height page; this is the pyramid, not a page.)
         IngestSources(A->sceneSources,
                       std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)},
-                      {surface.cubeH});   // PHASE B3: the z14 height page deleted (the pyramid is painted on demand)
+                      {hal::BlockBinding::Pyramid(256, 128), surface.cubeH});
     }
     if (S.Tool("ingest")) return nullptr;
 
@@ -1121,8 +1127,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
                     gisMask.Load("data/gis/", S.streaming.gisLand, S.data.edits)) {
-                    srcGisMask.Refresh();   // the rings are loaded: declare the real box
                     srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
+                    // The height's witness: a height layer finer than that grain draws the water's
+                    // edge where it has a value (GisMask.h SetHeight; the shipped scenes have none).
+                    if (hgtCh >= 0) srcGisMask.SetHeight(&compositor, hgtCh);
+                    srcGisMask.Refresh();   // the rings are loaded: declare the real box and the finer layers
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
                     if (S.Tool("gis-sweep-test")) tools::RunGisSweepTest(gisMask);   // F15
                     colorStack.push_back(&srcGisMask);

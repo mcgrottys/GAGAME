@@ -879,12 +879,17 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
     // sediment and CDOM, so both are measurements (ALGEBRA "optics"). Where the retrieval is
     // absent, the M7c constants and the shelf tint stand in, byte for byte.
+    // THE RADIOMETRY IN `half` (REVIEW 2026-10-17 finding 32): the colours, the mixes and the
+    // Fresnel weights below are 16-bit where the compile enables 16-bit types (the mesh pipeline's
+    // pixel stage, GlobeLayer::BuildMeshPso) and plain float elsewhere (`half` is float without the
+    // flag). Every address, height, depth, direction and ray point keeps fp32 (the float-wall
+    // findings 6/7/42); the glint lobe too, whose range (1 / (4 pi s2 ch^4)) passes fp16's 65504.
     const WaterOptics wq = SampleWaterOptics(latDeg, lonDeg);
     const float shelf = saturate(1.0f + hp / 45.0f);        // 1 at the beach, 0 by -45 m
-    const float3 cScatter =
-        (wq.deep.x >= 0.0f) ? wq.deep
-                            : lerp(float3(0.008f, 0.030f, 0.080f),
-                                   float3(0.055f, 0.28f, 0.31f), shelf * shelf);
+    const half3 cScatter =
+        (wq.deep.x >= 0.0f) ? half3(wq.deep)
+                            : lerp(half3(0.008h, 0.030h, 0.080h),
+                                   half3(0.055h, 0.28h, 0.31h), half(shelf * shelf));
 
     // ---- THE SURFACE. Far afield the slope variance is Cox-Munk on the live wind; inside the
     // bank's rings the fold's own shed sigma^2 replaces it, floored at the PIXEL's resolving
@@ -996,7 +1001,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // the space view is the bed's; toward the horizon the sea becomes a mirror.
     const float3 dIn = -v;                                   // camera -> surface
     const float cosV = saturate(dot(v, nPix));
-    const float fres = 0.02f + 0.98f * pow(1.0f - cosV, 5.0f);
+    const half fres = 0.02h + 0.98h * pow(half(1.0f - cosV), 5.0h);   // the difference taken in fp32
 
     // ---- RAY 1, REFLECTED: the Cl(3) sandwich. What it HITS is the question the old horizon
     // clamp dodged.
@@ -1024,7 +1029,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // The fold's shed grades used to reach the GLINT and not the MIRROR -- that asymmetry was
     // the artefact, and this is the same sigma^2 arriving where it was always due.
     const float spread = 2.0f * sqrt(max(s2, 1e-6f));
-    const float seaward = saturate(0.5f - 0.5f * rUp / spread);
+    const half seaward = half(saturate(0.5f - 0.5f * rUp / spread));   // a mix weight, from fp32 directions
     // The sky is still sampled on a horizon-clamped ray -- below it the model has no sky to
     // give -- but it now only carries the (1 - seaward) share.
     const float3 rSky = normalize(rDir + max(0.02f - rUp, 0.0f) * upT);
@@ -1079,14 +1084,14 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         bedW = geo + upT * a0 + sP * tDir;
         sDown = sP;
     }
-    const float3 Tw = exp(-wq.kd * (sDown + depthW));
-    const float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                              ? ComposedColor(bedDir, bedP CS_WALK_AT(bedW, lvl))
-                              : float3(0.44f, 0.40f, 0.31f);
+    const half3 Tw = exp(-half3(wq.kd * (sDown + depthW)));   // the optical depth formed in fp32
+    const half3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
+                             ? half3(ComposedColor(bedDir, bedP CS_WALK_AT(bedW, lvl)))
+                             : half3(0.44h, 0.40h, 0.31h);
     // THE TRANSLUCENCY. Albedos mix and the surface lights ONCE -- the engine's radiometry
     // everywhere else -- so this path cannot disagree with the vertex path about EXPOSURE,
     // only about what is under the water.
-    float3 albW = lerp(cScatter, bedAlb, Tw);
+    const half3 albW = lerp(cScatter, bedAlb, Tw);
 
     // ---- THE GLINT: the Cox-Munk lobe on the pixel normal, sigma^2 as folded above.
     // M10: the level's own sun, eclipsed by the inner globe (PortalShadow) and by the planet
@@ -1116,7 +1121,8 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes,
     // and the mirror itself is part sky, part the very water it stands on.
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
-    const float3 bodyLit = albW * (SkyAmbient(nSmooth, upT, hp) + ndl * SunAt(upT, hp) * 1.15f);
+    const half3 sunHere = half3(SunAt(upT, hp));
+    const half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1125,9 +1131,9 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // straight down it returns 0.02 and the endpoint is the water body. No new constant, no
     // branch -- the law already in this function, applied once more.
     // M10: the sky it sees -- the hour rides the gradient only; the march already has it.
-    const float3 skyLit = SkyRadianceDirDiscless(rSky, upT);
-    const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
-    float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
+    const half3 skyLit = half3(SkyRadianceDirDiscless(rSky, upT));
+    const half fresHit = 0.02h + 0.98h * pow(half(1.0f - saturate(-rUp)), 5.0h);
+    half3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     // THE MIRROR'S LAND (scene render.reflectLand): the reflected ray marched over the same height
     // field the sun's was. Where it meets the ground, the water reflects that ground -- its imagery
     // lit flat by the sun and the sky at its own altitude, seen through the air along the ray --
@@ -1140,24 +1146,24 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         // never the bed through the back of the surface.
         if (mh.s > 0.0f && mh.alt > lvlW) {
             const float3 hitP = own ? pA + upT * (lvlW + dispW) + mh.s * rDir : CsPointOfDir(mh.dirP);
-            const float3 landAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                                       ? ComposedColor(mh.dirP, hitP CS_WALK_AT(mh.pL, lvl))
-                                       : Hypsometric(max(mh.alt, 0.0f), radians(latDeg));
+            const half3 landAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
+                                      ? half3(ComposedColor(mh.dirP, hitP CS_WALK_AT(mh.pL, lvl)))
+                                      : half3(Hypsometric(max(mh.alt, 0.0f), radians(latDeg)));
             const float ndlL = saturate(dot(upT, GA_SUN_DIR)) * PlanetShadow(upT, GA_SUN_DIR, mh.alt, gGlo.x);
-            const float3 landLit = landAlb * (SkyAmbient(upT, upT, mh.alt) + ndlL * SunAt(upT, mh.alt) * 1.15f);
+            const half3 landLit = landAlb * (half3(SkyAmbient(upT, upT, mh.alt)) + half(ndlL * 1.15f) * half3(SunAt(upT, mh.alt)));
             // The air along the reflected ray, marched from where that ray starts: the water's own
             // zenith and radius, not the eye's (AerialPerspective's, a ray FROM the eye).
             float3 airT;
             float airG;
             const float3 airL = SkyAir(rDir, upT, GA_SUN_DIR, gSkyLut.y + max(lvlW, 0.0f), mh.s, airT, airG);
-            mirror = landLit * airT + airL;
+            mirror = landLit * half3(airT) + half3(airL);
         }
     }
-    float3 col = bodyLit * (1.0f - fres);
-    col += spec * SunAt(upT, hp) * 0.85f;
-    col += mirror * (fres * 0.9f);
-    col += albW * (1.0f - fres) * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // night side
-    return col;
+    half3 col = bodyLit * (1.0h - fres);
+    col += mirror * (fres * 0.9h);
+    col += albW * (1.0h - fres) * half3(0.010h, 0.014h, 0.028h) * half(1.0f - day);   // night side
+    // The glint added last and in fp32: a Cox-Munk lobe is the one term here that can pass 65504.
+    return float3(col) + spec * SunAt(upT, hp) * 0.85f;
 }
 
 // M9b: THE AMPLIFICATION UNIT, made visible. Wireframe answers "is the geometry moving";
@@ -1329,23 +1335,17 @@ float4 PsSurface(VsOut i, out float land) {
     // the sun is up. A hillside leans toward a set sun exactly as a wave face does.
     const float sunVis = PortalShadow(sLvlCamAbs + i.rel - float3(0.0f, gGlo.x, 0.0f)) *
                          PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x);
-    // M6i/M6j/M6n: classification by SURVEY far afield; inside the window the LIVE waterline
-    // decides through an ANALOG shore band (ComposedLandness) -- the binary cut flickered
-    // tile-shaped speckle over the flats whenever the height data's resident level changed
-    // mid-stream. Both shading sides are evaluated and MIXED by landness: a half-emerged flat
-    // is half wet, in color, in glint, and (in the mesh shader) in geometry.
-    // The classifier's INPUT is residency-stable: a fixed ~38 m level (window mip 2, fully
-    // warmed) rather than "finest resident" -- neighbouring tiles streaming at different
-    // depths were reading heights that disagreed by more than the shore band and cutting
-    // hard seams. Fine data still drives shading; only the land/water QUESTION reads the
-    // stable level.
-    // M7f: classification input sharpens one rung, 38 m -> 19 m (window mip 1): the fine
-    // edit mask owns the structures now, so the height-driven shoreline can afford the
-    // finer level -- half the staircase, same residency-stable contract.
-    const float lodC = max(lod, -5.0f);   // the classifier's level: hp itself where no coarser
-    const float hpC = ComposedHeightOn() ? ((lodC == lod) ? hp : ComposedHeightChain(up, lodC CS_WC)) : i.h;
+    // M6i/M6j/M6n: classification by SURVEY where the survey is the finer witness, by the height's
+    // sign against the LIVE waterline where a height layer finer than the survey has a value
+    // (Compose.hlsli ComposedLandnessEdit, 2026-10-17). Both shading sides are evaluated and MIXED
+    // by landness: a half-emerged flat is half wet, in color, in glint, and (in the mesh shader)
+    // in geometry.
+    // The classifier read the height at a residency-stable ~19 m level (M6i/M7f: tiles streaming
+    // at different depths cut seams where the height alone decided). With the survey global
+    // (streaming.gisLand) the height decides only where its data is finer than the survey, so it
+    // reads at the pixel's own level like every other height read here; the 19 m read is gone.
     // WATER CANNOT STAND ABOVE ITS OWN SURFACE: a fragment the mesh drew over the waterline is dry
-    // whatever the mask says of its map point (i.dry, made by SurfaceVertex). At and below the
+    // whatever the survey says of its map point (i.dry, made by SurfaceVertex). At and below the
     // waterline the classifier decides as before; the shore band's 0.4 m grades the edge.
     // A FACE OVERRIDES THE SURVEY ONLY AS FAR AS THE EYE CAN SEE IT (Mark, 2026-10-11: the coast
     // "would not spike like that"). A face `dry` metres tall, seen at elevation e, spans dry cos e
@@ -1354,12 +1354,17 @@ float4 PsSurface(VsOut i, out float land) {
     // centimetres and the band is the 0.4 m it was; from orbit the face is edge-on, the band grows
     // past any drawn height, and the survey decides -- the relief of a coast cell
     // kilometres wide stood its whole cell over the survey's sea, in mesh-cell stair steps.
+    // It is a witness at the mesh's CELL, so it rides the survey's side alone: where the height is
+    // the finer witness, its own excess at this pixel is the finer statement of the same face
+    // (the 6-12 m cells of a 600 m view drew a 10 m stair over a 1.19 m survey).
     const float sinE = saturate(dot(normalize(-i.rel), upT));
     const float cosE = sqrt(max(1.0f - sinE * sinE, 1e-6f));
     const float dryBand = max(0.4f, footPxW / cosE);
+    float editLandPx = 0.0f, wet = 0.0f;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : max(ComposedLandness(up, pA CS_WC, hpC, gWavesB.w), saturate(i.dry / dryBand));
+                            : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
+                                                   editLandPx, wet);
     land = landness;
     float3 n = upT;
     float3 alb;
@@ -1706,16 +1711,13 @@ float4 PsSurface(VsOut i, out float land) {
             const float water = gWavesB.w;
             float3 matAlb = alb;
             // WET ONLY WHERE THE DATA SAYS WATER (Mark, 2026-10-11: "only color what we can confirm
-            // is underwater via the mask or bathymetry"). The classifier's own two witnesses, in its
-            // own order: the survey's water coverage where it has an opinion -- so Tokyo's polders,
-            // below the live waterline but land to the survey, stay dry (2026-10-10) -- and with
-            // no survey the bed below the live waterline. A height band above the water and "no
-            // opinion = wet" were guesses, and painted a sand rim wider than any beach.
-            {
-                const float lmW = ComposedLandMask(up, pA CS_WC);
-                const float sea = (lmW >= 0.0f) ? 1.0f - lmW : ((hp < water) ? 1.0f : 0.0f);
-                matAlb = lerp(alb, float3(0.38f, 0.34f, 0.27f), sea);   // wet sand, where confirmed
-            }
+            // is underwater via the mask or bathymetry"). The classifier's own witnesses, by its own
+            // law (ComposedLandnessEdit's `wet`, the one mask read above): the survey's water coverage
+            // where it is the finer -- so Tokyo's polders, below the live waterline but land to the
+            // survey, stay dry (2026-10-10) -- and the bed below the live waterline where the height
+            // is, or with no survey. A height band above the water and "no opinion = wet" were
+            // guesses, and painted a sand rim wider than any beach.
+            matAlb = lerp(alb, float3(0.38f, 0.34f, 0.27f), wet);   // wet sand, where confirmed
             const float ndlM = saturate(dot(nM, GA_SUN_DIR)) * sunVis;
             // M10 (a pre-existing bug the Droste night found): the sky's ambient here ignored
             // the hour. Every other term in this shader dims its skylight by `day`; this one did

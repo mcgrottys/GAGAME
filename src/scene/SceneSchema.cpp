@@ -339,7 +339,9 @@ const Schema& StreamingSchema() {
             .Bind("gisGrainM", p.gisGrainM, Q::Length, "m",
                   "the survey's grain: the finest level the land/sea mask has anything of its own "
                   "for; a mask tile finer than it is its parent, magnified -- never painted, stored "
-                  "or loaded (HIERARCHY 4.20); 0 = every grain",
+                  "or loaded (HIERARCHY 4.20); 0 = every grain. Also the survey's standing as a "
+                  "WITNESS of the water's edge: a height layer finer than it draws the edge by its "
+                  "sign against the live level wherever it has a value (GisMaskSource SetHeight)",
                   R)
             .Bind("seafloor", p.seafloor, "the global seafloor relief source (--no-seafloor)", R)
             .Bind("exposure", p.exposure, "the swell-exposure page (--no-exposure)", R)
