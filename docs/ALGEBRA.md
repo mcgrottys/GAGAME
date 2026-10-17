@@ -1670,7 +1670,7 @@ model (or a textbook) would hold → what this project measured → the law now 
     rides the survey's side, and where the height is the finer witness its own excess at the pixel
     is the finer statement of the same face.
 
-48. **A frozen clock that starts at "now" is a different instant every run.** Prior (and the memory's
+49. **A frozen clock that starts at "now" is a different instant every run.** Prior (and the memory's
     own law): `--scale 0 --settle-exact` makes a headless still reproducible. Measured (2026-10-17,
     merrimack.json's sea view, two runs three minutes apart): 58.8 % of pixels differed (SSIM 0.939,
     the halo and the glint) with every residency hash EQUAL, and `globe.water` read 8.9 vs 6.8 ms --
@@ -1680,7 +1680,7 @@ model (or a textbook) would hold → what this project measured → the law now 
     pass's spread is 0.01 ms. Law: a still's instant is part of its recipe; `--scale 0` holds the
     clock, it does not choose it.
 
-49. **fp16 is not twice the ALU rate here, and the water pixel is not its ALU.** Prior (finding 32 of
+50. **fp16 is not twice the ALU rate here, and the water pixel is not its ALU.** Prior (finding 32 of
     REVIEW 2026-10-17, and every GPU text since Turing): the radiometry in 16 bits runs at twice the
     rate. Measured (RTX 5060 Laptop, Blackwell GB206, whose non-tensor fp16 rate is listed at its fp32
     rate; the water's colours, mixes, Fresnel weights and the sky table's lerp moved to `half` with

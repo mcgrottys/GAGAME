@@ -342,7 +342,26 @@ because the stack asks every source for an area mean over the ground asked, and 
 whole lidar set and the whole bed. The tree answers in 3 us at every level. Every CPU reader is on the
 tree already (the 2026-10-14 switch); the stack remains the probe's reference and the painter's source.
 
-## 4. What is open
+## 4. The culmination: what this branch holds from the evening's sessions
+
+Mark's word: one branch, one PR, one demo, not pieces. Each session that the day's findings spawned
+committed on its own branch and was folded here; their measurements, in their own commits' words:
+
+| piece | branch folded | what it changed | measured |
+|---|---|---|---|
+| The water's edge by the finest witness | `claude/wizardly-euler-007f5a` (was PR 103, closed into this) | The survey (gis.landsea rings) and the height tree against the live level both say wet or dry; the finer DATA answers, decided per texel at paint time (`Compositor::FinerHeightAt`, the mask texel's g byte), one mask read for landness, wet share and the edit floor; two dead compose functions deleted. | tnb_high with the DSM 8.25 % px, SSIM 0.972, the stair gone along the beach; tnb_low 2.17 %; the shipped sea view bit-identical on the same data; haulover_city at the noise floor. The ~10 m stair was the mesh stage's dry override interpolated across 6-12 m cells, not the mask's texel (ALGEBRA priors 48). |
+| Wave intrinsics in the three contended kernels | `claude/jolly-engelbart-f2c7b9` (7ee49ac) | `WaveActiveCountBits` / `WavePrefixCountBits` in the classify, `WaveActiveBitOr` in the meshlet mask, `WavePrefixSum` for the 64-lane scan (13 barriers to 2). | Exact: the city still identical outside the HUD text, the GPU's per-form counts agree record for record; the passes were 0.02-0.10 ms and the frame cannot see it. |
+| The water's radiometry in fp16 | the same branch (11072a2) | `-enable-16bit-types` for the globe's mesh-pipeline pixel stage alone; colours, mixes and Fresnel weights in `half`, every address, height and ray in float. | globe.water 6.676 to 6.604 ms, 1.1 % of the pass, for 1 % of pixels one LSB apart (A/A floor bit-identical). ALGEBRA priors 50: this GPU runs non-tensor fp16 at the fp32 rate, and the pass is marches and reads, not arithmetic. Kept as measured; it is Mark's to keep or drop. |
+| Priors 48-50 | the same two branches | The shoreline stair's witness; a frozen clock that starts at "now" is a different instant every run (pin `time.start` for any A/B); fp16 on this part. | |
+
+Still to fold, when their sessions report (each told: no PR, commit on your branch): the seam feather at
+a height source's data edge (`claude/interesting-morse-eaa9c3`: the law built, 61 checks, the lidar
+against the composite with no datum bias at the overlap; its picture gate waits on the corrected bed),
+the ortho's capture level as a weight (`claude/distracted-zhukovsky-997ee8`: built, planted case
+passing, stills queued), magnify-from-the-kept-tile below a source's own level (`claude/vigorous-wu-bf14f9`,
+in progress), and the coverage-conservation probe (a card, not started).
+
+## 5. What is open
 
 - The stack order among the heights is grain (StackOrder's default): the 2018 lidar stands over the 2025
   channel survey where both have a bottom. A date is not a key the stack knows; `over` would say it by

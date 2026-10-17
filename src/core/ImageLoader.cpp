@@ -387,21 +387,6 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&fac));
     const std::wstring wpath(path.begin(), path.end());
-    // A BigTIFF (version 43 in its header) has no WIC decoder; WIC says only "component not found"
-    // (0x88982F50), so it is named here first. MEASURED 2026-10-17: a 15 MB float32 DSM written by
-    // GDAL as BigTIFF was refused in every run while classic TIFFs of the same compression loaded;
-    // rewritten classic (the same bytes, 52 MB raw) it loads. gdal_translate -co BIGTIFF=NO.
-    {
-        uint8_t magic[4] = {0, 0, 0, 0};
-        std::ifstream in(path, std::ios::binary);
-        in.read(reinterpret_cast<char*>(magic), 4);
-        const bool little = magic[0] == 'I' && magic[1] == 'I', big = magic[0] == 'M' && magic[1] == 'M';
-        const unsigned version = little ? (magic[2] | (magic[3] << 8)) : big ? ((magic[2] << 8) | magic[3]) : 0;
-        if (version == 43) {
-            return refuse("it is a BigTIFF (TIFF version 43), which WIC has no decoder for; write it as a classic "
-                          "TIFF (gdal_translate -co BIGTIFF=NO) where it is under 4 GB");
-        }
-    }
     if (SUCCEEDED(hr)) {
         hr = fac->CreateDecoderFromFilename(wpath.c_str(), nullptr, GENERIC_READ,
                                             WICDecodeMetadataCacheOnDemand, &dec);
