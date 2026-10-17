@@ -879,12 +879,17 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
     // sediment and CDOM, so both are measurements (ALGEBRA "optics"). Where the retrieval is
     // absent, the M7c constants and the shelf tint stand in, byte for byte.
+    // THE RADIOMETRY IN `half` (REVIEW 2026-10-17 finding 32): the colours, the mixes and the
+    // Fresnel weights below are 16-bit where the compile enables 16-bit types (the mesh pipeline's
+    // pixel stage, GlobeLayer::BuildMeshPso) and plain float elsewhere (`half` is float without the
+    // flag). Every address, height, depth, direction and ray point keeps fp32 (the float-wall
+    // findings 6/7/42); the glint lobe too, whose range (1 / (4 pi s2 ch^4)) passes fp16's 65504.
     const WaterOptics wq = SampleWaterOptics(latDeg, lonDeg);
     const float shelf = saturate(1.0f + hp / 45.0f);        // 1 at the beach, 0 by -45 m
-    const float3 cScatter =
-        (wq.deep.x >= 0.0f) ? wq.deep
-                            : lerp(float3(0.008f, 0.030f, 0.080f),
-                                   float3(0.055f, 0.28f, 0.31f), shelf * shelf);
+    const half3 cScatter =
+        (wq.deep.x >= 0.0f) ? half3(wq.deep)
+                            : lerp(half3(0.008h, 0.030h, 0.080h),
+                                   half3(0.055h, 0.28h, 0.31h), half(shelf * shelf));
 
     // ---- THE SURFACE. Far afield the slope variance is Cox-Munk on the live wind; inside the
     // bank's rings the fold's own shed sigma^2 replaces it, floored at the PIXEL's resolving
@@ -996,7 +1001,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // the space view is the bed's; toward the horizon the sea becomes a mirror.
     const float3 dIn = -v;                                   // camera -> surface
     const float cosV = saturate(dot(v, nPix));
-    const float fres = 0.02f + 0.98f * pow(1.0f - cosV, 5.0f);
+    const half fres = 0.02h + 0.98h * pow(half(1.0f - cosV), 5.0h);   // the difference taken in fp32
 
     // ---- RAY 1, REFLECTED: the Cl(3) sandwich. What it HITS is the question the old horizon
     // clamp dodged.
@@ -1024,7 +1029,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // The fold's shed grades used to reach the GLINT and not the MIRROR -- that asymmetry was
     // the artefact, and this is the same sigma^2 arriving where it was always due.
     const float spread = 2.0f * sqrt(max(s2, 1e-6f));
-    const float seaward = saturate(0.5f - 0.5f * rUp / spread);
+    const half seaward = half(saturate(0.5f - 0.5f * rUp / spread));   // a mix weight, from fp32 directions
     // The sky is still sampled on a horizon-clamped ray -- below it the model has no sky to
     // give -- but it now only carries the (1 - seaward) share.
     const float3 rSky = normalize(rDir + max(0.02f - rUp, 0.0f) * upT);
@@ -1079,14 +1084,14 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         bedW = geo + upT * a0 + sP * tDir;
         sDown = sP;
     }
-    const float3 Tw = exp(-wq.kd * (sDown + depthW));
-    const float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                              ? ComposedColor(bedDir, bedP CS_WALK_AT(bedW, lvl))
-                              : float3(0.44f, 0.40f, 0.31f);
+    const half3 Tw = exp(-half3(wq.kd * (sDown + depthW)));   // the optical depth formed in fp32
+    const half3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
+                             ? half3(ComposedColor(bedDir, bedP CS_WALK_AT(bedW, lvl)))
+                             : half3(0.44h, 0.40h, 0.31h);
     // THE TRANSLUCENCY. Albedos mix and the surface lights ONCE -- the engine's radiometry
     // everywhere else -- so this path cannot disagree with the vertex path about EXPOSURE,
     // only about what is under the water.
-    float3 albW = lerp(cScatter, bedAlb, Tw);
+    const half3 albW = lerp(cScatter, bedAlb, Tw);
 
     // ---- THE GLINT: the Cox-Munk lobe on the pixel normal, sigma^2 as folded above.
     // M10: the level's own sun, eclipsed by the inner globe (PortalShadow) and by the planet
@@ -1116,7 +1121,8 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes,
     // and the mirror itself is part sky, part the very water it stands on.
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
-    const float3 bodyLit = albW * (SkyAmbient(nSmooth, upT, hp) + ndl * SunAt(upT, hp) * 1.15f);
+    const half3 sunHere = half3(SunAt(upT, hp));
+    const half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1125,9 +1131,9 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // straight down it returns 0.02 and the endpoint is the water body. No new constant, no
     // branch -- the law already in this function, applied once more.
     // M10: the sky it sees -- the hour rides the gradient only; the march already has it.
-    const float3 skyLit = SkyRadianceDirDiscless(rSky, upT);
-    const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
-    float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
+    const half3 skyLit = half3(SkyRadianceDirDiscless(rSky, upT));
+    const half fresHit = 0.02h + 0.98h * pow(half(1.0f - saturate(-rUp)), 5.0h);
+    half3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     // THE MIRROR'S LAND (scene render.reflectLand): the reflected ray marched over the same height
     // field the sun's was. Where it meets the ground, the water reflects that ground -- its imagery
     // lit flat by the sun and the sky at its own altitude, seen through the air along the ray --
@@ -1140,24 +1146,24 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         // never the bed through the back of the surface.
         if (mh.s > 0.0f && mh.alt > lvlW) {
             const float3 hitP = own ? pA + upT * (lvlW + dispW) + mh.s * rDir : CsPointOfDir(mh.dirP);
-            const float3 landAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                                       ? ComposedColor(mh.dirP, hitP CS_WALK_AT(mh.pL, lvl))
-                                       : Hypsometric(max(mh.alt, 0.0f), radians(latDeg));
+            const half3 landAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
+                                      ? half3(ComposedColor(mh.dirP, hitP CS_WALK_AT(mh.pL, lvl)))
+                                      : half3(Hypsometric(max(mh.alt, 0.0f), radians(latDeg)));
             const float ndlL = saturate(dot(upT, GA_SUN_DIR)) * PlanetShadow(upT, GA_SUN_DIR, mh.alt, gGlo.x);
-            const float3 landLit = landAlb * (SkyAmbient(upT, upT, mh.alt) + ndlL * SunAt(upT, mh.alt) * 1.15f);
+            const half3 landLit = landAlb * (half3(SkyAmbient(upT, upT, mh.alt)) + half(ndlL * 1.15f) * half3(SunAt(upT, mh.alt)));
             // The air along the reflected ray, marched from where that ray starts: the water's own
             // zenith and radius, not the eye's (AerialPerspective's, a ray FROM the eye).
             float3 airT;
             float airG;
             const float3 airL = SkyAir(rDir, upT, GA_SUN_DIR, gSkyLut.y + max(lvlW, 0.0f), mh.s, airT, airG);
-            mirror = landLit * airT + airL;
+            mirror = landLit * half3(airT) + half3(airL);
         }
     }
-    float3 col = bodyLit * (1.0f - fres);
-    col += spec * SunAt(upT, hp) * 0.85f;
-    col += mirror * (fres * 0.9f);
-    col += albW * (1.0f - fres) * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // night side
-    return col;
+    half3 col = bodyLit * (1.0h - fres);
+    col += mirror * (fres * 0.9h);
+    col += albW * (1.0h - fres) * half3(0.010h, 0.014h, 0.028h) * half(1.0f - day);   // night side
+    // The glint added last and in fp32: a Cox-Munk lobe is the one term here that can pass 65504.
+    return float3(col) + spec * SunAt(upT, hp) * 0.85f;
 }
 
 // M9b: THE AMPLIFICATION UNIT, made visible. Wireframe answers "is the geometry moving";

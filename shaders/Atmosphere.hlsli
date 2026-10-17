@@ -127,17 +127,21 @@ void AtmMsParams(float2 uv, float Rb, float Rt, out float r, out float muS) {
 // MANUAL BILINEAR, NOT SampleLevel -- priors 1: the sea shades in the DOMAIN stage and the table
 // is built in COMPUTE, and a bindless sample outside the pixel stage returns zero on this adapter.
 // xOff: the table's second half (x + 32) holds the SKY'S IRRADIANCE on a level surface.
+// The table's values are RADIOMETRY (per unit of the sun's irradiance, well inside fp16's range), so
+// the four taps are mixed in `half`: 16-bit where the compile enables 16-bit types (the globe's
+// mesh-pipeline pixel stage, GlobeLayer::BuildMeshPso), plain float everywhere else -- `half` IS
+// float without the flag. The address (uv, the texel fractions) stays fp32.
 float3 AtmFetch(uint slot, float2 uv, float2 dims, int xOff = 0) {
     const float2 tf = uv * dims - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
-    float3 acc = 0.0f;
+    half3 acc = half3(0.0h, 0.0h, 0.0h);
     [unroll] for (int k = 0; k < 4; ++k) {
         const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(dims) - int2(1, 1));
-        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gTex[slot][tc + int2(xOff, 0)].rgb;
+        acc += half(((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y)) *
+               half3(gTex[slot][tc + int2(xOff, 0)].rgb);
     }
-    return acc;
+    return float3(acc);
 }
 static const float2 kAtmMsDims = float2(32.0f, 32.0f);
 

@@ -26,8 +26,12 @@ public:
 
     // Returns an invalid blob and logs the DXC diagnostics on failure, rather than throwing.
     // A failed hot reload must not take the viewer down; the caller keeps the previous PSO.
+    // `args`: compiler switches this one compile adds (REVIEW 2026-10-17 finding 32: the globe's
+    // mesh-pipeline pixel stage passes -enable-16bit-types, so its `half` is 16-bit; every other
+    // compile's `half` stays float). The log line names them, so the switch is seen to arrive.
     ShaderBlob Compile(const std::wstring& path, const wchar_t* entry, const wchar_t* target,
-                       const std::vector<std::wstring>& defines = {});
+                       const std::vector<std::wstring>& defines = {},
+                       const std::vector<std::wstring>& args = {});
     // HIERARCHY 4.17: a define every later compile carries -- the standing blocks'
     // GA_BLOCK_RANKS, set once the scene's key stands and before the first layer compiles.
     void Always(std::wstring define) { m_always.push_back(std::move(define)); }
