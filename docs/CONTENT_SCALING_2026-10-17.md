@@ -354,6 +354,20 @@ committed on its own branch and was folded here; their measurements, in their ow
 | The water's radiometry in fp16 | the same branch (11072a2) | `-enable-16bit-types` for the globe's mesh-pipeline pixel stage alone; colours, mixes and Fresnel weights in `half`, every address, height and ray in float. | globe.water 6.676 to 6.604 ms, 1.1 % of the pass, for 1 % of pixels one LSB apart (A/A floor bit-identical). ALGEBRA priors 50: this GPU runs non-tensor fp16 at the fp32 rate, and the pass is marches and reads, not arithmetic. Kept as measured; it is Mark's to keep or drop. |
 | Priors 48-50 | the same two branches | The shoreline stair's witness; a frozen clock that starts at "now" is a different instant every run (pin `time.start` for any A/B); fp16 on this part. | |
 
+**The gate on the merged tree** (one take each; the other sessions' engines shared the GPU throughout):
+`--tool rastertest` 57 checks; `--selftest` 29 suites PASS, no unplanted FAIL; the demo scene against the
+A arm at the same instant: the mouth settled exact in 840 frames, 20.8 ms GPU, 25.8 % px / SSIM 0.984;
+Town Neck Beach from 600 m settled in 1,299 frames, 15.8 ms, the stair along the beach gone and the houses
+standing as solids, 54 % px / SSIM 0.875 (A has no ortho there); the jetty view did not settle in 3,000
+frames under the contention (7,779 of 32,479 tiles pending), 27.5 ms, 13.9 % px / SSIM 0.951 on what it
+had. The jetty view also shows a flat, faceted top on the north jetty -- in the A arm too, and in the
+shipped scene since the MassGIS orthos went in: `data/gis/edits.geojson`'s hand polygons (OSM's jetty ways)
+put a 2.5 m NAVD88 crest floor under the whole structure, flat, and the 2023 leaf-off ortho paints its dark
+riprap with little contrast, so the eye reads a slab where Google's imagery read rocks. The 2018 lidar has
+the structure at 1 m (valid on 98 % of the north jetty's outline, crests to 4.4 m): the hand floor should
+yield to a finer height where one has data -- the finest-witness law the shoreline took tonight, applied to
+the edits. Not done; it predates this branch.
+
 Still to fold, when their sessions report (each told: no PR, commit on your branch): the seam feather at
 a height source's data edge (`claude/interesting-morse-eaa9c3`: the law built, 61 checks, the lidar
 against the composite with no datum bias at the overlap; its picture gate waits on the corrected bed),
