@@ -914,7 +914,7 @@ void ResidencyManager::KeepPoolAhead(Gpu& gpu) {
     }
     // Never past the budget: the chunks made and ready stay under the cap (the exact hold, which
     // lifts the cap, grows inline as it always did).
-    if ((m_heaps.size() + ready + 1) * kPoolChunkTiles > kPoolCapTiles) return;
+    if ((m_heaps.size() + ready + 1) * kPoolChunkTiles > poolCapTiles) return;
     ++m_heapJobs;
     ID3D12Device* device = gpu.Device();
     Threads().Submit(Lane::Long, "residency.chunk", [this, device] {
@@ -2052,7 +2052,7 @@ void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
             poolTiles, m_passCut, lost, tail.empty() ? "" : (" --" + tail).c_str());
         // What the cut P would lose at this pose, outside the hold: by tenant and by rung.
         uint32_t byT[16] = {}, byR[kRungs] = {}, tailP = 0, wantedN = 0;
-        CountTail(kPoolCapTiles - kSlotReserve, byT, byR, tailP, wantedN);
+        CountTail(poolCapTiles - kSlotReserve, byT, byR, tailP, wantedN);
         std::string ten, rung;
         for (uint32_t k = 0; k < m_tenants.size() && k < 16; ++k) {
             if (!byT[k]) continue;
@@ -2074,11 +2074,11 @@ void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
         }
         Log("[settle-exact] order: at this pose the cut P = %u would keep %u of the %u wanted and "
             "lose %u | by tenant:%s | by rung (texel):%s",
-            kPoolCapTiles - kSlotReserve, wantedN - tailP, wantedN, tailP,
+            poolCapTiles - kSlotReserve, wantedN - tailP, wantedN, tailP,
             ten.empty() ? " -" : ten.c_str(), rung.empty() ? " -" : rung.c_str());
     }
     Log("[settle-exact] pool: %zu tiles mapped (%.0f MB); the pool's budget is %u tiles (%.0f MB)",
-        poolTiles, poolTiles / 16.0, kPoolCapTiles, kPoolCapTiles / 16.0);
+        poolTiles, poolTiles / 16.0, poolCapTiles, poolCapTiles / 16.0);
     Log("[settle-exact] held %u frames: wanted %u, mapped %u, deficit %u, unreachable %u, stale "
         "%u, pending %u, in-flight reads %u, retiring %u, magnified %u, released under a refused "
         "parent %llu (must be 0) -- %s",

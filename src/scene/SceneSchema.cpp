@@ -307,6 +307,7 @@ const Schema& StreamingSchema() {
         auto& p = kDoc.streaming;
         Schema* sc = new Schema("streaming", &p);
         sc->Bind("tileBudget", p.tileBudget, Q::Dimensionless, "1", "hard cap on Google fetches per run (--tile-budget)", R)
+            .Bind("poolTiles", p.poolTiles, Q::Dimensionless, "1", "the residency pool's ceiling in 64 KB tiles (32768 = 2 GB); smaller, the order's cut releases sooner", R)
             .Bind("dayTiles", p.dayTiles, Q::Dimensionless, "1",
                   "cap on Google requests a UTC day, every request sent counted whatever came "
                   "back, every engine on the machine together (cache/google/day_<date>.json); "

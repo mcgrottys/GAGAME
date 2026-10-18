@@ -629,6 +629,25 @@ the instrument now rides every run, and his flight with `--res-trace` will say "
 ground" at the frame, or it will say neither and the page is the GPU's rows against the CPU's bindings within
 a frame, which the next instrument would compare.
 
+**The third path, found by reading** (2026-10-18 afternoon; Mark: "look at how we discard things that go out of
+view and replace the data for a new tile in view -- it happens over time", and "this is what the AST is for").
+The codemap's callers of `Untrack` named a path the map and the kept-tile audit never see:
+`ResidencyManager::Rescue` (ResidencyOrder.cpp). The order's cut releases a tile past the wanted set and marks
+it `rescuable` -- good bytes, retiring for up to `kEvictAgeFrames` = 4 frames before its coordinate is
+NULL-mapped and its pool slot freed. A window step in those frames (`Tenant::Move`) tells the TRACKED tiles of
+the slice whose ground changed; a retiring tile is tracked no more, so its slot takes a new ground and the
+tile never hears of it. When the GPU wants that slot again, the rescue matches the retiring tile by its
+COORDINATE, not its ground, and brings it back as the slot's tile: no read, no new slot, `kHeldBit` set,
+landed -- the old ground's bytes drawn at the new ground until the slot is next told. It passes every audit:
+the kept-tile check watches tiles a step kept, the map check watches tiles that land through `MapAndFill`,
+and a rescued tile does neither; Mark's flight showed 0 of each with the pages on screen. It happens over
+time because it needs three things to coincide in four frames -- a release by the cut, a step, a re-want --
+which a hand flight low over the reservation does and a smooth rail does not (the jetty and dive rails made
+0 rescues in 620 moves). The law at the rescue, the same as at the map: the slot's ground is read again
+(`KeyOf`) and a retiring tile whose key is not the slot's is not rescued; the slot's new tile reads its own
+bytes. Counted with the map's refusals in the loader's line ("refused: the slot's ground moved under the
+read") and said under `--res-trace` as "the ground moved under the retiring tile: not rescued". Gated (14:35-15:05): `--selftest` 29 suites; the jetty rail with `--res-trace` at the full pool, 460 moves: the rescue refused 12 times, every one on the rank-5 slice of the colour tenant within a frame of a window step (`[residency] earth.color slot (10 m3 5,4): the ground moved under the retiring tile (key ...9b85, the slot's now ...9b75): not rescued`), 0 at the map, 0 kept tiles on another ground -- the same rail refused 0 the day before, when the rescue was not asked. Mark's own instrument then: a small pool makes the cut release every turn, so the discard-and-replace path runs on a moving camera; `streaming.poolTiles` (default 32,768, the constant it replaces) is now a scene key for it. The dive rail at 3,000 tiles starved instead of churning (840 colour loads, 426 tiles kept, 0 rescues in either arm, the frames identical); at 20,000 tiles, just under the dive's want, the arm with the law refused 2 rescues at one slot, the colour and the mask page together (slot 9 m3 11,6: key ...536b against the slot's ...537b), and the arm without it, the same source with the check cut out and rebuilt, shows no page in its 751 frames either: the two runs' residency timing differs and the other arm did not meet the same slot at the same turn, so the before picture is not on film; the frames of the two arms differ by at most 2 % of pixels on one frame of the descent and 0 on the median frame. The settled shipped sea view against the 02:40 still: 60 pixels past one level of 1.44 M, max 19, SSIM 1.0000, the same floor as before the law. What settles it is the count in Mark's next flight: a "not rescued" line at the frame of a page, or a flight with no page at all.
+
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
 ledger) are in the table above and run in `--selftest` and `--tool rastertest` on every build.
@@ -686,10 +705,8 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
   shader's chain tests the box before it reads a rank, the pixel stage gathers the residency byte and
   samples the window with one wrap sampler, the compute reads take the uv modulo one for both; a told
   slot's old bytes stay mapped at most `kEvictAgeFrames` = 4 frames; the rows are filled after the
-  steps in the same frame. What the GPU read for a page's pixel is the one fact no log holds; the
-  residency lens (`--lens residency`, or G through the debug views to "residency") paints each pixel by
-  the rank that answered (cyan 1, green 2, red 3, yellow 4, white 5, violet the cube), its floor mip as
-  brightness, and outlines the answering tile; a page seen through it, with the log's `[eye-blocks]
-  bound` line of that frame, gives the slice, the slot and the CPU's tile for it.
+  steps in the same frame. FOUND the same afternoon by reading the discard-and-replace path the codemap
+  laid out: the rescue of a retiring tile by its coordinate after a step gave its slot another ground
+  (section 4, "the third path"). Fixed there; the counter names it in a flight.
 - The scenes list absolute `D:/DataCache/...` paths (as `streaming.gisLand` already does); a second
   machine needs the files at those paths or the entries edited.

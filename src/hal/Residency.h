@@ -74,6 +74,9 @@ public:
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
     static constexpr uint64_t kMapStageBytes = 8ull << 20;   // M9bb: residency-map staging reserve
     static constexpr uint32_t kPoolCapTiles = 32768;     // 2 GB ceiling before eviction (the owner's, 2026-10-03)
+    // The ceiling this run uses (streaming.poolTiles): the constant above by default; a test sets it low so
+    // the cut releases every turn and the discard-and-replace path runs on a moving camera.
+    uint32_t poolCapTiles = kPoolCapTiles;
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
     // ---- THE SAMPLERS (M13) -------------------------------------------------------------
     // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
