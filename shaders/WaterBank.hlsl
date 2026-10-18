@@ -4,7 +4,16 @@
 //  A camera-anchored window of mip rings (finest tiles at the camera, coarser rings outward)
 //  over TWO RGBA16F banks:
 //      disp  = (dx, dy, dz, foam)          -- the wave vertex, metres about the local level
-//      param = (levelNavd, sigma2, u, v)   -- the mean surface + shed variance + current
+//      param = (level - waterline, sigma2, u, v)
+//              -- the mean surface's DEPARTURE from the frame's live waterline (gMisc.y, the
+//                 globe's gWavesB.w) + shed variance + current. A tile the rings never mapped
+//                 reads zero in every channel (a NULL tile of a reserved resource), and zero
+//                 here means "the waterline", never "0 m NAVD": the readers (GlobeMesh.hlsl,
+//                 Globe.hlsl WaterPixelColor, WaterBankLayer::ReadBankPoints) add the waterline
+//                 back. Before 2026-10-18 the channel held the level itself, so a NULL tile over
+//                 a survey-water marsh read a level of 0 m and its water was drawn 1 m under the
+//                 bed -- dry to the eye -- while the mapped tile beside it stood at the tide: the
+//                 straight-edged dark square Mark saw at the Merrimack's mouth.
 //
 //  Each resident tile is RECOMPUTED every frame by this kernel from the state the weather
 //  manager federates: the FFT cascades (folded by the tile's own texel footprint -- the M6t
@@ -26,7 +35,8 @@ cbuffer BankCb : register(b0) {
     float4 gPatch;      // xyz = cascade patch sizes m, w = height exaggeration
     float4 gBandK;      // xyz = representative wavenumber per cascade, w = list count
     float4 gSweDims;    // xy = swe grid nx/ny, zw = 1 / eta-atlas padded dims
-    float4 gMisc;       // x = tile texels, y = seaLevel fallback, zw unused
+    float4 gMisc;       // x = tile texels, y = the frame's live waterline (m NAVD; the globe's
+                        //     gWavesB.w, the level the param plane's x is measured from), z = inject pattern
     uint4  gSlotsA;     // cascade disp SRV slots x3, swe eta SRV slot
     uint4  gSlotsB;     // swe uv SRV slot, disp/param/detail bank UAV slots
     uint4  gSlotsC;     // x = churn atlas SRV (foam memory), y = swell-shadow SRV
@@ -947,7 +957,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // the pale horizon sky over its entire area and the ebb ride went white.
     // One ceiling, both paths, and the declared range becomes true again.
     sig2 = min(sig2, gFoamA.z);
-    gU[gSlotsB.z][dst] = float4(lvl, sig2, cur.x, cur.y);
+    // THE LEVEL AS A DEPARTURE (2026-10-18): the plane stores lvl - waterline, so a texel no
+    // kernel ever wrote (a NULL tile, a tile the land test left unmapped) reads as the waterline
+    // itself, the same level the classifier compared the bed against; the readers add gWavesB.w.
+    // fp16 holds a departure of a few decimetres to a tenth of a millimetre, the level itself to
+    // half a millimetre: the stored sea is finer than it was.
+    gU[gSlotsB.z][dst] = float4(lvl - gMisc.y, sig2, cur.x, cur.y);
     // The DETAIL plane: what the PS needs to recover sub-ring sparkle and the caustic
     // Jacobian -- per-band sea-state gains (cascade derivs are unit-sea) and the dry
     // guard (no sparkle on the flats). Layout: (gain1, dry, gain0, gain2).

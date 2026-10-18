@@ -1,5 +1,7 @@
 #include <cstdint>
 #include "compose/Sources.h"
+#include "core/Common.h"
+#include "core/Lattice.h"
 
 #include "core/Json.h"
 #include "core/TileProviders.h"
@@ -229,7 +231,70 @@ HeightSource::Range EquirectHeightSource::RangeIn(double lat0, double lon0, doub
     return Range::Known;
 }
 
+// THE IDENTITY OF WHAT A BUILT-IN LAYER PAINTS (2026-10-18). A layer by file carries its bytes in its
+// structure string and the tree keys its tiles by them (HeightLayerSource::Identity); these two read
+// grids the engine loaded for other reasons -- the globe's ETOPO, the survey's CUDEM -- and carried
+// only their names, so a regenerated grid, or another station's datum link, would have met its old
+// tiles in the cache. The law is the bytes and the numbers the paint depends on: the grid's FNV-64
+// and size, the datum link, the box and the feather. The paint's own FORM (the texel centre, the fold
+// of a parent from its children) is kTileTreeVersion's, which TileTree folds into every tree's name;
+// a layer does not repeat it. The hash is taken once, at the first ask, which comes when the tree is
+// built -- after the grid is loaded -- and costs the bytes once (ETOPO's 64 MB, some 50 ms).
+std::string EquirectHeightSource::Law() const {
+    if (!m_elev || m_elev->empty()) return std::string();
+    if (!m_hashed) {
+        m_bytesFnv = Fnv1aBytes(m_elev->data(), m_elev->size() * sizeof(int16_t));
+        m_hashed = true;
+    }
+    char b[128];
+    snprintf(b, sizeof(b), "grid int16 %dx%d fnv64 %016llx, vdatum %+.3f m, own level", m_nx, m_ny,
+             static_cast<unsigned long long>(m_bytesFnv), m_datumShift);
+    return b;   // "own level": the paint law (OwnMip) is part of what the tiles are, so it is part of the key
+}
+
+// The grid's cell is what its maker declared (SourceInfo::cmPerPixel: ETOPO 4,892 m, MOLA 3,697 m, each
+// in its own planet's metres), read at the equator, where an equirect cell is its widest.
+int EquirectHeightSource::OwnMip(const Lattice& l) const {
+    if (!m_elev || m_nx <= 0 || m_info.cmPerPixel <= 0.0) return -1;
+    return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, 0.0, 0.0), 0);
+}
+
 // ------------------------------------------------------------------------------ CUDEM
+
+std::string CudemHeightSource::Law() const {
+    if (!m_bathy || !m_bathy->Ready()) return std::string();
+    if (!m_hashed) {
+        const std::vector<float>& e = m_bathy->Elev();
+        m_bytesFnv = Fnv1aBytes(e.data(), e.size() * sizeof(float));
+        m_hashed = true;
+    }
+    char b[192];
+    snprintf(b, sizeof(b), "grid float32 %dx%d fnv64 %016llx at %.6f,%.6f..%.6f,%.6f, feather %.3f, own level",
+             m_bathy->Nx(), m_bathy->Ny(), static_cast<unsigned long long>(m_bytesFnv), m_bathy->Lon0(),
+             m_bathy->Lat0(), m_bathy->Lon1(), m_bathy->Lat1(), m_feather);
+    return b;
+}
+
+// THE OWN LEVEL OF A GRID LAYER (HIERARCHY 4.20, 2026-10-18). Measured before this: a layer without an
+// own level is painted by TileTree::LeafTile at whatever level a view asks first and folded upward where
+// a finer level was painted earlier, so the tree's bytes were a function of the order of asks -- against
+// trees built over two weeks, a fresh repaint differed at fully weighted texels by up to 1.08 m for the
+// CUDEM grid at pyramid mip 11 and by kilometres for ETOPO at the globe's coarse rungs (a point sample of
+// a mountain range where the fold holds its mean). Declared, the level is painted from the grid, the
+// levels above are its folds (kept, deterministic) and the levels below the kept tile magnified: the
+// same rule a raster by file has had since 2026-10-17, and the bytes become a function of the data.
+int CudemHeightSource::OwnMip(const Lattice& l) const {
+    if (!m_bathy || !m_bathy->Ready() || m_info.cmPerPixel <= 0.0) return -1;
+    const double lat = 0.5 * (m_info.lat0 + m_info.lat1) * kPi / 180.0;
+    const double lon = 0.5 * (m_info.lon0 + m_info.lon1) * kPi / 180.0;
+    return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, lat, lon), 0);
+}
+
+bool CudemHeightSource::Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
+    if (!m_bathy || !m_bathy->Ready()) return false;
+    lon0 = m_info.lon0; lat0 = m_info.lat0; lon1 = m_info.lon1; lat1 = m_info.lat1;
+    return true;
+}
 
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
                                      const char* name)
@@ -288,7 +353,7 @@ bool EditsHeightSource::Load(const std::string& geojsonPath, float crestNavd) {
     return true;
 }
 
-float EditsHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
+float EditsHeightSource::Sample(double latRad, double lonRad, double groundResM, float& metres) {
     const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
     for (const Ring& r : m_rings) {
         if (lon < r.lon0 || lon > r.lon1 || lat < r.lat0 || lat > r.lat1) continue;
@@ -304,10 +369,75 @@ float EditsHeightSource::Sample(double latRad, double lonRad, double, float& met
         }
         if (in) {
             metres = r.land ? m_crest : -1.0f;   // riprap crest, or dredged subtidal
-            return 1.0f;
+            return Uncovered(latRad, lonRad, groundResM);
         }
     }
     return 0.0f;
+}
+
+// THE HAND EDIT YIELDS TO A FINER WITNESS (2026-10-18). A polygon's crest is a stand-in for ground the
+// surveys never measured: OSM's jetty ways over CUDEM's 10 m cells, where the laser and the sounder
+// have no value. Measured at the north jetty with the transect tool, the edit painted its +2.5 m over
+// the 1 m lidar's +2.77 m and the 1.5 m composite's +3.03 m on the same crest, a flat slab in every
+// still. So the edit's weight at a point is the share the finer witnesses leave uncovered:
+//
+//     w = prod_j (1 - w_j)   over the channel's layers with a grain finer than this one's (5 m),
+//
+// the complement of their over-accumulated coverage -- one law at every grain, since each w_j at a
+// coarse grain is already that source's share of the box. Its limits: no finer layer (or no channel
+// named) = 1, the value the edit always had; a finer layer at full weight = 0, the edit gone and the
+// data standing; across a finer layer's feather the edit fades as the witness rises, the same metres.
+// The VALUE is never touched, only the weight: a floor would hold the lidar's slopes at the crest, and
+// the slopes are the data. Coarser layers (CUDEM, ETOPO) are not asked: the edit exists to stand over
+// them. One source asking the others for their weight is the gate's shape (GateSource) read inside
+// the layer, so the CPU's stack, the tree's point sample and its tile compose inherit it from this
+// one Sample and cannot drift.
+float EditsHeightSource::Uncovered(double latRad, double lonRad, double groundResM) const {
+    if (!m_comp || m_channel < 0) return 1.0f;
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    double u = 1.0;
+    for (HeightSource* hs : m_comp->ChannelAt(m_channel).height) {
+        if (hs == this) continue;
+        const SourceInfo& s = hs->Info();
+        if (s.cmPerPixel <= 0.0 || s.cmPerPixel >= m_info.cmPerPixel) continue;
+        if (lon < s.lon0 || lon > s.lon1 || lat < s.lat0 || lat > s.lat1) continue;
+        float m = 0.0f;
+        const float w = hs->Sample(latRad, lonRad, groundResM, m);
+        if (w > 0.0f) u *= 1.0 - (std::min)(1.0, double(w));
+        if (u <= 0.0) return 0.0f;
+    }
+    return float(u);
+}
+
+int EditsHeightSource::OwnMip(const Lattice& l) const {
+    if (m_rings.empty() || m_info.cmPerPixel <= 0.0) return -1;
+    const double lat = 0.5 * (m_info.lat0 + m_info.lat1) * kPi / 180.0;
+    const double lon = 0.5 * (m_info.lon0 + m_info.lon1) * kPi / 180.0;
+    return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, lat, lon), 0);
+}
+
+bool EditsHeightSource::Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
+    if (m_rings.empty()) return false;
+    lon0 = m_info.lon0; lat0 = m_info.lat0; lon1 = m_info.lon1; lat1 = m_info.lat1;
+    return true;
+}
+
+// The identity of what this layer paints: the finer witnesses it yields to, by name and structure
+// (its own content, the polygons' bytes and the crest, is the structure string, which the layer's
+// identity carries since the footprint is declared), so the tree repaints the edits' tiles when the
+// polygons OR a witness changes, and at no other time.
+std::string EditsHeightSource::Law() const {
+    std::string law = "own level";   // the paint law is part of the key, as for the grid layers
+    if (!m_comp || m_channel < 0) return law;
+    bool first = true;
+    for (HeightSource* hs : m_comp->ChannelAt(m_channel).height) {
+        if (hs == this) continue;
+        const SourceInfo& s = hs->Info();
+        if (s.cmPerPixel <= 0.0 || s.cmPerPixel >= m_info.cmPerPixel) continue;
+        law += (first ? "|yields<" : ",") + s.name + "|" + s.structure;
+        first = false;
+    }
+    return law;
 }
 
 HeightSource::Range EditsHeightSource::RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo,
@@ -821,6 +951,62 @@ float SeafloorReliefSource::Sample(double latRad, double lonRad, double groundRe
     }
     rgba[3] = 255;
     return a;
+}
+
+// ---- THE CAPTURE LEVEL (Sources.h LevelGateSource) --------------------------------------------
+
+void LevelGateSource::Load(const ColorSource& layer, const Compositor* comp, int hgtChannel,
+                           double levelM, const std::string& said) {
+    m_comp = comp;
+    m_hgtCh = hgtChannel;
+    m_level = levelM;
+    const SourceInfo& li = layer.Info();
+    // THE IDENTITY FOLDS THE HEIGHT STACK'S: every height layer's name|structure in the channel's
+    // order -- what the height tree's own identity is made of -- so an edited bed (a new survey, a
+    // moved hand edit) repaints the gated tiles, and a bed unchanged keeps them.
+    uint64_t h = 14695981039346656037ull;
+    if (comp && hgtChannel >= 0) {
+        for (const HeightSource* hs : comp->ChannelAt(hgtChannel).height) {
+            const std::string id = hs->Info().name + "|" + hs->Info().structure + ";";
+            for (unsigned char c : id) h = (h ^ c) * 1099511628211ull;
+        }
+    }
+    char b[256];
+    snprintf(b, sizeof(b),
+             "ground above %.4f m NAVD88 (%s): 1 above, 0 below, smoothstep across the height's own "
+             "spread; height stack fnv64 %016llx",
+             levelM, said.c_str(), static_cast<unsigned long long>(h));
+    m_info = {li.name + ".ground", b, "EPSG:4326 (a product of the height tree)", li.cmPerPixel,
+              li.lon0, li.lat0, li.lon1, li.lat1};
+    Log("[capture] %s gates %s: %s", m_info.name.c_str(), li.name.c_str(), b);
+}
+
+float LevelGateSource::Weight(float h, float level, float s) {
+    // ONE LAW: the smoothstep of (h - level) over [-s, s]. s -> 0 is the step, and at the level
+    // itself a half either way -- the step's own middle, the limit from both sides.
+    const double d = static_cast<double>(h) - static_cast<double>(level);
+    const double t = s > 0.0f ? std::clamp(0.5 + 0.5 * d / static_cast<double>(s), 0.0, 1.0)
+                              : (d > 0.0 ? 1.0 : d < 0.0 ? 0.0 : 0.5);
+    return static_cast<float>(t * t * (3.0 - 2.0 * t));
+}
+
+float LevelGateSource::Sample(double latRad, double lonRad, double groundResM, const PaintCtx&,
+                              uint8_t rgba[4]) {
+    if (!m_comp || m_hgtCh < 0) return 0.0f;   // no height to read: no opinion, the layer passes
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    if (lon < m_info.lon0 || lon > m_info.lon1 || lat < m_info.lat0 || lat > m_info.lat1) {
+        return 0.0f;   // outside the layer: no opinion
+    }
+    float s = 0.0f;
+    const float h = m_comp->SampleHeight(m_hgtCh, latRad, lonRad, groundResM, &s);
+    const uint8_t v = static_cast<uint8_t>(Weight(h, static_cast<float>(m_level), s) * 255.0f + 0.5f);
+    // The mask's encoding (GisMask.cpp): the weight says an opinion exists, r carries the factor;
+    // the gate multiplies by the value (ComposeTree.h GateSource; TileTree GateTile per texel).
+    rgba[0] = v;
+    rgba[1] = v;
+    rgba[2] = v;
+    rgba[3] = 255;
+    return 1.0f;
 }
 
 }  // namespace ga

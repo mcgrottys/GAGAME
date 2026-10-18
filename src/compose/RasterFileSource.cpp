@@ -19,14 +19,18 @@
 
 namespace ga {
 
-std::atomic<uint64_t> RasterFileSource::s_decodes{0}, RasterFileSource::s_decodeUs{0};
+std::atomic<uint64_t> RasterFileSource::s_decodes{0}, RasterFileSource::s_decodeUs{0}, RasterFileSource::s_edges{0},
+    RasterFileSource::s_edgeUs{0};
 
 namespace {
 
 constexpr double kPi = 3.14159265358979323846, kD2R = kPi / 180.0;
 constexpr double kR = 6378137.0;   // WGS84 a: Web Mercator's sphere, and a degree's metres of arc
 constexpr uint32_t kWin = 256;     // a decoded window's side, texels
-constexpr size_t kWindows = 256;   // the windows a source keeps: 64 MB
+constexpr size_t kWindows = 1024;  // the windows a source keeps: 256 MB at most, and only what was touched.
+// MEASURED 2026-10-17 at 256: a cold view over a 62 Mpx bed (980 windows) and 25 lidar files (400) decoded
+// 12,971 windows for 934 tile loads of 1.4 s each -- fourteen decodes a load, the same windows over and
+// over, the picture never settling; the cache held a fifth of the working set.
 
 bool Fail(std::string* why, std::string w) {
     if (why) *why = std::move(w);
@@ -70,14 +74,48 @@ std::unique_ptr<FieldLoader> OpenOne(const LoaderRegistry& reg, const std::strin
 }
 
 // The windows a painting thread used last: a texel read is then no lock, and four hold every
-// window one bilinear read can touch. Keyed by the source's serial, never its address.
+// window one bilinear read can touch. Keyed by the source's serial, never its address. The edges
+// beside them, the same way.
 struct Recent {
     uint64_t owner = 0, key = ~0ull;
     std::shared_ptr<const std::vector<uint8_t>> px;
 };
 thread_local Recent tRecent[4];
 thread_local unsigned tNext = 0;
+struct RecentEdge {
+    uint64_t owner = 0, key = ~0ull;
+    std::shared_ptr<const void> e;
+};
+thread_local RecentEdge tRecentEdge[4];
+thread_local unsigned tNextEdge = 0;
 std::atomic<uint64_t> gSerial{0};
+
+// ONE AXIS OF THE DISTANCE TRANSFORM (Felzenszwalb and Huttenlocher 2004, the lower envelope of
+// parabolas): d[q] = min over p of s2 (q - p)^2 + f[p], exact, n steps; s2 is the axis's texel
+// squared in metres. f is 0 at an absent texel and `far` elsewhere; v and z are scratch of n and
+// n + 1. Each axis in turn gives the squared Euclidean distance in metres.
+void Dt1(const double* f, double* d, int n, double s2, int* v, double* z) {
+    int k = 0;
+    v[0] = 0;
+    z[0] = -1e300;
+    z[1] = 1e300;
+    const auto meet = [&](int q, int r) {   // where parabola q overtakes parabola r (r < q)
+        return ((f[q] + s2 * q * q) - (f[r] + s2 * r * r)) / (2.0 * s2 * (q - r));
+    };
+    for (int q = 1; q < n; ++q) {
+        double s = meet(q, v[k]);
+        while (s <= z[k]) s = meet(q, v[--k]);   // z[0] is -1e300: k never falls under 0
+        ++k;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = 1e300;
+    }
+    k = 0;
+    for (int q = 0; q < n; ++q) {
+        while (z[k + 1] < q) ++k;
+        d[q] = s2 * (q - v[k]) * (q - v[k]) + f[v[k]];
+    }
+}
 
 }  // namespace
 
@@ -106,6 +144,10 @@ bool RasterFileSource::Open(std::vector<std::unique_ptr<FieldLoader>> files, con
     m_feather = e.feather;
     m_entry = e;
     if (!Placed(why)) return false;
+    // Whether a texel inside the box can be absent -- a file's own (its loader says), or ground
+    // the files do not tile. Only then does the feather reach absence, and only then is it named.
+    m_absence = !Tiled();
+    for (const auto& f : m_files) m_absence = m_absence || f->loader->MayBeAbsent();
     // THE IDENTITY: one file's structure, or the set's, and the feather that weighs it.
     char b[96];
     if (m_files.size() == 1) {
@@ -119,7 +161,7 @@ bool RasterFileSource::Open(std::vector<std::unique_ptr<FieldLoader>> files, con
         m_info.structure = "set of " + std::to_string(m_files.size()) + " files, " + m_info.crs + b;
     }
     if (m_feather > 0.0) {
-        snprintf(b, sizeof(b), ", feather %g m", m_feather);
+        snprintf(b, sizeof(b), ", feather %g m%s", m_feather, m_absence ? " at the box and at absence" : "");
         m_info.structure += b;
     }
     if (m_height) m_info.structure += ", " + m_valued;
@@ -250,6 +292,30 @@ bool RasterFileSource::Valued(std::string* why) {
     return true;
 }
 
+// Do the files tile the set's box? The files' edges cut the box into cells; every cell's centre
+// must lie in some file. N files cut at most (2N)^2 cells, each asked of N files.
+bool RasterFileSource::Tiled() const {
+    std::vector<double> xs, ys;
+    for (const auto& f : m_files) {
+        xs.push_back(f->x0);
+        xs.push_back(f->x1);
+        ys.push_back(f->yLo);
+        ys.push_back(f->yHi);
+    }
+    std::sort(xs.begin(), xs.end());
+    std::sort(ys.begin(), ys.end());
+    for (size_t j = 0; j + 1 < ys.size(); ++j) {
+        for (size_t i = 0; i + 1 < xs.size(); ++i) {
+            if (xs[i + 1] <= xs[i] || ys[j + 1] <= ys[j]) continue;
+            const double x = 0.5 * (xs[i] + xs[i + 1]), y = 0.5 * (ys[j] + ys[j + 1]);
+            bool held = false;
+            for (const auto& f : m_files) held = held || (x >= f->x0 && x < f->x1 && y >= f->yLo && y < f->yHi);
+            if (!held) return false;
+        }
+    }
+    return true;
+}
+
 bool RasterFileSource::Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
     lon0 = m_info.lon0;
     lat0 = m_info.lat0;
@@ -316,17 +382,24 @@ bool RasterFileSource::ToLatLon(double x, double y, double& lat, double& lon) co
 }
 
 // ---- BY THE WINDOW: 256 x 256 texels of one file, RGBA8 as the seam gives them (0 where the
-// file said nodata), decoded once and kept while used. Two threads may decode one window at once;
-// the second keeps the first's, and the loader serializes its own decoder.
+// file said nodata), decoded once and kept while used. ONE DECODE A WINDOW (2026-10-17): the loader
+// serializes its decoder, and the ingest's pool threads paint neighbouring tiles, so a window two
+// threads wanted at once was decoded twice behind that lock -- measured as 44,347 decodes of a 5,430-
+// window file, eight times over, with the decoder the whole of the ingest's time. A thread that finds
+// a window being decoded waits for it (m_decoding, m_decoded) rather than decoding it again.
 std::shared_ptr<const std::vector<uint8_t>> RasterFileSource::Window(size_t file, uint32_t wx,
                                                                      uint32_t wy) {
     const uint64_t key = (uint64_t(file) << 48) | (uint64_t(wy) << 24) | wx;
     {
-        std::lock_guard<std::mutex> lk(m_cacheMx);
-        auto it = m_index.find(key);
-        if (it != m_index.end()) {
-            m_lru.splice(m_lru.begin(), m_lru, it->second);
-            return it->second->second;
+        std::unique_lock<std::mutex> lk(m_cacheMx);
+        for (;;) {
+            auto it = m_index.find(key);
+            if (it != m_index.end()) {
+                m_lru.splice(m_lru.begin(), m_lru, it->second);
+                return it->second->second;
+            }
+            if (m_decoding.insert(key).second) break;   // nobody is on it: this thread decodes it
+            m_decoded.wait(lk);                          // another thread is: its window lands below
         }
     }
     auto px = std::make_shared<std::vector<uint8_t>>(size_t(kWin) * kWin * 4, uint8_t(m_height ? 0xFF : 0));
@@ -341,8 +414,8 @@ std::shared_ptr<const std::vector<uint8_t>> RasterFileSource::Window(size_t file
         for (size_t k = 0; k < px->size(); ++k) (*px)[k] = static_cast<uint8_t>(tp.data[k]);
     }
     std::lock_guard<std::mutex> lk(m_cacheMx);
-    auto it = m_index.find(key);
-    if (it != m_index.end()) return it->second->second;
+    m_decoding.erase(key);
+    m_decoded.notify_all();
     m_lru.emplace_front(key, px);
     m_index[key] = m_lru.begin();
     if (m_lru.size() > kWindows) {
@@ -363,6 +436,8 @@ std::shared_ptr<const RasterFileSource::Sat> RasterFileSource::WindowSat(size_t 
         }
     }
     const auto px = Window(file, wx, wy);
+    const auto edge = WindowEdge(file, wx, wy);
+    const float* ef = edge && !edge->f.empty() ? edge->f.data() : nullptr;
     auto s = std::make_shared<Sat>();
     const size_t N = kWin + 1;
     s->v.assign(N * N, 0.0);
@@ -372,9 +447,10 @@ std::shared_ptr<const RasterFileSource::Sat> RasterFileSource::WindowSat(size_t 
         for (uint32_t i = 0; i < kWin; ++i) {
             float t;
             std::memcpy(&t, &(*px)[(size_t(j) * kWin + i) * 4], 4);
-            if (!std::isnan(t)) {
-                rowV += t;
-                rowN += 1.0;
+            if (!std::isnan(t)) {   // a texel weighs its edge factor (1 with none): the table carries the law
+                const double e = ef ? double(ef[size_t(j) * kWin + i]) : 1.0;
+                rowV += e * t;
+                rowN += e;
             }
             s->v[(j + 1) * N + i + 1] = s->v[j * N + i + 1] + rowV;
             s->n[(j + 1) * N + i + 1] = s->n[j * N + i + 1] + rowN;
@@ -403,6 +479,8 @@ std::shared_ptr<const RasterFileSource::Blocks> RasterFileSource::WindowBlocks(s
         }
     }
     const auto px = Window(file, wx, wy);
+    const auto edge = WindowEdge(file, wx, wy);
+    const float* ef = edge && !edge->f.empty() ? edge->f.data() : nullptr;
     auto b = std::make_shared<Blocks>();
     for (int k = 0; k < 256; ++k) {
         b->mn[k] = std::numeric_limits<float>::infinity();
@@ -418,6 +496,7 @@ std::shared_ptr<const RasterFileSource::Blocks> RasterFileSource::WindowBlocks(s
                 b->nan[k] = 1;
                 continue;
             }
+            if (ef && ef[size_t(j) * kWin + i] < 1.0f) b->nan[k] = 1;   // under the feather: not the block's whole
             b->mn[k] = (std::min)(b->mn[k], t);
             b->mx[k] = (std::max)(b->mx[k], t);
         }
@@ -432,6 +511,130 @@ std::shared_ptr<const RasterFileSource::Blocks> RasterFileSource::WindowBlocks(s
         m_blkLru.pop_back();
     }
     return m_blkLru.front().second;
+}
+
+// THE EDGE OF THE DATA (header): the window's texels, each the smoothstep of its distance in metres to
+// the nearest absent texel over the feather. The seed is the window and a ring of `reach` texels about
+// it (the feather in texels, so every absent texel that can lower a factor is in it), read through
+// Absent: this file's texels, or the file of the set that holds the ground beyond this one's edge.
+// (kWin + 2 reach)^2 cells, two axes of Dt1 each: a window of a 10 m feather at 1 m costs 76k cells.
+std::shared_ptr<const RasterFileSource::Edge> RasterFileSource::WindowEdge(size_t file, uint32_t wx, uint32_t wy) {
+    if (m_feather <= 0.0 || !m_absence) return nullptr;
+    const uint64_t key = (uint64_t(file) << 48) | (uint64_t(wy) << 24) | wx;
+    {
+        std::lock_guard<std::mutex> lk(m_cacheMx);
+        auto it = m_edgeIndex.find(key);
+        if (it != m_edgeIndex.end()) {
+            m_edgeLru.splice(m_edgeLru.begin(), m_edgeLru, it->second);
+            return it->second->second;
+        }
+    }
+    const int reach = (std::max)(1, int(std::ceil(m_feather / (std::min)(m_gx, m_gy))));
+    const int P = int(kWin) + 2 * reach, X0 = int(wx * kWin) - reach, Y0 = int(wy * kWin) - reach;
+    constexpr double kFar = 1e30;   // (`far` is a Windows macro)
+    const auto tEdge = std::chrono::steady_clock::now();
+    std::vector<double> g(size_t(P) * P, kFar), d(size_t(P) * P);
+    bool any = false;
+    WinCache wc;
+    for (int j = 0; j < P; ++j) {
+        for (int i = 0; i < P; ++i) {
+            if (Absent(file, X0 + i, Y0 + j, wc)) {
+                g[size_t(j) * P + i] = 0.0;
+                any = true;
+            }
+        }
+    }
+    auto e = std::make_shared<Edge>();
+    if (any) {   // (a window whose present texels all weigh 1 stays empty below: every absent texel weighs 0 anyway)
+        std::vector<int> v(P);
+        std::vector<double> z(P + 1), col(P), out(P);
+        for (int i = 0; i < P; ++i) {   // down each column, the window's rows in metres
+            for (int j = 0; j < P; ++j) col[j] = g[size_t(j) * P + i];
+            Dt1(col.data(), out.data(), P, m_gy * m_gy, v.data(), z.data());
+            for (int j = 0; j < P; ++j) d[size_t(j) * P + i] = out[j];
+        }
+        for (int j = 0; j < P; ++j) Dt1(&d[size_t(j) * P], &g[size_t(j) * P], P, m_gx * m_gx, v.data(), z.data());
+        e->f.resize(size_t(kWin) * kWin);
+        bool trivial = true;
+        for (uint32_t j = 0; j < kWin; ++j) {
+            for (uint32_t i = 0; i < kWin; ++i) {
+                const double m2 = g[size_t(j + reach) * P + i + reach];
+                const double t = std::clamp(std::sqrt(m2) / m_feather, 0.0, 1.0);
+                const float f = float(t * t * (3.0 - 2.0 * t));
+                e->f[size_t(j) * kWin + i] = f;
+                if (m2 > 0.0 && f < 1.0f) trivial = false;   // a present texel under the feather
+            }
+        }
+        if (trivial) e->f.clear();
+    }
+    s_edges.fetch_add(1, std::memory_order_relaxed);
+    s_edgeUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tEdge).count()),
+                       std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(m_cacheMx);
+    auto it = m_edgeIndex.find(key);
+    if (it != m_edgeIndex.end()) return it->second->second;
+    m_edgeLru.emplace_front(key, e);
+    m_edgeIndex[key] = m_edgeLru.begin();
+    // As many as the windows: at a quarter of them the edges of a 7,400-window run were built 53,483
+    // times (686 s) and the picture never settled (2026-10-17). A window's bytes each where it holds
+    // anything; most hold nothing (no absent texel within the feather, or none present).
+    if (m_edgeLru.size() > kWindows) {
+        m_edgeIndex.erase(m_edgeLru.back().first);
+        m_edgeLru.pop_back();
+    }
+    return m_edgeLru.front().second;
+}
+
+// A texel of this file is absent where it holds NaN (a height) or alpha 0 (a colour). Ground beyond
+// this file's edge is the texel of the file of the set that holds it, absent where none does -- and
+// present beyond the set's box, whose edge is Feathered's.
+bool RasterFileSource::Absent(size_t file, int x, int y, WinCache& wc) {
+    const File& f = *m_files[file];
+    if (x < 0 || y < 0 || x >= int(f.w) || y >= int(f.h)) {
+        const double X = f.x0 + (x + 0.5) / f.kx;
+        const double Y = f.down ? f.yHi - (y + 0.5) / f.ky : f.yLo + (y + 0.5) / f.ky;
+        if (X < m_ux0 || X >= m_ux1 || Y < m_uy0 || Y >= m_uy1) return false;
+        for (size_t j = 0; j < m_files.size(); ++j) {
+            const File& o = *m_files[j];
+            if (j == file || X < o.x0 || X >= o.x1 || Y < o.yLo || Y >= o.yHi) continue;
+            const int u = std::clamp(int((X - o.x0) * o.kx), 0, int(o.w) - 1);
+            const int v = std::clamp(int((o.down ? o.yHi - Y : Y - o.yLo) * o.ky), 0, int(o.h) - 1);
+            return Absent(j, u, v, wc);
+        }
+        return true;
+    }
+    const uint64_t key = (uint64_t(file) << 48) | (uint64_t(y / kWin) << 24) | uint64_t(x / kWin);
+    if (key != wc.lastKey) {
+        auto it = wc.held.find(key);
+        if (it == wc.held.end()) it = wc.held.emplace(key, Window(file, uint32_t(x / kWin), uint32_t(y / kWin))).first;
+        wc.lastKey = key;
+        wc.last = it->second.get();
+    }
+    const uint8_t* p = &(*wc.last)[(size_t(y % kWin) * kWin + x % kWin) * 4];
+    if (!m_height) return p[3] == 0;
+    float t;
+    std::memcpy(&t, p, 4);
+    return std::isnan(t);
+}
+
+// A texel's edge factor: 1 where the feather does not reach absence, else its window's (held
+// beside the thread's recent windows, as Texel holds those).
+float RasterFileSource::EdgeAt(size_t file, int x, int y) {
+    if (m_feather <= 0.0 || !m_absence) return 1.0f;
+    const uint64_t key = (uint64_t(file) << 48) | (uint64_t(y / kWin) << 24) | uint64_t(x / kWin);
+    const size_t at = size_t(y % kWin) * kWin + x % kWin;
+    for (const RecentEdge& r : tRecentEdge) {
+        if (r.owner == m_serial && r.key == key) {
+            const Edge* e = static_cast<const Edge*>(r.e.get());
+            return e->f.empty() ? 1.0f : e->f[at];
+        }
+    }
+    RecentEdge& r = tRecentEdge[tNextEdge++ & 3u];
+    const auto e = WindowEdge(file, uint32_t(x / kWin), uint32_t(y / kWin));
+    r.e = e;
+    r.owner = m_serial;
+    r.key = key;
+    return e->f.empty() ? 1.0f : e->f[at];
 }
 
 // THE RANGE OVER A BOX. Sample's value is an area mean of the texels its box touches, times the scale
@@ -536,8 +739,10 @@ const uint8_t* RasterFileSource::Texel(size_t file, int x, int y) {
 }
 
 // A box of one texel: the bilinear read between texel centres, taps clamped at the file's edge,
-// in the plane orthos' own arithmetic. Where the four alphas are one, the alpha cancels and this
-// is their plain bilinear; else the colour is premultiplied. Returns the alpha, 0..1.
+// in the plane orthos' own arithmetic. A tap's alpha is the file's times its edge factor (1 where
+// the feather reaches no absence, so the bytes are what they were). Where the four are one and the
+// same, the alpha cancels and this is their plain bilinear; else the colour is premultiplied.
+// Returns the alpha, 0..1.
 double RasterFileSource::Bilinear(size_t file, double fx, double fy, uint8_t rgba[4]) {
     const File& f = *m_files[file];
     const int W = int(f.w), H = int(f.h);
@@ -550,18 +755,20 @@ double RasterFileSource::Bilinear(size_t file, double fx, double fy, uint8_t rgb
     std::memcpy(q[1], Texel(file, x1, y0), 4);
     std::memcpy(q[2], Texel(file, x0, y1), 4);
     std::memcpy(q[3], Texel(file, x1, y1), 4);
-    if (q[0][3] == q[1][3] && q[0][3] == q[2][3] && q[0][3] == q[3][3]) {
+    const double al[4] = {q[0][3] * EdgeAt(file, x0, y0), q[1][3] * EdgeAt(file, x1, y0),
+                          q[2][3] * EdgeAt(file, x0, y1), q[3][3] * EdgeAt(file, x1, y1)};
+    if (al[0] == al[1] && al[0] == al[2] && al[0] == al[3]) {
         for (int c = 0; c < 3; ++c) {
             const double a = q[0][c] * (1 - tx) + q[1][c] * tx;
             const double b = q[2][c] * (1 - tx) + q[3][c] * tx;
             rgba[c] = static_cast<uint8_t>(a * (1 - ty) + b * ty + 0.5);
         }
-        return q[0][3] / 255.0;
+        return al[0] / 255.0;
     }
     const double w[4] = {(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
     double acc[3] = {0.0, 0.0, 0.0}, a = 0.0;
     for (int k = 0; k < 4; ++k) {
-        const double wa = w[k] * q[k][3];
+        const double wa = w[k] * al[k];
         for (int c = 0; c < 3; ++c) acc[c] += wa * q[k][c];
         a += wa;
     }
@@ -571,8 +778,9 @@ double RasterFileSource::Bilinear(size_t file, double fx, double fy, uint8_t rgb
 }
 
 // A larger box (su x sv texels about (uc, vc), texel i covering [i, i + 1)): the area mean, each
-// texel weighted by its part inside the box and by its alpha, the box clipped to the file. It is
-// the same law as the bilinear: a box one texel wide is the linear read between centres.
+// texel weighted by its part inside the box and by its alpha and edge factor, the box clipped to
+// the file. It is the same law as the bilinear: a box one texel wide is the linear read between
+// centres.
 double RasterFileSource::BoxMean(size_t file, double uc, double vc, double su, double sv,
                                  uint8_t rgba[4]) {
     const File& f = *m_files[file];
@@ -584,7 +792,7 @@ double RasterFileSource::BoxMean(size_t file, double uc, double vc, double su, d
         for (int i = static_cast<int>(u0); i < u1; ++i) {
             const double wxy = ((std::min)(u1, i + 1.0) - (std::max)(u0, double(i))) * wy;
             const uint8_t* p = Texel(file, i, j);
-            const double wa = wxy * p[3];
+            const double wa = wxy * (p[3] * EdgeAt(file, i, j));
             for (int c = 0; c < 3; ++c) acc[c] += wa * p[c];
             a += wa;
             area += wxy;
@@ -629,10 +837,11 @@ float RasterFileSource::Feathered(double x, double y) const {
     return static_cast<float>(t * t * (3.0 - 2.0 * t));
 }
 
-// A HEIGHT: the colour's area mean in one channel -- a texel weighs 1 where the file has a number
-// and 0 where it said nodata (NaN in the window) -- over the box asked for, never under one texel,
-// so a box of one texel is the bilinear between centres, taps clamped at the file's edge. The
-// weight is the part of the box the file has, times the feather; the number is in kHeightFrame.
+// A HEIGHT: the colour's area mean in one channel -- a texel weighs its edge factor where the file
+// has a number (1 away from every absence) and 0 where it said nodata (NaN in the window) -- over
+// the box asked for, never under one texel, so a box of one texel is the bilinear between centres,
+// taps clamped at the file's edge. The weight is the weighed part of the box the file has, times
+// the box's feather; the number is in kHeightFrame.
 float RasterFileSource::Sample(double latRad, double lonRad, double groundResM, float& metres) {
     double x = 0.0, y = 0.0;
     if (!m_height || m_files.empty() || !ToCrs(latRad, lonRad, x, y)) return 0.0f;
@@ -661,8 +870,9 @@ float RasterFileSource::Sample(double latRad, double lonRad, double groundResM, 
                 std::memcpy(&t, Texel(i, k, j), 4);
                 area += w;
                 if (std::isnan(t)) continue;
-                acc += w * t;
-                have += w;
+                const double we = w * EdgeAt(i, k, j);
+                acc += we * t;
+                have += we;
             }
         }
         if (have <= 0.0 || area <= 0.0) return 0.0f;
@@ -714,7 +924,7 @@ std::vector<std::unique_ptr<RasterFileSource>> LoadRasterSources(
 }
 
 // ---- THE PASS ---------------------------------------------------------------------------------
-IngestStats Ingest(TileTree& tree, const Lattice& lattice) {
+IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lattice>& realized) {
     IngestStats st;
     const DomainSource* node = tree.Node();
     double lo0 = 0, la0 = 0, lo1 = 0, la1 = 0;
@@ -781,35 +991,55 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice) {
     }
     size_t total = 0;
     for (const auto& v : in) total += v.size();
+    // THE PARTNER LEVEL: a level whose texel grid a finer realization of this tree already holds is
+    // taken from it, tile for tile (TileTree::Adopt), and neither painted nor folded here.
+    std::vector<int> partnerMip(top + 1, -1), partnerOf(top + 1, -1);
+    for (uint32_t m = 0; m <= top; ++m) {
+        for (size_t i = 0; i < realized.size() && partnerMip[m] < 0; ++i) {
+            partnerMip[m] = TileTree::PartnerMip(lattice, m, realized[i]);
+            if (partnerMip[m] >= 0) partnerOf[m] = int(i);
+        }
+    }
     // Painted at the own mip, then each level folded from the one below, on the pool.
     const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t dec0 = RasterFileSource::s_decodes.load(), us0 = RasterFileSource::s_decodeUs.load();
+    const uint64_t edge0 = RasterFileSource::s_edges.load();
     auto since = [&] {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
-    std::atomic<uint32_t> done{0};
+    std::atomic<uint32_t> done{0}, adopted{0};
     std::atomic<bool> transient{false};
     std::atomic<long long> nextLog{5};
     for (uint32_t m = uint32_t(st.own); m <= top; ++m) {
         const std::vector<TileRequest>& lv = in[m];
         if (lv.empty()) continue;
         ++st.levels;
+        const int pi = partnerOf[m];
+        const std::string ptag = pi >= 0 ? realized[pi].Tag() : std::string();
         Threads().ParallelFor(Lane::Compute, "ingest", int(lv.size()), 4, [&](int a, int b) {
             std::vector<uint8_t> bytes;
             for (int k = a; k < b; ++k) {
-                if (tree.Tile(lattice, tag, lv[k], bytes, nullptr) == TileTree::Status::Transient) {
-                    transient = true;
-                }
+                const TileTree::Status s =
+                    pi >= 0 ? tree.Adopt(tag, lv[k], realized[pi], ptag, uint32_t(partnerMip[m]), bytes)
+                            : tree.Tile(lattice, tag, lv[k], bytes, nullptr);
+                if (s == TileTree::Status::Transient) transient = true;
+                if (pi >= 0) ++adopted;
                 const uint32_t d = ++done;
                 long long due = nextLog.load();
                 if (since() >= double(due) && nextLog.compare_exchange_strong(due, due + 5)) {
-                    Log("[ingest] %s on %s: mip %u, %u of %zu tiles, %.0f s", node->Name(),
-                        tag.c_str(), m, d, total, since());
+                    Log("[ingest] %s on %s: mip %u, %u of %zu tiles, %.0f s; %llu windows decoded, %llu data edges built",
+                        node->Name(), tag.c_str(), m, d, total, since(),
+                        static_cast<unsigned long long>(RasterFileSource::s_decodes.load() - dec0),
+                        static_cast<unsigned long long>(RasterFileSource::s_edges.load() - edge0));
                 }
             }
         });
     }
     st.tiles = done.load();
+    st.adopted = adopted.load();
     st.seconds = since();
+    st.windows = RasterFileSource::s_decodes.load() - dec0;
+    st.decodeSec = double(RasterFileSource::s_decodeUs.load() - us0) * 1e-6;
     if (!transient) {
         char b[256];
         snprintf(b, sizeof(b), "{\"tree\": \"%s\", \"own\": %d, \"tiles\": %u, \"levels\": %u}\n",
@@ -829,13 +1059,22 @@ void IngestSources(const std::vector<std::unique_ptr<RasterFileSource>>& sources
         if (src->Height()) layer = std::make_shared<HeightLayerSource>(src.get(), kHeightFrame);
         else leaf = NormalizeToSi(layer = std::make_shared<ColorLayerSource>(src.get()));
         TileTree tree(leaf ? leaf.get() : layer.get(), src->Height() ? TileTree::Fmt::FloatW : TileTree::Fmt::Rgba8);
-        for (const Lattice& l : src->Height() ? height : colour) {
-            const IngestStats st = Ingest(tree, l);
+        // The finest lattice first: a coarser one takes its equal-grid levels from the folds the
+        // finer one kept (TileTree::Adopt) instead of asking the file for them.
+        std::vector<Lattice> order = src->Height() ? height : colour;
+        std::stable_sort(order.begin(), order.end(),
+                         [](const Lattice& a, const Lattice& b) { return a.faceDim > b.faceDim; });
+        std::vector<Lattice> realized;
+        for (const Lattice& l : order) {
+            const IngestStats st = Ingest(tree, l, realized);
+            realized.push_back(l);
             if (st.whole) {
                 Log("[ingest] %s on %s: whole (own mip %d)", src->Info().name.c_str(), l.Tag().c_str(), st.own);
             } else if (st.own >= 0) {
-                Log("[ingest] %s on %s: own mip %d, %u tiles on %u levels in %.1f s", src->Info().name.c_str(),
-                    l.Tag().c_str(), st.own, st.tiles, st.levels, st.seconds);
+                Log("[ingest] %s on %s: own mip %d, %u tiles on %u levels in %.1f s (%u taken from a finer "
+                    "realization); %llu windows decoded, %.1f s in the decoder",
+                    src->Info().name.c_str(), l.Tag().c_str(), st.own, st.tiles, st.levels, st.seconds,
+                    st.adopted, static_cast<unsigned long long>(st.windows), st.decodeSec);
             }
         }
     }

@@ -37,6 +37,17 @@ void CsClassify(uint3 t : SV_DispatchThreadID) {
     if (m == 0u) return;   // no meshlet drew this pixel
     const bool wet = gCol[gA.y].Load(p).a < 0.75f || WaterAt(p + int3(1, 0, 0)) || WaterAt(p - int3(1, 0, 0)) ||
                      WaterAt(p + int3(0, 1, 0)) || WaterAt(p - int3(0, 1, 0));
+    // THE WAVE WRITES ONCE WHERE IT CAN (REVIEW 2026-10-17 finding 31c): a wave's pixels are an 8 x 4
+    // patch of the view and mostly belong to one meshlet. Where every live lane's m agrees, the lanes'
+    // bits are OR'd in registers and the first lane sets them with one atomic; a wave over a meshlet
+    // border falls back to the atomic a lane. The word's final value is the OR of the same bits
+    // either way. (The lanes that returned above are not in the wave's live set.)
+    const uint bit = wet ? 2u : 1u;
     uint was;
-    InterlockedOr(gOut[gA.z][gA.w + m - 1u], wet ? 2u : 1u, was);
+    if (WaveActiveAllEqual(m)) {
+        const uint bits = WaveActiveBitOr(bit);
+        if (WaveIsFirstLane()) InterlockedOr(gOut[gA.z][gA.w + m - 1u], bits, was);
+    } else {
+        InterlockedOr(gOut[gA.z][gA.w + m - 1u], bit, was);
+    }
 }

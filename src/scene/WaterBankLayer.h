@@ -93,6 +93,11 @@ public:
     // SeaLayer::SetTime hands it) -- inside the solver's domain the level IS that plane plus the
     // solver's deviation (the solver is truth), and the kernel needs the plane to say so.
     void SetTidePlane(double navdM) { m_tidePlane = static_cast<float>(navdM); }
+    // Per frame, BEFORE RenderFrame: the frame's live waterline (the value the globe shades and
+    // classifies against, GlobeLayer::waterNavd). The param plane's level is stored as its
+    // DEPARTURE from this (WaterBank.hlsl), so a tile the rings never mapped reads as the
+    // waterline and not as 0 m NAVD; every reader adds it back, this layer's own included.
+    void SetWaterline(double navdM) { m_waterline = static_cast<float>(navdM); }
 
     uint32_t DispSrv() const { return m_disp.Srv(); }
     uint32_t ParamSrv() const { return m_param.Srv(); }
@@ -112,7 +117,7 @@ public:
         int ring = -1;           // which mip answered
         float texelM = 0.0f;
         float dispX = 0, dispY = 0, dispZ = 0, foam = 0;
-        float level = 0, sigma2 = 0, curU = 0, curV = 0;
+        float level = 0, sigma2 = 0, curU = 0, curV = 0;   // level in m NAVD (the texel's departure + the waterline)
         // The detail plane, as the kernel wrote it: the per-band gains of the FULL closure (sea-state
         // scale x shadow x shoaling x wave-current, before any window stand-down) and the dry weight.
         float gain0 = 0, gain1 = 0, gain2 = 0, dry = 0;
@@ -390,6 +395,7 @@ private:
     bool m_originSet = false;
     bool m_chartSet = false;
     float m_tidePlane = 0.0f;   // SetTidePlane: the plane the solver's deviation is measured from
+    float m_waterline = 0.0f;   // SetWaterline: the plane the param plane's level is measured from
     D3D12_RESOURCE_STATES m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     bool m_ready = false;
 };

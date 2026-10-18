@@ -555,6 +555,20 @@ double Compositor::HeightGrainM(int channel, double latRad, double lonRad) const
     return finest;
 }
 
+bool Compositor::FinerHeightAt(int channel, double latRad, double lonRad, double grainM) const {
+    if (!(grainM > 0.0)) return false;
+    const Channel& ch = m_channels[channel];
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    for (HeightSource* hs : ch.height) {
+        const SourceInfo& s = hs->Info();
+        if (s.cmPerPixel <= 0.0 || s.cmPerPixel * 0.01 >= grainM) continue;
+        if (lon < s.lon0 || lon > s.lon1 || lat < s.lat0 || lat > s.lat1) continue;
+        float m = 0.0f;
+        if (hs->Sample(latRad, lonRad, s.cmPerPixel * 0.01, m) > 0.0f) return true;
+    }
+    return false;
+}
+
 bool Compositor::HeightStackCeiling(int channel, double lat0, double lon0, double lat1, double lon1, float limit,
                                     float& hi) const {
     const Channel& ch = m_channels[channel];
@@ -586,8 +600,12 @@ float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,
     return h;
 }
 
-float Compositor::SampleHeight(int channel, double latRad, double lonRad, double groundResM) const {
-    if (HeightTree* t = m_channels[channel].heightTree.get()) return t->Sample(latRad, lonRad, groundResM);
+float Compositor::SampleHeight(int channel, double latRad, double lonRad, double groundResM,
+                               float* halfRange) const {
+    if (HeightTree* t = m_channels[channel].heightTree.get()) {
+        return t->Sample(latRad, lonRad, groundResM, 0, halfRange);
+    }
+    if (halfRange) *halfRange = 0.0f;
     return SampleHeightStack(channel, latRad, lonRad, groundResM);
 }
 

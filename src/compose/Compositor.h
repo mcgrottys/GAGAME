@@ -81,6 +81,9 @@ struct PaintCtx {
     std::vector<uint8_t> scratch;
     uint32_t scratchDim = 0;
     double sLat0 = 0, sLat1 = 0, sLon0 = 0, sLon1 = 0;   // the box `scratch` spans (radians)
+    // GisMaskSource: a height layer finer than the survey's grain meets this tile's box, so its
+    // texels ask the height's witness (Compositor::FinerHeightAt); false on nearly every tile.
+    bool finerHeight = false;
 };
 
 class ColorSource {
@@ -128,6 +131,10 @@ public:
     // layers declare none, so their trees keep the key they were painted under.
     virtual int OwnMip(const Lattice&) const { return -1; }
     virtual bool Footprint(double&, double&, double&, double&) const { return false; }
+    // THE LAW A LAYER PAINTS BY, when it is more than its bytes (2026-10-18): empty for a layer whose
+    // name is its identity; a layer whose weight depends on OTHER layers names them here (the hand
+    // edits yield to the finer witnesses), so the tree's cached tiles of it follow those layers too.
+    virtual std::string Law() const { return std::string(); }
     // THE RANGE OVER A BOX (degrees): every value Sample can give at any point of the box, at any
     // grain, lies in [lo, hi] -- a bound, not an estimate (a sample is a weighted mean of the source's
     // own values, so it never leaves their range). `full`: the weight is 1 everywhere in the box.
@@ -205,6 +212,13 @@ public:
     // than the data's cell reads the interpolant's facets (bilinear ETOPO at 4.9 km stepped at
     // 1 km rendered the continental slope as terraces).
     double HeightGrainM(int channel, double latRad, double lonRad) const;
+    // THE HEIGHT'S WITNESS AT A POINT (GisMaskSource, 2026-10-17): true where a height layer whose
+    // declared grain is finer than `grainM` HAS A VALUE at the point -- asked of the layer at its own
+    // grain, so a raster's nodata (a lidar's channel, a drone survey's water) answers false and the
+    // point belongs to the layer under it, whatever that one's grain. A footprint alone cannot say
+    // this: the Town Neck Beach DSM's rectangle is 31 % data. Nothing finer declared, or a grain of
+    // 0 (every grain): false.
+    bool FinerHeightAt(int channel, double latRad, double lonRad, double grainM) const;
     // THE STACK'S CEILING OVER A BOX (degrees): no SampleHeightStack in the box returns more than `hi`.
     // The stack is a chain of lerps h += (m - h) w, w in [0, 1], from 0: each step keeps h inside the
     // range of what came before and the source's own -- or replaces it, where the source owns the box
@@ -217,7 +231,10 @@ public:
     // THE ONE READ OF A CHANNEL'S HEIGHT for a CPU reader (compose/HeightTree.h): the tree the GPU
     // reads when one is bound, else the stack. The stack stays what the tree itself paints from.
     void BindHeightTree(int channel, std::shared_ptr<HeightTree> tree) { m_channels[channel].heightTree = std::move(tree); }
-    float SampleHeight(int channel, double latRad, double lonRad, double groundResM) const;
+    // `halfRange`, when asked: the read's own uncertainty (HeightTree::Sample); the stack has no taps
+    // a reader can see, so without a tree it is nought.
+    float SampleHeight(int channel, double latRad, double lonRad, double groundResM,
+                       float* halfRange = nullptr) const;
     HeightTree* HeightTreeOf(int channel) const { return m_channels[channel].heightTree.get(); }
     // THE FRAME THREAD'S READ: what is held, never a paint (HeightTree::SampleResident); the stack
     // when no tree is bound. HeightLanded counts the tree's loads, so a kept answer can be asked again.

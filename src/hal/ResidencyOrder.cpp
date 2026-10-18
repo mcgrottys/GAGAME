@@ -1148,7 +1148,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     passEntries += m_rec.size();
     passLap(1);
     // ---- (c) THE CUT: a walk over the counts; the one straddling bucket gathered and partitioned.
-    const uint32_t P = kPoolCapTiles - kSlotReserve;
+    const uint32_t P = poolCapTiles - kSlotReserve;
     const uint32_t cut = settleExact ? wantSet : P;
     m_passCut = cut;
     std::vector<uint32_t> mid;   // record indices of the straddling bucket
@@ -1370,6 +1370,30 @@ void ResidencyManager::Rescue(OrderTurnLedger& L) {
         R.rewanted = true;
         Tracked* now = e.tile;   // the tile tracked at the address since the release
         if (now->state == TileState::Mapped) continue;   // mapped over: the old bytes are gone
+        // A TILE LANDS ONLY ON ITS OWN GROUND (2026-10-18), at the rescue too. The retiring tile's
+        // bytes are the ground its slot had when the cut released it; a window step since
+        // (Tenant::Move tells the TRACKED tiles of the slice, and a retiring tile is tracked no
+        // more) may have given the slot another ground. The rescue matched the slot, not the
+        // ground, and brought the old bytes back as the new tile -- no read, no new slot, held and
+        // landed, never through MapAndFill's check: a page of the Salisbury parking lot standing on
+        // the sea until the slot was next told (Mark's screenshots of 2026-10-18). So the slot's
+        // ground is read again here, and a tile whose key is not the slot's stays retiring; the
+        // tile tracked at the slot loads its own bytes.
+        {
+            Tenant& tt = m_tenants[R.tile->tenant];
+            const uint64_t nowKey = KeyOf(tt, R.tile->req);
+            if (R.tile->gkey && nowKey != R.tile->gkey) {
+                ++tt.loadsMovedGround;
+                ++movedGroundTotal;
+                if (traceRes) {
+                    Log("[residency] %S slot (%u m%u %u,%u): the ground moved under the retiring tile (key %016llx, "
+                        "the slot's now %016llx): not rescued, the slot reads its own",
+                        tt.name.c_str(), R.tile->req.face, R.tile->req.mip, R.tile->req.x, R.tile->req.y,
+                        static_cast<unsigned long long>(R.tile->gkey), static_cast<unsigned long long>(nowKey));
+                }
+                continue;
+            }
+        }
         ++L.rewanted;
         ++rewantedTotal;
         Tenant& t = m_tenants[now->tenant];
@@ -1625,7 +1649,10 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         // dropped before it mapped) takes the read itself.
         {
             Tenant& tn = m_tenants[tr->tenant];
-            if (!tr->gkey) tr->gkey = KeyOf(tn, tr->req);
+            // A TILE LANDS ONLY ON ITS OWN GROUND (2026-10-18): the key is the slot's ground NOW, taken at
+            // every decision (it was taken once and kept; a step between two decisions left it another
+            // ground's). MapAndFill holds the bytes to it again when they meet the slot.
+            tr->gkey = KeyOf(tn, tr->req);
             if (tr->gkey) {
                 auto hit = tn.held.find(tr->gkey);
                 if (hit != tn.held.end()) {
@@ -1678,7 +1705,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     // the exact hold the pool grows to the want set).
     const size_t made = m_heaps.size() * kPoolChunkTiles;
     const size_t slots = settleExact ? SIZE_MAX
-                                     : m_freePool.size() + (made < kPoolCapTiles ? kPoolCapTiles - made : 0u);
+                                     : m_freePool.size() + (made < poolCapTiles ? poolCapTiles - made : 0u);
     const size_t maxBatch = (std::min)(static_cast<size_t>(kMaxMapsPerFrame) - refills.size() / 2, slots);
     // The loaded tiles of the first P, in the order: the few that are loaded are picked out of the
     // list and only they are sorted (the list itself is sorted only as far as the loader read it).
@@ -2019,11 +2046,12 @@ void ResidencyManager::LogLoader() const {
         const uint64_t n = uint64_t(t.loadsRead) + t.loadsPaint;
         if (!n && !t.magnifiedKnown) continue;
         Log("[loader]   %S: %llu loads -- %u read (%.2f ms each), %u painted (%.1f ms each); of them %u "
-            "answered magnified, %u failed or not whole | queue wait %.2f ms a load | %u known magnified, no load",
+            "answered magnified, %u failed or not whole, %u refused (the slot's ground moved under the read) | "
+            "queue wait %.2f ms a load | %u known magnified, no load",
             t.name.c_str(), static_cast<unsigned long long>(n), t.loadsRead,
             t.loadsRead ? double(t.readUs) / (1000.0 * t.loadsRead) : 0.0, t.loadsPaint,
             t.loadsPaint ? double(t.paintUs) / (1000.0 * t.loadsPaint) : 0.0, t.loadsMagnified,
-            t.loadsFailed, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0, t.magnifiedKnown);
+            t.loadsFailed, t.loadsMovedGround, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0, t.magnifiedKnown);
     }
 }
 

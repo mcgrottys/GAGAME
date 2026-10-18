@@ -203,6 +203,9 @@ struct WaterSection {
 };
 struct StreamingSection {
     uint32_t tileBudget = 1000, predictEvery = 3;
+    // The residency pool's ceiling in 64 KB tiles (ResidencyManager::kPoolCapTiles = 32768, 2 GB):
+    // smaller, the order's cut releases sooner -- a test's way to make the discard-and-replace path run.
+    uint32_t poolTiles = 32768;
     // THE DAY'S CAP on Google, every engine on the machine together, per UTC day, whichever is
     // met first (core/DayLedger.h): dayTiles bounds the requests SENT, whatever came back;
     // dayBytes the bytes landed. Zero is no request that day, not "no limit".
@@ -319,11 +322,13 @@ struct RailsSection {
 // file cannot say (a CRS it carries wins); `over` is the stack order's first key, the grain its
 // second; `feather` (m) softens the edge of the whole. A height's `unit` and `datum` are read only
 // where the file names none; `offset` (m) is read only where it is written (hasOffset: 0 is a
-// separation too), and a height off the engine's datum is taken only with it.
+// separation too), and a height off the engine's datum is taken only with it. A photo's
+// `captureLevel` (m above `captureDatum`; the datum alone is 0 m on it) is the water level it was
+// flown at: its pixels are the ground only above it (compose/Sources.h LevelGateSource).
 struct SourceProps {
-    std::string name, file, folder, match, manifest, kind, crs, unit, datum;
-    double over = 0.0, feather = 0.0, offset = 0.0;
-    bool hasOffset = false;
+    std::string name, file, folder, match, manifest, kind, crs, unit, datum, captureDatum;
+    double over = 0.0, feather = 0.0, offset = 0.0, captureLevel = 0.0;
+    bool hasOffset = false, hasCaptureLevel = false;
 };
 struct PortalProps {
     std::string name;

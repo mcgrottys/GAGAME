@@ -696,13 +696,54 @@ public:
     // any child is Absent this node cannot yet know its own key and answers Absent.
     Held Peek(const ColorFrame& inherited, const std::string& tag, const TileRequest& r) {
         const ColorFrame& frame = Resolve(inherited);
-        if (m_kids.empty()) return PeekAt(Base(tag, r));
+        if (m_kids.empty()) {
+            const Held h = PeekAt(Base(tag, r));
+            // HIERARCHY 4.20's third clause: below the own level a tile is the own-level tile
+            // magnified and is not kept, so what it holds is what that ancestor holds (a tile kept
+            // from before the clause answers for itself, as LeafTile serves it first).
+            const int own = m_node->OwnMip(frame);
+            if (h == Held::Absent && own >= 0 && int(r.mip) < own) return PeekAt(Base(tag, Ancestor(r, uint32_t(own))));
+            return h;
+        }
         Compositor::TileBox box{};
         frame.Box(r, box);
         std::vector<Held> held;
         std::vector<size_t> inc;
         if (!KidsHeld(frame, tag, r, box, inc, held)) return Held::Absent;
         return PeekAt(Base(tag, r) + "_" + tree_detail::Hex8(KeyOf(inc, held)));
+    }
+
+    // ---- HIERARCHY 4.20 ACROSS REALIZATIONS (2026-10-17) -------------------------------------
+    // Two realizations of one tree whose levels have the same texel grid -- the same kind and tile
+    // shape, the same texels a face -- hold the SAME tiles at those levels: a fold is a function
+    // of the file, not of the folder it is kept in. So a coarse realization takes those tiles from
+    // the finer one, bytes for bytes, instead of asking the source for an area mean of the whole
+    // of it: cube16k's mip 0 is the pyramid's mip 17 (kFaceDim 16384 = 2^31 / 2^17), and painting
+    // it from a 1.4 GB ortho cost 40.7 s a tile where the pyramid's fold was already on disk.
+    // The level of `other` whose grid is `lattice`'s `mip`, or -1 where there is none.
+    static int PartnerMip(const Lattice& lattice, uint32_t mip, const Lattice& other) {
+        if (lattice.kind != Lattice::Kind::Cube || other.kind != Lattice::Kind::Cube) return -1;
+        if (lattice.texW != other.texW || lattice.texH != other.texH) return -1;
+        if (mip > lattice.MaxMip()) return -1;
+        const uint32_t texels = lattice.faceDim >> mip;
+        for (uint32_t k = 0; k <= other.MaxMip(); ++k) {
+            if ((other.faceDim >> k) == texels) return int(k);
+        }
+        return -1;
+    }
+    // The tile at `r` of this tree's realization `tag`, taken from the partner realization's tile
+    // (the same face, x and y at `otherMip`): its bytes written here as content, its void as void.
+    Status Adopt(const std::string& tag, const TileRequest& r, const Lattice& other,
+                 const std::string& otherTag, uint32_t otherMip, std::vector<uint8_t>& out) {
+        const TileRequest o{r.face, otherMip, r.x, r.y};
+        const Status s = Tile(other, otherTag, o, out, nullptr);
+        const std::string base = Base(tag, r);
+        if (s == Status::Content && out.size() == TileBytes()) {
+            tree_detail::WriteTile(base + ".bin", out);
+        } else if (s == Status::Void) {
+            tree_detail::Touch(base + ".void");
+        }
+        return s;
     }
 
     // ---- the tile ---------------------------------------------------------------------------
@@ -783,11 +824,12 @@ public:
     // ---- accounting --------------------------------------------------------------------------
     std::atomic<uint32_t> painted{0}, read{0}, voids{0}, refs{0}, composed{0}, hits{0};
     // F15 (instrument): the leaf's steps on the clock (microseconds summed, calls), see LeafTile.
-    std::atomic<uint64_t> usArchive{0}, usProbe{0}, usRead{0}, usFold{0}, usPaint{0}, usPublish{0}, usFoldUp{0};
-    std::atomic<uint32_t> nArchive{0}, nProbe{0}, nRead{0}, nFold{0}, nPaint{0}, nPublish{0}, nFoldUp{0};
+    std::atomic<uint64_t> usArchive{0}, usProbe{0}, usRead{0}, usFold{0}, usPaint{0}, usPublish{0}, usFoldUp{0}, usMagnify{0};
+    std::atomic<uint32_t> nArchive{0}, nProbe{0}, nRead{0}, nFold{0}, nPaint{0}, nPublish{0}, nFoldUp{0}, nMagnify{0};
     std::atomic<uint32_t> folded{0}, dropped{0};   // M9bb: pyramid folds; cached addresses dropped
     std::atomic<uint32_t> redundant{0};   // M9bd: folds the 4/255 rule found moved nothing
     std::atomic<uint32_t> magnified{0};   // PHASE A4: tiles answered as their parent, magnified
+    std::atomic<uint32_t> below{0};       // 4.20's third clause: tiles below the own level, the own tile magnified (MagnifyOwn)
 
     // PHASE A4: THE FINEST LEVEL ANY SOURCE UNDER THIS NODE HAS OF ITS OWN over a box: a leaf's
     // FinestMip there, a compose the finest of the children that touch the box (the membership
@@ -835,8 +877,9 @@ public:
                  voids.load(), refs.load(), composed.load(), hits.load(), arcPlaces.load(),
                  arcReads.load());
         std::string s = b;
-        if (magnified.load()) {
-            snprintf(b, sizeof(b), " | %u magnified (no bytes: the parent)", magnified.load());
+        if (magnified.load() || below.load()) {
+            snprintf(b, sizeof(b), " | %u magnified (no bytes: the parent), %u below the own level (the own tile magnified)",
+                     magnified.load(), below.load());
             s += b;
         }
         if (nArchive.load()) {   // F15: ms a call, by step (calls)
@@ -845,10 +888,11 @@ public:
             };
             snprintf(b, sizeof(b),
                      " | leaf ms a call: archive %.2f (%u), probe %.2f (%u), read %.2f (%u), fold %.1f (%u), "
-                     "paint %.1f (%u), publish %.1f (%u), fold-up %.1f (%u)",
+                     "paint %.1f (%u), publish %.1f (%u), fold-up %.1f (%u), magnify %.1f (%u)",
                      ms(usArchive, nArchive), nArchive.load(), ms(usProbe, nProbe), nProbe.load(),
                      ms(usRead, nRead), nRead.load(), ms(usFold, nFold), nFold.load(), ms(usPaint, nPaint),
-                     nPaint.load(), ms(usPublish, nPublish), nPublish.load(), ms(usFoldUp, nFoldUp), nFoldUp.load());
+                     nPaint.load(), ms(usPublish, nPublish), nPublish.load(), ms(usFoldUp, nFoldUp), nFoldUp.load(),
+                     ms(usMagnify, nMagnify), nMagnify.load());
             s += b;
         }
         // A leaf over a source that fetches says what it could not fetch: with the budget at
@@ -1110,13 +1154,20 @@ private:
             lap(usFold, nFold);
             return s;
         }
-        if (!TreeMayPaint()) return Status::Transient;   // the boot's question, or a loader leaving
         // HIERARCHY 4.20: A SOURCE PAINTS ITS OWN LEVEL, AND THE TREE MAKES THE OTHERS. Above the
         // node's own mip a tile is the fold of its four children, kept, and never painted: its
         // bytes are a function of the file, not of what was flown or in what order. A tile the
         // footprint does not touch (the compositor's rule) is void by arithmetic: nothing is read
-        // or written for it. Below the own mip the node paints, magnifying its own texels.
+        // or written for it. Below the own mip the tile is the own-level tile magnified
+        // (MagnifyOwn), read from what is kept -- so it is answered before the boot's held-only
+        // question, which it can meet whenever the ancestor is there -- and never from the file.
         const int ownMip = m_node->OwnMip(frame);
+        if (ownMip >= 0 && int(r.mip) < ownMip && !GpuRoot()) {
+            const Status s = MagnifyOwn(frame, tag, r, uint32_t(ownMip), out);
+            lap(usMagnify, nMagnify);
+            return s;
+        }
+        if (!TreeMayPaint()) return Status::Transient;   // the boot's question, or a loader leaving
         if (ownMip >= 0 && int(r.mip) > ownMip) {
             if (!Touching(box)) return Status::Void;
             const Status s = FoldFromChildren(frame, tag, r, out, true);
@@ -1333,6 +1384,128 @@ private:
             }
         }
     }
+    // ---- HIERARCHY 4.20, THE THIRD CLAUSE MADE LITERAL (2026-10-17) ---------------------------
+    // Below a node's own level a tile is the part of the OWN-LEVEL tile it lies under, magnified.
+    // The ancestor is read through Tile() -- kept by the pass, or painted once at the first ask --
+    // and the file is never opened for this tile. Bilinear between the ancestor's texel centres,
+    // in the tree's own format: coverage and coverage-weighted colour interpolated apart and then
+    // divided (the straight-alpha rule OverFinish keeps; a FloatW's weight and weight-weighted
+    // value the same way; a Raw4's four channels as they are), rounded to nearest. A tap past the
+    // ancestor's edge reads the NEIGHBOURING ancestor tile -- the GPU's own magnification reads
+    // across the atlas, and a clamp here would crease the picture every W texels of the own level
+    // -- and clamps only at the face's edge, where the neighbour is another face. The limits: at
+    // the own level the one tap weighs one and the tile is itself (the kept tile, which LeafTile
+    // serves before this); a neighbour the footprint does not reach is void and weighs nothing,
+    // so coverage falls off over one own texel there, as a fold's does; an ancestor that is void
+    // makes everything under it void. Not kept: Peek answers for it from the ancestor's entry.
+    //
+    // WHAT TODAY'S PAINT GAVE THAT THIS DOES NOT: the file's bilinear between ITS texels
+    // (RasterFileSource::Sample at a box under one of them), a little sharper than the own tile
+    // upsampled, since the own level is itself a read of the file at one to two texels a texel.
+    // The stills move by that sub-texel blur below the own level and nowhere above it. What the
+    // paint cost instead, at a cold mouth view over a 1.5 m bed and a 1 m lidar
+    // (docs/CONTENT_SCALING_2026-10-17.md 3d): 12,971 file windows decoded in 934 residency loads
+    // of 1.45 s each, 17,781 tiles still pending after 3,000 frames.
+    static TileRequest Ancestor(const TileRequest& r, uint32_t mip) {
+        const uint32_t k = mip - r.mip;
+        return TileRequest{r.face, mip, r.x >> k, r.y >> k};
+    }
+    Status MagnifyOwn(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
+                      uint32_t own, std::vector<uint8_t>& out) {
+        const uint32_t W = frame.texW, H = frame.texH, k = own - r.mip;
+        const TileRequest a = Ancestor(r, own);
+        // The ancestor and the neighbours the taps reach: bytes, or empty where one is void.
+        std::vector<uint8_t> nb[3][3];
+        bool asked[3][3] = {};
+        Status st = Status::Content;
+        auto fetch = [&](int dx, int dy) -> const std::vector<uint8_t>& {
+            std::vector<uint8_t>& b = nb[dy + 1][dx + 1];
+            if (!asked[dy + 1][dx + 1]) {
+                asked[dy + 1][dx + 1] = true;
+                const TileRequest n{a.face, a.mip, uint32_t(int(a.x) + dx), uint32_t(int(a.y) + dy)};
+                const Status s = Tile(frame, tag, n, b, nullptr);
+                if (s == Status::Transient) st = Status::Transient;
+                if (s != Status::Content || b.size() != TileBytes()) b.clear();
+            }
+            return b;
+        };
+        if (fetch(0, 0).empty()) return st == Status::Transient ? st : Status::Void;   // nothing under a void ancestor
+        // Each texel's two taps along an axis, in the ancestor's texel units: texel c of the
+        // sub-tile s (of 2^k a side) has its centre at u = (s W + c + 1/2) / 2^k - 1/2. A tap
+        // past the ancestor steps one tile (d = -1 or 1); past the face it clamps to the edge.
+        struct Tap {
+            int i0, i1, d0, d1;   // the two taps' texel and tile step
+            double f;             // the second's weight
+        };
+        auto taps = [&](uint32_t n, uint32_t sub, uint32_t tile, uint32_t count, std::vector<Tap>& t) {
+            t.resize(n);
+            const double S = double(1ull << k);
+            for (uint32_t c = 0; c < n; ++c) {
+                const double u = (double(sub) * n + c + 0.5) / S - 0.5;
+                const int u0 = int(std::floor(u));
+                t[c].f = u - u0;
+                for (int j = 0; j < 2; ++j) {
+                    int i = u0 + j, d = i < 0 ? -1 : i >= int(n) ? 1 : 0;
+                    if (int(tile) + d < 0 || uint32_t(int(tile) + d) >= count) {
+                        d = 0;
+                        i = (std::max)(0, (std::min)(int(n) - 1, i));
+                    }
+                    (j ? t[c].i1 : t[c].i0) = i - d * int(n);
+                    (j ? t[c].d1 : t[c].d0) = d;
+                }
+            }
+        };
+        const uint64_t mask = (1ull << k) - 1ull;
+        std::vector<Tap> tx, ty;
+        taps(W, uint32_t(r.x & mask), a.x, (std::max)(1u, (frame.faceDim >> own) / W), tx);
+        taps(H, uint32_t(r.y & mask), a.y, (std::max)(1u, (frame.faceDim >> own) / H), ty);
+        for (const int dx : {tx.front().d0, tx.back().d1}) {   // the tiles the taps reach, before the loop
+            for (const int dy : {ty.front().d0, ty.back().d1}) fetch(dx, dy);
+        }
+        if (st == Status::Transient) return st;
+        out.assign(TileBytes(), 0);
+        for (uint32_t cy = 0; cy < H; ++cy) {
+            const Tap& y = ty[cy];
+            for (uint32_t cx = 0; cx < W; ++cx) {
+                const Tap& x = tx[cx];
+                double acc[4] = {0, 0, 0, 0}, cov = 0.0;
+                for (int q = 0; q < 4; ++q) {
+                    const double w = ((q & 1) ? x.f : 1.0 - x.f) * ((q & 2) ? y.f : 1.0 - y.f);
+                    const std::vector<uint8_t>& t = nb[((q & 2) ? y.d1 : y.d0) + 1][((q & 1) ? x.d1 : x.d0) + 1];
+                    if (w <= 0.0 || t.empty()) continue;
+                    const size_t i = size_t((q & 2) ? y.i1 : y.i0) * W + uint32_t((q & 1) ? x.i1 : x.i0);
+                    if (m_fmt == Fmt::FloatW) {
+                        const float* s = reinterpret_cast<const float*>(t.data()) + i * 2;
+                        acc[0] += w * s[1] * s[0];
+                        cov += w * s[1];
+                    } else if (m_fmt == Fmt::Raw4) {
+                        for (int c = 0; c < 4; ++c) acc[c] += w * t[i * 4 + c];
+                        cov += w;
+                    } else {
+                        const double wa = w * t[i * 4 + 3];
+                        for (int c = 0; c < 3; ++c) acc[c] += wa * t[i * 4 + c];
+                        cov += wa;
+                    }
+                }
+                const size_t o = size_t(cy) * W + cx;
+                if (m_fmt == Fmt::FloatW) {
+                    float* d = reinterpret_cast<float*>(out.data()) + o * 2;
+                    d[0] = cov > 0.0 ? float(acc[0] / cov) : 0.0f;
+                    d[1] = float((std::min)(1.0, cov));
+                } else {
+                    uint8_t* d = &out[o * 4];
+                    const int n = m_fmt == Fmt::Raw4 ? 4 : 3;
+                    for (int c = 0; c < n && cov > 0.0; ++c) {
+                        d[c] = static_cast<uint8_t>((std::max)(0.0, (std::min)(255.0, acc[c] / cov + 0.5)));
+                    }
+                    if (m_fmt == Fmt::Rgba8) d[3] = static_cast<uint8_t>((std::min)(255.0, cov + 0.5));
+                }
+            }
+        }
+        ++below;
+        return Status::Content;
+    }
+
     // THE CHAIN IS WALKED ONCE, one level and one stripe at a time. What rises from a level to
     // the one above is not one tile but the VERSIONS that level took on this walk, in order: its
     // own paint first, when it was absent and had to be painted, then each fold that moved it.
@@ -1954,7 +2127,11 @@ private:
         // height said "under water" -- unseen in New England, whose heights are exact; at Tokyo
         // Bay, over the 4.9 km ETOPO, the reclaimed shore came out sand (Mark).
         for (size_t i = 3; i < out.size(); i += 4) {
-            const uint32_t op = gt[i], val = gt[i - 3];
+            // THE GATE'S VALUE PROPER (2026-10-18): the mask is premultiplied by its opinion (the NHD
+            // carve's water at a = 128, GisMask.cpp), so the texel's value is val / op, not val -- read
+            // raw, a lake's or an estuary's bed was gated at three quarters. No opinion passes whole.
+            const uint32_t op = gt[i];
+            const uint32_t val = op ? (std::min)(255u, (uint32_t(gt[i - 3]) * 255u + op / 2u) / op) : 0u;
             const uint32_t f = ((255u - op) * 255u + op * val + 127u) / 255u;
             const uint32_t a = (uint32_t(out[i]) * f + 127u) / 255u;
             out[i] = static_cast<uint8_t>(a);

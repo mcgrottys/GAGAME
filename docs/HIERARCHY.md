@@ -2191,6 +2191,48 @@ blocks from the sources' footprints and grains.
 - **The decoder does not show a GeoTIFF's own overviews** (measured: a file of two
   directories decodes as one frame). The law below does not need them.
 
+**Where the data ends inside the box** (2026-10-17). The 1 m lidar's bare earth over the
+1.5 m channel survey showed a wall along the beach: the lidar is nodata where the laser saw
+no bottom, and the entry's `feather` softened its weight only against the bounding box of
+the whole set, so at a hole's edge the stack stepped from one survey to the other across one
+texel. A source ends at its box, and it ends again at every texel it lacks -- a height's
+nodata, a colour's alpha of 0, ground inside the box that no file of the set holds. The
+weight now fades over the same metres from both, by one smoothstep: at the box, of the
+sample point's distance to the box's edge, as before; inside, of each texel's distance to
+the nearest absent texel, one exact Euclidean distance transform a window (Felzenszwalb and
+Huttenlocher's, each axis in its own metres), the neighbouring windows' and files' texels
+within the feather in reach, kept beside the window. A texel's weight is that factor times
+its coverage; the summed-area table carries the factor, so a box of any size reads the same
+law, and the colour's taps read it too (an ortho's torn edge fades, which is right). Its
+limits are the physics: feather 0 is the hard edge the reads had, and a file that lacks no
+texel is byte for byte what it was. The identity names the feather as reaching absence only
+where a file can be absent (the loader says: a nodata value or an alpha band; or the files
+do not tile their box), so a set the law cannot touch keeps its tree. A constant difference
+between two surveys where both have data is not the feather's to hide: `--tool
+rastertest:overlap` prints it, by the under survey's depth.
+
+Measured (2026-10-17 evening, commits 0c9cd4b..8cf42a8 on f68c786). The planted seam (a 1 m
+height +3 m with nodata east of column 300 over a 2 m height of -2 m, feather 10 m): the fine
+weight is the smoothstep of the texel's distance to within 3e-8, the stack steps at most
+0.740 m a texel (the bound 0.75 = 5 m x 1.5 / 10), the plant with feather 0 steps 5.00 m in one
+texel; the transform against brute force over 40 scattered nodata texels in a 1.5 x 2 m file,
+worst 3e-8. The corrected 1.5 m composite (inlethq_navd88_2026-10-17, `over` 1) against the 1 m
+lidar where both have data, 1,371,290 points at 2.57 m: median +0.08 m, sd 0.71; the channel
+median +0.08, sd 0.38; at the composite's own data edge median +0.03, 5th -2.4, 95th +1.2 -- no
+datum bias, the entry's `offset` stays 0. The stills (frozen clock, --settle-exact, one take
+each side, the parent's head f68c786 as before): the hq mouth, bar and sea views change only at
+the jetties (the lidar's holes beside the rocks; 1,528 / 3,472 / 7,546 px); the shipped
+merrimack.json sea view changes at one patch, the north jetty's crest (7,293 px), because the
+massgis set lists 19 of its box's 24 tiles and its data ends along easting 352,500, which
+crosses that crest -- the ortho now fades over its 25 m there where it stopped dead; the
+Haulover city view is at the run-to-run floor (94 px, |d| <= 5). Three transects across the
+north tip's beach (`--tool height-tree-probe:transect=...`) read every source at weight 1 and
+within a metre of each other from the dune to -5 m: the wall seen there on 2026-10-17 stood on
+the sign-flipped channel survey, mended upstream the same evening, not on a data edge. The
+costs: an edge build is 10-20 ms a window (the seed ring and two axes of the transform), built
+once per window while the edge cache holds as many entries as the window cache; at a quarter
+of them the bar view built 53,483 edges for 7,400 windows and never settled.
+
 **A source paints its own level, and the tree makes the others.** The owner, 2026-09-29:
 when a raster of any size is inserted, the tree is to make the lower levels, for itself and
 for the rendering. Most of what that needs is in the tree, and one node uses it.
@@ -2235,6 +2277,44 @@ The law, in three clauses:
    survey's grain (`streaming.gisGrainM`, metres; `GisMaskSource::FinestMip` is that grain's
    level at the box's place, `OwnMip` stays -1 so the coarser levels are painted, not folded).
    Before it, the mask tree held 1,081,979 tiles of which 913,717 were at 1.9-7.5 cm texels.
+
+   **The clause made literal for a tile under ONE source's level (2026-10-17).** The
+   residency's answer above holds only for a tile finer than every source that touches it.
+   A tile finer than one source's own level and not another's -- ETOPO 15-second's mip 16 under
+   every page near the ground, a bed's mip 8 under a page finer than it -- was painted, and the
+   paint asked the FILE at the tile's grain, a window decode a tap: at a cold mouth view over
+   the 1.5 m bed and the 1 m lidar the frames decoded 12,971 windows in 934 residency loads of
+   1.45 s each, with 17,781 tiles pending after 3,000 frames and the water's lighting stepping at
+   2 fps (docs/CONTENT_SCALING_2026-10-17.md 3d; the tree's share of those decodes against the
+   stack's direct readers' was never split). Now `TileTree::LeafTile` reads such a tile from
+   the KEPT own-level tile -- the pass's, or painted once at the first ask -- through
+   `MagnifyOwn`: bilinear between the ancestor's texel centres in the tree's own format
+   (coverage and coverage-weighted colour apart, then divided, the straight-alpha rule;
+   FloatW's weight and weight-weighted value the same way), a tap past the ancestor's edge
+   read from the neighbouring ancestor tile as the GPU reads across the atlas, clamped only at
+   the face's edge. The limits: at the own level the one tap weighs one and the tile is itself;
+   a void ancestor makes everything under it void; a void neighbour weighs nothing, so coverage
+   falls off over one own texel there as a fold's does. The tile is not kept, and `Peek`
+   answers for it from the ancestor's entry, so a composite above it knows its key without
+   bytes. What the paint gave that this does not: the file's bilinear between ITS texels, a
+   little sharper than the own tile upsampled (the own level is itself a read of the file at
+   one to two texels a texel) -- the stills move by that sub-texel blur below the own level
+   and nowhere above it. Measured by the height-tree probe on fresh roots (docs/
+   CONTENT_SCALING_2026-10-17.md 3d): above every source's own level the probe's lines are
+   identical to the metre; under ETOPO 15-second's own level (a 262 m texel), where it is the
+   only painter, |tree - stack| p95 0.006 -> 0.123 m at 1.5 m and worst 0.69 -> 1.18 m -- half a
+   texel of a 15-second grid is a metre of offshore slope. The raster selftest's own counts: the
+   file's Sample called 0 times under the own level, the bytes equal to a mosaic reference, a
+   clamp at the tile's edge caught on 280 bytes. The source is now asked at its own level only,
+   never at frame time for a tile under it; its window cache (`RasterFileSource.cpp` kWindows)
+   serves the pass. The height tree's ledger at exit (`[height-tree] the tree this run`, a cold
+   mouth view): the law answered 3,660 tiles at 1.0 ms each, all ETOPO 15-second's under its mip
+   16; the bed and the lidar were asked under their own level 0 times at that view. What a cold
+   height tile still costs (some 60 ms) is the three sources of the Merrimack's stack that are
+   not files and have no own level -- the CUDEM grid, ETOPO 2022, the survey edits -- painted per
+   texel at every level (2.2-2.6 ms a tile) and FOLDED UPWARD on every paint (103-171 ms a
+   fold-up, M9bb's chain to the root): the clause still to apply to them, and the fold-up goes
+   with it.
 
 What follows from it:
 
@@ -2366,6 +2446,175 @@ height stack by `over`, under the owner's hand edits.
   is step 4b's to mend, where a tile's key names only the inputs that touch it.
 - **Not held:** the jetty view with and without the hill could not be compared (its root
   was still filling when the runs were taken); the island does not show above its horizon.
+
+**Imagery of water: the capture level** (2026-10-17). A photo's pixel is a picture of the
+GROUND only where the ground stood above the water when the picture was taken, and under
+today's water the tree may show only such pixels. NOAA's 2011 low-water orthomosaic of the
+Merrimack, on the tree by file (above), painted its channel black and its bars sand as the
+bed under today's water, with the photo's hard edges: the water imagery hijacking the water.
+Google's and MassGIS's water pixels do the same more quietly everywhere.
+
+The law, one continuous weight and no special case. A colour source may declare the water
+level it was flown at: `captureLevel`, metres above `captureDatum`, the datum alone 0 m on
+it; the datum is resolved at the place as the tides are (`""` or NAVD88 the engine's frame,
+MLLW by the place's link, MSL by the focus station's fitted mean), and a name the ladder does
+not hold refuses the photo by name, as a height off the frame is refused without its offset
+(4.11: declared, never guessed). Where declared, the source's weight at a texel is multiplied
+by a gate on the ground height there, read from the height tree at the texel's grain (the
+reader every CPU consumer uses, `HeightTree`): 1 above the level, 0 below, and between them
+a smoothstep across the height's own uncertainty, half the spread of the four texels the
+tree's bilinear stands between. On a flat bed that is nought and the gate is a step at the
+level; on a slope it is one grain of the level read times the slope, the shoreline's own
+uncertainty said as a height; where only a coarse level holds the point it is wide, and the
+gate says honestly that the height cannot place the shoreline. A source that declares no
+level has no gate, and keeps today's weight byte for byte.
+
+It is a gate of the kind the survey already is (`GateSource`: the value is the layer's, only
+the weight is the product; absent and void are different answers), with a height as its
+input instead of a vector: a layer of the colour channel that paints nothing
+(`LevelGateSource`, compose/Sources.h), named `<photo>.ground`, with the photo's footprint and
+the mask's encoding (an opinion at every texel inside it, the factor in r). The tree composes
+it per texel (`TileTree::GateTile`), the point path per sample. Its identity folds the height
+stack's, every height layer's name and structure, so an edited bed repaints the gated tiles
+and nothing else; the photo's own tree never moves, since only its weight changed. The flat
+channel (`PaintColorTile`) carries no value gate -- its gate is a weight -- so there the photo
+stands as it always did; the pictures are the tree's.
+
+Gated by `composetest` (a planted ortho over a planted ramp as a height tree, half above and
+half below its level: the weight steps at the crossing and the un-declared copy's does not;
+at a coarse grain the step is the feather of the taps' spread, the law's one function; the
+painted tile says the same byte for byte; another bed or another level is another identity),
+and by the mouth-view stills in the commit that brought it. What the stills said, honestly: in the
+shipped scene the mouth view does not move (the MassGIS orthos stand over the 2011 ortho by grain
+across the whole view, and a source declaring no level keeps today's weight: the sea view and the
+undeclared arm bit-identical between the two binaries). On the scene without MassGIS, where the
+2011 ortho is the top photo, the gate changed one wedge along the south jetty's harbour face (8,326
+pixels, luma 74 to 41) and nothing in the channel or on the shoal, because under surveyed water
+the bed classifier already paints over every photo (synth.bed's band in data/bed/bed_rules.json:
+full weight below +0.4 m NAVD88, off above +1.2 m, gated by the survey's water): a photo's water
+can show under today's water only where the survey's rings say land and the height tree says the
+ground is below the level -- the jetty's inner face, where the 1 m rings are coarser than the bar's
+true edge -- and that is exactly what the gate removes. The bars east of the jetties stood above
+MLLW when flown and are kept, by the law. The black channel Mark saw was the HQ bed's sign-flipped
+eHydro cells (channel at +2..+4 m NAVD88, drawn DRY with the photo as its ground), the parent's
+finding and fix; with the bed corrected the classifier owns the channel in both arms. The gate's
+reach grows with the level: an MHW set (about +1.3 m NAVD88 at the Merrimack) would lose its water
+up to a level the classifier's +1.2 m cutoff does not reach.
+
+
+
+**The hand edit yields to a finer witness** (2026-10-18). `survey.edits`, the hand polygons of
+data/gis/edits.geojson, is the last layer of the height stack and painted its crest (+2.5 m NAVD88
+for a land ring, -1 m for a water ring) as a VALUE at weight 1 wherever a polygon lay: the law over
+every survey. Measured with the transect tool across the north jetty on the HQ scene
+(`--tool height-tree-probe:transect=42.818805,-70.8085,42.820005,-70.8085,134`), the stack read
++2.500 on every metre of the jetty's 29 m while the 1 m lidar under it read up to +2.77 m and the
+1.5 m composite +3.03 m on the same crest -- the flat slab of every jetty still was the hand edit
+itself, not a floor the data could rise above. The polygons exist to put land where the surveys
+have none (OSM's jetty ways over CUDEM's 10 m cells); over finer data they were overruling the
+witnesses they stood in for.
+
+The law (compose/Sources.cpp, `EditsHeightSource::Uncovered`): the edit's weight at a point is the
+share of it the finer measured witnesses leave uncovered,
+
+    w = prod_j (1 - w_j)   over the channel's layers with a grain finer than the edit's own (5 m),
+
+the complement of their over-accumulated coverage; the VALUE is untouched. One law at every grain,
+since each w_j at a coarse grain is already that layer's share of the box. Limits: no finer layer
+(or no channel named: `Witnesses` unset) = 1, the paint the edit always had; a finer layer at full
+weight = 0, the edit gone and the data standing; across a finer layer's feather the edit fades as the
+witness rises, by the same metres. Coarser layers (CUDEM, ETOPO) are not asked: the edit exists to
+stand over them. Not a floor (max of edit and data): a floor would hold the lidar's slopes at the
+crest, and the slopes are the data; the two differ everywhere inside a polygon where the data is
+below the crest, which on a jetty is everything but the crest line. It is the gate's shape
+(GateSource: the value is the layer's, the weight a product) read inside the layer, so the CPU's
+stack (Compositor::SampleHeightStack), the tree's point sample and its tile compose inherit it from
+one Sample and cannot drift. The layer's cache identity now carries its law (HeightSource::Law:
+the polygons' content hash and the witnesses' name|structure), so the tree repaints the edits'
+tiles when the polygons or a witness change and at no other time. Found on the way, and first
+misread as stale paint: the shipped scene's edits tree of 2026-10-03 and tonight's differ in 52 of
+2,581 shared tiles, every one at a polygon's edge -- because the old tree's mip-8 tiles were FOLDED
+from mip-7 children an earlier, deeper view had painted (edge weights in 1/64 steps, the area the
+polygon covers of each texel), while the new tree, asked at mip 8 first, painted that level directly
+(the centre in or out: weight 1 or 0). A source with no own level paints whatever level is asked and
+folds where a finer one was asked first, and at a hard edge the two disagree by up to a texel: the
+area question of the direct paint, open, not a staleness.
+
+Gated: `--tool rastertest` (69 checks): a +50 m polygon over the test hill's east half and 200 m
+past it -- in the disc the edit's weight is 0.000 and the stack the hill (0.03 mm off), past the
+disc its weight is 1.000 and the stack its crest, west of the polygon the hill; the PLANT with no
+witnesses named paints 50 m over the hill (the law before, kept for a channel that names none);
+the identity carries `yields<hill|...`; across the rim with the hill feathered 20 m the edit's
+weight is the hill's complement to 3e-8 and the stack steps at most 5.41 m a metre (bound 5.74 =
+72.5 m span x 1.5 / 20 + the hill's slope) where the hard edge steps 72.5 m in one metre. The
+transect after: the jetty's stack is the composite over the lidar on every metre (+2.5 to +3.0 on
+the crest, the slopes down to the water), the edits' column gone from 49 to 77 m; along the
+polygon's midline the crest is +2.1 to +3.7 m end to end. Stills, frozen clock: the shipped
+merrimack.json sea view (no finer witness in that scene) 1.3 % of pixels at the jetty's edges, the
+fold against the direct paint above, not the law; the HQ sea view's jetty is the composite's rock surface, with one
+10 m spike at the east tip -- the composite's own cells there (+9.99, +7.08, +6.50 m): the North
+Jetty light tower standing in BlueTopo's surface, which the hand edit used to flatten. Whether a
+tower is ground is the surface-versus-bare-earth question of that source, not the law's.
+
+**A grid layer's tiles are keyed by its bytes** (2026-10-18). A layer by file carries its bytes in
+its structure string and the tree keys its leaf by them; the two layers that read grids the engine
+loaded for other reasons -- `noaa.etopo2022` (the globe's int16 grid, with the station's MSL to NAVD88
+link applied at the source) and `noaa.cudem.<survey>` (the harvester's float32 grid behind
+BathyModel) -- carried only name|unit, so a regenerated grid or another station's link would have met
+the old tiles in the cache, and the composite that folds them would have kept them too. Now each
+answers `HeightSource::Law` with the grid's FNV-64 and size, the datum link, the box and the feather
+(compose/Sources.cpp), hashed once at the first ask, which is the tree's build after the grid is
+loaded (ETOPO's 64 MB, tens of milliseconds). The paint's own FORM -- the texel centre, the fold of a
+parent from its children -- is `kTileTreeVersion`'s (TileTree.h), which every tree's name already
+folds; a layer does not repeat it, and that constant is bumped by hand when the leaf paint changes,
+which is the one discipline the identity cannot take over. Planted (`--selftest`, composetest): two
+equal grids share a key; the link of -0.092 m on one, or one cell changed, is a new key. The cost
+is one repaint of the three grid leaves and `earth.height` at every view the cache knew: the shipped sea view's first boot settled exact in 1,792 frames (174 s) against 515 (97 s) with the grids warm; the height tree read 1,053 tiles in 144.9 s against 26.0 s, residency.load 17.8 ms a job against 5.9, the GPU frame 13.4 ms, unchanged; ETOPO 2022 painted 2,720 tiles, CUDEM 2,320 (1,226 void), the composite composed 4,517. The still against the 01:17 one: 0.28 % of pixels, max 53, SSIM 0.9998, specks on the water. **And the repaint from scratch is not the bytes the long-lived trees held.** Against the trees of 2026-10-03, at texels both weigh fully (weights agree to 0.002 everywhere): CUDEM differs by up to 0.13 m at pyramid mip 8, 0.29 at mip 10, 1.08 at mip 11 (a million texels past 1 cm); ETOPO 2022 by up to 0.02 m at pyramid mips 8-13 -- and by 42, 183, 474, 1,022, 1,583 and 2,658 m at cube16k's mips 1 to 6, with mip 0 identical in all 101 tiles. The reading: a source without an own level paints whatever level is asked. The old trees' coarse levels were FOLDED from finer levels earlier views had painted (area means); tonight's fresh trees painted them DIRECTLY at the first ask (the boot walks coarse first), and `EquirectHeightSource::Sample` is a point bilinear that ignores the grain, so a 39 km texel painted directly is one point of a mountain range where the fold is its mean. The tree's bytes for the three grid layers are a function of the order of asks: a fresh cache (a new machine, this commit's first boot) and a lived-in one hold different heights, kilometres apart at the globe's coarse rungs. The identity cannot mend that; the own-level clause for these three (the magnify session's remaining clause: paint at the grid's own level, fold above, magnify below) makes the bytes a function of the data alone, and is the next step.
+
+**The three grid layers declare an own level** (2026-10-18). The clause of 4.20 that the magnify
+session left and the grid identity's repaint measured: `noaa.etopo2022`, `noaa.cudem.<survey>` and
+`survey.edits` answered at every grain, so TileTree::LeafTile painted them at whatever level a view
+asked first and folded upward only where a finer level had been painted before -- the tree's bytes
+were a function of the order of asks (CUDEM up to 1.08 m apart at mip 11 between a fresh and a lived-in
+cache; ETOPO kilometres apart at cube16k's coarse rungs, a point sample of a range against its mean).
+Now each declares `OwnMip` -- the lattice level whose texel at the source's place is its cell
+(ETOPO 4,892 m at the equator, CUDEM its 13.7 m resample, the edits their 5 m), by `Lattice::LevelOf`
+-- and CUDEM and the edits their `Footprint` (the grid's box, the rings' box; ETOPO is global and
+declares none). Nothing else changed: the leaf's own-level paint, the materialized fold above it and
+`MagnifyOwn` below it are the paths a raster by file has taken since the previous day, and the three
+layers' bytes are now a function of the data alone. What it means for each: CUDEM's `Sample` is a point
+bilinear of its 13.7 m grid, so its own level IS that bilinear at ~12 m texels and the levels below are
+the kept texels magnified (a bilinear of a bilinear) where before they were the grid's bilinear at each
+texel directly -- a sub-texel change the probe measures below; ETOPO's own level is the grid itself and
+every coarse rung above it an area mean, where before a rung asked first held point samples; the edits'
+hard edge below 5 m is the own texel's bilinear ramp, one texel of the own level wide, where before it
+was hard at every level (and above 5 m it is the area the polygon covers of each texel, the same bytes
+whichever level came first). Planted (`--tool rastertest`): an equirect grid of ETOPO's size, a swell
+plus a checker that flips every cell, asked cold two levels above its own mip -- the tile is the fold of
+its sixteen own-level paints byte for byte, the direct paint of that level (the law before) is the
+checker's height away from it, and a second root asked fine-first holds the same files byte for byte.
+The gate (02:20-02:40, one take each, one engine at a time): `--tool rastertest` 70 checks, `--selftest` 29
+suites. The own level is part of each layer's key (`Law` says "own level"), found necessary on the first
+pass: without it the lived-in cache served ETOPO's old point-sampled rungs under the new law. Fresh roots,
+before and after: the cold mouth view (the heights-only scene) never settled before (1,575 of 18,703 tiles
+pending at 3,000 frames, residency.load 43.9 ms, ETOPO 2022 painted 3,042 tiles, CUDEM 2,867, the edits 2,949,
+every one at the level asked) and settles exact after in 1,620 frames (loads 34.5 ms; ETOPO paints its own
+level, 8,197 tiles, and magnifies 3,016 below it; CUDEM paints 225 and magnifies 1,731; the edits paint 12);
+the picture 0.09 % of pixels apart. The probe (`--tool height-tree-probe`, fresh roots): a cold 1.5 m sample
+154 ms before, 3 ms after, the run 451 s to 88 s -- the per-level paint and push fold of the three are gone.
+Its |tree - stack| moved where the law says it must and nowhere else: at the place, p95 0.122 to 0.128 m at
+1.5 m, 0.126 to 0.135 at 6 m, 0.209 to 0.207 at 25 m, identical at 100 m and above; the worst at 1.5 m from
+1.18 to 5.20 m, which is the edits' hard edge become one own texel's ramp (4.8 m at mip 10) against the
+stack's hard edge, the crest less the bed; over the sphere p95 0.27 to 13.3 m at 400 m and 7.5 to 13.3 at
+1,600 m, which is the stack's doing, not the tree's: above ETOPO 2022's own level the tree now holds area
+means and the stack still answers with a point bilinear at every grain (`EquirectHeightSource::Sample`
+ignores its grain). The lived-in cache, the three layers' trees fresh under their new keys: the globe's orbit
+view settled in 8 frames where it had held one tile short through 3,000, ETOPO painting its 7,171 own-level
+tiles once, 0.23 % of pixels apart; the globe's mouth view 1.7 %; the shipped sea view 8.9 % (mean 0.71: the
+bed under the water now CUDEM's own level magnified rather than its bilinear at every texel, and the wave
+field re-solved on it); the HQ sea view 0.12 %, the drone and survey files owning it. Not done: the stack's
+own point sampling above a grid's own level (the probe's sphere numbers), and the edits' ramp width is the
+own texel's, not a declared feather.
 
 ## 5. Decisions for Mark
 

@@ -307,6 +307,7 @@ const Schema& StreamingSchema() {
         auto& p = kDoc.streaming;
         Schema* sc = new Schema("streaming", &p);
         sc->Bind("tileBudget", p.tileBudget, Q::Dimensionless, "1", "hard cap on Google fetches per run (--tile-budget)", R)
+            .Bind("poolTiles", p.poolTiles, Q::Dimensionless, "1", "the residency pool's ceiling in 64 KB tiles (32768 = 2 GB); smaller, the order's cut releases sooner", R)
             .Bind("dayTiles", p.dayTiles, Q::Dimensionless, "1",
                   "cap on Google requests a UTC day, every request sent counted whatever came "
                   "back, every engine on the machine together (cache/google/day_<date>.json); "
@@ -339,7 +340,9 @@ const Schema& StreamingSchema() {
             .Bind("gisGrainM", p.gisGrainM, Q::Length, "m",
                   "the survey's grain: the finest level the land/sea mask has anything of its own "
                   "for; a mask tile finer than it is its parent, magnified -- never painted, stored "
-                  "or loaded (HIERARCHY 4.20); 0 = every grain",
+                  "or loaded (HIERARCHY 4.20); 0 = every grain. Also the survey's standing as a "
+                  "WITNESS of the water's edge: a height layer finer than it draws the edge by its "
+                  "sign against the live level wherever it has a value (GisMaskSource SetHeight)",
                   R)
             .Bind("seafloor", p.seafloor, "the global seafloor relief source (--no-seafloor)", R)
             .Bind("exposure", p.exposure, "the swell-exposure page (--no-exposure)", R)
@@ -382,7 +385,19 @@ const Schema& SourceSchema() {
             .Bind("offset", kSource.offset, Q::Length, "m",
                   "added to a height whose datum is not the engine's (NAVD88): the separation at the "
                   "place; such a file is refused without it, and a file on NAVD88 takes none", R)
-            .Optional();   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
+            .Optional()   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
+            .Bind("captureLevel", kSource.captureLevel, Q::Length, "m",
+                  "THE WATER LEVEL A PHOTO WAS FLOWN AT, metres above captureDatum (compose/Sources.h "
+                  "LevelGateSource): its pixel is a picture of the ground only where the ground stands above "
+                  "it, so under today's water the tree shows only such pixels -- the photo's weight is gated by "
+                  "the height tree (1 above, 0 below, a feather of the height's own spread between), its colour "
+                  "untouched; absent, with no captureDatum, the photo is not gated (today's weight)", R)
+            .Optional()   // absent is not 0 (SourceProps::hasCaptureLevel)
+            .Bind("captureDatum", kSource.captureDatum,
+                  "the datum captureLevel is measured from, resolved at the place as the tides are: \"\" or "
+                  "NAVD88 (the engine's frame), MLLW (sea.datum: the place's link), MSL (the focus station's "
+                  "fitted mean above MLLW); alone = 0 m on it; a datum the ladder does not hold refuses the "
+                  "photo by name", R);
         return sc;
     }();
     return *s;
@@ -859,9 +874,9 @@ const Schema& SceneFileSchema() {
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
             .Nest("render", RenderSchema(), &kDoc.render, "the renderer: the kept frame and its grains")
             .Nest("debug", DebugSchema(), &kDoc.debug, "the debug views of the globe's surface")
-            .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
-            .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
-            .List("solvers", &SolverSchema(), "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide", false)
+            .List("sources", &SourceSchema(), "the scene's sources by name: a derived scene ADDS to its base's (merged in place by name, `remove: true` drops one), as every named list; their order is StackOrder's (`over`, then the coarser under the finer), not the list's")
+            .List("stations", &StationSchema(), "where a station of the data stands when its file does not say; by name, merged as every named list")
+            .List("solvers", &SolverSchema(), "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide; by name, merged as every named list")
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .Nest("hud", HudSchema(), &kDoc.hud, "the windshield: readouts and the minimap on the glass")
             .List("views", &ViewSchema_(), "the cameras, by name")

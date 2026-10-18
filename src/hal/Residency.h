@@ -74,6 +74,9 @@ public:
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
     static constexpr uint64_t kMapStageBytes = 8ull << 20;   // M9bb: residency-map staging reserve
     static constexpr uint32_t kPoolCapTiles = 32768;     // 2 GB ceiling before eviction (the owner's, 2026-10-03)
+    // The ceiling this run uses (streaming.poolTiles): the constant above by default; a test sets it low so
+    // the cut releases every turn and the discard-and-replace path runs on a moving camera.
+    uint32_t poolCapTiles = kPoolCapTiles;
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
     // ---- THE SAMPLERS (M13) -------------------------------------------------------------
     // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
@@ -359,6 +362,9 @@ public:
     // slice that tracks nothing -- a set just claimed by a world of the corridor -- is a step of
     // no work. Before it, each step asked every one of the box's 21,760 slots twice (a six-slot
     // claim: 5 million asks in one frame), whether or not the slot held anything.
+    // A TILE LANDS ONLY ON ITS OWN GROUND (2026-10-18): the slot's ground now, as the pool keys it (0: none).
+    uint64_t GroundKey(int tenant, const TileRequest& r) const;
+    uint64_t movedGroundTotal = 0;   // refusals over the run (the loader's lines carry them per tenant)
     template <class F> void ForTrackedIn(int tenant, uint32_t slice, F&& f) const {
         if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return;
         for (const std::shared_ptr<Tracked>& tr : m_tenants[size_t(tenant)].tracked) {
@@ -789,6 +795,9 @@ private:
         // provider, failed or not whole), and the queue wait from the order's Submit to the job's
         // first instruction, summed (the Io lane's saturation, told apart from the cap's).
         uint32_t loadsMagnified = 0, loadsFailed = 0, magnifiedKnown = 0;
+        // A TILE LANDS ONLY ON ITS OWN GROUND (2026-10-18): bytes refused at the map because the
+        // slot's ground had moved under the read (its key then is not the key the read was for).
+        uint32_t loadsMovedGround = 0;
         uint64_t queueUs = 0;
         // Step 25: the exact settle's per-tenant ledger -- the last turn's counts and the
         // drops summed over the hold, for LogSettleExact.

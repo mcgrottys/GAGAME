@@ -14,7 +14,15 @@
     "",
     "THE PLANET'S BUILDINGS AND ROADS (2026-10-15): the same folded tree the earth scene draws (docs/BUILDING_LOD.md,",
     "docs/ROADS.md section 5), so the coast folds up into its towns as the views step down. The layer and its",
-    "sources are the earth scene's, merged by name over the composite base (the named-array law)."
+    "sources are the earth scene's, merged by name over the composite base (the named-array law).",
+    "",
+    "THE NAMED-ARRAY LAW REACHED `sources` ON 2026-10-18: until then a scene's sources REPLACED its base's, so this",
+    "scene had none of the place's imagery (the land at the Merrimack was Google at the cache's zoom: Mark's 'why",
+    "does the land look low res'). It now inherits the MassGIS orthos, the highlights and the ETOPO ring, and drops",
+    "the composite scene's water.bed by name: with its five file-backed rungs in the height stack a height page",
+    "cost 3.5 s through the stack's direct readers (824 loads, 53,003 window decodes, the land unpainted after",
+    "3,000 frames); without them the same eye settles exact in 659 frames at 13.8 ms a load (CONTENT_SCALING",
+    "section 4; the reader is open in its section 5)."
   ],
   "base": "scenes/demos/composite_merrimack.json",
   "scene": {"name": "globe-test", "view": "orbit"},
@@ -25,12 +33,17 @@
      "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12}
   ],
   "sources": [
+    {"name": "water.bed", "remove": true},
     {"name": "osm.planet", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"},
     {"name": "osm.roads.planet", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"},
     {"name": "nbi.2025", "kind": "bridges", "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"},
     {"name": "noaa.enc", "kind": "bridges", "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"}
   ],
   "views": [
+    {"name": "plum_marsh", "_at": "the refuge marsh behind Plum Island's dunes, the eye of Mark's dark-marsh screenshot (2026-10-18)",
+     "at": {"lat": 42.7705, "lon": -70.8045, "alt": 330, "heading": 8, "tilt": 56}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "marsh_island", "_at": "the marsh island at the Merrimack's mouth, looking at Plum Island Point: the platform the survey calls water under a +0.9 m tide (CONTENT_SCALING 4, 2026-10-18)",
+     "at": {"lat": 42.800, "lon": -70.835, "alt": 350, "heading": 20, "tilt": 60}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
     {"name": "orbit", "_at": "the planet, the east coast at its centre",
      "at": {"lat": 36.0, "lon": -72.0, "alt": 0, "heading": 0, "tilt": 0, "range": 20000000}, "fovY": 55, "gauge": "root", "nearZ": 1000},
     {"name": "coast", "_at": "Maine to Florida: the composite's three regions in one view",

@@ -72,12 +72,22 @@ public:
     // The grid's cells under the box and the bilinear's one beyond, the longitude wrapped; it owns
     // every box (its weight is 1 everywhere).
     Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
+    // THE IDENTITY OF WHAT IT PAINTS (2026-10-18): the grid's bytes, its size and the datum link.
+    std::string Law() const override;
+    // ITS OWN LEVEL (HIERARCHY 4.20, 2026-10-18): the lattice level whose texel at the equator is the
+    // grid's cell; the tree folds the levels above it and magnifies the kept tile below. Before this
+    // the layer was painted at whatever level a view asked first -- Sample is a point bilinear that
+    // ignores the grain -- so a coarse tile held one point of a mountain range where the fold holds
+    // its mean, and a fresh cache and a lived-in one disagreed by kilometres. Global: no footprint.
+    int OwnMip(const Lattice& l) const override;
 
 private:
     const std::vector<int16_t>* m_elev;
     int m_nx, m_ny;
     double m_datumShift = 0.0;
     SourceInfo m_info;
+    mutable uint64_t m_bytesFnv = 0;   // the grid hashed once, at the first ask (after it is loaded)
+    mutable bool m_hashed = false;
 };
 
 // (The plane orthos and the overlays are scene sources now, compose/RasterFileSource.h.)
@@ -101,11 +111,19 @@ public:
     // no cell does. The band follows the feather: ask again and a new feather gives a new box.
     bool FullWeightCells(int& c0, int& r0, int& c1, int& r1) const;
     const BathyModel* Grid() const { return m_bathy; }
+    // THE IDENTITY OF WHAT IT PAINTS (2026-10-18): the grid's bytes, its box and the feather.
+    std::string Law() const override;
+    // ITS OWN LEVEL AND BOX (HIERARCHY 4.20, 2026-10-18): the level whose texel at the grid's centre
+    // is its cell (SourceInfo::cmPerPixel), and the grid's box; folded above, magnified below.
+    int OwnMip(const Lattice& l) const override;
+    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override;
 
 private:
     const BathyModel* m_bathy;
     double m_feather;
     SourceInfo m_info;
+    mutable uint64_t m_bytesFnv = 0;
+    mutable bool m_hashed = false;
 };
 
 // M6w: HAND EDITS AS A STACK SOURCE. The mask=land polygons (the OSM-seeded jetty
@@ -187,6 +205,49 @@ private:
     SourceInfo m_info;
 };
 
+// THE CAPTURE LEVEL (2026-10-17): an ortho's pixel is a picture of the GROUND only where the ground
+// stood above the water when the picture was taken, and under today's water the tree may show only
+// such pixels. NOAA's 2011 low-water orthomosaic of the Merrimack painted its channel black and its
+// bars sand as the BED under today's water (Mark: "the water imagery is hijacking the water"), and
+// Google's and MassGIS's water pixels do the same more quietly everywhere. So a colour source may
+// declare the water level it was flown at (the scene entry's captureLevel / captureDatum, resolved
+// at the place as the tides are), and this node is the gate that level makes: a layer of the colour
+// channel that PAINTS NOTHING, whose value at a texel is the weight the ground earns there -- 1
+// above the level, 0 below, a smoothstep across the height's own uncertainty between -- read from
+// the height tree at the texel's grain (Compositor::SampleHeight: the tree the GPU reads, the stack
+// where none is bound). GateSource multiplies the layer's weight by it (ComposeTree.h; the tree's
+// GateTile does it per texel), the same edge the survey gates the seafloor with: the pixel's COLOUR
+// is never touched, only its weight.
+//   ONE CONTINUOUS LAW, its limits the physics. The uncertainty is half the spread of the four
+// texels the tree's bilinear stands between (HeightTree::Sample): nought on a flat bed, where the
+// gate is a step at the level; one grain of the level read times the slope on a slope, the
+// shoreline's own uncertainty said as a height; wide where only a coarse level holds the point. A
+// source that declares no level has no gate: today's weight, byte for byte.
+//   ITS IDENTITY folds the height stack's (every height layer's name|structure), so an edited bed
+// repaints the gated tiles and nothing else; the gated source's own tree never moves. Its footprint
+// is its layer's: inside it an opinion at every texel (weight 1, r = the factor, the mask's
+// encoding); outside, none.
+class LevelGateSource : public ColorSource {
+public:
+    // `layer`: the source gated (its footprint and its name); `levelM` on kHeightFrame (m NAVD88);
+    // `said`: the level as the scene declared it, for the log and the identity.
+    void Load(const ColorSource& layer, const Compositor* comp, int hgtChannel, double levelM,
+              const std::string& said);
+    const SourceInfo& Info() const override { return m_info; }
+    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
+                 uint8_t rgba[4]) override;
+    // THE LAW as a function: the weight of ground at height h against the level, with the height's
+    // uncertainty s (metres, >= 0). Public so the selftest pins it beside the painted tile.
+    static float Weight(float h, float level, float s);
+    double LevelM() const { return m_level; }
+
+private:
+    const Compositor* m_comp = nullptr;
+    int m_hgtCh = -1;
+    double m_level = 0.0;
+    SourceInfo m_info;
+};
+
 class EditsHeightSource : public HeightSource {
 public:
     bool Load(const std::string& geojsonPath, float crestNavd = 2.5f);
@@ -194,8 +255,22 @@ public:
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
     // The crest where a land ring's box meets the box, -1 where a water ring's does.
     Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
+    // THE HAND EDIT YIELDS TO A FINER WITNESS (2026-10-18): the channel whose finer measured layers
+    // this one yields to. Unnamed, the edit paints at full weight wherever its polygons are (the law
+    // before this date). Named, its weight is the share of the texel those layers leave uncovered.
+    void Witnesses(const Compositor* comp, int channel) { m_comp = comp; m_channel = channel; }
+    std::string Law() const override;
+    // ITS OWN LEVEL AND BOX (HIERARCHY 4.20, 2026-10-18): the level whose texel at the rings' centre
+    // is the declared 5 m, and the rings' box. Above it the tree folds (a polygon's edge becomes the
+    // area it covers of each coarser texel, the same bytes whichever level a view asked first);
+    // below it the kept tile is magnified, so the hard edge becomes one own texel's ramp.
+    int OwnMip(const Lattice& l) const override;
+    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override;
 
 private:
+    float Uncovered(double latRad, double lonRad, double groundResM) const;
+    const Compositor* m_comp = nullptr;
+    int m_channel = -1;
     struct Ring {
         bool land = true;
         double lon0 = 1e9, lat0 = 1e9, lon1 = -1e9, lat1 = -1e9;

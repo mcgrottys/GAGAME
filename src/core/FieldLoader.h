@@ -78,6 +78,10 @@ public:
     // tile pyramid with a coverage index, or a survey footprint polygon can all answer this
     // cheaply, which is what lets a policy be evaluated before any I/O happens.
     virtual bool MayHaveData(uint32_t /*tileX*/, uint32_t /*tileY*/) const { return true; }
+    // Whether a texel INSIDE the file can be absent (a nodata value, an alpha band): a reader that
+    // feathers its weight at the data's edge asks this before it looks, and names it in its
+    // identity. A loader that cannot say answers yes.
+    virtual bool MayBeAbsent() const { return true; }
 
     // The residency class -- the third axis beyond FIELD/TEXTURE. It decides what an eviction
     // COSTS, which is the thing that makes water different from terrain.

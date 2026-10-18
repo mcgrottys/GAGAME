@@ -88,6 +88,20 @@ std::vector<uint16_t> QueryShorts(IWICMetadataQueryReader* q, const wchar_t* nam
     PropVariantClear(&v);
     return out;
 }
+// A tag that is SHORT or LONG by the writer's choice (RowsPerStrip, Compression, TileWidth), as numbers.
+std::vector<uint32_t> QueryUints(IWICMetadataQueryReader* q, const wchar_t* name) {
+    std::vector<uint32_t> out;
+    PROPVARIANT v;
+    PropVariantInit(&v);
+    if (SUCCEEDED(q->GetMetadataByName(name, &v))) {
+        if (v.vt == VT_UI2) out.push_back(v.uiVal);
+        else if (v.vt == VT_UI4) out.push_back(v.ulVal);
+        else if (v.vt == (VT_VECTOR | VT_UI2)) out.assign(v.caui.pElems, v.caui.pElems + v.caui.cElems);
+        else if (v.vt == (VT_VECTOR | VT_UI4)) out.assign(v.caul.pElems, v.caul.pElems + v.caul.cElems);
+    }
+    PropVariantClear(&v);
+    return out;
+}
 std::string QueryText(IWICMetadataQueryReader* q, const wchar_t* name) {
     std::string out;
     PROPVARIANT v;
@@ -244,7 +258,13 @@ public:
     std::mutex m_mx;
     RowFile m_rows;
     bool m_dataBand = false, m_height = false, m_signed = false;
+    bool m_alpha = false;   // a fourth band the file calls alpha (TIFF ExtraSamples 1 or 2, a PNG's)
     UINT m_bits = 32;
+
+public:
+    // A height's nodata or NaN, a colour's nodata value or its alpha 0: the texels a window of this
+    // file can lack. A 3-band file, or a 4-band whose fourth is data, lacks none.
+    bool MayBeAbsent() const override { return m_height || m_ref.hasNoData || m_alpha; }
 };
 
 // A VERTICAL CRS (GeoKey 4096) as the unit and datum UnitSpec reads (core/GaUnits.h); 4099, where the
@@ -348,6 +368,22 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
     bool indexed = false;
     const uint64_t own = ContentHash(path, &indexed);   // the file's bytes, not held
     if (own == 0) return refuse("the file cannot be read");
+    {
+        // BIGTIFF IS REFUSED BY NAME (2026-10-17). WIC decodes classic TIFF (version word 42) and
+        // has no decoder for BigTIFF (43): it answers WINCODEC_ERR_COMPONENTNOTFOUND, which the
+        // generic line below reports as "cannot decode it" -- and the Town Neck Beach 25 cm DSM,
+        // deflate + float predictor + 256 tiles like the lidar that loads, was refused that way in
+        // every run of its scene while its doc said it stood on the tree. The pixels are not the
+        // trouble, the container is: rewritten classic (same bytes, same tags) it loads.
+        std::ifstream hf(path, std::ios::binary);
+        unsigned char hd[4] = {0, 0, 0, 0};
+        hf.read(reinterpret_cast<char*>(hd), 4);
+        const bool le = hd[0] == 'I' && hd[1] == 'I', be = hd[0] == 'M' && hd[1] == 'M';
+        if ((le && hd[2] == 0x2B && hd[3] == 0x00) || (be && hd[2] == 0x00 && hd[3] == 0x2B)) {
+            return refuse("BigTIFF (version 43): WIC decodes classic TIFF (42) alone -- rewrite it classic with the "
+                          "same pixels and tags (tifffile.imwrite(..., bigtiff=False) did for the Town Neck Beach DSM)");
+        }
+    }
     static thread_local const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     (void)co;   // RPC_E_CHANGED_MODE: the thread's COM is someone else's, and WIC still works
     auto L = std::make_unique<ImageLoader>();
@@ -393,6 +429,7 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
                       std::to_string(bpp) + " bits: a height is one channel of 32-bit float or 16-bit integer");
     }
     L->m_height = height;
+    L->m_alpha = chan == 4;          // a TIFF's data band takes it back below
     L->m_bits = height ? bpp : 32;   // a colour window is the converter's RGBA8
     if (!colour && !height) {
         return refuse(std::to_string(chan) + " channels in " + std::to_string(bpp) +
@@ -463,6 +500,21 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
         // A FOURTH BAND is alpha only where ExtraSamples (338) says 1 or 2.
         const std::vector<uint16_t> extra = QueryShorts(q.Get(), L"/ifd/{ushort=338}");
         L->m_dataBand = chan == 4 && (extra.empty() || (extra[0] != 1 && extra[0] != 2));
+        L->m_alpha = chan == 4 && !L->m_dataBand;
+        // THIN COMPRESSED STRIPS are refused by name (2026-10-17): a 20,700 x 17,200 RGBA written as
+        // deflate with ONE row a strip (what Pillow writes for a row wider than its 64 KB strip
+        // budget) gave the ingest no tile in eight minutes, where the same pixels in one raw strip
+        // ingested at the pyramid's pace and 256 x 256 tiles faster still. The window reader asks
+        // WIC for 256 rows at a time; a compressed file of thin strips pays that read strip by strip.
+        const std::vector<uint32_t> comp = QueryUints(q.Get(), L"/ifd/{ushort=259}");
+        const std::vector<uint32_t> rows = QueryUints(q.Get(), L"/ifd/{ushort=278}");
+        const std::vector<uint32_t> tileW = QueryUints(q.Get(), L"/ifd/{ushort=322}");
+        if (tileW.empty() && !comp.empty() && comp[0] != 1 && !rows.empty() && rows[0] < 16 && h > 1024) {
+            return refuse("its strips are " + std::to_string(rows[0]) + " row(s) each and compressed (TIFF "
+                          "compression " + std::to_string(comp[0]) + ") over " + std::to_string(h) +
+                          " rows: a file so written gave the ingest no tile in eight minutes; write it "
+                          "tiled (gdal_translate -co TILED=YES) or in strips of 16 rows or more");
+        }
     }
     std::vector<uint8_t> sb;
     if (!affine) {
@@ -615,6 +667,7 @@ std::vector<std::unique_ptr<FieldLoader>> OpenManifest(const std::string& path, 
                 path.c_str(), file.c_str(), px, px, nc);
             continue;
         }
+        L->m_alpha = nc == 4;
         GeoRef& g = L->m_ref;
         g.provenance = CrsProvenance::Declared;
         g.epsg = epsg;

@@ -69,8 +69,12 @@ public:
     }
 
     // The ground at a point for a reader of `groundResM` metres, in the height's frame (m NAVD88).
-    // `levelOffset` moves the level (the probe's planted fault); 0 is the law.
-    float Sample(double latRad, double lonRad, double groundResM, int levelOffset = 0) {
+    // `levelOffset` moves the level (the probe's planted fault); 0 is the law. `halfRange`, when
+    // asked: THE READ'S OWN UNCERTAINTY -- half the spread of the four texels the bilinear stands
+    // between. The ground at the point lies among them: nought on a flat bed, one grain of the level
+    // read times the slope on a slope (the level's texel on the ground, as a height), and wide where
+    // only a coarse level holds the point. A capture-level gate feathers by it (Sources.h).
+    float Sample(double latRad, double lonRad, double groundResM, int levelOffset = 0, float* halfRange = nullptr) {
         const double cl = std::cos(latRad);
         const double d[3] = {cl * std::cos(lonRad), std::sin(latRad), cl * std::sin(lonRad)};
         double uv[2] = {0.0, 0.0};
@@ -90,8 +94,14 @@ public:
         const double dmax = double(dim) - 1.0;
         const auto clampI = [&](double t) { return uint32_t((std::min)((std::max)(t, 0.0), dmax)); };
         const uint32_t x0 = clampI(fx0), x1 = clampI(fx0 + 1.0), y0 = clampI(fy0), y1 = clampI(fy0 + 1.0);
-        return float((double(Texel(face, mip, x0, y0)) * (1.0 - frx) + double(Texel(face, mip, x1, y0)) * frx) * (1.0 - fry) +
-                     (double(Texel(face, mip, x0, y1)) * (1.0 - frx) + double(Texel(face, mip, x1, y1)) * frx) * fry);
+        const float t00 = Texel(face, mip, x0, y0), t10 = Texel(face, mip, x1, y0);
+        const float t01 = Texel(face, mip, x0, y1), t11 = Texel(face, mip, x1, y1);
+        if (halfRange) {
+            *halfRange = 0.5f * ((std::max)((std::max)(t00, t10), (std::max)(t01, t11)) -
+                                 (std::min)((std::min)(t00, t10), (std::min)(t01, t11)));
+        }
+        return float((double(t00) * (1.0 - frx) + double(t10) * frx) * (1.0 - fry) +
+                     (double(t01) * (1.0 - frx) + double(t11) * frx) * fry);
     }
 
     // THE FRAME'S READ: never waits on a paint. The answer is the finest level HELD at or coarser than

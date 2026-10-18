@@ -11,10 +11,12 @@
 //  A SOURCE PAINTS ITS OWN LEVEL, AND THE TREE MAKES THE OTHERS (HIERARCHY 4.20). On a lattice its
 //  own mip (OwnMip) is the coarsest whose texel on the ground, measured at the source's centre with
 //  the lattice's own texel (Lattice::TexelGround), is no coarser than its grain on either axis;
-//  0 where even mip 0 is coarser. The tree folds every level above that and keeps the folds
-//  (TileTree::LeafTile). So the source is asked only at its own grain or finer, and it keeps no
-//  levels: it reads its files by the WINDOW, 256 x 256 texels decoded once and kept while used
-//  (a few hundred, least recently used), and holds no copy of a file.
+//  0 where even mip 0 is coarser. The tree folds every level above that and keeps the folds, and
+//  below it magnifies the kept own-level tile (TileTree::LeafTile, MagnifyOwn). So the source is
+//  asked at its own level only -- by the boot's pass, or once at the first ask of an own tile --
+//  and never at frame time for a tile under it; it keeps no levels: it reads its files by the
+//  WINDOW, 256 x 256 texels decoded once and kept while used (least recently used), and holds no
+//  copy of a file.
 //
 //  WHAT IT ANSWERS. The exchange frame (WGS84 lat/lon) resolved EXACTLY into the files' CRS
 //  (Projections.h), then a file's affine: no row is flipped by hand, the sign of the scale is the
@@ -31,9 +33,23 @@
 //  refused by name): a point is read from the file that holds it, seamless inside, and the
 //  entry's `feather` (metres, 0 = a hard edge) is taken against the bounding box of the whole.
 //
+//  WHERE THE DATA ENDS INSIDE THE BOX (2026-10-17). A source ends at its box, and it ends again at
+//  every texel it lacks: a height's nodata, a colour's alpha 0, ground inside the box that no file
+//  of the set holds (a tile the folder is missing). The weight fades over the entry's feather from
+//  both, by one smoothstep of the same metres: at the box, of the sample point's distance to the
+//  box's edge (Feathered, as before); inside, of each texel's distance to the nearest absent texel
+//  (Edge: one exact Euclidean distance transform a window, the neighbouring windows' and files'
+//  texels within the feather in reach, kept beside the window). A texel's weight is that factor
+//  times its coverage, and a box read is the mean weighted by it -- the summed-area table carries
+//  the factor, so a box of any size reads the same law. Its limits: feather 0 is the hard edge the
+//  reads had; a file that lacks no texel is byte for byte what it was. Before it, the lidar's
+//  bare earth (nodata where the laser saw no bottom) stood as a wall over the survey beneath at
+//  every hole's edge, one texel from full weight to none.
+//
 //  ITS IDENTITY is the loaders' Structure(): FNV-1a 64 of every byte of each file and its
-//  sidecars (core/ImageLoader.cpp), and the feather. A file replaced by one of the same size is a
-//  new tree.
+//  sidecars (core/ImageLoader.cpp), and the feather -- named as reaching absence only where a
+//  file can be absent (FieldLoader::MayBeAbsent, or files that do not tile the box), so a set the
+//  law cannot touch keeps its tree. A file replaced by one of the same size is a new tree.
 //
 //  A HEIGHT (slice 3) is the same class and every line above: a file of one channel is a
 //  HeightSource of the height stack, its window's four bytes a texel a float, NaN where the file
@@ -46,6 +62,8 @@
 // ================================================================================================
 #pragma once
 #include <atomic>
+#include <condition_variable>
+#include <unordered_set>
 
 #include "compose/Compositor.h"
 #include "compose/Projections.h"
@@ -71,13 +89,20 @@ struct RasterEntry {
     std::string unit, datum;   // a height's, read only where the file names none
     double offset = 0.0;       // metres added to a height off kHeightFrame's datum: declared, or
     bool hasOffset = false;    // such a file is refused
+    // THE CAPTURE LEVEL (Sources.h LevelGateSource): the water level a photo was flown at, metres
+    // above `captureDatum` ("" = the engine's frame), read only where written; a datum alone is 0 m
+    // on it. The Assembly resolves it at the place and gates the photo by the ground above it.
+    double captureLevel = 0.0;
+    std::string captureDatum;
+    bool hasCaptureLevel = false;
 };
 
 class RasterFileSource : public ColorSource, public HeightSource {
 public:
     // THE INSTRUMENT: windows decoded from files (cache misses) and the time in the decoder, every
-    // source summed -- a reader that is slow somewhere cold reads these before and after.
-    static std::atomic<uint64_t> s_decodes, s_decodeUs;
+    // source summed -- a reader that is slow somewhere cold reads these before and after; and the
+    // data edges built (WindowEdge) with their time, the same way.
+    static std::atomic<uint64_t> s_decodes, s_decodeUs, s_edges, s_edgeUs;
 
 public:
     RasterFileSource();
@@ -104,6 +129,7 @@ public:
     double Over() const { return m_over; }
     size_t Files() const { return m_files.size(); }
     bool Height() const { return m_height; }
+    const RasterEntry& Entry() const { return m_entry; }   // as the scene declared it
 
 private:
     struct File {
@@ -139,6 +165,24 @@ private:
         uint8_t nan[256];
     };
     std::shared_ptr<const Blocks> WindowBlocks(size_t file, uint32_t wx, uint32_t wy);
+    // THE EDGE OF THE DATA, a window's texels' feather factors 0..1 from the metres to the nearest
+    // absent texel (header). Empty where none lies within the feather: every factor 1, nothing read.
+    struct Edge {
+        std::vector<float> f;   // kWin^2, row-major; empty = all one
+    };
+    std::shared_ptr<const Edge> WindowEdge(size_t file, uint32_t wx, uint32_t wy);
+    float EdgeAt(size_t file, int x, int y);
+    // The windows one edge build reads, each fetched once (Window) and held for the build: the seed
+    // asks 100k+ texels, and the per-texel path (Texel's four recent windows, then the LRU behind the
+    // mutex) thrashed across fifteen threads -- measured 2026-10-17 as an ingest that finished no tile
+    // in half an hour.
+    struct WinCache {
+        std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> held;
+        uint64_t lastKey = ~0ull;
+        const std::vector<uint8_t>* last = nullptr;
+    };
+    bool Absent(size_t file, int x, int y, WinCache& wc);   // the texel, or the ground under it in another file
+    bool Tiled() const;                       // the files cover the set's box
     void BoxIntegral(size_t file, double u0, double u1, double v0, double v1, double& value, double& have);
     float Feathered(double x, double y) const;
 
@@ -149,6 +193,7 @@ private:
     double m_mx = 1, m_my = 1;                           // metres per CRS unit at the centre
     double m_gx = 0, m_gy = 0, m_grainM = 0.0, m_over = 0.0, m_feather = 0.0;
     bool m_height = false;
+    bool m_absence = false;   // a texel inside the box can be absent: the feather reaches it (Edge)
     double m_vScale = 1.0, m_vOffset = 0.0;   // a height: metres = the file's number x scale + offset
     std::string m_valued;                     // ...and in words, for the identity
     RasterEntry m_entry;
@@ -157,10 +202,14 @@ private:
     std::mutex m_cacheMx;
     std::list<std::pair<uint64_t, std::shared_ptr<const std::vector<uint8_t>>>> m_lru;
     std::unordered_map<uint64_t, decltype(m_lru)::iterator> m_index;
+    std::unordered_set<uint64_t> m_decoding;   // windows a thread is decoding now (under m_cacheMx)
+    std::condition_variable m_decoded;         // one landed: a thread waiting for it looks again
     std::list<std::pair<uint64_t, std::shared_ptr<const Sat>>> m_satLru;   // under m_cacheMx
     std::unordered_map<uint64_t, decltype(m_satLru)::iterator> m_satIndex;
     std::list<std::pair<uint64_t, std::shared_ptr<const Blocks>>> m_blkLru;   // under m_cacheMx
     std::unordered_map<uint64_t, decltype(m_blkLru)::iterator> m_blkIndex;
+    std::list<std::pair<uint64_t, std::shared_ptr<const Edge>>> m_edgeLru;   // under m_cacheMx
+    std::unordered_map<uint64_t, decltype(m_edgeLru)::iterator> m_edgeIndex;
 };
 
 // Every entry, opened: one source each. A refused entry is logged by name with its reason, and
@@ -192,17 +241,24 @@ struct IngestStats {
     int own = -1;
     uint32_t tiles = 0, levels = 0;
     double seconds = 0.0;
+    uint32_t adopted = 0;      // tiles taken from a finer realization's equal-grid level (TileTree::Adopt)
+    uint64_t windows = 0;      // THE INSTRUMENT: file windows decoded for this lattice, and the
+    double decodeSec = 0.0;    // seconds inside the decoder (summed over the pool's threads)
     bool whole = false;   // the marker was there: nothing was asked
 };
-IngestStats Ingest(TileTree& tree, const Lattice& lattice);
+// `realized`: this tree's lattices ingested before this one (finest first), whose equal-grid
+// levels this lattice takes instead of painting (HIERARCHY 4.20 across realizations).
+IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lattice>& realized = {});
 // Every source's pass on every lattice of its kind, logged: what the boot runs before the first
 // frame and the `ingest` tool runs alone. A height's tree is the height stack's leaf (FloatW).
 void IngestSources(const std::vector<std::unique_ptr<RasterFileSource>>& sources,
                    const std::vector<Lattice>& colour, const std::vector<Lattice>& height);
 
 // --selftest's block (compose/RasterFileTest.cpp); `--tool rastertest:real`, the real files of
-// slice 3's part C against the harvester's grids, on the CPU.
+// slice 3's part C against the harvester's grids, on the CPU; `--tool rastertest:overlap`, the
+// scene's heights by file against each other where both have data (bias and spread, by depth).
 bool RunRasterFileSelfTest();
 bool RunRealHeightsCheck();
+bool RunHeightOverlapReport(const std::vector<RasterEntry>& entries);
 
 }  // namespace ga

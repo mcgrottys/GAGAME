@@ -17,8 +17,10 @@
 #include "sim/GlobeModel.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <cstdarg>
 #include <cstdio>
@@ -76,7 +78,35 @@ struct TiffImage {
     uint32_t subfile;   // NewSubfileType: 1 = a reduced-resolution copy (an overview)
     int extra = 2;      // ExtraSamples of a fourth band: 2 unassociated alpha, 0 data, -1 absent
     int fmt = 1;        // SampleFormat (339): 1 unsigned, 2 signed, 3 float
+    uint32_t rowsPerStrip = 0;   // 0 = one strip; else strips of so many rows
+    uint16_t compression = 1;    // 1 none; 8 deflate, written as STORED zlib blocks (bytes as they are)
 };
+
+// A zlib stream whose deflate blocks are stored, not compressed: what a TIFF of compression 8
+// carries, without a compressor in the test.
+std::vector<uint8_t> ZlibStored(const uint8_t* p, size_t n) {
+    std::vector<uint8_t> z{0x78, 0x01};
+    size_t at = 0;
+    do {
+        const size_t len = (std::min)(n - at, size_t(65535));
+        const bool last = at + len >= n;
+        z.push_back(last ? 1 : 0);
+        z.push_back(uint8_t(len & 255));
+        z.push_back(uint8_t(len >> 8));
+        z.push_back(uint8_t(~len & 255));
+        z.push_back(uint8_t((~len >> 8) & 255));
+        z.insert(z.end(), p + at, p + at + len);
+        at += len;
+    } while (at < n);
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < n; ++i) {
+        a = (a + p[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    const uint32_t adler = (b << 16) | a;
+    for (int s = 24; s >= 0; s -= 8) z.push_back(uint8_t(adler >> s));
+    return z;
+}
 struct GeoTags {
     std::vector<double> scale, tie;
     std::vector<uint16_t> keys;
@@ -108,18 +138,31 @@ bool WriteTiff(const std::string& path, const std::vector<TiffImage>& imgs, cons
             else v = blob(p, n);
             e.push_back({tag, type, count, v});
         };
-        const uint32_t data = blob(im.px.data(), im.px.size());
+        // The pixels in strips: one strip of the whole image, or rowsPerStrip rows each; a deflate
+        // strip is a stored zlib stream of its rows.
+        const uint32_t rps = im.rowsPerStrip ? (std::min)(im.rowsPerStrip, im.h) : im.h;
+        const size_t rowBytes = size_t(im.w) * im.spp * (im.bps / 8);
+        std::vector<uint32_t> offs, cnts;
+        for (uint32_t y0 = 0; y0 < im.h; y0 += rps) {
+            const uint32_t rows = (std::min)(rps, im.h - y0);
+            const uint8_t* src = im.px.data() + size_t(y0) * rowBytes;
+            std::vector<uint8_t> strip;
+            if (im.compression == 8) strip = ZlibStored(src, rows * rowBytes);
+            else strip.assign(src, src + rows * rowBytes);
+            offs.push_back(blob(strip.data(), strip.size()));
+            cnts.push_back(uint32_t(strip.size()));
+        }
         const std::vector<uint16_t> bits(im.spp, uint16_t(im.bps));
         e.push_back({254, 4, 1, im.subfile});
         e.push_back({256, 4, 1, im.w});
         e.push_back({257, 4, 1, im.h});
         arr(258, 3, im.spp, bits.data(), bits.size() * 2);
-        e.push_back({259, 3, 1, 1});                        // no compression
+        e.push_back({259, 3, 1, im.compression});           // 1 none, 8 deflate
         e.push_back({262, 3, 1, im.spp >= 3 ? 2u : 1u});    // RGB, or black is zero
-        e.push_back({273, 4, 1, data});
+        arr(273, 4, uint32_t(offs.size()), offs.data(), offs.size() * 4);
         e.push_back({277, 3, 1, im.spp});
-        e.push_back({278, 4, 1, im.h});
-        e.push_back({279, 4, 1, uint32_t(im.px.size())});
+        e.push_back({278, 4, 1, rps});
+        arr(279, 4, uint32_t(cnts.size()), cnts.data(), cnts.size() * 4);
         e.push_back({284, 3, 1, 1});
         if (im.spp == 4 && im.extra >= 0) e.push_back({338, 3, 1, uint32_t(im.extra)});
         if (im.fmt != 1) e.push_back({339, 3, 1, uint32_t(im.fmt)});
@@ -396,6 +439,23 @@ class Shifted : public RasterFileSource {
 public:
     int OwnMip(const Lattice& l) const override { return RasterFileSource::OwnMip(l) + 1; }
 };
+// The file's reads, counted (4.20's third clause: below its own level a source is not asked).
+class Counted : public RasterFileSource {
+public:
+    std::atomic<int> asks{0};
+    float Sample(double la, double lo, double g, const PaintCtx& c, uint8_t rgba[4]) override {
+        ++asks;
+        return RasterFileSource::Sample(la, lo, g, c, rgba);
+    }
+};
+class CountedH : public RasterFileSource {
+public:
+    std::atomic<int> asks{0};
+    float Sample(double la, double lo, double g, float& m) override {
+        ++asks;
+        return RasterFileSource::Sample(la, lo, g, m);
+    }
+};
 
 // ---- A HEIGHT (slice 3): out\s3\make_hill.py's hill, written again here, uncompressed:
 //     v = -25 + 40 2^-(r / 300 m)^2  metres NAVD88,  r <= 600 m about UTM 19N (354636, 4742174),
@@ -485,6 +545,51 @@ std::vector<uint8_t> PaintF(const DomainSource& node, const Lattice& L, const Ti
     }
     return out;
 }
+// THE THIRD CLAUSE, said again by another route (TileTree::MagnifyOwn's law for colour): the own-level
+// ancestor and its eight neighbours laid out as one 3 x 3 mosaic -- a void or absent one all zero --
+// and the child's texel centres read off it by the plain bilinear, coverage and coverage-weighted
+// colour apart and then divided, to the nearest byte. A neighbour past the face is left zero here
+// (the engine clamps there; no tile of this test lies at a face's edge).
+std::vector<uint8_t> MagnifyRef(const std::function<std::vector<uint8_t>(const TileRequest&)>& tile,
+                                const Lattice& L, const TileRequest& child, uint32_t own, uint32_t tilesX,
+                                uint32_t tilesY) {
+    const uint32_t W = L.texW, H = L.texH, k = own - child.mip;
+    const TileRequest a{child.face, own, child.x >> k, child.y >> k};
+    std::vector<uint8_t> mosaic(size_t(3 * W) * (3 * H) * 4, 0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const long long tx = static_cast<long long>(a.x) + dx, ty = static_cast<long long>(a.y) + dy;
+            if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) continue;
+            const std::vector<uint8_t> b = tile({a.face, own, uint32_t(tx), uint32_t(ty)});
+            if (b.size() != size_t(W) * H * 4) continue;
+            for (uint32_t y = 0; y < H; ++y) {
+                std::memcpy(&mosaic[((size_t(dy + 1) * H + y) * 3 * W + size_t(dx + 1) * W) * 4], &b[size_t(y) * W * 4], size_t(W) * 4);
+            }
+        }
+    }
+    const double S = double(1ull << k);
+    const uint64_t mask = (1ull << k) - 1ull;
+    std::vector<uint8_t> out(size_t(W) * H * 4, 0);
+    for (uint32_t cy = 0; cy < H; ++cy) {
+        const double v = (double(child.y & mask) * H + cy + 0.5) / S - 0.5 + H;
+        for (uint32_t cx = 0; cx < W; ++cx) {
+            const double u = (double(child.x & mask) * W + cx + 0.5) / S - 0.5 + W;
+            const int u0 = int(std::floor(u)), v0 = int(std::floor(v));
+            const double fx = u - u0, fy = v - v0;
+            double c[3] = {0, 0, 0}, cov = 0.0;
+            for (int q = 0; q < 4; ++q) {
+                const double w = ((q & 1) ? fx : 1.0 - fx) * ((q & 2) ? fy : 1.0 - fy);
+                const uint8_t* s = &mosaic[(size_t(v0 + (q >> 1)) * 3 * W + size_t(u0 + (q & 1))) * 4];
+                for (int ch = 0; ch < 3; ++ch) c[ch] += w * s[3] * s[ch];
+                cov += w * s[3];
+            }
+            uint8_t* d = &out[(size_t(cy) * W + cx) * 4];
+            for (int ch = 0; ch < 3 && cov > 0.0; ++ch) d[ch] = static_cast<uint8_t>((std::min)(255.0, c[ch] / cov + 0.5));
+            d[3] = static_cast<uint8_t>((std::min)(255.0, cov + 0.5));
+        }
+    }
+    return out;
+}
 // PLANT: nodata read as zero -- where the file has no value inside its box, 0 m at full weight.
 class ZeroNoData : public RasterFileSource {
 public:
@@ -560,6 +665,22 @@ bool RunRasterFileSelfTest() {
             const float w1 = s->Sample(lat, lon, 1e-4, PaintCtx{}, k);
             Check(w0 == 0.0f && w1 == 1.0f, "%s: GDAL nodata 0 is alpha 0 -- the black cell weighs %.3f, its neighbour %.3f",
                   c.name, w0, w1);
+            // The same file with a feather of one metre (20 texels at 0.05 m): the texel beside the
+            // black cell is under the feather, one 30 texels away is not, and the identity says so.
+            RasterEntry fe;
+            fe.feather = 1.0;
+            RasterFileSource sf;
+            const bool fl = sf.Load(reg, r.file, fe, &why);
+            PixelLatLon(r, 11 * 16 + 0, 5 * 16 + 8, lat, lon);
+            const float wn = fl ? sf.Sample(lat, lon, 1e-4, PaintCtx{}, k) : -1.0f;
+            PixelLatLon(r, 11 * 16 + 14, 5 * 16 + 8, lat, lon);   // 14 texels off the cell: under the feather still
+            const float wm = fl ? sf.Sample(lat, lon, 1e-4, PaintCtx{}, k) : -1.0f;
+            PixelLatLon(r, 13 * 16 + 8, 5 * 16 + 8, lat, lon);   // 40 texels off: past it
+            const float wf = fl ? sf.Sample(lat, lon, 1e-4, PaintCtx{}, k) : -1.0f;
+            Check(fl && wn > 0.0f && wn < 0.05f && wm > wn && wm < 1.0f && wf == 1.0f &&
+                      sf.Info().structure.find("at absence") != std::string::npos,
+                  "%s with feather 1 m: a colour fades from its nodata cell too -- the texel beside it weighs %.3f, "
+                  "14 texels off %.3f, 40 off %.3f; the identity names it", c.name, wn, wm, wf);
         }
         srcs.push_back(std::move(s));
         rasters.push_back(r);
@@ -692,6 +813,44 @@ bool RunRasterFileSelfTest() {
         Check(got.size() == 1 && got[0]->Info().name == "folder" && got[0]->Files() == 1,
               "a folder of two, one refused: the set goes on with the other (%zu source(s)%s%s)",
               got.size(), got.empty() ? "" : ": ", got.empty() ? "" : got[0]->Info().name.c_str());
+        // THIN COMPRESSED STRIPS (2026-10-17): Pillow's default for a row wider than 64 KB is one row
+        // a strip; deflate-compressed so, a 1.4 GB ortho gave the ingest no tile in eight minutes.
+        // Refused by name under 16 rows a strip over 1,024 rows; the same pixels in 256-row deflate
+        // strips load.
+        {
+            const uint32_t tw = 64, th = 2048;
+            std::vector<uint8_t> px(size_t(tw) * th * 3);
+            for (size_t i = 0; i < px.size(); ++i) px[i] = uint8_t((i * 7) & 255);
+            const Raster thin = Make(32617, 0.5, "out/rastertest/thin_strips.tif");
+            TiffImage im{tw, th, 3, 8, px, 0};
+            im.extra = -1;
+            im.rowsPerStrip = 1;
+            im.compression = 8;
+            WriteTiff(thin.file, {im}, TagsOf(thin, 32617));
+            RasterFileSource t1;
+            why.clear();
+            const bool tookThin = t1.Load(reg, thin.file, none, &why);
+            Check(!tookThin && why.find("strips are 1 row") != std::string::npos,
+                  "a deflate TIFF of one-row strips over 2048 rows is refused by name: %s", why.c_str());
+            // A BigTIFF header (version 43): refused by name before WIC is asked.
+            {
+                const std::vector<uint8_t> big{'I', 'I', 43, 0, 8, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0};
+                std::ofstream(std::string("out/rastertest/bigtiff.tif"), std::ios::binary | std::ios::trunc)
+                    .write(reinterpret_cast<const char*>(big.data()), std::streamsize(big.size()));
+                RasterFileSource tb;
+                why.clear();
+                const bool tookBig = tb.Load(reg, "out/rastertest/bigtiff.tif", none, &why);
+                Check(!tookBig && why.find("BigTIFF") != std::string::npos,
+                      "a BigTIFF is refused by name, before WIC: %s", why.c_str());
+            }
+            const Raster thick = Make(32617, 0.5, "out/rastertest/thick_strips.tif");
+            im.rowsPerStrip = 256;
+            WriteTiff(thick.file, {im}, TagsOf(thick, 32617));
+            RasterFileSource t2;
+            why.clear();
+            const bool tookThick = t2.Load(reg, thick.file, none, &why);
+            Check(tookThick, "the same pixels in 256-row deflate strips load: %s", tookThick ? "yes" : why.c_str());
+        }
         const Raster hr = Make(4326, 0.5, "out/rastertest/height16.tif");
         WriteTiff(hr.file, {{kW, kW, 1, 16, std::vector<uint8_t>(size_t(kW) * kW * 2, 7), 0}}, TagsOf(hr, 4326));
         RasterFileSource h;
@@ -960,6 +1119,114 @@ bool RunRasterFileSelfTest() {
             Check(!me && be == 65536, "PLANT the raster declared with every level: its child at mip %d is "
                   "answered with %zu bytes of its own where it is the parent magnified: %s", om - 1, be,
                   !me ? "CAUGHT" : "NOT caught");
+            // 6. THE CLAUSE MADE LITERAL (2026-10-17): asked BELOW its own level -- as a composite asks
+            // a leaf under the edge of a finer source -- the tile is the kept own-level tile magnified,
+            // taps across the ancestor's edge read from the neighbouring ancestor, and the file is not
+            // opened for it: the source's Sample calls are counted. The own tile with a neighbour of
+            // content on its west is the one asked under, at its west edge, two levels down.
+            {
+                Counted cnt;
+                cnt.Load(reg, ar.file, none, &why);
+                ColorLayerSource cl(&cnt);
+                TileTree tx(&cl, TileTree::Fmt::Rgba8, nullptr, trees + "/below");
+                Ingest(tx, pyr);
+                const int asksPass = cnt.asks.exchange(0);
+                const std::string dir = dirOf(tx);
+                auto tileOf = [&](const TileRequest& q) { return Bytes(dir + "\\" + TileName(q) + ".bin"); };
+                // The tile asked under: at the west edge of an own tile whose west neighbour also stands,
+                // two levels down, where both cover -- found by the reference itself: the first such tile
+                // whose magnification is covered on half its texels and MOVES when the neighbour is taken
+                // as void (what a clamp at the ancestor's edge would answer: the plant).
+                const uint32_t tilesX = (std::max)(1u, (pyr.faceDim >> uint32_t(om)) / pyr.texW);
+                const uint32_t tilesY = (std::max)(1u, (pyr.faceDim >> uint32_t(om)) / pyr.texH);
+                TileRequest east{}, under{};
+                std::vector<uint8_t> ref, clamped;
+                bool pair = false;
+                for (const auto& t : TilesIn(dir)) {
+                    if (pair || int(t.second.mip) != om || t.first.find(".bin") == std::string::npos || t.second.x == 0) continue;
+                    const TileRequest w{t.second.face, t.second.mip, t.second.x - 1, t.second.y};
+                    if (tileOf(w).size() != 65536) continue;
+                    for (uint32_t sy = 0; sy < 4 && !pair; ++sy) {
+                        const TileRequest u{t.second.face, t.second.mip - 2, t.second.x * 4, t.second.y * 4 + sy};
+                        const std::vector<uint8_t> r1 = MagnifyRef(tileOf, pyr, u, uint32_t(om), tilesX, tilesY);
+                        const std::vector<uint8_t> r2 = MagnifyRef(
+                            [&](const TileRequest& q) { return q.x == w.x && q.y == w.y ? std::vector<uint8_t>() : tileOf(q); },
+                            pyr, u, uint32_t(om), tilesX, tilesY);
+                        size_t covered = 0;
+                        for (size_t i = 3; i < r1.size(); i += 4) covered += r1[i] == 255 ? 1 : 0;
+                        if (covered >= 8192 && r1 != r2) {
+                            east = t.second;
+                            under = u;
+                            ref = r1;
+                            clamped = r2;
+                            pair = true;
+                        }
+                    }
+                }
+                const size_t before = TilesIn(dir).size();
+                std::vector<uint8_t> got, atOwn;
+                const TileTree::Status sg = pair ? tx.Tile(pyr, tag, under, got, nullptr) : TileTree::Status::Void;
+                const TileTree::Status so = pair ? tx.Tile(pyr, tag, east, atOwn, nullptr) : TileTree::Status::Void;
+                const int asksBelow = cnt.asks.exchange(0);
+                const size_t after = TilesIn(dir).size();
+                size_t off = 0, offClamped = 0;
+                int maxOff = 0;
+                for (size_t i = 0; i < got.size() && i < ref.size(); ++i) {
+                    const int d = std::abs(int(got[i]) - int(ref[i]));
+                    off += d ? 1 : 0;
+                    maxOff = (std::max)(maxOff, d);
+                    offClamped += got[i] != clamped[i] ? 1 : 0;
+                }
+                Check(pair && sg == TileTree::Status::Content && got.size() == 65536 && asksPass > 0 && asksBelow == 0 &&
+                          maxOff <= 1 && offClamped > 0 && so == TileTree::Status::Content && atOwn == tileOf(east) &&
+                          after == before,
+                      "below its own level (mip %d asked at %d) the tile is the own tile magnified: the file was asked "
+                      "%d times by the pass and %d times by the ask; %zu of 65536 bytes off the mosaic reference "
+                      "(at most %d); a clamp at the ancestor's edge would differ on %zu bytes (PLANT %s); at the own "
+                      "level the tile is itself; nothing kept for it (%zu files before, %zu after)",
+                      om, om - 2, asksPass, asksBelow, off, maxOff, offClamped, offClamped ? "CAUGHT" : "NOT caught",
+                      before, after);
+                // WHAT MOVED, measured: today's paint of the same tile from the file (its bilinear between
+                // ITS texels) against the magnified own tile, over texels both cover -- the blur the law
+                // names, on this 4-texel checker (its worst case: every edge is a step).
+                {
+                    TileBox ub{};
+                    pyr.Box(under, ub);
+                    std::vector<uint8_t> today;
+                    bool complete = true, any = false, full = false;
+                    Compositor::PaintSourceTile(&cnt, pyr, under, ub, today, complete, any, full);
+                    int maxD = 0;
+                    double sumD = 0.0;
+                    size_t n = 0;
+                    for (size_t i = 0; i + 3 < today.size() && i + 3 < got.size(); i += 4) {
+                        if (!today[i + 3] || !got[i + 3]) continue;
+                        for (int c = 0; c < 3; ++c) {
+                            const int d = std::abs(int(today[i + c]) - int(got[i + c]));
+                            maxD = (std::max)(maxD, d);
+                            sumD += d;
+                        }
+                        ++n;
+                    }
+                    Log("[rastertest]      measured: today's paint from the file against the own tile magnified, mip %d "
+                        "under mip %d, %zu texels both cover: max |d| %d/255, mean %.2f/255 (the 4-texel checker's steps)",
+                        om - 2, om, n, maxD, n ? sumD / (3.0 * n) : 0.0);
+                }
+                // A composite above it knows its key without bytes of its own (Peek answers from the
+                // ancestor): asked twice, composed once, the same bytes.
+                auto dk = std::make_shared<DomainCompositor>();
+                dk->SetBlend(DomainCompositor::Blend::LayeredOver);
+                dk->Add(NormalizeToSi(keep(&cl)));     // the stage the stack's colour leaves wear (IngestSources)
+                dk->Add(NormalizeToSi(keep(&vecL)));
+                CompositeSource over("test.over", dk);
+                TileTree tk(&over, TileTree::Fmt::Rgba8, nullptr, trees + "/below_compose");
+                tk.EnsureFrame(tag);
+                std::vector<uint8_t> c1, c2;
+                tk.Tile(pyr, tag, under, c1, nullptr);
+                tk.Tile(pyr, tag, under, c2, nullptr);
+                Check(tk.composed.load() == 1 && tk.hits.load() >= 1 && c1.size() == 65536 && c1 == c2,
+                      "a composite over the magnified leaf: asked twice, composed %u time(s), served %u, the same "
+                      "%zu bytes -- its key is known from the ancestor's entry", tk.composed.load(), tk.hits.load(), c1.size());
+            }
         }
     }
 
@@ -1057,7 +1324,7 @@ bool RunRasterFileSelfTest() {
         Floor floor;
         Compositor comp;
         const Raster hr = WriteHill("out/rastertest/hill.tif", 1.0, 0.0, 5703);
-        RasterFileSource hill;
+        CountedH hill;
         why.clear();
         const bool took = hill.Load(reg, hr.file, none, &why);
         double worst = 0.0;
@@ -1071,6 +1338,176 @@ bool RunRasterFileSelfTest() {
             std::vector<HeightSource*> st{&hill, &floor};   // handed over upside down
             StackOrder(st);
             Check(st[0] == &floor, "the default order puts the coarse floor under the 2 m hill");
+        }
+        // THE HAND EDIT YIELDS TO A FINER WITNESS (2026-10-18): a polygon over the hill's east half and
+        // 200 m past the disc, crest +50 m (above everything the hill holds), in a stack of its own with
+        // the floor and the hill, the channel named as its witnesses -- against the same with none named,
+        // and across the disc's rim with the hill feathered, where the witness rises as the edit fades.
+        if (took) {
+            auto radAt = [&](double E, double N, double& la, double& lo) {
+                PixelLatLon(hr, (E - hr.ox) / hr.sx, (N - hr.oy) / hr.sy, la, lo);
+            };
+            const double eE0 = kHillE, eE1 = kHillE + kHillR + 200.0, eN0 = kHillN - 300.0, eN1 = kHillN + 300.0;
+            double c[4][2];
+            radAt(eE0, eN0, c[0][1], c[0][0]); radAt(eE1, eN0, c[1][1], c[1][0]);
+            radAt(eE1, eN1, c[2][1], c[2][0]); radAt(eE0, eN1, c[3][1], c[3][0]);
+            for (auto& p : c) { p[0] /= kD2R; p[1] /= kD2R; }
+            char poly[768];
+            snprintf(poly, sizeof(poly),
+                     "{\"type\":\"FeatureCollection\",\"features\":[{\"type\":\"Feature\",\"properties\":{\"mask\":\"land\","
+                     "\"name\":\"test crest\"},\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[[%.8f,%.8f],[%.8f,%.8f],"
+                     "[%.8f,%.8f],[%.8f,%.8f],[%.8f,%.8f]]]}}]}",
+                     c[0][0], c[0][1], c[1][0], c[1][1], c[2][0], c[2][1], c[3][0], c[3][1], c[0][0], c[0][1]);
+            WriteText("out/rastertest/edit_crest.json", poly);
+            CountedH hillH;   // its own instance: `hill`'s ask count is read by the clause's checks below
+            const bool th = hillH.Load(reg, hr.file, none, &why);
+            EditsHeightSource ed, ed0;
+            const bool el = ed.Load("out/rastertest/edit_crest.json", 50.0f) &&
+                            ed0.Load("out/rastertest/edit_crest.json", 50.0f);
+            Compositor cy, cn;
+            const int chY = cy.AddHeightChannel("test.hill.edit", {&floor, &hillH, &ed});
+            const int chN = cn.AddHeightChannel("test.hill.edit.plant", {&floor, &hillH, &ed0});
+            ed.Witnesses(&cy, chY);
+            auto at = [&](const Compositor& cc, int cch, double E, double N, EditsHeightSource* e, float* edW) {
+                double la = 0.0, lo = 0.0;
+                radAt(E, N, la, lo);
+                if (e && edW) { float m = 0.0f; *edW = e->Sample(la, lo, kHillG / std::cos(la), m); }
+                return double(cc.SampleHeightStack(cch, la, lo, kHillG / std::cos(la)));
+            };
+            float wIn = -1.0f, wOut = -1.0f, wW = -1.0f;
+            const double hIn = at(cy, chY, kHillE + 300.0, kHillN + 150.0, &ed, &wIn);   // the disc and the polygon
+            const double hOut = at(cy, chY, kHillE + 700.0, kHillN, &ed, &wOut);         // the polygon past the disc
+            const double hWest = at(cy, chY, kHillE - 300.0, kHillN, &ed, &wW);          // the disc, no polygon
+            const double pIn = at(cn, chN, kHillE + 300.0, kHillN + 150.0, nullptr, nullptr);
+            const double dIn = std::abs(hIn - Hill(kHillE + 300.0, kHillN + 150.0));
+            const double dWest = std::abs(hWest - Hill(kHillE - 300.0, kHillN));
+            Check(th && el && wIn == 0.0f && dIn <= tol && wOut == 1.0f && hOut == 50.0 && wW == 0.0f && dWest <= tol,
+                  "the hand edit yields to the finer witness: in the disc its weight is %.3f and the stack the hill "
+                  "(off %.4f mm); past the disc its weight is %.3f and the stack its crest (%.1f m); west of the "
+                  "polygon the hill (off %.4f mm)", wIn, dIn * 1e3, wOut, hOut, dWest * 1e3);
+            Check(th && el && pIn == 50.0,
+                  "PLANT the edit with no witnesses named: its crest over the hill, %.1f m -- the law before, kept "
+                  "for a channel that names none", pIn);
+            HeightLayerSource ly(&ed, kHeightFrame), ln(&ed0, kHeightFrame);
+            const std::string idY = ly.Identity(), idN = ln.Identity();
+            const size_t atLaw = idY.find("yields<" + hillH.Info().name);
+            Check(idY != idN && atLaw != std::string::npos,
+                  "the edit's tile identity carries its witnesses (%s)",
+                  atLaw == std::string::npos ? idY.c_str() : idY.c_str() + atLaw);
+            // Across the rim, 40 m in to 40 m out at 1 m: with the hill feathered 20 m the edit's weight is the
+            // hill's complement to the float, and the stack ramps at most 72.5 m x 1.5 / 20 a metre (the smoothstep's
+            // slope on the span from the rim's value to the crest) plus the hill's own slope; with the hard edge
+            // (feather 0) it steps the crest less the rim in one metre -- the edge the reads had, kept.
+            RasterEntry fe;
+            fe.feather = 20.0;
+            CountedH hillF;
+            const bool tf = hillF.Load(reg, hr.file, fe, &why);
+            EditsHeightSource edF;
+            const bool ef = edF.Load("out/rastertest/edit_crest.json", 50.0f);
+            Compositor cf;
+            const int chF = cf.AddHeightChannel("test.hill.edit.feather", {&floor, &hillF, &edF});
+            edF.Witnesses(&cf, chF);
+            double stepF = 0.0, stepH = 0.0, lawWorst = 0.0;
+            double prevF = at(cf, chF, kHillE + kHillR - 40.0, kHillN, nullptr, nullptr);
+            double prevH = at(cy, chY, kHillE + kHillR - 40.0, kHillN, nullptr, nullptr);
+            for (int i = 1; i <= 80; ++i) {
+                const double E = kHillE + kHillR - 40.0 + i;
+                float we = 0.0f, m = 0.0f;
+                const double hF = at(cf, chF, E, kHillN, &edF, &we);
+                double la = 0.0, lo = 0.0;
+                radAt(E, kHillN, la, lo);
+                const float wh = hillF.Sample(la, lo, kHillG / std::cos(la), m);
+                lawWorst = (std::max)(lawWorst, std::abs(double(we) - (1.0 - (std::min)(1.0, double(wh)))));
+                stepF = (std::max)(stepF, std::abs(hF - prevF));
+                prevF = hF;
+                const double hH = at(cy, chY, E, kHillN, nullptr, nullptr);
+                stepH = (std::max)(stepH, std::abs(hH - prevH));
+                prevH = hH;
+            }
+            // the ramp's span: from the hill's value at the rim (-22.5 m) to the crest, 72.5 m, times the
+            // smoothstep's steepest slope 1.5 / feather, plus the hill's own slope under it
+            const double bound = (50.0 - Hill(kHillE + kHillR, kHillN)) * 1.5 / 20.0 + 0.3;
+            Check(tf && ef && lawWorst <= 1e-6 && stepF <= bound && stepH >= 40.0,
+                  "across the rim the edit's weight is the feathered hill's complement (worst %.1e); the stack steps at "
+                  "most %.2f m a metre (bound %.2f) with the hill feathered 20 m, and %.1f m in one metre with its hard "
+                  "edge", lawWorst, stepF, bound, stepH);
+        }
+        // THE OWN LEVEL OF A GRID LAYER (2026-10-18): an equirect grid the size of ETOPO 2022 (8192 x 4096
+        // int16), a smooth swell plus a checker that flips sign every cell, so a point sample and an area
+        // mean disagree by the checker's height. Asked COLD two levels above its own mip, the tile is the
+        // fold of the fold of its sixteen own-level paints, byte for byte; the plant -- the direct paint of
+        // that level, the law before -- differs from it by the checker; and asked fine-first in a second
+        // root, the same files hold the same bytes (the order of asks no longer chooses them).
+        {
+            const int gnx = 8192, gny = 4096;
+            std::vector<int16_t> grid(size_t(gnx) * gny);
+            for (int y = 0; y < gny; ++y) {
+                for (int x = 0; x < gnx; ++x) {
+                    const double u = (x + 0.5) / gnx, v = (y + 0.5) / gny;
+                    const double swell = 1500.0 * std::sin(6.2831853 * 3.0 * u) * std::cos(3.14159265 * 2.0 * v);
+                    const double checker = ((x ^ y) & 1) ? 800.0 : -800.0;
+                    grid[size_t(y) * gnx + x] = int16_t(std::lround(swell + checker));
+                }
+            }
+            EquirectHeightSource eq("test.equirect", "equirect-grid int16 8192x4096", 489200.0, &grid, gnx, gny, 0.0);
+            HeightLayerSource eql(&eq, kHeightFrame);
+            const Lattice& L = Lattice::Cube(Lattice::kFaceDim << 17, 256, 128);
+            const std::string tg = L.Tag();
+            const int om = eq.OwnMip(L);
+            double oa = 0, ob = 0;
+            L.TexelGround(uint32_t((std::max)(om, 0)), 0.0, 0.0, oa, ob);
+            // the asked tile: face 0, two levels up, at the face's middle
+            const uint32_t up = 2;
+            const uint32_t wide = (L.faceDim >> (om + up)) / L.texW, tall = (L.faceDim >> (om + up)) / L.texH;
+            const TileRequest coarse{0, uint32_t(om + up), wide / 2, tall / 2};
+            TileTree tc(&eql, TileTree::Fmt::FloatW, nullptr, trees + "/grid_coarse_first");
+            tc.EnsureFrame(tg);
+            std::vector<uint8_t> got;
+            const TileTree::Status sc = tc.Tile(L, tg, coarse, got, nullptr);
+            // the reference: sixteen own-level paints, folded twice
+            std::vector<uint8_t> ref(262144, 0);
+            for (uint32_t qy = 0; qy < 2; ++qy) {
+                for (uint32_t qx = 0; qx < 2; ++qx) {
+                    std::vector<uint8_t> mid(262144, 0);
+                    const TileRequest m1{0, uint32_t(om + 1), coarse.x * 2 + qx, coarse.y * 2 + qy};
+                    for (uint32_t ky = 0; ky < 2; ++ky) {
+                        for (uint32_t kx = 0; kx < 2; ++kx) {
+                            const TileRequest own{0, uint32_t(om), m1.x * 2 + kx, m1.y * 2 + ky};
+                            FoldQuarterF(PaintF(eql, L, own), kx, ky, mid);
+                        }
+                    }
+                    FoldQuarterF(mid, qx, qy, ref);
+                }
+            }
+            const std::vector<uint8_t> direct = PaintF(eql, L, coarse);
+            auto worst = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+                const float* p = reinterpret_cast<const float*>(a.data());
+                const float* q = reinterpret_cast<const float*>(b.data());
+                double w = 0.0;
+                for (size_t i = 0; i + 1 < a.size() / 4; i += 2) w = (std::max)(w, double(std::abs(p[i] - q[i])));
+                return w;
+            };
+            const double dRef = got.size() == ref.size() ? worst(got, ref) : 1e9;
+            const double dDirect = got.size() == direct.size() ? worst(got, direct) : 0.0;
+            // fine-first in a second root: the own level first, then the two above
+            TileTree tf(&eql, TileTree::Fmt::FloatW, nullptr, trees + "/grid_fine_first");
+            tf.EnsureFrame(tg);
+            std::vector<uint8_t> tmp;
+            for (uint32_t ky = 0; ky < 4; ++ky)
+                for (uint32_t kx = 0; kx < 4; ++kx)
+                    tf.Tile(L, tg, TileRequest{0, uint32_t(om), coarse.x * 4 + kx, coarse.y * 4 + ky}, tmp, nullptr);
+            for (uint32_t ky = 0; ky < 2; ++ky)
+                for (uint32_t kx = 0; kx < 2; ++kx)
+                    tf.Tile(L, tg, TileRequest{0, uint32_t(om + 1), coarse.x * 2 + kx, coarse.y * 2 + ky}, tmp, nullptr);
+            tf.Tile(L, tg, coarse, tmp, nullptr);
+            size_t names3 = 0;
+            const size_t differ3 = Unequal(tc.Folder() + "\\" + tg, tf.Folder() + "\\" + tg, names3);
+            Check(om > 0 && sc == TileTree::Status::Content && got == ref && dDirect > 500.0 && differ3 == 0 && names3 >= 21,
+                  "a grid layer's own level on the pyramid is mip %d (its texel %.0f x %.0f m at the equator, the cell "
+                  "4,892 m); asked cold two levels above it the tile is the fold of its sixteen own-level paints byte for "
+                  "byte (worst %.3f m); the PLANT, the direct paint of that level, is %.0f m from it (the checker: a "
+                  "point against the mean); asked fine-first in another root, %zu files, %zu differ",
+                  om, oa, ob, dRef, dDirect, names3, differ3);
         }
         // ---- the levels: the own mip on the pyramid (a height's tile) and on the z14 page, the pass,
         // each fold byte for byte, and the same files asked coarse-first
@@ -1118,6 +1555,72 @@ bool RunRasterFileSelfTest() {
                   "byte (%d not%s%s); %d own-mip tiles, each the source's paint (%d not); asked coarse-first, "
                   "the same %zu files (%zu differ)", names[k], om, a0, b0, a1, b1, sa.tiles, sa.levels,
                   checked, unf, first.empty() ? "" : ", first ", first.c_str(), own, paintBad, names2, differ);
+            if (k == 0) {
+                // THE THIRD CLAUSE FOR A HEIGHT (2026-10-17): under the hill's crown, two and eight levels
+                // below the own level (the eighth is mip 0: a tile one own texel wide and HALF of one tall,
+                // the fractional case), the tile is the kept own tile magnified -- the file is not asked,
+                // counted -- and at the texel nearest the crown the value is the hill's within twice the
+                // bilinear's bound (one read of the file into the own tile, one between the own tile's
+                // centres), at weight one.
+                TileRequest crown{};
+                bool found = false;
+                for (const auto& t : TilesIn(dir)) {
+                    if (found || int(t.second.mip) != om || t.first.find(".bin") == std::string::npos) continue;
+                    TileBox b{};
+                    L.Box(t.second, b);
+                    if (la > b.latMin && la < b.latMax && lo > b.lonMin && lo < b.lonMax) {
+                        crown = t.second;
+                        found = true;
+                    }
+                }
+                const TransverseMercator tm = TransverseMercator::Utm(19);
+                int asks = 0, badW = 0, answered = 0;
+                double worstM = 0.0;
+                for (const uint32_t depth : {2u, 8u}) {
+                    if (!found || crown.mip < depth) break;
+                    TileRequest q = crown;   // the descendant whose box holds the crown, level by level
+                    for (uint32_t d = 0; d < depth; ++d) {
+                        TileRequest pick{q.face, q.mip - 1, q.x * 2, q.y * 2};
+                        for (uint32_t c = 0; c < 4; ++c) {
+                            const TileRequest cand{q.face, q.mip - 1, q.x * 2 + (c & 1), q.y * 2 + (c >> 1)};
+                            TileBox b{};
+                            L.Box(cand, b);
+                            if (la >= b.latMin && la <= b.latMax && lo >= b.lonMin && lo <= b.lonMax) pick = cand;
+                        }
+                        q = pick;
+                    }
+                    hill.asks = 0;
+                    std::vector<uint8_t> got;
+                    const TileTree::Status s = ta.Tile(L, tg, q, got, nullptr);
+                    asks += hill.asks.load();
+                    if (s != TileTree::Status::Content || got.size() != 262144) continue;
+                    ++answered;
+                    const float* f = reinterpret_cast<const float*>(got.data());
+                    double best = 1e30;
+                    uint32_t bi = 0;
+                    for (uint32_t py = 0; py < L.texH; ++py) {
+                        for (uint32_t px = 0; px < L.texW; ++px) {
+                            double tl = 0, tn = 0;
+                            L.Texel(q, px, py, tl, tn);
+                            const double dd = std::hypot(tl - la, (tn - lo) * std::cos(la));
+                            if (dd < best) {
+                                best = dd;
+                                bi = py * L.texW + px;
+                            }
+                        }
+                    }
+                    double tl = 0, tn = 0, E = 0, N = 0;
+                    L.Texel(q, bi % L.texW, bi / L.texW, tl, tn);
+                    tm.Forward(tl, tn, E, N);
+                    worstM = (std::max)(worstM, std::abs(double(f[bi * 2]) - Hill(E, N)));
+                    badW += f[bi * 2 + 1] == 1.0f ? 0 : 1;
+                }
+                Check(found && answered == 2 && asks == 0 && badW == 0 && worstM <= 2.0 * tol,
+                      "a height below its own level (mip %d asked at %d and %d): the own tile magnified, the file "
+                      "asked %d times, %d tiles answered; at the texel nearest the crown the hill's function within "
+                      "%.3f mm (worst %.4f mm) at weight one (%d not)", om, om - 2, om - 8, asks, answered,
+                      2.0 * tol * 1e3, worstM * 1e3, badW);
+            }
         }
         // ---- the value, declared: feet, a datum and its offset, nodata -- and a plant each
         const GeoRef good = hill.Ref();
@@ -1261,6 +1764,158 @@ bool RunRasterFileSelfTest() {
                 (void)ws;
             }
         }
+        {   // WHERE THE DATA ENDS INSIDE THE BOX (RasterFileSource::WindowEdge): a fine height of 1 m,
+            // +3 m west of its texel column 300 and nodata east of it, over a coarse height of 2 m, -2 m
+            // everywhere and wider; the fine entry's feather is 10 m. Read across the data's edge at the
+            // fine grain, the fine weight is one smoothstep of the texel's distance to the edge over the
+            // feather, and the stack's height steps by no more than the surveys' 5 m times the
+            // smoothstep's steepest texel (1.5 / 10). The plant is the law before: with feather 0 the
+            // stack steps the whole 5 m in one texel. A box of six texels across the edge, by the
+            // integral, weighs the mean of its texels' factors; a window's edge (texel 256) is not a
+            // data edge; and the identity of a height with a feather names absence.
+            constexpr uint32_t WF = 600, WC = 400;
+            const double la0 = 25.8997, lo0 = -80.1239;
+            auto make = [&](const char* file, uint32_t W, double grain, auto value) {
+                Raster r{file, 4326, 0, 0, 0, 0};
+                const double d = grain / (kA * kD2R);
+                r.sx = d / std::cos(la0 * kD2R);
+                r.sy = -d;
+                r.ox = lo0 - W / 2.0 * r.sx;
+                r.oy = la0 - W / 2.0 * r.sy;
+                std::vector<uint8_t> px(size_t(W) * W * 4);
+                for (uint32_t y = 0; y < W; ++y) {
+                    for (uint32_t x = 0; x < W; ++x) {
+                        const float v = value(x);
+                        std::memcpy(&px[(size_t(y) * W + x) * 4], &v, 4);
+                    }
+                }
+                GeoTags t = TagsOf(r, 4326);
+                t.keys[3] = 4;
+                t.keys.insert(t.keys.end(), {4096, 0, 1, 5703});
+                TiffImage im{W, W, 1, 32, px, 0};
+                im.fmt = 3;
+                WriteTiff(file, {im}, t);
+                return r;
+            };
+            const Raster fr = make("out/rastertest/seam_fine.tif", WF, 1.0, [](uint32_t x) {
+                return x < 300 ? 3.0f : std::numeric_limits<float>::quiet_NaN();
+            });
+            const Raster cr = make("out/rastertest/seam_coarse.tif", WC, 2.0, [](uint32_t) { return -2.0f; });
+            RasterFileSource coarse;
+            const bool cl = coarse.Load(reg, cr.file, none, &why);
+            auto smooth = [](double t) { t = std::clamp(t, 0.0, 1.0); return t * t * (3.0 - 2.0 * t); };
+            for (int plant = 0; plant < 2; ++plant) {
+                RasterEntry fe;
+                fe.feather = plant ? 0.0 : 10.0;
+                RasterFileSource fine;
+                const bool fl = fine.Load(reg, fr.file, fe, &why);
+                if (!cl || !fl) {
+                    Check(false, "the seam's two heights load: %s", why.c_str());
+                    break;
+                }
+                Compositor comp;
+                const int ch = comp.AddHeightChannel(plant ? "test.seam.plant" : "test.seam", {&coarse, &fine});
+                double lat = 0.0, lon = 0.0, step = 0.0, wWorst = 0.0, last = 0.0;
+                int ramp = 0;
+                for (int x = 280; x <= 320; ++x) {   // texel centres of row 150, west to east
+                    PixelLatLon(fr, x + 0.5, 150.5, lat, lon);
+                    const double g = 1.0 / std::cos(lat);
+                    float m = 0.0f;
+                    const double w = fine.Sample(lat, lon, g, m);
+                    const double want = x >= 300 ? 0.0 : plant ? 1.0 : smooth((300 - x) / 10.0);
+                    wWorst = (std::max)(wWorst, std::abs(w - want));
+                    ramp += (w > 1e-6 && w < 1.0 - 1e-6) ? 1 : 0;   // a box 1.0000001 texels wide weighs 0.9999999
+                    const double h = comp.SampleHeightStack(ch, lat, lon, g);
+                    if (x > 280) step = (std::max)(step, std::abs(h - last));
+                    last = h;
+                }
+                if (plant) {
+                    Check(step > 4.99 && ramp == 0, "PLANT the law before (feather 0): %s -- the stack steps %.2f m in one "
+                          "texel at the fine height's nodata edge", step > 4.99 ? "CAUGHT" : "NOT caught", step);
+                    continue;
+                }
+                Check(wWorst < 1e-5 && ramp == 9 && step <= 5.0 * 1.5 / 10.0 + 1e-6,
+                      "a fine height over a coarse one, feather 10 m: across the fine one's nodata edge its weight is the "
+                      "smoothstep of the texel's distance (worst %.2g off, %d texels in the ramp) and the stack steps at "
+                      "most %.3f m a texel (bound 0.75, the surveys' 5 m x 1.5 / 10)", wWorst, ramp, step);
+                // the six-texel box about texel 297, by the integral: the mean of the six factors
+                PixelLatLon(fr, 297.0, 150.5, lat, lon);
+                float m = 0.0f;
+                const double wb = fine.Sample(lat, lon, 6.0 / std::cos(lat), m);
+                double mean = 0.0;
+                for (int x = 294; x < 300; ++x) mean += smooth((300 - x) / 10.0) / 6.0;
+                PixelLatLon(fr, 255.5, 150.5, lat, lon);
+                const double wl = fine.Sample(lat, lon, 1.0 / std::cos(lat), m);
+                PixelLatLon(fr, 256.5, 150.5, lat, lon);
+                const double wr = fine.Sample(lat, lon, 1.0 / std::cos(lat), m);
+                Check(std::abs(wb - mean) < 1e-5 && m == 3.0f && wl == 1.0 && wr == 1.0 &&
+                          fine.Info().structure.find("at absence") != std::string::npos,
+                      "the box of six texels across the edge weighs the mean of their factors (%.4f against %.4f) and reads "
+                      "the data's +3 m (%.3f); the window's edge at texel 256 is no data edge (%.0f, %.0f); the identity "
+                      "names absence", wb, mean, m, wl, wr);
+            }
+            // THE TRANSFORM AGAINST BRUTE FORCE: 40 nodata texels scattered over a 1.5 m file whose rows
+            // are 2 m (a geographic file is not square on the ground), feather 8 m; at 300 texel centres
+            // the weight is the smoothstep of the least Euclidean distance in metres to any of them,
+            // taken by hand over all 40, across window edges (the file is three windows a side).
+            {
+                std::mt19937_64 rng(20261017);
+                std::uniform_int_distribution<int> ui(0, int(WF) - 1), inner(10, int(WF) - 11);   // inner: past the box's feather
+                std::uniform_int_distribution<int> off(-6, 6);   // about a hole: under the feather, and across window edges
+                std::vector<std::pair<int, int>> holes;
+                for (int i = 0; i < 40; ++i) holes.emplace_back(ui(rng), ui(rng));
+                auto hole = [&](uint32_t x, uint32_t y) {
+                    for (const auto& h : holes) if (h.first == int(x) && h.second == int(y)) return true;
+                    return false;
+                };
+                Raster sr{"out/rastertest/seam_scatter.tif", 4326, 0, 0, 0, 0};
+                const double gx = 1.5, gy = 2.0, d = gy / (kA * kD2R);
+                sr.sx = (gx / gy) * d / std::cos(la0 * kD2R);
+                sr.sy = -d;
+                sr.ox = lo0 - WF / 2.0 * sr.sx;
+                sr.oy = la0 - WF / 2.0 * sr.sy;
+                std::vector<uint8_t> px(size_t(WF) * WF * 4);
+                for (uint32_t y = 0; y < WF; ++y) {
+                    for (uint32_t x = 0; x < WF; ++x) {
+                        const float v = hole(x, y) ? std::numeric_limits<float>::quiet_NaN() : 1.0f;
+                        std::memcpy(&px[(size_t(y) * WF + x) * 4], &v, 4);
+                    }
+                }
+                GeoTags t = TagsOf(sr, 4326);
+                t.keys[3] = 4;
+                t.keys.insert(t.keys.end(), {4096, 0, 1, 5703});
+                TiffImage im{WF, WF, 1, 32, px, 0};
+                im.fmt = 3;
+                WriteTiff(sr.file, {im}, t);
+                RasterEntry se;
+                se.feather = 8.0;
+                RasterFileSource sc;
+                const bool sl = sc.Load(reg, sr.file, se, &why);
+                double worst = 0.0;
+                int under = 0;
+                for (int i = 0; i < 300 && sl; ++i) {
+                    int x = inner(rng), y = inner(rng);
+                    if (i < 200) {   // two of three about a hole, the rest anywhere
+                        const auto& h = holes[size_t(i) % holes.size()];
+                        x = std::clamp(h.first + off(rng), 10, int(WF) - 11);
+                        y = std::clamp(h.second + off(rng), 10, int(WF) - 11);
+                    }
+                    if (hole(x, y)) continue;
+                    double least = 1e9;
+                    for (const auto& h : holes) least = (std::min)(least, std::hypot((x - h.first) * gx, (y - h.second) * gy));
+                    double lat = 0.0, lon = 0.0;
+                    PixelLatLon(sr, x + 0.5, y + 0.5, lat, lon);
+                    float m = 0.0f;
+                    const double w = sc.Sample(lat, lon, 1e-4, m);
+                    worst = (std::max)(worst, std::abs(w - smooth(least / 8.0)));
+                    under += w < 1.0 ? 1 : 0;
+                }
+                Check(sl && worst < 1e-5 && under > 50,
+                      "the distance transform against brute force: 300 texels of a 1.5 x 2 m file about 40 scattered "
+                      "nodata texels, feather 8 m, past the box's own feather -- worst %.2g off the smoothstep of the least distance by hand, "
+                      "%d under the feather%s%s", worst, under, sl ? "" : " -- ", sl ? "" : why.c_str());
+            }
+        }
     }
     Sweep(trees);
 
@@ -1368,6 +2023,87 @@ bool RunRealHeightsCheck() {
         const int bad = HillMisses(comp, ch, hr, 6.2e-4, &worst);
         Log("[realheights] the hill Python wrote, through the CPU's door: %d of 36 points missed, worst %.4f mm (bound 0.62)",
             bad, worst * 1e3);
+    }
+    return true;
+}
+
+// ---- `--tool rastertest:overlap`: the scene's heights by file, each one against each one under it in
+// the stack (StackOrder: `over`, then the coarser under the finer) that it overlaps, where BOTH have a
+// value at full weight -- a grid at the coarser grain over the overlap, both read as the mean over that box. A constant difference is a datum or an epoch
+// question for the entry's `offset`; a spread is the surveys' disagreement; neither is the feather's.
+namespace {
+void Bin(const char* what, std::vector<double> d) {
+    if (d.empty()) {
+        Log("[overlap]   %s: no point", what);
+        return;
+    }
+    double mean = 0.0;
+    for (double v : d) mean += v;
+    mean /= double(d.size());
+    double var = 0.0;
+    for (double v : d) var += (v - mean) * (v - mean);
+    std::sort(d.begin(), d.end());
+    const auto q = [&](double p) { return d[size_t(p * double(d.size() - 1))]; };
+    Log("[overlap]   %s: %zu points; over - under: mean %+.3f m, median %+.3f, sd %.3f, 5th %+.3f, 95th %+.3f, "
+        "least %+.2f, most %+.2f", what, d.size(), mean, q(0.5), std::sqrt(var / double(d.size())), q(0.05),
+        q(0.95), d.front(), d.back());
+}
+}  // namespace
+
+bool RunHeightOverlapReport(const std::vector<RasterEntry>& entries) {
+    auto all = LoadRasterSources(entries);
+    std::vector<RasterFileSource*> h;
+    for (auto& s : all) if (s->Height()) h.push_back(s.get());
+    StackOrder(h);   // bottom to top: the coarser under the finer
+    if (h.size() < 2) {
+        Log("[overlap] %zu height source(s) by file: nothing to compare", h.size());
+        return h.size() == 1;
+    }
+    for (size_t i = h.size(); i-- > 1;) {
+        for (size_t j = i; j-- > 0;) {
+            RasterFileSource& a = *h[i];   // the one over
+            RasterFileSource& b = *h[j];
+            const SourceInfo& ia = a.Info();
+            const SourceInfo& ib = b.Info();
+            const double lo0 = (std::max)(ia.lon0, ib.lon0), lo1 = (std::min)(ia.lon1, ib.lon1);
+            const double la0 = (std::max)(ia.lat0, ib.lat0), la1 = (std::min)(ia.lat1, ib.lat1);
+            if (lo1 <= lo0 || la1 <= la0) continue;
+            const double c = std::cos(0.5 * (la0 + la1) * kD2R);
+            // the coarser grain, or coarser still so the grid holds at most 4 M points
+            const double kmW = (lo1 - lo0) * kD2R * kA * c, kmH = (la1 - la0) * kD2R * kA;
+            const double step = (std::max)((std::max)(a.GrainM(), b.GrainM()), std::sqrt(kmW * kmH / 4e6));
+            const double dlat = step / (kA * kD2R), dlon = dlat / c;
+            Log("[overlap] %s (%.3g m) OVER %s (%.3g m): the overlap %.2f x %.2f km, read at %.3g m",
+                ia.name.c_str(), a.GrainM(), ib.name.c_str(), b.GrainM(), kmW * 1e-3, kmH * 1e-3, step);
+            std::vector<double> all, deep, shallow, low, high, edge;
+            size_t aOnly = 0, bOnly = 0, under = 0;
+            for (double lat = la0 + 0.5 * dlat; lat < la1; lat += dlat) {
+                for (double lon = lo0 + 0.5 * dlon; lon < lo1; lon += dlon) {
+                    float ha = 0.0f, hb = 0.0f;
+                    const float wa = a.Sample(lat * kD2R, lon * kD2R, step / std::cos(lat * kD2R), ha);
+                    const float wb = b.Sample(lat * kD2R, lon * kD2R, step / std::cos(lat * kD2R), hb);
+                    if (wa > 0.0f && wb <= 0.0f) ++aOnly;
+                    if (wb > 0.0f && wa <= 0.0f) ++bOnly;
+                    if (wa <= 0.0f || wb <= 0.0f) continue;
+                    if (wa < 0.999f || wb < 0.999f) {   // the over's data edge: its value is still the data's
+                        ++under;
+                        if (wa < 0.999f && wb >= 0.999f) edge.push_back(double(ha) - double(hb));
+                        continue;
+                    }
+                    const double d = double(ha) - double(hb);
+                    all.push_back(d);
+                    (hb < -4.0f ? deep : hb < -1.0f ? shallow : hb < 1.0f ? low : high).push_back(d);
+                }
+            }
+            Log("[overlap]   %zu points the one over alone holds, %zu the one under alone, %zu both under a feather",
+                aOnly, bOnly, under);
+            Bin("both at full weight", all);
+            Bin("the one under below -4 m (the channel)", deep);
+            Bin("the one under -4 .. -1 m (shoals, the bar)", shallow);
+            Bin("the one under -1 .. +1 m (the intertidal, the beach face)", low);
+            Bin("the one under above +1 m (the beach, the dune)", high);
+            Bin("the one over under its feather (the step its data's edge would make)", edge);
+        }
     }
     return true;
 }

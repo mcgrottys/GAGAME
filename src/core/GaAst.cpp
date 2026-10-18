@@ -264,7 +264,8 @@ void RegisterKnownWaterEdges() {
     Register({"water.bank", "globe.mesh", "shading: normal/sigma2/foam", atlasN, atlasN, false,
               "m / sigma2 / 0..1 foam", "rings 1.2..38 m/texel", 1.0,
               "Globe.hlsl WaterVertexColor (one BankSampleT, analytic normal)"});
-    Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false, "m NAVD",
+    Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false,
+              "m about the live waterline (the reader adds gWavesB.w; a NULL tile is the waterline)",
               "+-4", 1.0, "GlobeMesh.hlsl BankSample"});
 
     // ---- M7u: THE CATALOG COMPLETION -- the atlas, the weather federation, the churn's
@@ -324,11 +325,11 @@ void RegisterKnownWaterEdges() {
     // M9ay: the survey is PAGES of its own tree (gis.landsea: rings swept per tile on the
     // shared addresses; r = water coverage, b = edited, a = surveyed), a third page tenant.
     Register({"compose.stack", "mask.pages", "paint survey mask", latlonW, mercPxW, true,
-              "water coverage / edited / surveyed (bytes)", "cube + z14 + z17 pages", 1.0,
-              "TileTree::Provider over gis.landsea (GisMaskSource sweep)"});
-    Register({"mask.pages", "globe.ps", "classifier + edit override", mercPxW, uvSW, false,
-              "land 0..1, edited 0..1, or no opinion", "finest page with an opinion", 1.0,
-              "Compose.hlsli CsMaskSample / ComposedLandness"});
+              "water coverage / finer height (g != r) / edited / surveyed (bytes)", "cube + z14 + z17 pages", 1.0,
+              "TileTree::Provider over gis.landsea (GisMaskSource sweep + Compositor::FinerHeightAt)"});
+    Register({"mask.pages", "globe.ps", "classifier: finest witness + edit override", mercPxW, uvSW, false,
+              "land 0..1, wet 0..1, edited 0..1, or no opinion", "finest page with an opinion", 1.0,
+              "Compose.hlsli CsMaskSample / ComposedLandnessEdit"});
     Register({"globe.ps", "frame.out", "radiance (accepting state)", worldM, worldM,
               false, "linear RGB -> tonemap", "the render", 1.0, "Renderer tonemap"});
 }
@@ -457,7 +458,7 @@ void RegisterPixelWaterEdges() {
     // the translucency's depth is measured against. (The M9bg "sanity lens only" edge stays
     // registered beside this one -- --bank-lens is still its own consumer.)
     Register({"water.bank", "globe.ps", "shading: normal/sigma2/level (--pixel-water)", atlasN,
-              atlasN, false, "m / sigma2 / m NAVD", "rings 1.2..38 m/texel", 1.0,
+              atlasN, false, "m / sigma2 / m about the live waterline (+ gWavesB.w)", "rings 1.2..38 m/texel", 1.0,
               "Globe.hlsl WaterPixelColor (one BankSampleT, analytic normal)"});
 }
 

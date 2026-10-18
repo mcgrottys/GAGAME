@@ -31,7 +31,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | wave.solver | a/k/phase-spinor planes | water.bank | mercator.px +v=S | uv01.vS +v=S | - | m / rad/m / unit spinor (RGBA8 pages, per-comp aMax kMax) | 17 planes of the wave.field page tenant (z16), mip 0 pinned | x1 | WaterBank.hlsl WavePageSample (M9bc; no flip: both vS) |
 | water.bank | disp/param/detail (sanity lens only) | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m/s / band gains (g1,dry,g0,g2) | rings 1.2..38 m/texel | x1 | Globe.hlsl BankSample cubic (Catmull-Rom) + tangent bivector |
 | water.bank | shading: normal/sigma2/foam | globe.mesh | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / 0..1 foam | rings 1.2..38 m/texel | x1 | Globe.hlsl WaterVertexColor (one BankSampleT, analytic normal) |
-| water.bank | disp+level | globe.mesh | atlas.texel +v=N | atlas.texel +v=N | - | m NAVD | +-4 | x1 | GlobeMesh.hlsl BankSample |
+| water.bank | disp+level | globe.mesh | atlas.texel +v=N | atlas.texel +v=N | - | m about the live waterline (the reader adds gWavesB.w; a NULL tile is the waterline) | +-4 | x1 | GlobeMesh.hlsl BankSample |
 | noaa.stations | harmonic fit | water.atlas | latlon.deg +v=N | latlon.deg +v=N | - | phasor re/im per constituent | sub-mm RMS (watertest) | x1 | harvest_tides.py -> StationFieldSource IDW p=2 |
 | eot20.grid | phasor grid | water.atlas | latlon.deg +v=N | latlon.deg +v=N | - | phasor re/im | |P| clamp a2>100 (Fundy) | x1 | Eot20Source (epoch-rotated arg sum P conj Q) |
 | water.atlas | tide phasors x18 (M8i) | window.field | latlon.deg +v=N | mercator.px +v=S | FLIP | phasor re/im | RG16F tiles | x1 | Compositor::WindowField paint |
@@ -46,8 +46,8 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | ocean.fft | chop deriv (pattern) | churn.kernel | patch.wrap +v=N | atlas.texel +v=N | - | jacobian foam | 0..1 | x1 | SeaChurn.hlsl (world - U dt)/patch |
 | swe.solver | uv (blocking) | churn.kernel | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | +-2.5 | x1 | SeaChurn.hlsl suv flip |
 | sea.peakdir | LOS march over the height stack (M9ba) | exposure.node | world.m +v=N | world.m +v=N | - | 0..1 exposure | 0.12..1; rebuilt on dir/level move | x1 | SeaLayer::BuildShadowMask (CPU) |
-| compose.stack | paint survey mask | mask.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | water coverage / edited / surveyed (bytes) | cube + z14 + z17 pages | x1 | TileTree::Provider over gis.landsea (GisMaskSource sweep) |
-| mask.pages | classifier + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandness |
+| compose.stack | paint survey mask | mask.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | water coverage / finer height (g != r) / edited / surveyed (bytes) | cube + z14 + z17 pages | x1 | TileTree::Provider over gis.landsea (GisMaskSource sweep + Compositor::FinerHeightAt) |
+| mask.pages | classifier: finest witness + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, wet 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandnessEdit |
 | globe.ps | radiance (accepting state) | frame.out | world.m +v=N | world.m +v=N | - | linear RGB -> tonemap | the render | x1 | Renderer tonemap |
 | color.pages | bed albedo (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | at the refracted ray's bed hit, 2 secant steps | x1 | Globe.hlsl WaterPixelColor ComposedColor(bedDir) |
 | height.pages | refracted cast (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | 2 secant steps, s clamped 0.3..140 m | x1 | Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(dirP)) |
@@ -55,7 +55,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | gfs.wind | wind10 (far sigma2, --pixel-water) | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | 0..40 | x1 | Globe.hlsl WaterPixelColor wuv; sigma2 = 0.003+0.00512 U |
 | ocean.colour | Kd490 -> Kd(RGB) transfer (--pixel-water) | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | 1/m | 0.019..6 (Kdw floor) | x1 | Globe.hlsl SampleWaterOptics (Austin-Petzold; M(490)=1) |
 | ocean.colour | chl/SPM -> deep albedo (--pixel-water) | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | albedo | 0.001..0.5 | x1 | Globe.hlsl SampleWaterOptics (Gordon two-flux, gain 2.0331) |
-| water.bank | shading: normal/sigma2/level (--pixel-water) | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m NAVD | rings 1.2..38 m/texel | x1 | Globe.hlsl WaterPixelColor (one BankSampleT, analytic normal) |
+| water.bank | shading: normal/sigma2/level (--pixel-water) | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m about the live waterline (+ gWavesB.w) | rings 1.2..38 m/texel | x1 | Globe.hlsl WaterPixelColor (one BankSampleT, analytic normal) |
 | sim.clock | unix -> apparent RA/dec/distance | solar.sun | scalar.params +v=N | solar.au +v=N | - | deg / deg / AU | dec +-23.44, 0.98329..1.01671 AU | x1 | Ephemeris.h Solar (Astronomical Almanac low-precision series, ~0.01 deg) |
 | solar.sun | sun direction (versor chain, tangent frame) | globe.ps | solar.au +v=N | world.m +v=N | - | unit vector | T,R,M,D then CsToTangent; topocentric, 8.8 arcsec of parallax | x1 | Ephemeris.h Build + SunDirFromPlanetPoint -> Renderer sunDirTangent (gSunDir) |
 | solar.sun | sun direction (per-vertex water shading) | globe.mesh | solar.au +v=N | world.m +v=N | - | unit vector | WaterVertexColor's lambert + Cox-Munk lobe | x1 | Globe.hlsl WaterVertexColor (gSunDir) |

@@ -2304,14 +2304,22 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
     // Three turns on: every tile a step kept is held at the pool slot it was held at, or the
     // step moved bytes.
     if (!m_keptCheck.empty() && m_frame >= m_keptCheckAt) {
-        uint32_t same = 0, gone = 0, moved2 = 0;
+        uint32_t same = 0, gone = 0, moved2 = 0, drift = 0;
         for (const KeptTile& k : m_keptCheck) {
             const uint32_t now = rm.HeldPool(k.tenant, k.req);
             if (now == k.pool) ++same;
             else if (now == UINT32_MAX) ++gone;
             else ++moved2;
+            // A TILE LANDS ONLY ON ITS OWN GROUND (2026-10-18): a kept tile still held must stand on the
+            // ground it was kept for; another ground here is a slot drawing bytes that are not its place's.
+            if (now != UINT32_MAX && k.gkey && rm.GroundKey(k.tenant, k.req) != k.gkey) ++drift;
         }
         m_windowKeptMoved += moved2;
+        m_windowKeptDrift += drift;
+        if (drift) {
+            Log("[eye-windows] frame %llu: %u kept tile(s) held on ANOTHER ground three turns after a step (must be 0)",
+                static_cast<unsigned long long>(m_frame), drift);
+        }
         if (rm.traceRes) {   // housekeeping: the per-step lines are --res-trace's; the run's ledger stays
             Log("[eye-windows] three turns after the step: of %zu tiles kept, %u held at the same pool "
                 "slot, %u released since (the order's own cut), %u at another slot",
@@ -2334,7 +2342,7 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
             std::vector<KeptTile> held;
             const uint32_t tW = t.Desc().fiber.texW, tH = t.Desc().fiber.texH;
             rm.ForTrackedIn(t.Id(), mv.slice, [&](const TileRequest& r, uint32_t pool) {
-                if (r.mip < 4 && pool != UINT32_MAX) held.push_back({t.Id(), r, pool});
+                if (r.mip < 4 && pool != UINT32_MAX) held.push_back({t.Id(), r, pool, rm.GroundKey(t.Id(), r)});
             });
             const uint32_t told = t.Move(mv.slice, mv.to);
             uint32_t left = 0;
@@ -4174,6 +4182,11 @@ bool FrameLoop::Frame() {
         if (waterBank) waterBank->SetTidePlane(tidePlane);
         if (waterBankB) waterBankB->SetTidePlane(tidePlane);
         if (m_A.waterBankEye) m_A.waterBankEye->SetTidePlane(tidePlane);
+        // THE WATERLINE THE BANK'S LEVEL IS MEASURED FROM: the globe's own (gWavesB.w, below), so a
+        // ring tile the bank never mapped reads as this level and not as 0 m NAVD.
+        if (waterBank) waterBank->SetWaterline(waterNavd);
+        if (waterBankB) waterBankB->SetWaterline(waterNavd);
+        if (m_A.waterBankEye) m_A.waterBankEye->SetWaterline(waterNavd);
     }
     PROF_BEGIN();
     if (swe.Ready()) {
@@ -5228,11 +5241,16 @@ int FrameLoop::Finish() {
             }
         }
         Log("[eye-windows] the run's steps: %llu (slice moves), %llu slots told, %llu held tiles left, "
-            "%llu kept at their slots, %llu kept tiles found at another pool slot three turns on",
+            "%llu kept at their slots, %llu kept tiles found at another pool slot three turns on, %llu held on "
+            "another ground (must be 0); %llu reads or aliases refused at the map for a ground that moved",
             static_cast<unsigned long long>(m_windowSteps), static_cast<unsigned long long>(m_windowTold),
             static_cast<unsigned long long>(m_windowLeft), static_cast<unsigned long long>(m_windowKept),
-            static_cast<unsigned long long>(m_windowKeptMoved));
+            static_cast<unsigned long long>(m_windowKeptMoved), static_cast<unsigned long long>(m_windowKeptDrift),
+            static_cast<unsigned long long>(resMgr.movedGroundTotal));
         if (m_A.megaTree) Log("[eye-windows] the colour tree this run:\n%s", m_A.megaTree->Stats().c_str());
+        // The height tree too (2026-10-17): its leaves' paint, fold and magnify counts are the
+        // instrument that says what a height load cost at frame time (HIERARCHY 4.20's clauses).
+        if (m_A.heightTree) Log("[height-tree] the tree this run:\n%s", m_A.heightTree->Stats().c_str());
         if (m_A.bldFieldTree) Log("[buildings] the field's tree this run:\n%s", m_A.bldFieldTree->Stats().c_str());
     }
     // THE SHUTDOWN TRAIL (core/ExitTrail.h): a flushed line before every phase from here to the
@@ -5524,9 +5542,11 @@ int FrameLoop::Finish() {
     Log("[tiletree] in memory at the end: %.1f MB (the wave field's blends between tide buckets; never on disk)",
         double(tree_detail::MemBytes()) / 1048576.0);
     // The rasters read by being files: the windows their reads decoded and the time in the decoder.
-    Log("[raster] %llu windows decoded this run, %.1f s in the decoder",
+    Log("[raster] %llu windows decoded this run, %.1f s in the decoder; %llu data edges built, %.1f s",
         static_cast<unsigned long long>(RasterFileSource::s_decodes.load()),
-        double(RasterFileSource::s_decodeUs.load()) / 1.0e6);
+        double(RasterFileSource::s_decodeUs.load()) / 1.0e6,
+        static_cast<unsigned long long>(RasterFileSource::s_edges.load()),
+        double(RasterFileSource::s_edgeUs.load()) / 1.0e6);
 
     if (S.Tool("sea-verify") && sea) tools::RunSeaVerify(opt, gpu, sea);
     if (!S.dumpW.empty()) {

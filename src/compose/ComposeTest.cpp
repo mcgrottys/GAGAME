@@ -12,10 +12,15 @@
 //       window addressing verified against closed-form lat/lon)
 //    7. reordering a stack changes its cache tag (stale tiles are unreachable)
 // ================================================================================================
+#include "compose/ColorStackSource.h"
+#include "compose/ComposeTree.h"
 #include "compose/Compositor.h"
+#include "compose/HeightStackSource.h"
 #include "compose/Projections.h"
 #include "compose/Sources.h"
+#include "compose/TileTree.h"
 #include "compose/VectorPack.h"
+#include "hal/Tenant.h"
 
 #include <fstream>
 
@@ -402,6 +407,25 @@ bool RunComposeSelfTest() {
               "edit polygon silent outside");
     }
 
+    // ---- THE IDENTITY OF WHAT A BUILT-IN LAYER PAINTS (2026-10-18): a grid layer's tile key is its
+    // bytes and its datum link, not its name alone. Two equal grids share a key; the link planted on
+    // one of them, or one cell changed, is a new key.
+    {
+        std::vector<int16_t> g1(8 * 4, 7), g2(8 * 4, 7);
+        g2[5] = 8;
+        EquirectHeightSource a("test.eq", "equirect-grid int16 8x4", 1e6, &g1, 8, 4, 0.0);
+        EquirectHeightSource b("test.eq", "equirect-grid int16 8x4", 1e6, &g1, 8, 4, 0.0);
+        EquirectHeightSource c("test.eq", "equirect-grid int16 8x4", 1e6, &g1, 8, 4, -0.092);
+        EquirectHeightSource d("test.eq", "equirect-grid int16 8x4", 1e6, &g2, 8, 4, 0.0);
+        HeightLayerSource la(&a, kHeightFrame), lb(&b, kHeightFrame), lc(&c, kHeightFrame), ld(&d, kHeightFrame);
+        Check(la.Identity() == lb.Identity() && la.Identity().find("fnv64") != std::string::npos,
+              "a grid layer's tile identity is its bytes: the same grid twice, one key");
+        Log("[composetest] the grid layer's key: %s", la.Identity().c_str());
+        Check(la.Identity() != lc.Identity(),
+              "PLANT a datum link of -0.092 m on the same grid: a new key, the old tiles not reused");
+        Check(la.Identity() != ld.Identity(), "one cell of the grid changed: a new key");
+    }
+
     // ---- the Google source's finest zoom is the scene's (streaming.googleZoom), and part of
     // what the source IS. Printed line by line; the plant is the clamp left at the old literal.
     {
@@ -451,9 +475,147 @@ bool RunComposeSelfTest() {
         }
     }
 
+    // ---- THE CAPTURE LEVEL (2026-10-17, Sources.h LevelGateSource): a synthetic ortho over a
+    // synthetic ramp, half of it above and half below the level it declares. The gate's weight steps
+    // where the ramp crosses the level and the un-declared copy's does not; at a coarse grain the
+    // step is the feather of the height's own spread, the law's one function of what the tree read;
+    // the painted tile says the same byte for byte; and the gate's identity folds the height's.
+    {
+        // The ramp as a HEIGHT TREE on the pyramid -- what the engine reads -- h = lat x 1e5 m: 1 m
+        // at lat 1e-5 rad (63.7 m north of the equator), a slope of 0.0157.
+        const Lattice pyr = hal::BlockBinding::Pyramid(128, 128);
+        const auto read = [pyr](const TileRequest& r, std::vector<uint8_t>& out) {
+            out.assign(size_t(pyr.texW) * pyr.texH * 4, 0);
+            float* f = reinterpret_cast<float*>(out.data());
+            for (uint32_t py = 0; py < pyr.texH; ++py) {
+                for (uint32_t px = 0; px < pyr.texW; ++px) {
+                    double lat = 0, lon = 0;
+                    pyr.Texel(r, px, py, lat, lon);
+                    f[py * pyr.texW + px] = static_cast<float>(lat * 1e5);
+                }
+            }
+            return 1;
+        };
+        Compositor comp6;
+        const int h6 = comp6.AddHeightChannel("selftest.capture", {&ramp});
+        comp6.BindHeightTree(h6, std::make_shared<HeightTree>(read, nullptr, pyr, 64));
+        // The ortho: one colour at weight 1 over lat 0..2e-5 rad, lon 0..2e-5 rad (127 m a side),
+        // so its southern half stands below 1 m of ground and its northern half above.
+        class Ortho : public ColorSource {
+        public:
+            Ortho() {
+                m_info = {"test.ortho", "analytic", "EPSG:4326", 50, 0.0, 0.0, 2e-5 * 180.0 / kPi,
+                          2e-5 * 180.0 / kPi};
+            }
+            const SourceInfo& Info() const override { return m_info; }
+            float Sample(double lat, double lon, double, const PaintCtx&, uint8_t rgba[4]) override {
+                if (lat < 0.0 || lat > 2e-5 || lon < 0.0 || lon > 2e-5) return 0.0f;
+                rgba[0] = 180; rgba[1] = 120; rgba[2] = 60; rgba[3] = 255;
+                return 1.0f;
+            }
+            SourceInfo m_info;
+        } ortho;
+        LevelGateSource gate;
+        gate.Load(ortho, &comp6, h6, 1.0, "1 m NAVD88 (planted)");
+        const auto keep = [](DomainSource* d) {
+            return std::shared_ptr<DomainSource>(d, [](DomainSource*) {});
+        };
+        ColorLayerSource ol(&ortho), gl(&gate);
+        const std::shared_ptr<DomainSource> on = NormalizeToSi(keep(&ol)), gn = NormalizeToSi(keep(&gl));
+        GateSource gated("test.ortho<ground", on, gn);
+        const auto weightAt = [&](const DomainSource& s, double latRad, double groundM) {
+            DomainQuery q;
+            q.lat = latRad * 180.0 / kPi;
+            q.lon = 1e-5 * 180.0 / kPi;
+            q.groundM = groundM;
+            DomainValue v;
+            return s.SampleAt(q, v) ? v.weight : 0.0f;
+        };
+        char b[320];
+        const auto say = [](bool ok, const char* line) {   // printed on a pass, FAIL on a fault
+            if (ok) Log("[composetest] %s", line);
+            else Check(false, line);
+        };
+        const float wUp = weightAt(gated, 1.5e-5, 1.0), wDown = weightAt(gated, 0.5e-5, 1.0),
+                    wAt = weightAt(gated, 1.0e-5, 1.0), uUp = weightAt(*on, 1.5e-5, 1.0),
+                    uDown = weightAt(*on, 0.5e-5, 1.0);
+        snprintf(b, sizeof b,
+                 "the gated ortho weighs %.3f at 1.5 m of ground, %.3f at 0.5 m and %.3f at the 1 m level it "
+                 "declares (a 1 m grain: a step); the un-declared copy %.3f and %.3f",
+                 wUp, wDown, wAt, uUp, uDown);
+        say(std::abs(wUp - 1.0f) < 1e-5f && wDown == 0.0f && std::abs(wAt - 0.5f) < 0.01f &&
+                std::abs(uUp - 1.0f) < 1e-5f && std::abs(uDown - 1.0f) < 1e-5f,
+            b);
+        // At a coarse grain the step is the feather of the height's own spread: 0.2 m above the level
+        // the weight is strictly between 0 and 1, and it is the law's one function of what the tree read.
+        float s = 0.0f;
+        const float hC = comp6.SampleHeight(h6, 1.2e-5, 1e-5, 100.0, &s);
+        const float wC = weightAt(gated, 1.2e-5, 100.0);
+        const float expC = float(uint8_t(LevelGateSource::Weight(hC, 1.0f, s) * 255.0f + 0.5f)) / 255.0f;
+        snprintf(b, sizeof b,
+                 "at a 100 m grain the tree reads %.3f m +- %.3f (its taps' spread) 0.2 m above the level, and "
+                 "the gate feathers by it: weight %.4f, the law's %.4f",
+                 hC, s, wC, expC);
+        say(s > 0.1f && wC > 0.0f && wC < 1.0f && std::abs(wC - expC) < 1e-5f, b);
+        // THE TILE: the gate node painted through the tree at the ortho's 1 m level (GateTile's byte
+        // law): every texel of the ortho above the level keeps its alpha of 255 and its colour, every
+        // one below is 0; the un-gated tree keeps 255 throughout.
+        {
+            const int mip = pyr.LevelOf(1.0, 1e-5, 1e-5);
+            const uint32_t dim = pyr.faceDim >> mip;
+            const double cl = std::cos(1e-5);
+            const double dir[3] = {cl * std::cos(1e-5), std::sin(1e-5), cl * std::sin(1e-5)};
+            double uv[2] = {0.0, 0.0};
+            const uint32_t face = CubeFaceOfDir(dir, uv);
+            const TileRequest r{face, uint32_t(mip), uint32_t(uv[0] * dim) / pyr.texW,
+                                uint32_t(uv[1] * dim) / pyr.texH};
+            TileTree tg(&gated, TileTree::Fmt::Rgba8, nullptr, "out\\composetest\\capture");
+            TileTree tu(on.get(), TileTree::Fmt::Rgba8, nullptr, "out\\composetest\\capture");
+            std::vector<uint8_t> g, u;
+            const bool okG = tg.Provider(pyr)(r, g, nullptr) && g.size() == 65536;
+            const bool okU = tu.Provider(pyr)(r, u, nullptr) && u.size() == 65536;
+            uint32_t n = 0, above = 0, below = 0, between = 0, bad = 0;
+            for (uint32_t py = 0; okG && okU && py < pyr.texH; ++py) {
+                for (uint32_t px = 0; px < pyr.texW; ++px) {
+                    double lat = 0, lon = 0;
+                    pyr.Texel(r, px, py, lat, lon);
+                    if (lat < 0.0 || lat > 2e-5 || lon < 0.0 || lon > 2e-5) continue;
+                    const size_t i = (size_t(py) * pyr.texW + px) * 4;
+                    const double h = lat * 1e5;
+                    ++n;
+                    if (u[i + 3] != 255) ++bad;
+                    if (h > 1.05) {
+                        g[i + 3] == 255 ? ++above : ++bad;
+                    } else if (h < 0.95) {
+                        g[i + 3] == 0 ? ++below : ++bad;
+                    } else {
+                        ++between;
+                    }
+                    if (g[i + 3] && (g[i] != 180 || g[i + 1] != 120 || g[i + 2] != 60)) ++bad;
+                }
+            }
+            snprintf(b, sizeof b,
+                     "the tile at mip %d: of %u ortho texels %u above the level keep alpha 255 and the ortho's "
+                     "colour, %u below are 0, %u within 5 cm of it, %u wrong; the un-gated tile keeps 255",
+                     mip, n, above, below, between, bad);
+            say(okG && okU && n > 1000 && above > 0 && below > 0 && bad == 0, b);
+        }
+        // THE IDENTITY folds the height stack's and the level: another bed or another level, another tree.
+        RampHeight ramp2;
+        ramp2.m_info.structure = "analytic, another survey";
+        Compositor comp7;
+        const int h7 = comp7.AddHeightChannel("selftest.capture", {&ramp2});
+        LevelGateSource g2, g3;
+        g2.Load(ortho, &comp7, h7, 1.0, "1 m NAVD88 (planted)");
+        g3.Load(ortho, &comp6, h6, 1.5, "1.5 m NAVD88 (planted)");
+        Check(gate.Info().name == "test.ortho.ground" && gate.Info().structure != g2.Info().structure &&
+                  gate.Info().structure != g3.Info().structure,
+              "the gate is named by the photo it gates, and its identity folds the height stack's and the level");
+    }
+
     if (g_ok) {
         Log("[composetest] ---- PASS: paint order, weights, alpha, cache, addressing, "
-            "projections, the Google source's zoom cap and its identity ----");
+            "projections, the Google source's zoom cap and its identity, the capture level ----");
     }
     return g_ok;
 }

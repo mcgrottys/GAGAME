@@ -108,20 +108,27 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // (PHASE A2) that hold its undisplaced point geo (above), relative to that level's eye. PHASE B2:
     // the height reads it too.
     const WalkChain wc = CsChain(geo, rec.level);
-    // The morph's second height only where the morph is on (lerp(a, b, 0) is a); the classifier's
-    // coarser height is this one where its lod is no coarser.
+    // The morph's second height only where the morph is on (lerp(a, b, 0) is a).
     const float hA = ComposedHeightChain(dir, vl CS_WC);
     const float h = (k > 0.0f) ? lerp(hA, ComposedHeightChain(dir, vlP CS_WC), k) : hA;
-    const float vlC = max(vl, -4.0f);
-    const float hC = (vlC == vl) ? hA : ComposedHeightChain(dir, vlC CS_WC);
     // Geometry obeys the same classifier the pixels use: WATER rides ~2 m BELOW the live
     // waterline (not the geoid -- at low tide the geoid stands PROUD of the real sea and
     // buries the FFT surface; this was the M6j flat-sea bug). Land keeps its height.
     // M6n: the mix is ANALOG (ComposedLandness): a half-emerged flat sits halfway between
     // the drowned plane and its true height, so streaming height data slides shorelines
     // smoothly instead of popping plateau edges (the flats speckle, geometry side).
-    float editLand;
-    const float landness = ComposedLandnessEdit(dir, pA CS_WC, hC, gWavesB.w, editLand);
+    // The classifier's height is the vertex's own, the one it is displaced by (the ~38 m read it
+    // took, a residency-stable level for the height-alone case, is gone with the pixel's): where
+    // the height is the finer witness a vertex above the level stands at its height and one below
+    // rides the water, so the drawn shore is the pixels' shore. No drawn-face override at a
+    // vertex (the pixel stage's i.dry is made from this landness).
+    // Water cannot stand above its own surface, at the vertex too (Compose.hlsli overBand): a vertex of
+    // the survey's sea whose bed stands over the waterline is land and keeps its height, graded over its
+    // own cell (rec.arc spans the meshlet's 8 cells) -- the band the pixel's dryBand is at nadir -- so
+    // the mesh and the pixels agree about the dry beach and the marsh platform, and an orbit cell's
+    // mean never stands over the survey's sea.
+    float editLand, wetV;
+    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, gWavesB.w, 0.0f, max(0.4f, rec.arc / 8.0f), editLand, wetV);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the
@@ -135,8 +142,9 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     const float dispLand = max(max(h, 0.0f), editFloor);
     // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
     // (tide + solver) plus the folded cascade displacement, one tiled resource, ring LOD.
-    // Beyond every ring (or bank off) the M6t sunk plane remains: it exists only so the
-    // SeaLayer grid can cover it, and in one-water mode that grid is retired.
+    // Beyond every ring the water stands at the frame's waterline (below); with the bank off the
+    // M6t sunk plane remains: it exists only so the SeaLayer grid can cover it, and in one-water
+    // mode that grid is retired.
     float dispWater = min(gWavesB.w - 8.0f, -8.0f);
     // M8g: the FULL displacement vector. The vertex used to take level + dy only;
     // in shallow water the ORBITAL (horizontal) displacement dominates the vertical
@@ -155,7 +163,15 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         const float2 bankXZ = fine ? BankXZ(geo) : BankXZOfDir(CsToTangent(dir));
         float bT;
         float3 dDdx, dDdz;
-        dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (bP.x + bD.y) : 0.0f;
+        // THE WATER STANDS AT THE WATERLINE WHERE THE BANK IS SILENT (2026-10-18). The bank's level
+        // plane holds the DEPARTURE from the frame's live waterline (WaterBank.hlsl), so a texel of
+        // a tile the rings left unmapped -- a NULL tile reads zero -- is the waterline, and so is a
+        // point past every ring. It used to be 0 m NAVD both ways: at a 2.35 m tide the water
+        // over a survey-water marsh sat a metre under its bed wherever the ring's land test had
+        // left the tile NULL, and at the tide where it had not -- a square of flooded marsh beside
+        // the same marsh drawn dry (Mark, 2026-10-18, the Merrimack's mouth; the mix lens showed
+        // the classifier calling all of it water).
+        dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (gWavesB.w + bP.x + bD.y) : gWavesB.w;
         // M9bm: THE FOLD GUARD.
         //
         // The lateral term was applied with nothing bounding the Jacobian it induces. Where

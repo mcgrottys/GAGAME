@@ -67,6 +67,7 @@
 #include "app/Tools.h"
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -119,6 +120,10 @@ std::vector<RasterEntry> CompositeTiers(const scene::SourceProps& s) {
         // A tier off the engine's datum carries the separation it measured (offset_m); one on it, none.
         e.hasOffset = t.Get("offset_m") != nullptr && e.datum != "NAVD88";
         e.offset = e.hasOffset ? t.Num("offset_m", 0) : 0.0;
+        // The entry's capture level is every tier's: one flight, one water.
+        e.captureLevel = s.captureLevel;
+        e.captureDatum = s.captureDatum;
+        e.hasCaptureLevel = s.hasCaptureLevel;
         out.push_back(std::move(e));
     }
     Log("[composite] %s: layer %s, %zu tiers", s.file.c_str(), layer.c_str(), out.size());
@@ -186,6 +191,37 @@ bool NavdAboveMsl(const TideModel& model, double* outM, std::string* from) {
     }
     if (got && outM) *outM = best;
     return got;
+}
+
+// THE CAPTURE LEVEL ON THE ENGINE'S FRAME (compose/Sources.h LevelGateSource): a scene source's
+// `captureLevel` metres above its `captureDatum`, resolved at the place as the tides are -- MLLW by
+// the place's link (`datumOff`: a height in MLLW + it = NAVD88, ResolveDatum below), MSL by the focus
+// station's fitted mean above MLLW (TideStation::meanMllwM), NAVD88 as it is -- and refused by name
+// for a datum the ladder does not hold (MHW is not in stations.json yet). `said`: the declaration
+// in words, for the log and the gate's identity.
+bool LevelOnFrame(const RasterEntry& e, const TideModel& model, double datumOff, double& levelM,
+                  std::string& said, std::string* why) {
+    const std::string& d = e.captureDatum;
+    double zero = 0.0;   // the datum's zero on NAVD88
+    if (d.empty() || d == "NAVD88") {
+        zero = 0.0;
+    } else if (d == "MLLW") {
+        zero = datumOff;
+    } else if (d == "MSL") {
+        if (model.Count() == 0) {
+            if (why) *why = "captureDatum MSL: no tide station to take the fitted mean from";
+            return false;
+        }
+        zero = datumOff + model.S(model.Focus()).meanMllwM;
+    } else {
+        if (why) *why = "captureDatum '" + d + "' is not on the place's ladder (NAVD88, MLLW, MSL)";
+        return false;
+    }
+    levelM = e.captureLevel + zero;
+    char b[128];
+    snprintf(b, sizeof(b), "%g m %s = %+.3f m NAVD88", e.captureLevel, d.empty() ? "NAVD88" : d.c_str(), levelM);
+    said = b;
+    return true;
 }
 
 float ResolveDatum(const TideModel& model) {
@@ -345,7 +381,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 continue;
             }
             entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
-                               s.feather, s.unit, s.datum, s.offset, s.hasOffset});
+                               s.feather, s.unit, s.datum, s.offset, s.hasOffset, s.captureLevel,
+                               s.captureDatum, s.hasCaptureLevel});
         }
         A->sceneSources = LoadRasterSources(entries);
     }
@@ -353,9 +390,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
     TileTree::SetTreeRoot(S.streaming.treeRoot);
     if (S.streaming.colorTrees || S.Tool("ingest")) {
+        // The heights' pyramid at boot too (2026-10-17): a height source's own level and its folds, on
+        // the lattice the Float root's children answer in (TileTree::KidFrame: the pyramid twice as
+        // wide a tile). Painted on demand, each coarse level the terrain or the solver asked for was
+        // an area mean of the whole file -- 655 ms a height read, cold, at the jetty with a 62 Mpx bed
+        // and a 25 Mpx lidar on the tree, against 2 ms warm; folds kept at boot make it the read of
+        // a tile. (PHASE B3 deleted the z14 height page; this is the pyramid, not a page.)
         IngestSources(A->sceneSources,
                       std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)},
-                      {surface.cubeH});   // PHASE B3: the z14 height page deleted (the pyramid is painted on demand)
+                      {hal::BlockBinding::Pyramid(256, 128), surface.cubeH});
     }
     if (S.Tool("ingest")) return nullptr;
 
@@ -529,6 +572,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             hstack.push_back(&srcEdits);
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
+        // THE HAND EDIT YIELDS TO A FINER WITNESS (Sources.cpp, EditsHeightSource::Uncovered): the
+        // channel it stands in names the witnesses; its tiles' identity folds theirs (HeightSource::Law).
+        srcEdits.Witnesses(&compositor, hgtCh);
         // THE HEIGHT TREE (M9as), built as soon as the channel stands: every CPU reader after this line --
         // the solver's bed first -- reads it through Compositor::SampleHeight (compose/HeightTree.h), and
         // the GPU's tenant below is fed from it. Before 2026-10-14 it stood after the solver's bed was
@@ -567,8 +613,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 exitCode = tools::RunFetchProbe(*compositor.HeightTreeOf(hgtCh), S.place.anchor[1], S.place.anchor[0]);
                 return nullptr;
             }
-            if (S.Tool("height-tree-probe")) {
-                exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1]);
+            if (const SceneTool* t = S.Tool("height-tree-probe")) {
+                exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1], t->args);
                 return nullptr;
             }
         }
@@ -912,6 +958,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         CbTrace() = opt.cbTrace;   // F9: the CB fingerprints print when asked for
         resMgr.pagesEvery = opt.pagesEvery;
         resMgr.auditEvery = S.capture.residencyAudit;   // the scene's (--res-audit N)
+        resMgr.poolCapTiles = (std::max)(S.streaming.poolTiles, 1024u);   // streaming.poolTiles: the reserve (384) and a few chunks at least
         resMgr.starvePlant = opt.starvePlant;           // the watchdog's plant (0 = off)
         int surf = -1, norm = -1;
         if (marsMode) {
@@ -1084,8 +1131,33 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // and hands land back to the photos above +1.2 m NAVD).
                 // The scene's `sources` join the photos, and the photos stand in their default
                 // order (StackOrder: `over`, then the coarser grain under the finer).
+                // THE CAPTURE LEVEL (compose/Sources.h LevelGateSource): a photo that declares the
+                // water level it was flown at is gated, in the tree below, by the ground above that
+                // level -- the edge the survey gates the seafloor with (GateSource): the pixel's colour
+                // is its own, only the weight is the product. The level is resolved as the tides are
+                // (LevelOnFrame); a datum the ladder does not hold refuses the photo by name, as a
+                // height off the frame is refused without its offset (HIERARCHY 4.11: declared, never
+                // guessed). The flat channel below carries no value gate (its gate is a weight,
+                // PaintColorTile), so the photo stands ungated there as it always did.
+                std::map<const ColorSource*, LevelGateSource*> levelGateOf;
                 for (const auto& s : A->sceneSources) {
-                    if (!s->Height()) colorStack.push_back(s.get());
+                    if (s->Height()) continue;
+                    const RasterEntry& e = s->Entry();
+                    if (e.hasCaptureLevel || !e.captureDatum.empty()) {
+                        double levelM = 0.0;
+                        std::string said, why;
+                        if (hgtCh < 0) why = "no height channel stands to read the ground from";
+                        if (!why.empty() || !LevelOnFrame(e, model, datumOff, levelM, said, &why)) {
+                            Log("[capture] %s REFUSED: %s -- the photo is not drawn",
+                                s->Info().name.c_str(), why.c_str());
+                            continue;
+                        }
+                        auto g = std::make_unique<LevelGateSource>();
+                        g->Load(*s, &compositor, hgtCh, levelM, said);
+                        levelGateOf[s.get()] = g.get();
+                        A->levelGates.push_back(std::move(g));
+                    }
+                    colorStack.push_back(s.get());
                 }
                 StackOrder(colorStack);
                 const std::vector<ColorSource*> photos = colorStack;   // (the stack moves below)
@@ -1121,8 +1193,18 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
                     gisMask.Load("data/gis/", S.streaming.gisLand, S.data.edits)) {
-                    srcGisMask.Refresh();   // the rings are loaded: declare the real box
+                    // A river reach is the sea's where the solver stands (GisMask.h SetTidalBox): the
+                    // carve's FCode says river, the solver's domain says tidal. Before Refresh (the box
+                    // joins the mask's fingerprint).
+                    if (swe.Ready()) {
+                        const SweDomain& td = swe.Domain();
+                        gisMask.SetTidalBox(td.lat0, td.lat1, td.lon0, td.lon1);
+                    }
                     srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
+                    // The height's witness: a height layer finer than that grain draws the water's
+                    // edge where it has a value (GisMask.h SetHeight; the shipped scenes have none).
+                    if (hgtCh >= 0) srcGisMask.SetHeight(&compositor, hgtCh);
+                    srcGisMask.Refresh();   // the rings are loaded: declare the real box and the finer layers
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
                     if (S.Tool("gis-sweep-test")) tools::RunGisSweepTest(gisMask);   // F15
                     colorStack.push_back(&srcGisMask);
@@ -1173,7 +1255,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     return std::make_shared<CompositeSource>(name, dc);
                 };
                 std::vector<std::shared_ptr<DomainSource>> landIn;
-                for (ColorSource* s : photos) landIn.push_back(leaf(s));
+                for (ColorSource* s : photos) {
+                    std::shared_ptr<DomainSource> l = leaf(s);
+                    // The capture level's gate (above): the photo's weight times the ground above it.
+                    const auto g = levelGateOf.find(s);
+                    if (g != levelGateOf.end()) {
+                        l = std::make_shared<GateSource>(s->Info().name + "<ground", l, leaf(g->second));
+                    }
+                    landIn.push_back(l);
+                }
                 std::shared_ptr<DomainSource> land = over("earth.land", landIn);
                 std::shared_ptr<DomainSource> mega;
                 std::vector<std::shared_ptr<DomainSource>> seaIn;
