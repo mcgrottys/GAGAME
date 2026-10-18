@@ -645,7 +645,14 @@ child tree; and **identity is the inputs** — a node's identity folds its child
 tile's key folds what each child holds at that address, so a composite updates when a
 source's tiles change and at no other time. A **gate** (`GateSource`) is a third kind of
 edge: the value is the layer's, only the weight is the product; *absent* (no opinion)
-and *void* (blocks) are different answers.
+and *void* (blocks) are different answers. A gate's input may be a height: **the capture
+level** (`LevelGateSource`, HIERARCHY 4.20) â€” an ortho is a picture of the ground only
+where the ground stood above the water it was flown at, so a source that declares that
+level has its weight multiplied by smoothstep((h âˆ’ level) / Ïƒ) with h the height tree's
+read at the texel's grain and Ïƒ the read's own uncertainty, half the spread of the four
+texels its bilinear stands between: a step on a flat bed, one grain times the slope on a
+slope. The gate's identity folds the height stack's; a source declaring no level is the
+law's limit, today's weight.
 
 **The water's edge is a ladder of witnesses** (2026-10-17): two sources can say whether
 a point is wet — the survey (`gis.landsea`'s rings, exact to the scene's declared survey

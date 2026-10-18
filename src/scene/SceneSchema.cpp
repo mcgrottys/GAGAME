@@ -384,7 +384,19 @@ const Schema& SourceSchema() {
             .Bind("offset", kSource.offset, Q::Length, "m",
                   "added to a height whose datum is not the engine's (NAVD88): the separation at the "
                   "place; such a file is refused without it, and a file on NAVD88 takes none", R)
-            .Optional();   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
+            .Optional()   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
+            .Bind("captureLevel", kSource.captureLevel, Q::Length, "m",
+                  "THE WATER LEVEL A PHOTO WAS FLOWN AT, metres above captureDatum (compose/Sources.h "
+                  "LevelGateSource): its pixel is a picture of the ground only where the ground stands above "
+                  "it, so under today's water the tree shows only such pixels -- the photo's weight is gated by "
+                  "the height tree (1 above, 0 below, a feather of the height's own spread between), its colour "
+                  "untouched; absent, with no captureDatum, the photo is not gated (today's weight)", R)
+            .Optional()   // absent is not 0 (SourceProps::hasCaptureLevel)
+            .Bind("captureDatum", kSource.captureDatum,
+                  "the datum captureLevel is measured from, resolved at the place as the tides are: \"\" or "
+                  "NAVD88 (the engine's frame), MLLW (sea.datum: the place's link), MSL (the focus station's "
+                  "fitted mean above MLLW); alone = 0 m on it; a datum the ladder does not hold refuses the "
+                  "photo by name", R);
         return sc;
     }();
     return *s;

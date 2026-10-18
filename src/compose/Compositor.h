@@ -227,7 +227,10 @@ public:
     // THE ONE READ OF A CHANNEL'S HEIGHT for a CPU reader (compose/HeightTree.h): the tree the GPU
     // reads when one is bound, else the stack. The stack stays what the tree itself paints from.
     void BindHeightTree(int channel, std::shared_ptr<HeightTree> tree) { m_channels[channel].heightTree = std::move(tree); }
-    float SampleHeight(int channel, double latRad, double lonRad, double groundResM) const;
+    // `halfRange`, when asked: the read's own uncertainty (HeightTree::Sample); the stack has no taps
+    // a reader can see, so without a tree it is nought.
+    float SampleHeight(int channel, double latRad, double lonRad, double groundResM,
+                       float* halfRange = nullptr) const;
     HeightTree* HeightTreeOf(int channel) const { return m_channels[channel].heightTree.get(); }
     // THE FRAME THREAD'S READ: what is held, never a paint (HeightTree::SampleResident); the stack
     // when no tree is bound. HeightLanded counts the tree's loads, so a kept answer can be asked again.

@@ -2409,6 +2409,62 @@ height stack by `over`, under the owner's hand edits.
 - **Not held:** the jetty view with and without the hill could not be compared (its root
   was still filling when the runs were taken); the island does not show above its horizon.
 
+**Imagery of water: the capture level** (2026-10-17). A photo's pixel is a picture of the
+GROUND only where the ground stood above the water when the picture was taken, and under
+today's water the tree may show only such pixels. NOAA's 2011 low-water orthomosaic of the
+Merrimack, on the tree by file (above), painted its channel black and its bars sand as the
+bed under today's water, with the photo's hard edges: the water imagery hijacking the water.
+Google's and MassGIS's water pixels do the same more quietly everywhere.
+
+The law, one continuous weight and no special case. A colour source may declare the water
+level it was flown at: `captureLevel`, metres above `captureDatum`, the datum alone 0 m on
+it; the datum is resolved at the place as the tides are (`""` or NAVD88 the engine's frame,
+MLLW by the place's link, MSL by the focus station's fitted mean), and a name the ladder does
+not hold refuses the photo by name, as a height off the frame is refused without its offset
+(4.11: declared, never guessed). Where declared, the source's weight at a texel is multiplied
+by a gate on the ground height there, read from the height tree at the texel's grain (the
+reader every CPU consumer uses, `HeightTree`): 1 above the level, 0 below, and between them
+a smoothstep across the height's own uncertainty, half the spread of the four texels the
+tree's bilinear stands between. On a flat bed that is nought and the gate is a step at the
+level; on a slope it is one grain of the level read times the slope, the shoreline's own
+uncertainty said as a height; where only a coarse level holds the point it is wide, and the
+gate says honestly that the height cannot place the shoreline. A source that declares no
+level has no gate, and keeps today's weight byte for byte.
+
+It is a gate of the kind the survey already is (`GateSource`: the value is the layer's, only
+the weight is the product; absent and void are different answers), with a height as its
+input instead of a vector: a layer of the colour channel that paints nothing
+(`LevelGateSource`, compose/Sources.h), named `<photo>.ground`, with the photo's footprint and
+the mask's encoding (an opinion at every texel inside it, the factor in r). The tree composes
+it per texel (`TileTree::GateTile`), the point path per sample. Its identity folds the height
+stack's, every height layer's name and structure, so an edited bed repaints the gated tiles
+and nothing else; the photo's own tree never moves, since only its weight changed. The flat
+channel (`PaintColorTile`) carries no value gate -- its gate is a weight -- so there the photo
+stands as it always did; the pictures are the tree's.
+
+Gated by `composetest` (a planted ortho over a planted ramp as a height tree, half above and
+half below its level: the weight steps at the crossing and the un-declared copy's does not;
+at a coarse grain the step is the feather of the taps' spread, the law's one function; the
+painted tile says the same byte for byte; another bed or another level is another identity),
+and by the mouth-view stills in the commit that brought it. What the stills said, honestly: in the
+shipped scene the mouth view does not move (the MassGIS orthos stand over the 2011 ortho by grain
+across the whole view, and a source declaring no level keeps today's weight: the sea view and the
+undeclared arm bit-identical between the two binaries). On the scene without MassGIS, where the
+2011 ortho is the top photo, the gate changed one wedge along the south jetty's harbour face (8,326
+pixels, luma 74 to 41) and nothing in the channel or on the shoal, because under surveyed water
+the bed classifier already paints over every photo (synth.bed's band in data/bed/bed_rules.json:
+full weight below +0.4 m NAVD88, off above +1.2 m, gated by the survey's water): a photo's water
+can show under today's water only where the survey's rings say land and the height tree says the
+ground is below the level -- the jetty's inner face, where the 1 m rings are coarser than the bar's
+true edge -- and that is exactly what the gate removes. The bars east of the jetties stood above
+MLLW when flown and are kept, by the law. The black channel Mark saw was the HQ bed's sign-flipped
+eHydro cells (channel at +2..+4 m NAVD88, drawn DRY with the photo as its ground), the parent's
+finding and fix; with the bed corrected the classifier owns the channel in both arms. The gate's
+reach grows with the level: an MHW set (about +1.3 m NAVD88 at the Merrimack) would lose its water
+up to a level the classifier's +1.2 m cutoff does not reach.
+
+
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:

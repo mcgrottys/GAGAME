@@ -87,6 +87,12 @@ struct RasterEntry {
     std::string unit, datum;   // a height's, read only where the file names none
     double offset = 0.0;       // metres added to a height off kHeightFrame's datum: declared, or
     bool hasOffset = false;    // such a file is refused
+    // THE CAPTURE LEVEL (Sources.h LevelGateSource): the water level a photo was flown at, metres
+    // above `captureDatum` ("" = the engine's frame), read only where written; a datum alone is 0 m
+    // on it. The Assembly resolves it at the place and gates the photo by the ground above it.
+    double captureLevel = 0.0;
+    std::string captureDatum;
+    bool hasCaptureLevel = false;
 };
 
 class RasterFileSource : public ColorSource, public HeightSource {
@@ -121,6 +127,7 @@ public:
     double Over() const { return m_over; }
     size_t Files() const { return m_files.size(); }
     bool Height() const { return m_height; }
+    const RasterEntry& Entry() const { return m_entry; }   // as the scene declared it
 
 private:
     struct File {

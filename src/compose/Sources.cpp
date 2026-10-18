@@ -823,4 +823,60 @@ float SeafloorReliefSource::Sample(double latRad, double lonRad, double groundRe
     return a;
 }
 
+// ---- THE CAPTURE LEVEL (Sources.h LevelGateSource) --------------------------------------------
+
+void LevelGateSource::Load(const ColorSource& layer, const Compositor* comp, int hgtChannel,
+                           double levelM, const std::string& said) {
+    m_comp = comp;
+    m_hgtCh = hgtChannel;
+    m_level = levelM;
+    const SourceInfo& li = layer.Info();
+    // THE IDENTITY FOLDS THE HEIGHT STACK'S: every height layer's name|structure in the channel's
+    // order -- what the height tree's own identity is made of -- so an edited bed (a new survey, a
+    // moved hand edit) repaints the gated tiles, and a bed unchanged keeps them.
+    uint64_t h = 14695981039346656037ull;
+    if (comp && hgtChannel >= 0) {
+        for (const HeightSource* hs : comp->ChannelAt(hgtChannel).height) {
+            const std::string id = hs->Info().name + "|" + hs->Info().structure + ";";
+            for (unsigned char c : id) h = (h ^ c) * 1099511628211ull;
+        }
+    }
+    char b[256];
+    snprintf(b, sizeof(b),
+             "ground above %.4f m NAVD88 (%s): 1 above, 0 below, smoothstep across the height's own "
+             "spread; height stack fnv64 %016llx",
+             levelM, said.c_str(), static_cast<unsigned long long>(h));
+    m_info = {li.name + ".ground", b, "EPSG:4326 (a product of the height tree)", li.cmPerPixel,
+              li.lon0, li.lat0, li.lon1, li.lat1};
+    Log("[capture] %s gates %s: %s", m_info.name.c_str(), li.name.c_str(), b);
+}
+
+float LevelGateSource::Weight(float h, float level, float s) {
+    // ONE LAW: the smoothstep of (h - level) over [-s, s]. s -> 0 is the step, and at the level
+    // itself a half either way -- the step's own middle, the limit from both sides.
+    const double d = static_cast<double>(h) - static_cast<double>(level);
+    const double t = s > 0.0f ? std::clamp(0.5 + 0.5 * d / static_cast<double>(s), 0.0, 1.0)
+                              : (d > 0.0 ? 1.0 : d < 0.0 ? 0.0 : 0.5);
+    return static_cast<float>(t * t * (3.0 - 2.0 * t));
+}
+
+float LevelGateSource::Sample(double latRad, double lonRad, double groundResM, const PaintCtx&,
+                              uint8_t rgba[4]) {
+    if (!m_comp || m_hgtCh < 0) return 0.0f;   // no height to read: no opinion, the layer passes
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    if (lon < m_info.lon0 || lon > m_info.lon1 || lat < m_info.lat0 || lat > m_info.lat1) {
+        return 0.0f;   // outside the layer: no opinion
+    }
+    float s = 0.0f;
+    const float h = m_comp->SampleHeight(m_hgtCh, latRad, lonRad, groundResM, &s);
+    const uint8_t v = static_cast<uint8_t>(Weight(h, static_cast<float>(m_level), s) * 255.0f + 0.5f);
+    // The mask's encoding (GisMask.cpp): the weight says an opinion exists, r carries the factor;
+    // the gate multiplies by the value (ComposeTree.h GateSource; TileTree GateTile per texel).
+    rgba[0] = v;
+    rgba[1] = v;
+    rgba[2] = v;
+    rgba[3] = 255;
+    return 1.0f;
+}
+
 }  // namespace ga
