@@ -223,7 +223,7 @@ is coverage, not a new source. Fetched the same evening: the 4 x 6 USNG grid 19T
 Island), 20 zips present of 24 asked (the rest are sea), decoded by `harvest aerial` (Magick.NET,
 lossless JP2 to RGB mip chains, a minute or two a tile) into 19 tiles, 7.1 GB under data/aerial, one
 manifest. The tree's identity followed the manifest: a sibling session's boot saw it first and paid the
-ingest, 17:58 to 18:11, **384,501 tiles on 16 levels at own mip 5** (9.4 cm a texel, 15 cm content),
+ingest, 17:58 to 18:11, **384,501 tiles on 16 levels at own mip 5, 18 GB** (9.4 cm a texel, 15 cm content),
 and this branch's `--tool ingest` found it whole. The house is now 15 cm wherever those tiles reach;
 beyond them it is Google again. The stills of 3a were retaken on the whole scene (B2 rows there).
 
