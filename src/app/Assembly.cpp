@@ -573,8 +573,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 exitCode = tools::RunFetchProbe(*compositor.HeightTreeOf(hgtCh), S.place.anchor[1], S.place.anchor[0]);
                 return nullptr;
             }
-            if (S.Tool("height-tree-probe")) {
-                exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1]);
+            if (const SceneTool* t = S.Tool("height-tree-probe")) {
+                exitCode = tools::RunHeightTreeProbe(compositor, hgtCh, S.place.anchor[0], S.place.anchor[1], t->args);
                 return nullptr;
             }
         }

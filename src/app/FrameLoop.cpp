@@ -5524,9 +5524,11 @@ int FrameLoop::Finish() {
     Log("[tiletree] in memory at the end: %.1f MB (the wave field's blends between tide buckets; never on disk)",
         double(tree_detail::MemBytes()) / 1048576.0);
     // The rasters read by being files: the windows their reads decoded and the time in the decoder.
-    Log("[raster] %llu windows decoded this run, %.1f s in the decoder",
+    Log("[raster] %llu windows decoded this run, %.1f s in the decoder; %llu data edges built, %.1f s",
         static_cast<unsigned long long>(RasterFileSource::s_decodes.load()),
-        double(RasterFileSource::s_decodeUs.load()) / 1.0e6);
+        double(RasterFileSource::s_decodeUs.load()) / 1.0e6,
+        static_cast<unsigned long long>(RasterFileSource::s_edges.load()),
+        double(RasterFileSource::s_edgeUs.load()) / 1.0e6);
 
     if (S.Tool("sea-verify") && sea) tools::RunSeaVerify(opt, gpu, sea);
     if (!S.dumpW.empty()) {

@@ -601,6 +601,22 @@ bool RunRasterFileSelfTest() {
             const float w1 = s->Sample(lat, lon, 1e-4, PaintCtx{}, k);
             Check(w0 == 0.0f && w1 == 1.0f, "%s: GDAL nodata 0 is alpha 0 -- the black cell weighs %.3f, its neighbour %.3f",
                   c.name, w0, w1);
+            // The same file with a feather of one metre (20 texels at 0.05 m): the texel beside the
+            // black cell is under the feather, one 30 texels away is not, and the identity says so.
+            RasterEntry fe;
+            fe.feather = 1.0;
+            RasterFileSource sf;
+            const bool fl = sf.Load(reg, r.file, fe, &why);
+            PixelLatLon(r, 11 * 16 + 0, 5 * 16 + 8, lat, lon);
+            const float wn = fl ? sf.Sample(lat, lon, 1e-4, PaintCtx{}, k) : -1.0f;
+            PixelLatLon(r, 11 * 16 + 14, 5 * 16 + 8, lat, lon);   // 14 texels off the cell: under the feather still
+            const float wm = fl ? sf.Sample(lat, lon, 1e-4, PaintCtx{}, k) : -1.0f;
+            PixelLatLon(r, 13 * 16 + 8, 5 * 16 + 8, lat, lon);   // 40 texels off: past it
+            const float wf = fl ? sf.Sample(lat, lon, 1e-4, PaintCtx{}, k) : -1.0f;
+            Check(fl && wn > 0.0f && wn < 0.05f && wm > wn && wm < 1.0f && wf == 1.0f &&
+                      sf.Info().structure.find("at absence") != std::string::npos,
+                  "%s with feather 1 m: a colour fades from its nodata cell too -- the texel beside it weighs %.3f, "
+                  "14 texels off %.3f, 40 off %.3f; the identity names it", c.name, wn, wm, wf);
         }
         srcs.push_back(std::move(s));
         rasters.push_back(r);
@@ -1340,6 +1356,158 @@ bool RunRasterFileSelfTest() {
                 (void)ws;
             }
         }
+        {   // WHERE THE DATA ENDS INSIDE THE BOX (RasterFileSource::WindowEdge): a fine height of 1 m,
+            // +3 m west of its texel column 300 and nodata east of it, over a coarse height of 2 m, -2 m
+            // everywhere and wider; the fine entry's feather is 10 m. Read across the data's edge at the
+            // fine grain, the fine weight is one smoothstep of the texel's distance to the edge over the
+            // feather, and the stack's height steps by no more than the surveys' 5 m times the
+            // smoothstep's steepest texel (1.5 / 10). The plant is the law before: with feather 0 the
+            // stack steps the whole 5 m in one texel. A box of six texels across the edge, by the
+            // integral, weighs the mean of its texels' factors; a window's edge (texel 256) is not a
+            // data edge; and the identity of a height with a feather names absence.
+            constexpr uint32_t WF = 600, WC = 400;
+            const double la0 = 25.8997, lo0 = -80.1239;
+            auto make = [&](const char* file, uint32_t W, double grain, auto value) {
+                Raster r{file, 4326, 0, 0, 0, 0};
+                const double d = grain / (kA * kD2R);
+                r.sx = d / std::cos(la0 * kD2R);
+                r.sy = -d;
+                r.ox = lo0 - W / 2.0 * r.sx;
+                r.oy = la0 - W / 2.0 * r.sy;
+                std::vector<uint8_t> px(size_t(W) * W * 4);
+                for (uint32_t y = 0; y < W; ++y) {
+                    for (uint32_t x = 0; x < W; ++x) {
+                        const float v = value(x);
+                        std::memcpy(&px[(size_t(y) * W + x) * 4], &v, 4);
+                    }
+                }
+                GeoTags t = TagsOf(r, 4326);
+                t.keys[3] = 4;
+                t.keys.insert(t.keys.end(), {4096, 0, 1, 5703});
+                TiffImage im{W, W, 1, 32, px, 0};
+                im.fmt = 3;
+                WriteTiff(file, {im}, t);
+                return r;
+            };
+            const Raster fr = make("out/rastertest/seam_fine.tif", WF, 1.0, [](uint32_t x) {
+                return x < 300 ? 3.0f : std::numeric_limits<float>::quiet_NaN();
+            });
+            const Raster cr = make("out/rastertest/seam_coarse.tif", WC, 2.0, [](uint32_t) { return -2.0f; });
+            RasterFileSource coarse;
+            const bool cl = coarse.Load(reg, cr.file, none, &why);
+            auto smooth = [](double t) { t = std::clamp(t, 0.0, 1.0); return t * t * (3.0 - 2.0 * t); };
+            for (int plant = 0; plant < 2; ++plant) {
+                RasterEntry fe;
+                fe.feather = plant ? 0.0 : 10.0;
+                RasterFileSource fine;
+                const bool fl = fine.Load(reg, fr.file, fe, &why);
+                if (!cl || !fl) {
+                    Check(false, "the seam's two heights load: %s", why.c_str());
+                    break;
+                }
+                Compositor comp;
+                const int ch = comp.AddHeightChannel(plant ? "test.seam.plant" : "test.seam", {&coarse, &fine});
+                double lat = 0.0, lon = 0.0, step = 0.0, wWorst = 0.0, last = 0.0;
+                int ramp = 0;
+                for (int x = 280; x <= 320; ++x) {   // texel centres of row 150, west to east
+                    PixelLatLon(fr, x + 0.5, 150.5, lat, lon);
+                    const double g = 1.0 / std::cos(lat);
+                    float m = 0.0f;
+                    const double w = fine.Sample(lat, lon, g, m);
+                    const double want = x >= 300 ? 0.0 : plant ? 1.0 : smooth((300 - x) / 10.0);
+                    wWorst = (std::max)(wWorst, std::abs(w - want));
+                    ramp += (w > 1e-6 && w < 1.0 - 1e-6) ? 1 : 0;   // a box 1.0000001 texels wide weighs 0.9999999
+                    const double h = comp.SampleHeightStack(ch, lat, lon, g);
+                    if (x > 280) step = (std::max)(step, std::abs(h - last));
+                    last = h;
+                }
+                if (plant) {
+                    Check(step > 4.99 && ramp == 0, "PLANT the law before (feather 0): %s -- the stack steps %.2f m in one "
+                          "texel at the fine height's nodata edge", step > 4.99 ? "CAUGHT" : "NOT caught", step);
+                    continue;
+                }
+                Check(wWorst < 1e-5 && ramp == 9 && step <= 5.0 * 1.5 / 10.0 + 1e-6,
+                      "a fine height over a coarse one, feather 10 m: across the fine one's nodata edge its weight is the "
+                      "smoothstep of the texel's distance (worst %.2g off, %d texels in the ramp) and the stack steps at "
+                      "most %.3f m a texel (bound 0.75, the surveys' 5 m x 1.5 / 10)", wWorst, ramp, step);
+                // the six-texel box about texel 297, by the integral: the mean of the six factors
+                PixelLatLon(fr, 297.0, 150.5, lat, lon);
+                float m = 0.0f;
+                const double wb = fine.Sample(lat, lon, 6.0 / std::cos(lat), m);
+                double mean = 0.0;
+                for (int x = 294; x < 300; ++x) mean += smooth((300 - x) / 10.0) / 6.0;
+                PixelLatLon(fr, 255.5, 150.5, lat, lon);
+                const double wl = fine.Sample(lat, lon, 1.0 / std::cos(lat), m);
+                PixelLatLon(fr, 256.5, 150.5, lat, lon);
+                const double wr = fine.Sample(lat, lon, 1.0 / std::cos(lat), m);
+                Check(std::abs(wb - mean) < 1e-5 && m == 3.0f && wl == 1.0 && wr == 1.0 &&
+                          fine.Info().structure.find("at absence") != std::string::npos,
+                      "the box of six texels across the edge weighs the mean of their factors (%.4f against %.4f) and reads "
+                      "the data's +3 m (%.3f); the window's edge at texel 256 is no data edge (%.0f, %.0f); the identity "
+                      "names absence", wb, mean, m, wl, wr);
+            }
+            // THE TRANSFORM AGAINST BRUTE FORCE: 40 nodata texels scattered over a 1.5 m file whose rows
+            // are 2 m (a geographic file is not square on the ground), feather 8 m; at 300 texel centres
+            // the weight is the smoothstep of the least Euclidean distance in metres to any of them,
+            // taken by hand over all 40, across window edges (the file is three windows a side).
+            {
+                std::mt19937_64 rng(20261017);
+                std::uniform_int_distribution<int> ui(0, int(WF) - 1), inner(10, int(WF) - 11);   // inner: past the box's feather
+                std::uniform_int_distribution<int> off(-6, 6);   // about a hole: under the feather, and across window edges
+                std::vector<std::pair<int, int>> holes;
+                for (int i = 0; i < 40; ++i) holes.emplace_back(ui(rng), ui(rng));
+                auto hole = [&](uint32_t x, uint32_t y) {
+                    for (const auto& h : holes) if (h.first == int(x) && h.second == int(y)) return true;
+                    return false;
+                };
+                Raster sr{"out/rastertest/seam_scatter.tif", 4326, 0, 0, 0, 0};
+                const double gx = 1.5, gy = 2.0, d = gy / (kA * kD2R);
+                sr.sx = (gx / gy) * d / std::cos(la0 * kD2R);
+                sr.sy = -d;
+                sr.ox = lo0 - WF / 2.0 * sr.sx;
+                sr.oy = la0 - WF / 2.0 * sr.sy;
+                std::vector<uint8_t> px(size_t(WF) * WF * 4);
+                for (uint32_t y = 0; y < WF; ++y) {
+                    for (uint32_t x = 0; x < WF; ++x) {
+                        const float v = hole(x, y) ? std::numeric_limits<float>::quiet_NaN() : 1.0f;
+                        std::memcpy(&px[(size_t(y) * WF + x) * 4], &v, 4);
+                    }
+                }
+                GeoTags t = TagsOf(sr, 4326);
+                t.keys[3] = 4;
+                t.keys.insert(t.keys.end(), {4096, 0, 1, 5703});
+                TiffImage im{WF, WF, 1, 32, px, 0};
+                im.fmt = 3;
+                WriteTiff(sr.file, {im}, t);
+                RasterEntry se;
+                se.feather = 8.0;
+                RasterFileSource sc;
+                const bool sl = sc.Load(reg, sr.file, se, &why);
+                double worst = 0.0;
+                int under = 0;
+                for (int i = 0; i < 300 && sl; ++i) {
+                    int x = inner(rng), y = inner(rng);
+                    if (i < 200) {   // two of three about a hole, the rest anywhere
+                        const auto& h = holes[size_t(i) % holes.size()];
+                        x = std::clamp(h.first + off(rng), 10, int(WF) - 11);
+                        y = std::clamp(h.second + off(rng), 10, int(WF) - 11);
+                    }
+                    if (hole(x, y)) continue;
+                    double least = 1e9;
+                    for (const auto& h : holes) least = (std::min)(least, std::hypot((x - h.first) * gx, (y - h.second) * gy));
+                    double lat = 0.0, lon = 0.0;
+                    PixelLatLon(sr, x + 0.5, y + 0.5, lat, lon);
+                    float m = 0.0f;
+                    const double w = sc.Sample(lat, lon, 1e-4, m);
+                    worst = (std::max)(worst, std::abs(w - smooth(least / 8.0)));
+                    under += w < 1.0 ? 1 : 0;
+                }
+                Check(sl && worst < 1e-5 && under > 50,
+                      "the distance transform against brute force: 300 texels of a 1.5 x 2 m file about 40 scattered "
+                      "nodata texels, feather 8 m, past the box's own feather -- worst %.2g off the smoothstep of the least distance by hand, "
+                      "%d under the feather%s%s", worst, under, sl ? "" : " -- ", sl ? "" : why.c_str());
+            }
+        }
     }
     Sweep(trees);
 
@@ -1447,6 +1615,87 @@ bool RunRealHeightsCheck() {
         const int bad = HillMisses(comp, ch, hr, 6.2e-4, &worst);
         Log("[realheights] the hill Python wrote, through the CPU's door: %d of 36 points missed, worst %.4f mm (bound 0.62)",
             bad, worst * 1e3);
+    }
+    return true;
+}
+
+// ---- `--tool rastertest:overlap`: the scene's heights by file, each one against each one under it in
+// the stack (StackOrder: `over`, then the coarser under the finer) that it overlaps, where BOTH have a
+// value at full weight -- a grid at the coarser grain over the overlap, both read as the mean over that box. A constant difference is a datum or an epoch
+// question for the entry's `offset`; a spread is the surveys' disagreement; neither is the feather's.
+namespace {
+void Bin(const char* what, std::vector<double> d) {
+    if (d.empty()) {
+        Log("[overlap]   %s: no point", what);
+        return;
+    }
+    double mean = 0.0;
+    for (double v : d) mean += v;
+    mean /= double(d.size());
+    double var = 0.0;
+    for (double v : d) var += (v - mean) * (v - mean);
+    std::sort(d.begin(), d.end());
+    const auto q = [&](double p) { return d[size_t(p * double(d.size() - 1))]; };
+    Log("[overlap]   %s: %zu points; over - under: mean %+.3f m, median %+.3f, sd %.3f, 5th %+.3f, 95th %+.3f, "
+        "least %+.2f, most %+.2f", what, d.size(), mean, q(0.5), std::sqrt(var / double(d.size())), q(0.05),
+        q(0.95), d.front(), d.back());
+}
+}  // namespace
+
+bool RunHeightOverlapReport(const std::vector<RasterEntry>& entries) {
+    auto all = LoadRasterSources(entries);
+    std::vector<RasterFileSource*> h;
+    for (auto& s : all) if (s->Height()) h.push_back(s.get());
+    StackOrder(h);   // bottom to top: the coarser under the finer
+    if (h.size() < 2) {
+        Log("[overlap] %zu height source(s) by file: nothing to compare", h.size());
+        return h.size() == 1;
+    }
+    for (size_t i = h.size(); i-- > 1;) {
+        for (size_t j = i; j-- > 0;) {
+            RasterFileSource& a = *h[i];   // the one over
+            RasterFileSource& b = *h[j];
+            const SourceInfo& ia = a.Info();
+            const SourceInfo& ib = b.Info();
+            const double lo0 = (std::max)(ia.lon0, ib.lon0), lo1 = (std::min)(ia.lon1, ib.lon1);
+            const double la0 = (std::max)(ia.lat0, ib.lat0), la1 = (std::min)(ia.lat1, ib.lat1);
+            if (lo1 <= lo0 || la1 <= la0) continue;
+            const double c = std::cos(0.5 * (la0 + la1) * kD2R);
+            // the coarser grain, or coarser still so the grid holds at most 4 M points
+            const double kmW = (lo1 - lo0) * kD2R * kA * c, kmH = (la1 - la0) * kD2R * kA;
+            const double step = (std::max)((std::max)(a.GrainM(), b.GrainM()), std::sqrt(kmW * kmH / 4e6));
+            const double dlat = step / (kA * kD2R), dlon = dlat / c;
+            Log("[overlap] %s (%.3g m) OVER %s (%.3g m): the overlap %.2f x %.2f km, read at %.3g m",
+                ia.name.c_str(), a.GrainM(), ib.name.c_str(), b.GrainM(), kmW * 1e-3, kmH * 1e-3, step);
+            std::vector<double> all, deep, shallow, low, high, edge;
+            size_t aOnly = 0, bOnly = 0, under = 0;
+            for (double lat = la0 + 0.5 * dlat; lat < la1; lat += dlat) {
+                for (double lon = lo0 + 0.5 * dlon; lon < lo1; lon += dlon) {
+                    float ha = 0.0f, hb = 0.0f;
+                    const float wa = a.Sample(lat * kD2R, lon * kD2R, step / std::cos(lat * kD2R), ha);
+                    const float wb = b.Sample(lat * kD2R, lon * kD2R, step / std::cos(lat * kD2R), hb);
+                    if (wa > 0.0f && wb <= 0.0f) ++aOnly;
+                    if (wb > 0.0f && wa <= 0.0f) ++bOnly;
+                    if (wa <= 0.0f || wb <= 0.0f) continue;
+                    if (wa < 0.999f || wb < 0.999f) {   // the over's data edge: its value is still the data's
+                        ++under;
+                        if (wa < 0.999f && wb >= 0.999f) edge.push_back(double(ha) - double(hb));
+                        continue;
+                    }
+                    const double d = double(ha) - double(hb);
+                    all.push_back(d);
+                    (hb < -4.0f ? deep : hb < -1.0f ? shallow : hb < 1.0f ? low : high).push_back(d);
+                }
+            }
+            Log("[overlap]   %zu points the one over alone holds, %zu the one under alone, %zu both under a feather",
+                aOnly, bOnly, under);
+            Bin("both at full weight", all);
+            Bin("the one under below -4 m (the channel)", deep);
+            Bin("the one under -4 .. -1 m (shoals, the bar)", shallow);
+            Bin("the one under -1 .. +1 m (the intertidal, the beach face)", low);
+            Bin("the one under above +1 m (the beach, the dune)", high);
+            Bin("the one over under its feather (the step its data's edge would make)", edge);
+        }
     }
     return true;
 }

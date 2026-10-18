@@ -63,13 +63,44 @@ Stat Measure(Compositor& comp, int ch, HeightTree& tree, const std::vector<std::
 
 }  // namespace
 
-int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anchorLatDeg) {
+int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anchorLatDeg, const std::string& args) {
+    constexpr double kD2R = 3.14159265358979 / 180.0;
+    if (args.rfind("transect=", 0) == 0) {   // THE TRANSECT: the stack and each source along a line
+        double la0 = 0, lo0 = 0, la1 = 0, lo1 = 0;
+        int n = 0;
+        if (sscanf_s(args.c_str() + 9, "%lf,%lf,%lf,%lf,%d", &la0, &lo0, &la1, &lo1, &n) != 5 || n < 2) {
+            Log("[height-tree] transect wants lat0,lon0,lat1,lon1,n");
+            return 1;
+        }
+        const Compositor::Channel& chan = comp.ChannelAt(ch);
+        const double c = std::cos(0.5 * (la0 + la1) * kD2R), R = 6378137.0;
+        const double lenM = std::hypot((lo1 - lo0) * kD2R * R * c, (la1 - la0) * kD2R * R), step = lenM / (n - 1);
+        Log("[height-tree] transect %.6f,%.6f -> %.6f,%.6f: %.0f m in %d points (%.2f m), read at %.2f m; the stack, then "
+            "each source with a weight: name w value", la0, lo0, la1, lo1, lenM, n, step, step);
+        for (int i = 0; i < n; ++i) {
+            const double f = double(i) / (n - 1), la = (la0 + (la1 - la0) * f) * kD2R, lo = (lo0 + (lo1 - lo0) * f) * kD2R;
+            const double g = step / std::cos(la);
+            std::string row;
+            char b[160];
+            snprintf(b, sizeof(b), "[height-tree] %4.0f m (%.6f, %.6f): stack %+8.3f |", f * lenM, la / kD2R, lo / kD2R,
+                     comp.SampleHeightStack(ch, la, lo, g));
+            row = b;
+            for (HeightSource* h : chan.height) {
+                float m = 0.0f;
+                const float w = h ? h->Sample(la, lo, g, m) : 0.0f;
+                if (w <= 0.0f) continue;
+                snprintf(b, sizeof(b), " %s %.3f %+.3f", h->Info().name.c_str(), w, m);
+                row += b;
+            }
+            Log("%s", row.c_str());
+        }
+        return 0;
+    }
     HeightTree* tree = comp.HeightTreeOf(ch);
     if (!tree) {
         Log("[height-tree] no tree is bound to the height channel (streaming.colorTrees is off): nothing to probe");
         return 1;
     }
-    constexpr double kD2R = 3.14159265358979 / 180.0;
     std::mt19937_64 rng(20261014);
     std::uniform_real_distribution<double> u01(0.0, 1.0);
     std::vector<std::pair<double, double>> place, sphere;

@@ -31,9 +31,23 @@
 //  refused by name): a point is read from the file that holds it, seamless inside, and the
 //  entry's `feather` (metres, 0 = a hard edge) is taken against the bounding box of the whole.
 //
+//  WHERE THE DATA ENDS INSIDE THE BOX (2026-10-17). A source ends at its box, and it ends again at
+//  every texel it lacks: a height's nodata, a colour's alpha 0, ground inside the box that no file
+//  of the set holds (a tile the folder is missing). The weight fades over the entry's feather from
+//  both, by one smoothstep of the same metres: at the box, of the sample point's distance to the
+//  box's edge (Feathered, as before); inside, of each texel's distance to the nearest absent texel
+//  (Edge: one exact Euclidean distance transform a window, the neighbouring windows' and files'
+//  texels within the feather in reach, kept beside the window). A texel's weight is that factor
+//  times its coverage, and a box read is the mean weighted by it -- the summed-area table carries
+//  the factor, so a box of any size reads the same law. Its limits: feather 0 is the hard edge the
+//  reads had; a file that lacks no texel is byte for byte what it was. Before it, the lidar's
+//  bare earth (nodata where the laser saw no bottom) stood as a wall over the survey beneath at
+//  every hole's edge, one texel from full weight to none.
+//
 //  ITS IDENTITY is the loaders' Structure(): FNV-1a 64 of every byte of each file and its
-//  sidecars (core/ImageLoader.cpp), and the feather. A file replaced by one of the same size is a
-//  new tree.
+//  sidecars (core/ImageLoader.cpp), and the feather -- named as reaching absence only where a
+//  file can be absent (FieldLoader::MayBeAbsent, or files that do not tile the box), so a set the
+//  law cannot touch keeps its tree. A file replaced by one of the same size is a new tree.
 //
 //  A HEIGHT (slice 3) is the same class and every line above: a file of one channel is a
 //  HeightSource of the height stack, its window's four bytes a texel a float, NaN where the file
@@ -78,8 +92,9 @@ struct RasterEntry {
 class RasterFileSource : public ColorSource, public HeightSource {
 public:
     // THE INSTRUMENT: windows decoded from files (cache misses) and the time in the decoder, every
-    // source summed -- a reader that is slow somewhere cold reads these before and after.
-    static std::atomic<uint64_t> s_decodes, s_decodeUs;
+    // source summed -- a reader that is slow somewhere cold reads these before and after; and the
+    // data edges built (WindowEdge) with their time, the same way.
+    static std::atomic<uint64_t> s_decodes, s_decodeUs, s_edges, s_edgeUs;
 
 public:
     RasterFileSource();
@@ -141,6 +156,24 @@ private:
         uint8_t nan[256];
     };
     std::shared_ptr<const Blocks> WindowBlocks(size_t file, uint32_t wx, uint32_t wy);
+    // THE EDGE OF THE DATA, a window's texels' feather factors 0..1 from the metres to the nearest
+    // absent texel (header). Empty where none lies within the feather: every factor 1, nothing read.
+    struct Edge {
+        std::vector<float> f;   // kWin^2, row-major; empty = all one
+    };
+    std::shared_ptr<const Edge> WindowEdge(size_t file, uint32_t wx, uint32_t wy);
+    float EdgeAt(size_t file, int x, int y);
+    // The windows one edge build reads, each fetched once (Window) and held for the build: the seed
+    // asks 100k+ texels, and the per-texel path (Texel's four recent windows, then the LRU behind the
+    // mutex) thrashed across fifteen threads -- measured 2026-10-17 as an ingest that finished no tile
+    // in half an hour.
+    struct WinCache {
+        std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>> held;
+        uint64_t lastKey = ~0ull;
+        const std::vector<uint8_t>* last = nullptr;
+    };
+    bool Absent(size_t file, int x, int y, WinCache& wc);   // the texel, or the ground under it in another file
+    bool Tiled() const;                       // the files cover the set's box
     void BoxIntegral(size_t file, double u0, double u1, double v0, double v1, double& value, double& have);
     float Feathered(double x, double y) const;
 
@@ -151,6 +184,7 @@ private:
     double m_mx = 1, m_my = 1;                           // metres per CRS unit at the centre
     double m_gx = 0, m_gy = 0, m_grainM = 0.0, m_over = 0.0, m_feather = 0.0;
     bool m_height = false;
+    bool m_absence = false;   // a texel inside the box can be absent: the feather reaches it (Edge)
     double m_vScale = 1.0, m_vOffset = 0.0;   // a height: metres = the file's number x scale + offset
     std::string m_valued;                     // ...and in words, for the identity
     RasterEntry m_entry;
@@ -165,6 +199,8 @@ private:
     std::unordered_map<uint64_t, decltype(m_satLru)::iterator> m_satIndex;
     std::list<std::pair<uint64_t, std::shared_ptr<const Blocks>>> m_blkLru;   // under m_cacheMx
     std::unordered_map<uint64_t, decltype(m_blkLru)::iterator> m_blkIndex;
+    std::list<std::pair<uint64_t, std::shared_ptr<const Edge>>> m_edgeLru;   // under m_cacheMx
+    std::unordered_map<uint64_t, decltype(m_edgeLru)::iterator> m_edgeIndex;
 };
 
 // Every entry, opened: one source each. A refused entry is logged by name with its reason, and
@@ -210,8 +246,10 @@ void IngestSources(const std::vector<std::unique_ptr<RasterFileSource>>& sources
                    const std::vector<Lattice>& colour, const std::vector<Lattice>& height);
 
 // --selftest's block (compose/RasterFileTest.cpp); `--tool rastertest:real`, the real files of
-// slice 3's part C against the harvester's grids, on the CPU.
+// slice 3's part C against the harvester's grids, on the CPU; `--tool rastertest:overlap`, the
+// scene's heights by file against each other where both have data (bias and spread, by depth).
 bool RunRasterFileSelfTest();
 bool RunRealHeightsCheck();
+bool RunHeightOverlapReport(const std::vector<RasterEntry>& entries);
 
 }  // namespace ga

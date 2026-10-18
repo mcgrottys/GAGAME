@@ -86,7 +86,10 @@ int RunSelfTest(const Options& opt);
 
 // --water-map / --bathy-map: the reprojection proof (Lambert conformal sheet); exit 0.
 // --tool height-tree-probe: the CPU's read of the height tree against the stack (compose/HeightTree.h).
-int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anchorLatDeg);
+// With args "transect=lat0,lon0,lat1,lon1,n" (degrees): no statistics -- the stack's height and every
+// source's weight and value at n points along the line, so a step in the picture can be read off to the
+// source that makes it.
+int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anchorLatDeg, const std::string& args = "");
 // --tool paint-ab: a colour source's tile-at-a-time paint against its texel-by-texel one, byte for byte.
 int RunPaintAB(ColorSource& src, double anchorLatDeg, double anchorLonDeg);
 // --tool fetch-probe: the fetch on the height tree (HeightTree::Fetch) against a brute march.
