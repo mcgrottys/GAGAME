@@ -11,10 +11,12 @@
 //  A SOURCE PAINTS ITS OWN LEVEL, AND THE TREE MAKES THE OTHERS (HIERARCHY 4.20). On a lattice its
 //  own mip (OwnMip) is the coarsest whose texel on the ground, measured at the source's centre with
 //  the lattice's own texel (Lattice::TexelGround), is no coarser than its grain on either axis;
-//  0 where even mip 0 is coarser. The tree folds every level above that and keeps the folds
-//  (TileTree::LeafTile). So the source is asked only at its own grain or finer, and it keeps no
-//  levels: it reads its files by the WINDOW, 256 x 256 texels decoded once and kept while used
-//  (a few hundred, least recently used), and holds no copy of a file.
+//  0 where even mip 0 is coarser. The tree folds every level above that and keeps the folds, and
+//  below it magnifies the kept own-level tile (TileTree::LeafTile, MagnifyOwn). So the source is
+//  asked at its own level only -- by the boot's pass, or once at the first ask of an own tile --
+//  and never at frame time for a tile under it; it keeps no levels: it reads its files by the
+//  WINDOW, 256 x 256 texels decoded once and kept while used (least recently used), and holds no
+//  copy of a file.
 //
 //  WHAT IT ANSWERS. The exchange frame (WGS84 lat/lon) resolved EXACTLY into the files' CRS
 //  (Projections.h), then a file's affine: no row is flipped by hand, the sign of the scale is the

@@ -17,8 +17,10 @@
 #include "sim/GlobeModel.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <cstdarg>
 #include <cstdio>
@@ -437,6 +439,23 @@ class Shifted : public RasterFileSource {
 public:
     int OwnMip(const Lattice& l) const override { return RasterFileSource::OwnMip(l) + 1; }
 };
+// The file's reads, counted (4.20's third clause: below its own level a source is not asked).
+class Counted : public RasterFileSource {
+public:
+    std::atomic<int> asks{0};
+    float Sample(double la, double lo, double g, const PaintCtx& c, uint8_t rgba[4]) override {
+        ++asks;
+        return RasterFileSource::Sample(la, lo, g, c, rgba);
+    }
+};
+class CountedH : public RasterFileSource {
+public:
+    std::atomic<int> asks{0};
+    float Sample(double la, double lo, double g, float& m) override {
+        ++asks;
+        return RasterFileSource::Sample(la, lo, g, m);
+    }
+};
 
 // ---- A HEIGHT (slice 3): out\s3\make_hill.py's hill, written again here, uncompressed:
 //     v = -25 + 40 2^-(r / 300 m)^2  metres NAVD88,  r <= 600 m about UTM 19N (354636, 4742174),
@@ -522,6 +541,51 @@ std::vector<uint8_t> PaintF(const DomainSource& node, const Lattice& L, const Ti
             if (!node.SampleAt(q, v) || v.weight <= 0.0f) continue;
             d[(size_t(py) * L.texW + px) * 2] = v.c[0];
             d[(size_t(py) * L.texW + px) * 2 + 1] = (std::min)(1.0f, v.weight);
+        }
+    }
+    return out;
+}
+// THE THIRD CLAUSE, said again by another route (TileTree::MagnifyOwn's law for colour): the own-level
+// ancestor and its eight neighbours laid out as one 3 x 3 mosaic -- a void or absent one all zero --
+// and the child's texel centres read off it by the plain bilinear, coverage and coverage-weighted
+// colour apart and then divided, to the nearest byte. A neighbour past the face is left zero here
+// (the engine clamps there; no tile of this test lies at a face's edge).
+std::vector<uint8_t> MagnifyRef(const std::function<std::vector<uint8_t>(const TileRequest&)>& tile,
+                                const Lattice& L, const TileRequest& child, uint32_t own, uint32_t tilesX,
+                                uint32_t tilesY) {
+    const uint32_t W = L.texW, H = L.texH, k = own - child.mip;
+    const TileRequest a{child.face, own, child.x >> k, child.y >> k};
+    std::vector<uint8_t> mosaic(size_t(3 * W) * (3 * H) * 4, 0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const long long tx = static_cast<long long>(a.x) + dx, ty = static_cast<long long>(a.y) + dy;
+            if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) continue;
+            const std::vector<uint8_t> b = tile({a.face, own, uint32_t(tx), uint32_t(ty)});
+            if (b.size() != size_t(W) * H * 4) continue;
+            for (uint32_t y = 0; y < H; ++y) {
+                std::memcpy(&mosaic[((size_t(dy + 1) * H + y) * 3 * W + size_t(dx + 1) * W) * 4], &b[size_t(y) * W * 4], size_t(W) * 4);
+            }
+        }
+    }
+    const double S = double(1ull << k);
+    const uint64_t mask = (1ull << k) - 1ull;
+    std::vector<uint8_t> out(size_t(W) * H * 4, 0);
+    for (uint32_t cy = 0; cy < H; ++cy) {
+        const double v = (double(child.y & mask) * H + cy + 0.5) / S - 0.5 + H;
+        for (uint32_t cx = 0; cx < W; ++cx) {
+            const double u = (double(child.x & mask) * W + cx + 0.5) / S - 0.5 + W;
+            const int u0 = int(std::floor(u)), v0 = int(std::floor(v));
+            const double fx = u - u0, fy = v - v0;
+            double c[3] = {0, 0, 0}, cov = 0.0;
+            for (int q = 0; q < 4; ++q) {
+                const double w = ((q & 1) ? fx : 1.0 - fx) * ((q & 2) ? fy : 1.0 - fy);
+                const uint8_t* s = &mosaic[(size_t(v0 + (q >> 1)) * 3 * W + size_t(u0 + (q & 1))) * 4];
+                for (int ch = 0; ch < 3; ++ch) c[ch] += w * s[3] * s[ch];
+                cov += w * s[3];
+            }
+            uint8_t* d = &out[(size_t(cy) * W + cx) * 4];
+            for (int ch = 0; ch < 3 && cov > 0.0; ++ch) d[ch] = static_cast<uint8_t>((std::min)(255.0, c[ch] / cov + 0.5));
+            d[3] = static_cast<uint8_t>((std::min)(255.0, cov + 0.5));
         }
     }
     return out;
@@ -1055,6 +1119,114 @@ bool RunRasterFileSelfTest() {
             Check(!me && be == 65536, "PLANT the raster declared with every level: its child at mip %d is "
                   "answered with %zu bytes of its own where it is the parent magnified: %s", om - 1, be,
                   !me ? "CAUGHT" : "NOT caught");
+            // 6. THE CLAUSE MADE LITERAL (2026-10-17): asked BELOW its own level -- as a composite asks
+            // a leaf under the edge of a finer source -- the tile is the kept own-level tile magnified,
+            // taps across the ancestor's edge read from the neighbouring ancestor, and the file is not
+            // opened for it: the source's Sample calls are counted. The own tile with a neighbour of
+            // content on its west is the one asked under, at its west edge, two levels down.
+            {
+                Counted cnt;
+                cnt.Load(reg, ar.file, none, &why);
+                ColorLayerSource cl(&cnt);
+                TileTree tx(&cl, TileTree::Fmt::Rgba8, nullptr, trees + "/below");
+                Ingest(tx, pyr);
+                const int asksPass = cnt.asks.exchange(0);
+                const std::string dir = dirOf(tx);
+                auto tileOf = [&](const TileRequest& q) { return Bytes(dir + "\\" + TileName(q) + ".bin"); };
+                // The tile asked under: at the west edge of an own tile whose west neighbour also stands,
+                // two levels down, where both cover -- found by the reference itself: the first such tile
+                // whose magnification is covered on half its texels and MOVES when the neighbour is taken
+                // as void (what a clamp at the ancestor's edge would answer: the plant).
+                const uint32_t tilesX = (std::max)(1u, (pyr.faceDim >> uint32_t(om)) / pyr.texW);
+                const uint32_t tilesY = (std::max)(1u, (pyr.faceDim >> uint32_t(om)) / pyr.texH);
+                TileRequest east{}, under{};
+                std::vector<uint8_t> ref, clamped;
+                bool pair = false;
+                for (const auto& t : TilesIn(dir)) {
+                    if (pair || int(t.second.mip) != om || t.first.find(".bin") == std::string::npos || t.second.x == 0) continue;
+                    const TileRequest w{t.second.face, t.second.mip, t.second.x - 1, t.second.y};
+                    if (tileOf(w).size() != 65536) continue;
+                    for (uint32_t sy = 0; sy < 4 && !pair; ++sy) {
+                        const TileRequest u{t.second.face, t.second.mip - 2, t.second.x * 4, t.second.y * 4 + sy};
+                        const std::vector<uint8_t> r1 = MagnifyRef(tileOf, pyr, u, uint32_t(om), tilesX, tilesY);
+                        const std::vector<uint8_t> r2 = MagnifyRef(
+                            [&](const TileRequest& q) { return q.x == w.x && q.y == w.y ? std::vector<uint8_t>() : tileOf(q); },
+                            pyr, u, uint32_t(om), tilesX, tilesY);
+                        size_t covered = 0;
+                        for (size_t i = 3; i < r1.size(); i += 4) covered += r1[i] == 255 ? 1 : 0;
+                        if (covered >= 8192 && r1 != r2) {
+                            east = t.second;
+                            under = u;
+                            ref = r1;
+                            clamped = r2;
+                            pair = true;
+                        }
+                    }
+                }
+                const size_t before = TilesIn(dir).size();
+                std::vector<uint8_t> got, atOwn;
+                const TileTree::Status sg = pair ? tx.Tile(pyr, tag, under, got, nullptr) : TileTree::Status::Void;
+                const TileTree::Status so = pair ? tx.Tile(pyr, tag, east, atOwn, nullptr) : TileTree::Status::Void;
+                const int asksBelow = cnt.asks.exchange(0);
+                const size_t after = TilesIn(dir).size();
+                size_t off = 0, offClamped = 0;
+                int maxOff = 0;
+                for (size_t i = 0; i < got.size() && i < ref.size(); ++i) {
+                    const int d = std::abs(int(got[i]) - int(ref[i]));
+                    off += d ? 1 : 0;
+                    maxOff = (std::max)(maxOff, d);
+                    offClamped += got[i] != clamped[i] ? 1 : 0;
+                }
+                Check(pair && sg == TileTree::Status::Content && got.size() == 65536 && asksPass > 0 && asksBelow == 0 &&
+                          maxOff <= 1 && offClamped > 0 && so == TileTree::Status::Content && atOwn == tileOf(east) &&
+                          after == before,
+                      "below its own level (mip %d asked at %d) the tile is the own tile magnified: the file was asked "
+                      "%d times by the pass and %d times by the ask; %zu of 65536 bytes off the mosaic reference "
+                      "(at most %d); a clamp at the ancestor's edge would differ on %zu bytes (PLANT %s); at the own "
+                      "level the tile is itself; nothing kept for it (%zu files before, %zu after)",
+                      om, om - 2, asksPass, asksBelow, off, maxOff, offClamped, offClamped ? "CAUGHT" : "NOT caught",
+                      before, after);
+                // WHAT MOVED, measured: today's paint of the same tile from the file (its bilinear between
+                // ITS texels) against the magnified own tile, over texels both cover -- the blur the law
+                // names, on this 4-texel checker (its worst case: every edge is a step).
+                {
+                    TileBox ub{};
+                    pyr.Box(under, ub);
+                    std::vector<uint8_t> today;
+                    bool complete = true, any = false, full = false;
+                    Compositor::PaintSourceTile(&cnt, pyr, under, ub, today, complete, any, full);
+                    int maxD = 0;
+                    double sumD = 0.0;
+                    size_t n = 0;
+                    for (size_t i = 0; i + 3 < today.size() && i + 3 < got.size(); i += 4) {
+                        if (!today[i + 3] || !got[i + 3]) continue;
+                        for (int c = 0; c < 3; ++c) {
+                            const int d = std::abs(int(today[i + c]) - int(got[i + c]));
+                            maxD = (std::max)(maxD, d);
+                            sumD += d;
+                        }
+                        ++n;
+                    }
+                    Log("[rastertest]      measured: today's paint from the file against the own tile magnified, mip %d "
+                        "under mip %d, %zu texels both cover: max |d| %d/255, mean %.2f/255 (the 4-texel checker's steps)",
+                        om - 2, om, n, maxD, n ? sumD / (3.0 * n) : 0.0);
+                }
+                // A composite above it knows its key without bytes of its own (Peek answers from the
+                // ancestor): asked twice, composed once, the same bytes.
+                auto dk = std::make_shared<DomainCompositor>();
+                dk->SetBlend(DomainCompositor::Blend::LayeredOver);
+                dk->Add(NormalizeToSi(keep(&cl)));     // the stage the stack's colour leaves wear (IngestSources)
+                dk->Add(NormalizeToSi(keep(&vecL)));
+                CompositeSource over("test.over", dk);
+                TileTree tk(&over, TileTree::Fmt::Rgba8, nullptr, trees + "/below_compose");
+                tk.EnsureFrame(tag);
+                std::vector<uint8_t> c1, c2;
+                tk.Tile(pyr, tag, under, c1, nullptr);
+                tk.Tile(pyr, tag, under, c2, nullptr);
+                Check(tk.composed.load() == 1 && tk.hits.load() >= 1 && c1.size() == 65536 && c1 == c2,
+                      "a composite over the magnified leaf: asked twice, composed %u time(s), served %u, the same "
+                      "%zu bytes -- its key is known from the ancestor's entry", tk.composed.load(), tk.hits.load(), c1.size());
+            }
         }
     }
 
@@ -1152,7 +1324,7 @@ bool RunRasterFileSelfTest() {
         Floor floor;
         Compositor comp;
         const Raster hr = WriteHill("out/rastertest/hill.tif", 1.0, 0.0, 5703);
-        RasterFileSource hill;
+        CountedH hill;
         why.clear();
         const bool took = hill.Load(reg, hr.file, none, &why);
         double worst = 0.0;
@@ -1213,6 +1385,72 @@ bool RunRasterFileSelfTest() {
                   "byte (%d not%s%s); %d own-mip tiles, each the source's paint (%d not); asked coarse-first, "
                   "the same %zu files (%zu differ)", names[k], om, a0, b0, a1, b1, sa.tiles, sa.levels,
                   checked, unf, first.empty() ? "" : ", first ", first.c_str(), own, paintBad, names2, differ);
+            if (k == 0) {
+                // THE THIRD CLAUSE FOR A HEIGHT (2026-10-17): under the hill's crown, two and eight levels
+                // below the own level (the eighth is mip 0: a tile one own texel wide and HALF of one tall,
+                // the fractional case), the tile is the kept own tile magnified -- the file is not asked,
+                // counted -- and at the texel nearest the crown the value is the hill's within twice the
+                // bilinear's bound (one read of the file into the own tile, one between the own tile's
+                // centres), at weight one.
+                TileRequest crown{};
+                bool found = false;
+                for (const auto& t : TilesIn(dir)) {
+                    if (found || int(t.second.mip) != om || t.first.find(".bin") == std::string::npos) continue;
+                    TileBox b{};
+                    L.Box(t.second, b);
+                    if (la > b.latMin && la < b.latMax && lo > b.lonMin && lo < b.lonMax) {
+                        crown = t.second;
+                        found = true;
+                    }
+                }
+                const TransverseMercator tm = TransverseMercator::Utm(19);
+                int asks = 0, badW = 0, answered = 0;
+                double worstM = 0.0;
+                for (const uint32_t depth : {2u, 8u}) {
+                    if (!found || crown.mip < depth) break;
+                    TileRequest q = crown;   // the descendant whose box holds the crown, level by level
+                    for (uint32_t d = 0; d < depth; ++d) {
+                        TileRequest pick{q.face, q.mip - 1, q.x * 2, q.y * 2};
+                        for (uint32_t c = 0; c < 4; ++c) {
+                            const TileRequest cand{q.face, q.mip - 1, q.x * 2 + (c & 1), q.y * 2 + (c >> 1)};
+                            TileBox b{};
+                            L.Box(cand, b);
+                            if (la >= b.latMin && la <= b.latMax && lo >= b.lonMin && lo <= b.lonMax) pick = cand;
+                        }
+                        q = pick;
+                    }
+                    hill.asks = 0;
+                    std::vector<uint8_t> got;
+                    const TileTree::Status s = ta.Tile(L, tg, q, got, nullptr);
+                    asks += hill.asks.load();
+                    if (s != TileTree::Status::Content || got.size() != 262144) continue;
+                    ++answered;
+                    const float* f = reinterpret_cast<const float*>(got.data());
+                    double best = 1e30;
+                    uint32_t bi = 0;
+                    for (uint32_t py = 0; py < L.texH; ++py) {
+                        for (uint32_t px = 0; px < L.texW; ++px) {
+                            double tl = 0, tn = 0;
+                            L.Texel(q, px, py, tl, tn);
+                            const double dd = std::hypot(tl - la, (tn - lo) * std::cos(la));
+                            if (dd < best) {
+                                best = dd;
+                                bi = py * L.texW + px;
+                            }
+                        }
+                    }
+                    double tl = 0, tn = 0, E = 0, N = 0;
+                    L.Texel(q, bi % L.texW, bi / L.texW, tl, tn);
+                    tm.Forward(tl, tn, E, N);
+                    worstM = (std::max)(worstM, std::abs(double(f[bi * 2]) - Hill(E, N)));
+                    badW += f[bi * 2 + 1] == 1.0f ? 0 : 1;
+                }
+                Check(found && answered == 2 && asks == 0 && badW == 0 && worstM <= 2.0 * tol,
+                      "a height below its own level (mip %d asked at %d and %d): the own tile magnified, the file "
+                      "asked %d times, %d tiles answered; at the texel nearest the crown the hill's function within "
+                      "%.3f mm (worst %.4f mm) at weight one (%d not)", om, om - 2, om - 8, asks, answered,
+                      2.0 * tol * 1e3, worstM * 1e3, badW);
+            }
         }
         // ---- the value, declared: feet, a datum and its offset, nodata -- and a plant each
         const GeoRef good = hill.Ref();
