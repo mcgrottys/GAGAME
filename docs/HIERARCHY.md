@@ -2209,7 +2209,29 @@ texel is byte for byte what it was. The identity names the feather as reaching a
 where a file can be absent (the loader says: a nodata value or an alpha band; or the files
 do not tile their box), so a set the law cannot touch keeps its tree. A constant difference
 between two surveys where both have data is not the feather's to hide: `--tool
-rastertest:overlap` prints it, by the coarser survey's depth.
+rastertest:overlap` prints it, by the under survey's depth.
+
+Measured (2026-10-17 evening, commits 0c9cd4b..8cf42a8 on f68c786). The planted seam (a 1 m
+height +3 m with nodata east of column 300 over a 2 m height of -2 m, feather 10 m): the fine
+weight is the smoothstep of the texel's distance to within 3e-8, the stack steps at most
+0.740 m a texel (the bound 0.75 = 5 m x 1.5 / 10), the plant with feather 0 steps 5.00 m in one
+texel; the transform against brute force over 40 scattered nodata texels in a 1.5 x 2 m file,
+worst 3e-8. The corrected 1.5 m composite (inlethq_navd88_2026-10-17, `over` 1) against the 1 m
+lidar where both have data, 1,371,290 points at 2.57 m: median +0.08 m, sd 0.71; the channel
+median +0.08, sd 0.38; at the composite's own data edge median +0.03, 5th -2.4, 95th +1.2 -- no
+datum bias, the entry's `offset` stays 0. The stills (frozen clock, --settle-exact, one take
+each side, the parent's head f68c786 as before): the hq mouth, bar and sea views change only at
+the jetties (the lidar's holes beside the rocks; 1,528 / 3,472 / 7,546 px); the shipped
+merrimack.json sea view changes at one patch, the north jetty's crest (7,293 px), because the
+massgis set lists 19 of its box's 24 tiles and its data ends along easting 352,500, which
+crosses that crest -- the ortho now fades over its 25 m there where it stopped dead; the
+Haulover city view is at the run-to-run floor (94 px, |d| <= 5). Three transects across the
+north tip's beach (`--tool height-tree-probe:transect=...`) read every source at weight 1 and
+within a metre of each other from the dune to -5 m: the wall seen there on 2026-10-17 stood on
+the sign-flipped channel survey, mended upstream the same evening, not on a data edge. The
+costs: an edge build is 10-20 ms a window (the seed ring and two axes of the transform), built
+once per window while the edge cache holds as many entries as the window cache; at a quarter
+of them the bar view built 53,483 edges for 7,400 windows and never settled.
 
 **A source paints its own level, and the tree makes the others.** The owner, 2026-09-29:
 when a raster of any size is inserted, the tree is to make the lower levels, for itself and
