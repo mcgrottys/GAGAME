@@ -379,8 +379,24 @@ float2 CsEditMask(float3 dir, float3 p CS_WC_PARAM) {
 //   it (at 600 m the 6-12 m cells drew a stair of red teeth over a 1.19 m survey: --lens mix).
 //   wet: the water's share by the same witness, for the wet-sand law (wet only where the data says
 //   water), so the classifier and the material cannot disagree.
+//   overBand: WATER CANNOT STAND ABOVE ITS OWN SURFACE, AT THE TEXEL (2026-10-18). The survey's sea is
+//   a ring drawn at some datum's shoreline; the live waterline moves, and the bed between the two stands
+//   dry at every tide below that datum -- a beach at low water, the marsh island at the Merrimack's
+//   mouth that OSM's coast leaves seaward (its platform +1.2..1.7 m under a +0.9 m tide). The survey's
+//   "sea" over a bed above the waterline is a statement no water can make good, so the height answers
+//   there: land, graded over `overBand` metres of the bed's rise above the level. The band is the
+//   reader's own grain -- the pixel's dryBand (the shore's 0.4 m or the face one pixel can hold, so a
+//   coast cell kilometres wide seen from orbit never stands its mean over the survey's sea), the
+//   vertex's cell. The clause is the SEA's alone: a lake, a pond, a river reach has a level of its own
+//   and stands above the sea's by right. The mask says which water a texel holds (GisMask.cpp: the
+//   NHD carve's lakes, reservoirs, river reaches and canals, by feature code, are painted at an
+//   opinion of 0.9; its estuaries and sea, and the coast's sea, at 1), and the clause applies by the sea's share,
+//   saturate(10a - 9); a fold of the sea with unsurveyed ground reads a half and the clause stays out,
+//   which is the law before it. One-sided: survey land below the waterline stays land (Tokyo's
+//   polders, a dike's lee), because land can stand under the sea's level and water cannot stand above
+//   its own. The hand edits are law over this too (they are applied after it).
 float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel, float dryOver,
-                           out float editLand, out float wet) {
+                           float overBand, out float editLand, out float wet) {
     float4 m;
     const bool op = CsMaskSample(dir, p CS_WC, m);
     const float a = max(m.a, 0.001f);
@@ -391,6 +407,11 @@ float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float wat
     const float hWet = (hp < waterLevel) ? 1.0f : 0.0f;
     float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f) : hLand;
     float landH = hLand;
+    // Water cannot stand above its own surface (overBand above): where the survey's SEA answered and this
+    // bed stands over the waterline, the height answers land, by the bed's rise over the reader's band.
+    const float seaW = op ? saturate(10.0f * m.a - 9.0f) : 0.0f;   // the sea's share of this texel's opinion (own-level water is painted at 0.9)
+    const float over = seaW * ((lm >= 0.0f) ? smoothstep(0.0f, max(overBand, 0.05f), hp - waterLevel) : 0.0f);
+    land = max(land, over);
     editLand = 0.0f;
     if (gCsU3.x != 0xFFFFFFFFu) {
         // M6p: HAND EDITS ARE LAW. A flagged texel's mask value overrides survey and the live tide
@@ -402,7 +423,7 @@ float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float wat
         editLand = ed * ev;
     }
     land = max(land, dryOver);
-    wet = lerp((lm >= 0.0f) ? (1.0f - lm) : hWet, hWet, finer);
+    wet = lerp((lm >= 0.0f) ? (1.0f - lm) : hWet, hWet, finer) * (1.0f - over);   // no water stands on a bed above the sea's level
     return lerp(land, landH, finer);
 }
 

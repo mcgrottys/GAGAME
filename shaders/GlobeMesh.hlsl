@@ -122,8 +122,13 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // the height is the finer witness a vertex above the level stands at its height and one below
     // rides the water, so the drawn shore is the pixels' shore. No drawn-face override at a
     // vertex (the pixel stage's i.dry is made from this landness).
+    // Water cannot stand above its own surface, at the vertex too (Compose.hlsli overBand): a vertex of
+    // the survey's sea whose bed stands over the waterline is land and keeps its height, graded over its
+    // own cell (rec.arc spans the meshlet's 8 cells) -- the band the pixel's dryBand is at nadir -- so
+    // the mesh and the pixels agree about the dry beach and the marsh platform, and an orbit cell's
+    // mean never stands over the survey's sea.
     float editLand, wetV;
-    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, gWavesB.w, 0.0f, editLand, wetV);
+    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, gWavesB.w, 0.0f, max(0.4f, rec.arc / 8.0f), editLand, wetV);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the

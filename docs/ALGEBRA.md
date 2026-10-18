@@ -668,7 +668,15 @@ shipped Merrimack's CUDEM 13.7 m and edits 5 m against a 1 m survey — paints g
 survey answers byte for byte as before (no tree on disk repaints); a 25 cm drone DSM
 answers by its sign at the live level. The mesh's drawn-face override (`i.dry`, "water
 cannot stand above its own surface") is a witness at the mesh's cell and rides the
-survey's side only (priors 48).
+survey's side only (priors 48). **The one-sided clause, the sea's alone** (2026-10-18): where
+the survey's SEA says water and the bed stands over the live waterline, the height answers
+land, graded over the reader's own band (the pixel's dryBand, the vertex's cell) -- water
+cannot stand above its own surface, at the texel; survey land below the waterline stays
+land (polders), because land can stand under the sea's level. The mask says which water a
+texel holds: the NHD carve's own-level water (lakes, reservoirs, river reaches, canals, by feature
+code; its estuaries and sea are the sea's) is painted at an opinion of 0.9 (its weight, premultiplied; every
+ratio a reader forms is unchanged, the folds carry it as a weight), and the clause applies
+by the sea's share, saturate(10a - 9) -- a lake stands above the sea by right.
 
 Code: `src/compose/Compositor.*`, `Sources.*`, `ComposeTree.h`, `TileTree.h`,
 `GisMask.*`. Gates: `composetest` (paint order, weights, alpha, cache identity,

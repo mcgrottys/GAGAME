@@ -1193,6 +1193,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
                     gisMask.Load("data/gis/", S.streaming.gisLand, S.data.edits)) {
+                    // A river reach is the sea's where the solver stands (GisMask.h SetTidalBox): the
+                    // carve's FCode says river, the solver's domain says tidal. Before Refresh (the box
+                    // joins the mask's fingerprint).
+                    if (swe.Ready()) {
+                        const SweDomain& td = swe.Domain();
+                        gisMask.SetTidalBox(td.lat0, td.lat1, td.lon0, td.lon1);
+                    }
                     srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
                     // The height's witness: a height layer finer than that grain draws the water's
                     // edge where it has a value (GisMask.h SetHeight; the shipped scenes have none).

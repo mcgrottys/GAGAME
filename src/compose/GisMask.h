@@ -129,6 +129,13 @@ public:
     // source's `structure`, so re-harvesting the GIS changes the mask's tree identity and every
     // composite that consumed it, and changes nothing else.
     const std::string& Fingerprint() const { return m_fingerprint; }
+    // A RIVER REACH IS THE SEA'S WHERE THE SOLVER STANDS (2026-10-18): the NHD FCode says lake or river but
+    // not tidal; the shallow-water solver's domain is the tide's reach by construction (the solver is
+    // truth there). A texel of a flowing feature (Ring::reach) inside this box takes the sea's level, one
+    // outside it the feature's own -- per TEXEL, because one NHD StreamRiver ring runs from Lowell to the
+    // Merrimack's mouth and no ring-wide answer is true of it. The box joins the fingerprint, so the mask
+    // trees repaint when it changes. Before Refresh.
+    void SetTidalBox(double lat0, double lat1, double lon0, double lon1);
 
 private:
     struct Ring {
@@ -136,6 +143,11 @@ private:
         float lon0 = 0, lat0 = 0, lon1 = 0, lat1 = 0;   // degrees, of the vertices
         float alat0 = 0, alat1 = 0;   // F15: of the arcs (a great circle bulges past its ends)
         uint8_t waterValue = 0;   // edits only: what "inside" asserts (0 land, 255 water)
+        uint8_t ownLevel = 0;     // NHD carve only: this water has a level of its own (LakePond, Reservoir,
+                                  // and a river reach or canal outside every solver's domain); SeaOcean and
+                                  // Estuary are the sea's, and so is a reach where a solver stands (SetTidalBox)
+        uint8_t reach = 0;        // NHD carve only: a StreamRiver / CanalDitch / other flowing feature, whose
+                                  // tidality the FCode cannot say: tidal where the solver stands
     };
     struct Vec3 {
         double x, y, z;
@@ -220,6 +232,8 @@ private:
     double m_lon0 = 180, m_lat0 = 90, m_lon1 = -180, m_lat1 = -90;
     uint32_t m_buckets = 0;
     std::string m_fingerprint;
+    double m_tidal[4] = {0, 0, 0, 0};   // SetTidalBox: lat0, lat1, lon0, lon1 of the solver's domain
+    bool m_tidalSet = false;
 };
 
 // ================================================================================================

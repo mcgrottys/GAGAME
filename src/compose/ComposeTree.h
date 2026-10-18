@@ -163,7 +163,7 @@ public:
     }
     std::string Identity() const override {
         // gate3 (2026-10-10): the tree's tile gate became the value gate too (TileTree GateTile).
-        return "gate3|(" + m_layer->Identity() + ")<(" + m_gate->Identity() + ")";
+        return "gate4|(" + m_layer->Identity() + ")<(" + m_gate->Identity() + ")";   // gate4: the value proper, val / opinion
     }
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         if (!m_layer->SampleAt(q, out) || out.weight <= 0.0f) return false;
@@ -181,7 +181,10 @@ public:
             out.weight = 0.0f;
             return false;
         }
-        if (g.weight > 0.0f) out.weight *= g.c[0];
+        // The gate's coverage is the gate's VALUE PROPER: a premultiplied source (the land/sea mask,
+        // whose a is its opinion -- the carve's water at half, 2026-10-18) gates by c[0] / c[3]; a
+        // source with no fourth channel gates by c[0] as before.
+        if (g.weight > 0.0f) out.weight *= (g.c[3] > 0.0f) ? (g.c[0] / g.c[3]) : g.c[0];
         return out.weight > 0.0f;
     }
 

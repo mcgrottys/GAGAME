@@ -2127,7 +2127,11 @@ private:
         // height said "under water" -- unseen in New England, whose heights are exact; at Tokyo
         // Bay, over the 4.9 km ETOPO, the reclaimed shore came out sand (Mark).
         for (size_t i = 3; i < out.size(); i += 4) {
-            const uint32_t op = gt[i], val = gt[i - 3];
+            // THE GATE'S VALUE PROPER (2026-10-18): the mask is premultiplied by its opinion (the NHD
+            // carve's water at a = 128, GisMask.cpp), so the texel's value is val / op, not val -- read
+            // raw, a lake's or an estuary's bed was gated at three quarters. No opinion passes whole.
+            const uint32_t op = gt[i];
+            const uint32_t val = op ? (std::min)(255u, (uint32_t(gt[i - 3]) * 255u + op / 2u) / op) : 0u;
             const uint32_t f = ((255u - op) * 255u + op * val + 127u) / 255u;
             const uint32_t a = (uint32_t(out[i]) * f + 127u) / 255u;
             out[i] = static_cast<uint8_t>(a);

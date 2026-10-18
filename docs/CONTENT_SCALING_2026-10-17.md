@@ -707,6 +707,46 @@ carries it in a form the folds and the bilinear read preserve as a weight, and t
 weight -- a mask format change, so every mask tree repaints (its identity moves with the painter); not for
 the demo's evening.
 
+**The mask says which water is the sea's, and the clause lands on it** (2026-10-18 18:00-19:00, at Mark's word).
+The sweep (`GisVectorMask::RasterizeGateImpl`) knows two witnesses: outside the coast rings is the sea, whose
+level is the live waterline; a feature of the NHD carve is water too -- and the carve holds both kinds. Its
+feature codes say which (the harvester's sidecar `nhd_water_ne.attrs.json`, one FCode a ring): SeaOcean
+(445xx) and Estuary (493xx) are the sea's; LakePond and Reservoir (390xx, 436xx) stand at levels of their own,
+always -- the refuge's diked pools; and a flowing feature (StreamRiver, CanalDitch, the rest) the FCode
+cannot place, since the same code names a tidal reach and a brook at +100 m. For those the engine already
+holds the tidal witness: the shallow-water solver's domain is the tide's reach by construction (the solver
+is truth there), so a flowing feature's TEXEL inside a solver's domain is the sea's and one outside it
+the feature's own (`GisVectorMask::SetTidalBox` from the assembly before the mask's Refresh, the box in the
+fingerprint; the sweep decides at the texel). Per texel, not per ring: the NHD StreamRiver ring that carves
+the marsh island runs from Lowell to the mouth, 7,124 points with its box centre at -71.08, and no ring-wide
+answer is true of it. Three cuts before this one are in the log, each leaving the island itself at the
+carve's opinion with the clause out of the very marsh this was for (the mix lens faint red, the ship and
+HQ views barely moved): "the carve's" taken for "inland"; FCode alone; the ring's box centre against the
+solver's box. OSM's land polygon holds the island and that StreamRiver ring carves it. The sweep says so in the flag byte -- bit
+4, own-level water on a texel the coast had made land, a hand edit's water being the sea's -- and `GisMaskSource::Sample` paints that water at an OPINION OF 0.9: its
+weight is 230/255 there and the bytes are premultiplied by it, a = 230, because the one-source paint
+(`Compositor::PaintSourceTile`) stores the bytes as given and the weight as alpha. Every reader's ratio is exactly what it was (r/a the landness, b/a the edit,
+|g - r|/a the finer witness, all four readers already divided by a), the tree's folds (coverage-weighted
+means) and the bilinear read carry the opinion as a weight, and the one new fact is the opinion itself:
+a = 1 the sea's water or land, 0.9 own-level water, between them a share; a lake weighs nine tenths in a fold. Two
+cuts before this one are in the log: bytes halved under the paint's own alpha of 255 (r = 128 under a = 255:
+half water, the estuary's seafloor gated at half, the river 15 luma darker with the clause off -- the gate
+found it, the tile files proved it), and an opinion of 1/2, which moved every lake's coarse shore toward
+land. The two colour gates take the value
+proper: `GateSource::SampleAt` by c[0] / c[3], and the gate TILE (`TileTree::GateTile`, where seafloor<gis is
+realized) by val / op -- the first gate run read the raw byte and the Merrimack estuary, NHD water inside OSM's
+coast, had its bed classifier gated at three quarters: the whole river darkened by 15 luma
+with the clause off, which is how the gate found it; "gate4" in the identity repaints the gate trees. The
+fingerprint moves to "sweep v8", so every mask tree repaints on demand (a tile's sweep, milliseconds). The
+Merrimack estuary is an NHD StreamRiver reach above the bridge and an Estuary feature at the mouth: the
+clause applies where the feature is the sea's and stays out upriver. The
+clause from "tried and withdrawn" above is back word for word, times the sea's share `saturate(10a - 9)`:
+where the survey's SEA answered and the bed stands over the waterline, the height answers land, graded
+over the reader's band (the pixel's `dryBand`, the vertex's cell); own-level water keeps its survey
+answer; a fold of the sea with unsurveyed ground reads a half or less and the clause stays out, which is the
+law before it -- safe by construction; one-sided (survey land below the waterline stays land); the hand
+edits law over it. Gated (17:50-18:20, the pre-clause stills as the befores): `--selftest` 29 suites, `--tool rastertest` 70 checks; the marsh island moved 21.0 % of its pixels (the platform land at the pixel and the vertex, SSIM 0.996; `--lens mix` red over the island, black in its creeks and basin); the refuge marsh 2.4 % (its diked pools black in the lens: still water; the dry beach red: land); the shipped sea view 0.48 %; the HQ sea view 0.10 %. Every mask tree repaints on first sight (sweep v8) and the gate trees with them (gate4): a scene's first frames after this commit sweep their mask tiles again.
+
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
 ledger) are in the table above and run in `--selftest` and `--tool rastertest` on every build.
@@ -767,13 +807,11 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
   steps in the same frame. FOUND the same afternoon by reading the discard-and-replace path the codemap
   laid out: the rescue of a retiring tile by its coordinate after a step gave its slot another ground
   (section 4, "the third path"). Fixed there; the counter names it in a flight.
-- Two witnesses disagree over the marsh island at the Merrimack's mouth and neither is the renderer's to
-  mend: the survey (OSM's coast runs landward of the salt marsh, so the island is sea) and the 2021 CUDEM
-  tile (the interior at -0.4..-0.9 m NAVD, where a vegetated marsh cannot stand; raw and resampled agree).
-  The platform above the tide is a water pixel of depth 0 (lit right since the surface law; flat, no near
-  material), the basin is drawn flooded. The texel-side clause that would make the platform land needs the
-  mask to say which water is the sea's (section 4, "tried and withdrawn"); the basin needs a bare-earth
-  lidar the CUDEM yields to. Neither built.
+- The 2021 CUDEM tile puts the marsh island's interior at -0.4..-0.9 m NAVD (raw and resampled agree), where
+  a vegetated marsh cannot stand, so its basin is drawn flooded 1.4 m deep at a tide that would not reach a
+  real marsh. The platform above the waterline is land now (section 4, the mask's inland bit and the
+  clause on it); the basin is the data's to mend -- a bare-earth lidar the CUDEM yields to, or a survey
+  that says marsh -- and the renderer's part is done.
 - The water bank's land test (`WaterBankLayer::ReanchorRing`: the survey's gate at 16 x 16 over the tile, or
   any of five resident heights under +2.5 m) answers by the height the tree HOLDS, coarse far from the eye,
   and re-asks only when a load lands for that ring; the level over a tile it leaves NULL is now the

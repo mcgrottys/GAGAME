@@ -1373,7 +1373,7 @@ float4 PsSurface(VsOut i, out float land) {
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
                             : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
-                                                   editLandPx, wet);
+                                                   dryBand, editLandPx, wet);
     land = landness;
     float3 n = upT;
     float3 alb;

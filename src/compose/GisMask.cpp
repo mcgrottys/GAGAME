@@ -291,6 +291,36 @@ bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, co
     // The NHD carve. survey.json: "NHD open-water even-odd per feature", with marsh and wetland
     // excluded because the live tide owns that call -- which is the same split as this gate.
     ReadRings(dir + "nhd_water_ne.bin", m_water);
+    // WHICH WATER HAS A LEVEL OF ITS OWN (2026-10-18): the carve's sidecar names each ring's NHD FCode
+    // (nhd_water_ne.attrs.json, one entry a ring, the harvester's order). SeaOcean (445xx) and Estuary
+    // (493xx) are the sea, whose level is the live waterline; LakePond, Reservoir, StreamRiver,
+    // CanalDitch and the rest stand at levels of their own. The sweep flags the latter (bit 4), the
+    // mask paints them at an opinion of 0.9, and the classifier's "water cannot stand above its own
+    // surface" applies by the sea's share. No sidecar, or one of another length: every carve ring is
+    // own-level, and the clause stays out of the carve -- the law before it.
+    {
+        for (Ring& r : m_water) r.ownLevel = 1u;
+        std::ifstream af(dir + "nhd_water_ne.attrs.json", std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(af)), std::istreambuf_iterator<char>());
+        std::string err;
+        const JsonValue root = text.empty() ? JsonValue{} : JsonParser::Parse(text, &err);
+        size_t sea = 0, own = 0;
+        if (root.type == JsonValue::Type::Array && root.arr.size() == m_water.size()) {
+            for (size_t i = 0; i < m_water.size(); ++i) {
+                const int fam = static_cast<int>(root.arr[i].Num("fcode", 0.0)) / 100;
+                const bool seaKind = fam == 445 || fam == 493;        // SeaOcean, Estuary
+                const bool impounded = fam == 390 || fam == 436;      // LakePond, Reservoir: a level of their own, always
+                m_water[i].ownLevel = seaKind ? 0u : 1u;
+                m_water[i].reach = (!seaKind && !impounded) ? 1u : 0u;   // StreamRiver, CanalDitch, ...: tidal where the solver stands
+                (m_water[i].ownLevel ? own : sea) += 1;
+            }
+            Log("[gismask] the carve's levels: %zu rings the sea's (SeaOcean, Estuary), %zu with a level of their own", sea, own);
+        } else {
+            Log("[gismask] the carve's sidecar %s: %s -- every carve ring counted as its own level (the clause stays out of the carve)",
+                (dir + "nhd_water_ne.attrs.json").c_str(),
+                text.empty() ? "not read" : (!err.empty() ? err.c_str() : "not one entry a ring"));
+        }
+    }
     if (!editsPath.empty()) LoadEdits(editsPath);
     if (!coast) {
         Log("[gismask] no coast rings at %s -- the gate will not exist, and nothing that does "
@@ -317,7 +347,7 @@ bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, co
     // re-harvesting the GIS changes this mask's tree identity -- and therefore every composite
     // that consumed it -- and changes nothing else.
     char fp[160];
-    snprintf(fp, sizeof(fp), "sweep v3 (per-feature carve) rings %zu/%zu/%zu pts %zu box %.4f,%.4f,%.4f,%.4f%s",
+    snprintf(fp, sizeof(fp), "sweep v8 (per-feature carve, own-level water by FCode and the solver's reach per texel, at an opinion of 0.9) rings %zu/%zu/%zu pts %zu box %.4f,%.4f,%.4f,%.4f%s",
              m_coast.size(), m_water.size(), m_edits.size(), m_pts.size(), m_lon0, m_lat0,
              m_lon1, m_lat1, m_landIdx.empty() ? "" : " + OSM land GALAND01 v1");
     if (!m_landIdx.empty()) {   // the coast file's own size, so a new harvest repaints
@@ -711,7 +741,14 @@ void GisVectorMask::RasterizeGateImpl(double latMin, double latMax, double lonMi
                 n, m_sweptOne.load(), m_sweptFull.load());
         }
     }
-    std::vector<uint8_t> col(dim), ecol(dim);
+    // THE SEA'S WATER AND THE WATER WITH A LEVEL OF ITS OWN (2026-10-18): a texel is water outside the
+    // coast rings (the sea) or inside a feature of the NHD carve, and the carve holds both kinds -- its
+    // SeaOcean and Estuary features are the sea's (their level is the live waterline), its lakes,
+    // reservoirs, river reaches and canals stand at levels of their own (Ring::ownLevel, by FCode). The
+    // classifier's clause "water cannot stand above its own surface" is the sea's alone, so the flag
+    // byte says which: bit 4 = own-level water, on a texel the coast had made land. ccol keeps the
+    // coast's parity, wcol the own-level features'; a hand edit's water is the sea's (the jetties' basin).
+    std::vector<uint8_t> col(dim), ecol(dim), ccol(dim), wcol(dim);
     std::vector<double> xs;
     std::vector<std::pair<uint32_t, double>> tagged;
     const double dLat = (latMax - latMin) / double(dim);
@@ -757,17 +794,25 @@ void GisVectorMask::RasterizeGateImpl(double latMin, double latMax, double lonMi
         // estuary/river polygon: the channel between the jetties came out LAND, the helm
         // stood on drained bed, and the bed classifier had been silently gated out of the
         // river since M9ak. Group the crossings by ring and fill each ring's parity alone.
+        ccol = col;   // the coast's own answer, before the carve
+        std::fill(wcol.begin(), wcol.end(), 0u);
         tagged.clear();
         CrossingsTagged(m_waterIdx, lon, tagged);
         std::sort(tagged.begin(), tagged.end());
         for (size_t s0 = 0; s0 < tagged.size();) {
             size_t s1 = s0;
+            const uint32_t ri = tagged[s0].first;
             xs.clear();
-            while (s1 < tagged.size() && tagged[s1].first == tagged[s0].first) {
+            while (s1 < tagged.size() && tagged[s1].first == ri) {
                 xs.push_back(tagged[s1].second);
                 ++s1;
             }
             FillParity(xs, latMin, latMax, dim, col, 255u);   // this feature carves WATER
+            if (ri < m_water.size() && m_water[ri].ownLevel) {
+                // ...at a level of its own: 1 an impounded feature (always), 2 a flowing one (own level
+                // only outside the tide's reach, decided at the texel below)
+                FillParity(xs, latMin, latMax, dim, wcol, m_water[ri].reach ? 2u : 1u);
+            }
             s0 = s1;
         }
         for (const Ring& e : m_edits) {                   // and the hand edits are law
@@ -780,7 +825,10 @@ void GisVectorMask::RasterizeGateImpl(double latMin, double latMax, double lonMi
             const double lat = latMax - (double(row) + 0.5) * dLat;   // row 0 = latMax
             const bool surveyed = lat >= m_lat0 && lat <= m_lat1;
             const uint8_t v = col[row];
-            const uint8_t f = static_cast<uint8_t>((surveyed ? 1u : 0u) | (ecol[row] ? 2u : 0u));
+            const uint8_t wk = wcol[row];
+            const bool tidalHere = m_tidalSet && lat >= m_tidal[0] && lat <= m_tidal[1] && lon >= m_tidal[2] && lon <= m_tidal[3];
+            const bool inland = v == 255u && wk != 0u && ccol[row] == 0u && ecol[row] == 0u && !(wk == 2u && tidalHere);
+            const uint8_t f = static_cast<uint8_t>((surveyed ? 1u : 0u) | (ecol[row] ? 2u : 0u) | (inland ? 4u : 0u));
             const uint32_t c0 = one ? 0u : cx, c1 = one ? dim : cx + 1u;
             for (uint32_t c = c0; c < c1; ++c) {
                 const size_t i = (static_cast<size_t>(row) * dim + c) * 2u;
@@ -792,6 +840,21 @@ void GisVectorMask::RasterizeGateImpl(double latMin, double latMax, double lonMi
 }
 
 // ---- the source -----------------------------------------------------------------------------
+
+void GisVectorMask::SetTidalBox(double lat0, double lat1, double lon0, double lon1) {
+    m_tidal[0] = lat0; m_tidal[1] = lat1; m_tidal[2] = lon0; m_tidal[3] = lon1;
+    m_tidalSet = true;
+    size_t meets = 0, reaches = 0;
+    for (const Ring& r : m_water) {
+        if (!r.reach) continue;
+        ++reaches;
+        if (r.lon1 >= lon0 && r.lon0 <= lon1 && r.lat1 >= lat0 && r.lat0 <= lat1) ++meets;
+    }
+    char b[128];
+    snprintf(b, sizeof(b), " tidal box %.4f,%.4f,%.4f,%.4f", lat0, lat1, lon0, lon1);
+    m_fingerprint += b;
+    Log("[gismask] the solver's domain is the tide's reach: %zu of %zu flowing carve rings meet it; their texels inside it are the sea's", meets, reaches);
+}
 
 void GisMaskSource::Refresh() {
     const GisVectorMask* mask = (m_mask && m_mask->Ready()) ? m_mask : nullptr;
@@ -860,7 +923,22 @@ float GisMaskSource::Sample(double latRad, double lonRad, double, const PaintCtx
     // exists); the VALUE carries it: r = water coverage (1 water, 0 land), b = edited. The
     // gate multiplies by the value (ComposeTree.h GateSource); the classifier reads the pages.
     if (!(fl & 1u)) return 0.0f;
-    rgba[0] = g;
+    // WHICH WATER (2026-10-18): water with a level of its own (fl & 4: the carve's lakes, reservoirs,
+    // river reaches and canals by FCode; its estuaries and sea are the sea's) is painted at an OPINION OF 0.9: this source's weight is 230/255 there, and the texel is
+    // premultiplied by it -- every channel scaled, a = 230 -- because the one-source paint
+    // (Compositor::PaintSourceTile) stores the bytes as given and the weight as alpha. Every reader's
+    // ratio is exactly what it was (r/a the landness, b/a the edit, |g - r|/a the finer witness), the
+    // tree's folds (coverage-weighted means) and the bilinear read carry the opinion as a weight, and
+    // the one new fact is the opinion itself: a = 1 the sea's water or land, 0.9 the carve's water,
+    // between them a share. The classifier's clause "water cannot stand above its own surface" applies
+    // by the sea's share, saturate(10a - 9); a fold of the sea with unsurveyed ground (a <= 1/2) reads
+    // no sea share, which is the law before the clause -- safe by construction -- and a lake weighs
+    // nine tenths in a fold, not half (the first cut's a = 1/2 moved every lake's coarse shore toward
+    // land). The gates (ComposeTree.h GateSource, TileTree.h GateTile) take the value proper, r/a.
+    const bool inland = (fl & 4u) != 0u;
+    const uint8_t opin = inland ? 230u : 255u;
+    const auto scaled = [inland](uint8_t v) { return inland ? static_cast<uint8_t>((unsigned(v) * 230u + 127u) / 255u) : v; };
+    rgba[0] = scaled(g);
     // THE HEIGHT'S WITNESS (2026-10-17): g was r's duplicate. It differs from r exactly where a height
     // layer finer than the survey's grain has a value at this texel -- a 25 cm drone DSM where it was
     // flown; not a 13.7 m CUDEM, not a 1 m lidar against a 1 m survey, not that DSM's nodata over the
@@ -868,10 +946,10 @@ float GisMaskSource::Sample(double latRad, double lonRad, double, const PaintCtx
     // the live level answer there and the survey everywhere else. A tile no finer layer meets paints
     // g = r as it always did: every mask tree on disk keeps its bytes.
     const bool finer = ctx.finerHeight && m_comp->FinerHeightAt(m_hgtCh, latRad, lonRad, m_grainM);
-    rgba[1] = finer ? static_cast<uint8_t>(255u - g) : g;
-    rgba[2] = (fl & 2u) ? 255 : 0;
-    rgba[3] = 255;
-    return 1.0f;
+    rgba[1] = scaled(finer ? static_cast<uint8_t>(255u - g) : g);
+    rgba[2] = (fl & 2u) ? scaled(255) : 0;
+    rgba[3] = opin;
+    return inland ? (230.0f / 255.0f) : 1.0f;   // the opinion, as the weight the paint writes for alpha
 }
 
 }  // namespace ga
