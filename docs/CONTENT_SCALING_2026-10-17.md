@@ -676,7 +676,20 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
   aliased after the binding stepped, with the loads slow enough (cold composites that morning) to leave the
   window open. The instrument and the law are built (section 4, the same afternoon): the key at every
   decision, the ground re-read at the map and refused when it moved, the kept tiles' ground audited; the
-  jetty and dive rails fly clean. Mark's flight with `--res-trace` and the frame of the screenshot places
-  it, or rules the residency out.
+  jetty and dive rails fly clean. Mark flew with `--res-trace` and saw two more pages, far out east of the
+  jetties at low altitude (rank-2 tiles by their size, 1.2 km squares at 9.5 m a texel), with 0 refused
+  and 0 held on another ground in the log while they stood. Settled stills looking east from his eye,
+  low and high, are clean, so the pages are not the tree's content. Read slowly for a deviation and
+  found none: `BlockBinding::Global` and `::Slot` are exact inverses (the slot is the global tile modulo
+  the tiles a side; the box is the origin plus one window); every tenant's declared tile shape is the
+  hardware's and its tree's (colour, mask, buildings and height 128 x 128, the exposure 256 x 128); the
+  shader's chain tests the box before it reads a rank, the pixel stage gathers the residency byte and
+  samples the window with one wrap sampler, the compute reads take the uv modulo one for both; a told
+  slot's old bytes stay mapped at most `kEvictAgeFrames` = 4 frames; the rows are filled after the
+  steps in the same frame. What the GPU read for a page's pixel is the one fact no log holds; the
+  residency lens (`--lens residency`, or G through the debug views to "residency") paints each pixel by
+  the rank that answered (cyan 1, green 2, red 3, yellow 4, white 5, violet the cube), its floor mip as
+  brightness, and outlines the answering tile; a page seen through it, with the log's `[eye-blocks]
+  bound` line of that frame, gives the slice, the slot and the CPU's tile for it.
 - The scenes list absolute `D:/DataCache/...` paths (as `streaming.gisLand` already does); a second
   machine needs the files at those paths or the entries edited.
