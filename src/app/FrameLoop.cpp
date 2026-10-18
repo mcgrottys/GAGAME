@@ -5233,6 +5233,9 @@ int FrameLoop::Finish() {
             static_cast<unsigned long long>(m_windowLeft), static_cast<unsigned long long>(m_windowKept),
             static_cast<unsigned long long>(m_windowKeptMoved));
         if (m_A.megaTree) Log("[eye-windows] the colour tree this run:\n%s", m_A.megaTree->Stats().c_str());
+        // The height tree too (2026-10-17): its leaves' paint, fold and magnify counts are the
+        // instrument that says what a height load cost at frame time (HIERARCHY 4.20's clauses).
+        if (m_A.heightTree) Log("[height-tree] the tree this run:\n%s", m_A.heightTree->Stats().c_str());
         if (m_A.bldFieldTree) Log("[buildings] the field's tree this run:\n%s", m_A.bldFieldTree->Stats().c_str());
     }
     // THE SHUTDOWN TRAIL (core/ExitTrail.h): a flushed line before every phase from here to the

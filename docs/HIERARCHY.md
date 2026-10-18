@@ -2236,6 +2236,44 @@ The law, in three clauses:
    level at the box's place, `OwnMip` stays -1 so the coarser levels are painted, not folded).
    Before it, the mask tree held 1,081,979 tiles of which 913,717 were at 1.9-7.5 cm texels.
 
+   **The clause made literal for a tile under ONE source's level (2026-10-17).** The
+   residency's answer above holds only for a tile finer than every source that touches it.
+   A tile finer than one source's own level and not another's -- ETOPO 15-second's mip 16 under
+   every page near the ground, a bed's mip 8 under a page finer than it -- was painted, and the
+   paint asked the FILE at the tile's grain, a window decode a tap: at a cold mouth view over
+   the 1.5 m bed and the 1 m lidar the frames decoded 12,971 windows in 934 residency loads of
+   1.45 s each, with 17,781 tiles pending after 3,000 frames and the water's lighting stepping at
+   2 fps (docs/CONTENT_SCALING_2026-10-17.md 3d; the tree's share of those decodes against the
+   stack's direct readers' was never split). Now `TileTree::LeafTile` reads such a tile from
+   the KEPT own-level tile -- the pass's, or painted once at the first ask -- through
+   `MagnifyOwn`: bilinear between the ancestor's texel centres in the tree's own format
+   (coverage and coverage-weighted colour apart, then divided, the straight-alpha rule;
+   FloatW's weight and weight-weighted value the same way), a tap past the ancestor's edge
+   read from the neighbouring ancestor tile as the GPU reads across the atlas, clamped only at
+   the face's edge. The limits: at the own level the one tap weighs one and the tile is itself;
+   a void ancestor makes everything under it void; a void neighbour weighs nothing, so coverage
+   falls off over one own texel there as a fold's does. The tile is not kept, and `Peek`
+   answers for it from the ancestor's entry, so a composite above it knows its key without
+   bytes. What the paint gave that this does not: the file's bilinear between ITS texels, a
+   little sharper than the own tile upsampled (the own level is itself a read of the file at
+   one to two texels a texel) -- the stills move by that sub-texel blur below the own level
+   and nowhere above it. Measured by the height-tree probe on fresh roots (docs/
+   CONTENT_SCALING_2026-10-17.md 3d): above every source's own level the probe's lines are
+   identical to the metre; under ETOPO 15-second's own level (a 262 m texel), where it is the
+   only painter, |tree - stack| p95 0.006 -> 0.123 m at 1.5 m and worst 0.69 -> 1.18 m -- half a
+   texel of a 15-second grid is a metre of offshore slope. The raster selftest's own counts: the
+   file's Sample called 0 times under the own level, the bytes equal to a mosaic reference, a
+   clamp at the tile's edge caught on 280 bytes. The source is now asked at its own level only,
+   never at frame time for a tile under it; its window cache (`RasterFileSource.cpp` kWindows)
+   serves the pass. The height tree's ledger at exit (`[height-tree] the tree this run`, a cold
+   mouth view): the law answered 3,660 tiles at 1.0 ms each, all ETOPO 15-second's under its mip
+   16; the bed and the lidar were asked under their own level 0 times at that view. What a cold
+   height tile still costs (some 60 ms) is the three sources of the Merrimack's stack that are
+   not files and have no own level -- the CUDEM grid, ETOPO 2022, the survey edits -- painted per
+   texel at every level (2.2-2.6 ms a tile) and FOLDED UPWARD on every paint (103-171 ms a
+   fold-up, M9bb's chain to the root): the clause still to apply to them, and the fold-up goes
+   with it.
+
 What follows from it:
 
 - **Any size.** The work is by the window and in proportion to the ground asked for. No

@@ -209,6 +209,81 @@ Read it this way:
 - The buildings were missing from the HQ scene because its base has none; the layer and sources of
   `newburyport_buildings.json` are now in it. The 19 MassGIS tiles' ingest is section 3e.
 
+**The third clause, built (the same evening, branch `claude/vigorous-wu-bf14f9`; `TileTree::LeafTile`
+and `MagnifyOwn`, HIERARCHY 4.20).** Below a source's own level the tile is now the KEPT own-level
+tile magnified -- bilinear between its texel centres in the tree's own format, taps past the tile's
+edge read from the neighbouring own tile -- and the file is never opened for it; the tile is not kept,
+and `Peek` answers for it from the ancestor's entry. The clause's own instrument is the raster
+selftest (`--tool rastertest`, 59 checks): the file's `Sample` is called 311,296 times by the pass and
+0 times by an ask two levels under the own level; the bytes equal an independent 3x3-mosaic
+magnification exactly; a clamp at the own tile's edge is a plant, caught on 280 bytes; a composite
+over the leaf is composed once and served once; a height (the hill) asked two and eight levels under
+its own level is the hill's function within 0.58 mm at the crown (bound 1.24 mm) with the file asked
+0 times. What moved, measured on the test's 4-texel checker (every cell edge a step, the worst case):
+the magnified tile against today's paint from the file, max |d| 36/255, mean 0.68/255.
+
+The fourth arm of the table above, the law, cold on a fresh root, one take (`out/law/cold_after.log`):
+
+| arm | windows decoded in the frames | residency loads | earth.height loads | mapped of 18,703 at 3,000 frames |
+|---|---|---|---|---|
+| + window cache 1,024 (above) | 0 (1,531 = the boot's) | 21,787, 88 ms each | 2,649; 1,676 painted at 101 ms | 13,827 |
+| the law | 0 (1,531 = the boot's) | 23,460, 38 ms each | 2,794; 921 painted at 62.5 ms | 14,598 |
+
+Read it this way, and against the probe (`--tool height-tree-probe` before and after, fresh roots,
+`out/law/probe_before.log`, `probe_after.log`):
+
+- **The frames' file decodes were already zero at a 1,024-window cache** (1,531 is exactly the boot
+  ingest's 225 + 980 + 326): the second arm's 12,971 - 2,798 = 10,173 frame-time decodes were the
+  256-window cache thrashing, and how many of them were the tree's and how many the stack's direct
+  readers' (the solver's bed realization reads `SampleHeightStack`, not the tree) was never split. The
+  law removes the file from the frame by construction rather than by cache size, and with it the
+  per-texel `Sample` loop of a file leaf under its own level (32,768 projections and bilinears a tile).
+- **What the law did in the frame, from the height tree's own ledger** (`[height-tree] the tree this
+  run`, printed at exit from this change on; `out/law/cold_after2.log`, a second cold take on a fresh
+  root): the law fired 3,660 times, every one for ETOPO 15-second under its own mip 16, at 1.0 ms a
+  call, beside its 155 own-level paints at 3.7 ms; the bed and the lidar were asked under their own
+  level 0 times -- the GPU's height pages at this view sit at or above pyramid mip 8 (1,775 and 927
+  tiles read, kept by the boot). So the first diagnosis above (the bed at mips 6-7) was wrong for this
+  view, and the file reads the law retired here were ETOPO's.
+- **A cold height tile still costs some 60 ms, and that cost is the push fold, not the files.** The
+  probe's cold sample at 1.5 m is 142 ms before and 140 ms after. The ledger names it: the stack's three
+  sources that are not files -- `noaa.cudem.merrimack` (the harvester grid), `noaa.etopo2022`,
+  `survey.edits` -- have no own level, so each is painted per texel at EVERY level asked (2,129 / 1,984 /
+  2,045 tiles at 2.2-2.6 ms each) and FOLDED UPWARD on every paint (M9bb: 1,684 / 853 / 22 fold-ups at
+  103 / 150 / 171 ms each, the chain to the root rewritten under its stripes), then the six leaves are
+  composed (4,076 composites). The cold scratch-root run does not settle in 3,000 frames for the same
+  reason the band-aid arm did not: those fold-ups, and the colour composite and the survey mask on an
+  empty root (8,921 and 4,604 loads at 76-102 ms), fill the queue. The load times across arms are
+  confounded by the machine's other work (the sibling's arm ran beside another session's engine; these
+  waited for the GPU to be free), so the per-leaf ledger and the selftest's call counts are the clean
+  instruments here, not the load means.
+- **The deviation the law names, measured where it can be seen.** Above a source's own level nothing
+  changes: the probe's lines at 400 m and coarser, and over the sphere, are identical to the metre. Under
+  ETOPO 15-second's own level (pyramid mip 16, a 262 m texel at the place), where it is the only painter
+  -- outside the bed's, the lidar's and CUDEM's footprints, about a fifth of the probe's 2,000 points --
+  the tree's value is the own tile upsampled instead of the file's bilinear between its 340 x 460 m
+  texels: |tree - stack| at the place, p95 0.006 -> 0.123 m at 1.5 m, 0.026 -> 0.128 m at 6 m,
+  0.157 -> 0.217 m at 25 m, worst 0.69 -> 1.18 m; the texel-centre equality with the stack, which held
+  exactly where a leaf painted the level directly, falls from 386 to 12 of 2,000 at level 9. Half a
+  texel of position on a 15-second grid is a metre of height on an offshore slope: sub-texel for the
+  source, visible to a probe, invisible to the stills (the Merrimack sea view before and after is
+  bit-identical; haulover_city differs on 2 pixels past one LSB, within the run-to-run floor, HUD rows
+  ignored). The stills could not have seen it anyway: the shared cache serves the tiles the old paint
+  kept before it asks the law. Whether a 15-second source should be read at 1.5 m through its own
+  260 m tile or through the file's bilinear is the law's one real trade, and it is the same trade the
+  GPU already makes for every parent it magnifies.
+- The city runs decode 548 (before) and 437 (after) windows at frame time with their trees already
+  whole; those are not the tree's reads (its tiles were kept by the earlier run) but the stack's own
+  direct readers (`SampleHeightStack`: the solver's bed realization and its kin) -- conjectured from the
+  counts, not traced.
+- Lines: the engine +158 / -13 (`TileTree.h` +149 / -9: `Peek` 699-707, the branch in `LeafTile`
+  1161-1170 before the held-only check, `Ancestor` + `MagnifyOwn` 1387-1508 after `FoldQuadrant`, the
+  `below` counter and the `magnify` lap in `Stats`; `RasterFileSource.h` header; `FrameLoop.cpp` the
+  height tree's stats at exit), the tests +239 / -1, this document and HIERARCHY 4.20. Nothing was
+  deleted: the paint path stays for the own level, and the three legacy sources still need it at every
+  level -- and the push fold with it -- until they, too, declare an own level (a file, or `OwnMip` on
+  the grid they already are): the remaining clause, and the cold height tile's remaining 60 ms.
+
 ### 3a. Stills and frame cost, A (no rasters) against B (five rasters), one take each
 
 **A correction, found by Mark's eye the same evening.** A scene's `sources` array REPLACES the base's;
