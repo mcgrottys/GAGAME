@@ -641,5 +641,20 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
   samples the STACK through those files per load, and which one was not found (the buildings' stand field
   reads the stack by design but its page jobs never ran; the height tenant's own paints measured 5.8 ms).
   `globe_test.json` drops the composite by name until it is; the composite scene itself still carries it.
+- **A land tile drawn on the sea in live flight** (Mark's second screenshot, 2026-10-18 late morning, the
+  globe scene over the Salisbury reservation): one 256 x 128 page of the reservation's parking lot, sharp, standing
+  dry some 250 m offshore, no water over it -- so its mask and colour agree it is land at an address that is
+  sea: a residency mismatch in his words. Not reproduced headless: a settled still at an eye 100 m from his
+  (`views.sal`, 42.8215 N -70.8165 E, 420 m, heading 42, tilt 52) is clean; the jetty rail flown with
+  `--res-trace` makes 460 window moves, tells 79,416 slots, keeps 72,352 tiles at their slots and finds 0 at
+  another pool slot three turns on (his log: 520 moves, 214 found elsewhere, 7,416 slots mapped to bytes
+  already held, 72 colour loads failed or not whole). Read and ruled out by the code: the step lets a told
+  slot's bytes go at once (B11), the pool slot is freed only with its retire, the shader's chain reads a rank
+  only inside its box (Window.hlsli, the C++ twin agrees), the rows are filled after the steps in the same
+  frame. What remains is the live case -- a want whose global key was taken under one binding and mapped or
+  aliased after the binding stepped, with the loads slow enough (cold composites that morning) to leave the
+  window open -- which no instrument catches today. The instrument that would: at every map and alias,
+  re-derive the slot's ground under the current binding and refuse bytes whose ground is another (counted
+  in the loader's line); Mark's flight with `--res-trace` and the frame of the screenshot would place it.
 - The scenes list absolute `D:/DataCache/...` paths (as `streaming.gisLand` already does); a second
   machine needs the files at those paths or the entries edited.
