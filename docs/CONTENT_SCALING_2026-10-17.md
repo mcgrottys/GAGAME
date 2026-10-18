@@ -428,6 +428,9 @@ committed on its own branch and was folded here; their measurements, in their ow
 | Wave intrinsics in the three contended kernels | `claude/jolly-engelbart-f2c7b9` (7ee49ac) | `WaveActiveCountBits` / `WavePrefixCountBits` in the classify, `WaveActiveBitOr` in the meshlet mask, `WavePrefixSum` for the 64-lane scan (13 barriers to 2). | Exact: the city still identical outside the HUD text, the GPU's per-form counts agree record for record; the passes were 0.02-0.10 ms and the frame cannot see it. |
 | The water's radiometry in fp16 | the same branch (11072a2) | `-enable-16bit-types` for the globe's mesh-pipeline pixel stage alone; colours, mixes and Fresnel weights in `half`, every address, height and ray in float. | globe.water 6.676 to 6.604 ms, 1.1 % of the pass, for 1 % of pixels one LSB apart (A/A floor bit-identical). ALGEBRA priors 50: this GPU runs non-tensor fp16 at the fp32 rate, and the pass is marches and reads, not arithmetic. Kept as measured; it is Mark's to keep or drop. |
 | Priors 48-50 | the same two branches | The shoreline stair's witness; a frozen clock that starts at "now" is a different instant every run (pin `time.start` for any A/B); fp16 on this part. | |
+| The seam between two height surveys: feather at the data's edge | `claude/interesting-morse-eaa9c3` (151cd20, four commits) | A source's weight fades over its `feather` from every texel it lacks -- a height's nodata, a colour's alpha 0, ground inside the set's box no file of the set holds -- not only from its bounding box: one exact Euclidean distance transform a window (Felzenszwalb-Huttenlocher, each axis in its own metres), the factor carried in the summed-area table; feather 0 is the hard edge the reads had; a file lacking no texel is byte for byte what it was, and the identity reaches absence only where a file can be absent, so the MassGIS and IOCM trees keep their names. `--tool rastertest:overlap <scene>` reads the heights against each other where both have data; `--tool height-tree-probe:transect=lat0,lon0,lat1,lon1,n` reads every source's weight and value along a line. The scene: noaa.inlethq `over` 1 (in the turbid channel a laser return can be the water's surface; the 2025 sounding is the better witness; the lidar keeps the beach and the bars the survey never saw) and `feather` 10 on the survey and the lidar both. | rastertest 61 checks: the fine weight is the smoothstep of the texel's distance to the nearest absent texel (worst 2.8e-8 against brute force), the stack steps at most 0.740 m a texel (bound 0.75 = 5 m x 1.5 / 10), the plant (feather 0) steps 5.00 m in one texel. The corrected composite over the lidar, 1,371,290 points: median +0.08 m, sd 0.71, the channel +0.08 / 0.38, the beach +0.09 / 0.92 -- no datum bias, `offset` stays 0. Three transects across the north tip of Plum Island read every source within a metre of each other from the dune (+7.7 m) down the beach face to the bed (-5 m): the wall seen there stood on the sign-flipped survey (3f), not on a data edge. The HQ views change only at the jetties; the shipped sea view at one patch, the north jetty's crest, where the MassGIS set's data ends along easting 352,500. The edge build at a quarter of the windows cost 686 s of CPU and never settled until the edge cache grew to `kWindows` entries and a trivial edge was kept empty. |
+| An ortho's pixel counts only where the ground was dry when flown | `claude/ortho-capture-level` (4320d23) | A colour source may declare `captureLevel` metres above `captureDatum` ("" or NAVD88 the engine's frame, MLLW by the place's link, MSL by the focus station's fitted mean; any other name refuses the photo by name). Where declared, its weight at a texel is multiplied by a gate on the ground height from the height tree at the texel's grain: 1 above the level, 0 below, between them a smoothstep across the read's own uncertainty, half the spread of the four texels the tree's bilinear stands between. `Sources.h LevelGateSource`, composed per texel by `TileTree::GateTile`, wired in the Assembly's colour tree as GateSource("<photo><ground"); the colour is never touched, an undeclared source keeps its weight byte for byte, the gate's identity folds every height layer's name so an edited bed repaints the gated tiles and nothing else. The 2011 IOCM low-water orthos are back in the demo scene with MLLW declared. | composetest, planted (a synthetic ortho over a synthetic ramp, half above and half below its 1 m level): weight 1.000 at 1.5 m of ground, 0.000 at 0.5 m, 0.502 at the level; at a 100 m grain the tree reads 1.200 +- 0.763 m and the gate weighs 0.6902 = the law's; the tile at mip 7: 5,120 texels kept, 10,240 zeroed, 1,024 within 5 cm of the level, 0 wrong. Stills (serialized on the GPU): the shipped sea view bit-identical; the HQ mouth with no level declared bit-identical, with MLLW declared sub-LSB, 86 px at d = 1 -- the MassGIS orthos cover the view at 15 cm and stand over the 2011 ortho by grain. On the scene without MassGIS the gate removed one wedge along the south jetty's harbour face (8,326 px, luma 74 to 41) and nothing in the channel or on the shoal: under surveyed water `bed_rules.json` already paints the bed over every photo below +0.4 m NAVD88, so a photo's water can show only where the survey's rings say land and the height says below the level. The gate's tiles hold 3.77 M texels at weight 0 under the water. Open: stations.json carries no MHW, so NOAA's MHW set of the same flight cannot declare it yet; the flat channel's gate is a weight gate while the tree's is a value gate (since 2026-10-10), noted, not touched. |
+| Below a source's own level, magnify its kept tile, not its file | `claude/vigorous-wu-bf14f9` (6e80451) | HIERARCHY 4.20's third clause made literal: `TileTree::LeafTile` reads a tile finer than one source's own level from the KEPT own-level tile through `MagnifyOwn` -- bilinear between the ancestor's texel centres in the tree's own format (straight alpha for Rgba8, weight-weighted value for FloatW, the four channels for Raw4), a tap past the ancestor's edge read from the neighbouring own tile as the GPU reads across the atlas -- and the file is never opened for it. Not kept; `Peek` answers from the ancestor's entry so a composite above knows its key; the branch stands before the held-only check since it reads only what is kept. The height tree's per-leaf ledger is printed at exit (`[height-tree] the tree this run`). | rastertest 59 checks: the file's `Sample` called 311,296 times by the pass and 0 times by an ask two levels under; the bytes equal an independent 3x3-mosaic magnification exactly; a planted clamp at the own tile's edge caught on 280 bytes; the hill asked eight levels under its own mip within 0.58 mm at the crown (bound 1.24 mm), the file asked 0 times; on the 4-texel checker what moved by design is max 36/255, mean 0.68/255. Stills: the shipped sea view bit-identical, haulover_city within the run-to-run floor, both settle exact. The cold mouth view of 3d, fourth arm: residency.load 38 ms (the 1,024-window arm 88, the original 1,451), frame-time file decodes 0, still not exact at 3,000 frames; the ledger says why: the law fired 3,660 times, every one for ETOPO 15-second under its own mip 16, and the bed and the lidar were asked under their own level 0 times at this view -- 3d's first diagnosis (the bed at mips 6-7) was wrong there -- and what a cold height tile still costs is the three NON-file sources (the CUDEM grid, ETOPO 2022, survey.edits), which have no own level, painted per texel at every level asked and folded upward at 103-171 ms a fold-up: the clause still to apply to them. The probe: above every own level identical to the metre; under ETOPO's own level, where it alone paints, |tree - stack| p95 0.006 to 0.123 m at 1.5 m -- the law's one trade, visible to the probe, not to the stills. |
 
 **The gate on the merged tree** (one take each; the other sessions' engines shared the GPU throughout):
 `--tool rastertest` 57 checks; `--selftest` 29 suites PASS, no unplanted FAIL; the demo scene against the
@@ -435,28 +438,92 @@ A arm at the same instant: the mouth settled exact in 840 frames, 20.8 ms GPU, 2
 Town Neck Beach from 600 m settled in 1,299 frames, 15.8 ms, the stair along the beach gone and the houses
 standing as solids, 54 % px / SSIM 0.875 (A has no ortho there); the jetty view did not settle in 3,000
 frames under the contention (7,779 of 32,479 tiles pending), 27.5 ms, 13.9 % px / SSIM 0.951 on what it
-had. The jetty view also shows a flat, faceted top on the north jetty -- in the A arm too, and in the
-shipped scene since the MassGIS orthos went in: `data/gis/edits.geojson`'s hand polygons (OSM's jetty ways)
+had. The jetty view also showed a flat, faceted top on the north jetty -- read, it turned out below, off a
+still with 7,779 tiles pending; the settled A arm shows the slab without the facets -- and in the shipped
+scene since the MassGIS orthos went in: `data/gis/edits.geojson`'s hand polygons (OSM's jetty ways)
 put a 2.5 m NAVD88 crest floor under the whole structure, flat, and the 2023 leaf-off ortho paints its dark
 riprap with little contrast, so the eye reads a slab where Google's imagery read rocks. The 2018 lidar has
 the structure at 1 m (valid on 98 % of the north jetty's outline, crests to 4.4 m): the hand floor should
 yield to a finer height where one has data -- the finest-witness law the shoreline took tonight, applied to
 the edits. Not done; it predates this branch.
 
-Still to fold, when their sessions report (each told: no PR, commit on your branch): the seam feather at
-a height source's data edge (`claude/interesting-morse-eaa9c3`: the law built, 61 checks, the lidar
-against the composite with no datum bias at the overlap; its picture gate waits on the corrected bed),
-the ortho's capture level as a weight (`claude/distracted-zhukovsky-997ee8`: built, planted case
-passing, stills queued), magnify-from-the-kept-tile below a source's own level (`claude/vigorous-wu-bf14f9`,
-in progress), and the coverage-conservation probe (a card, not started).
+**How the three were folded** (23:00-23:07): each branch stood on this branch's f68c786 and was merged
+in turn, seam, capture level, magnify. The dry run (`git merge-tree --write-tree`) named the conflicts
+before any merge: the scene twice (the seam's `over` 1 + `feather` 10 on the two heights against the
+capture level's 2011 ortho entry and readme paragraph; both kept, the ortho entry after the lidar's)
+and this document once (the magnify session's 3d paragraph and 3e-3f inserted at the same line; theirs
+first, since it belongs to 3d). Every source file auto-merged: `RasterFileSource.h` carries all three
+sessions' additions, `RasterFileTest.cpp` the seam's and the magnify's cases, `Assembly.cpp` the boot
+ingest and the capture gate's wiring. The build is clean (70 of 70). The seam's `feather` and the capture
+gate give new identities to the feathered heights, the RGBA drone ortho and the gated colour composite;
+the sessions' own gates had already ingested every one into the shared cache, so the merged binary's first
+boot found all fourteen trees whole (the MassGIS and IOCM trees keep their names and their tiles).
+Nothing is left to fold; the coverage-conservation probe (a card) was not started.
+
+**The gate on the whole** (23:08-23:15, the merged binary of 23:07, no other engine on the GPU, one take each):
+`--tool rastertest` 65 checks, 0 FAIL (57 + the seam's and the magnify's cases); `--selftest` 29 suites PASS, no
+unplanted FAIL. Every one of the fourteen trees was whole at boot. The three stills, `--scale 0 --settle-exact`:
+
+| view | settled | GPU whole frame / water | vs the A arm | vs the stills before the three folds (F0, 19:00) |
+|---|---|---|---|---|
+| sea (the north jetty tip) | exact in 1,840 frames (F0: not in 3,000, 7,779 pending, under four engines) | 15.4 / 6.5 ms (F0 27.5 under contention; A 14.9) | 54.5 % px, SSIM 0.908 | 53.4 % px, SSIM 0.916 |
+| mouth | exact in 309 frames (F0 840) | 20.4 / 15.9 ms (F0 20.8; A 22.4) | 47.8 % px, SSIM 0.977 | 41.3 % px, SSIM 0.975 |
+| tnb_high | exact in 986 frames (F0 1,299) | 15.0 / 11.9 ms (F0 15.8; A 14.7) | 54.0 % px, SSIM 0.876 (A has no ortho there) | 0.8 % px, SSIM 0.999 |
+
+Read against the pictures (sent to Mark; his eye decides):
+
+- **Town Neck did not move** (0.8 % of pixels, the RGBA ortho's 2 m feather now reaching its alpha edge): none
+  of the three laws has data to act on there.
+- **The mouth moved on the bars and in the channel, not on the land.** The dark irregular patches east of the
+  jetty tips in F0 were the 2018 lidar's shoals standing over the composite; with noaa.inlethq `over` 1 the
+  2025 composite (BlueTopo 4 m where eHydro's polygons end, resampled to 1.5 m) paints them, smoother and
+  moved, and the wave field re-solved on the new bed, so the whole water surface differs by a little
+  (mean |d| 1.8). What remains in the after-still is a thin dark line running SSE from the south jetty's tip
+  and a dark streak east of it: by their straightness, edges INSIDE the composite file (where an eHydro
+  survey polygon meets BlueTopo at a 1.5 m cell), which the feather cannot see, since the file lacks no
+  texel there -- a reading from the picture, not a measurement; the transect tool is the instrument.
+  Where the 2018 lidar is the finer and the truer witness on a bar the composite's own sources never
+  sounded, `over` 1 gives it away: a date and a provenance are still not keys the stack knows (section 5).
+- **The jetty's crest reads as rock, and the before-still is not the comparison.** F0's slab was taken with
+  7,779 tiles pending; its facets were the coarse heights the residency had. The settled after-still shows
+  the north jetty's top as the ortho's riprap, magnified into blobs at 1 m from the eye, over a crest the
+  transect below shows flat at +2.5 m. The seam session's own measurement of the shipped sea view names what
+  changed on the colour: the MassGIS set's data ends along easting 352,500, across this crest, and the ortho
+  now fades over its 25 m where it stepped. On the heights, the question this view raises -- does the seam's
+  10 m feather on the lidar fade a structure narrower than two feathers? -- the transect answers:
+
+  The transect across the north jetty (`--tool height-tree-probe:transect=42.818805,-70.8085,42.820005,-70.8085,134`,
+  a south-north line at 1 m through the structure's middle; 6 s on the CPU, the stack read directly, no
+  ingest): the jetty's polygon spans 49-77 m of the line, 29 m, and across every metre of it the stack is
+  +2.500 exactly. `survey.edits 1.000 +2.500` is the last source in the compose order and paints the hand
+  polygon's crest AS A VALUE at weight 1, over the lidar reading +2.77 m and the composite +3.03 m on the
+  same crest (both witnesses have the structure, and agree within 0.3 m). So the slab is the hand edit
+  itself, measured, not a floor the finer data could rise above; it stands in A, F0 and F alike, and the
+  settled after-still's rock is the ortho's colour on a flat +2.5 m top. The lidar's feather is moot here:
+  its weight ramps 0.027 to 1.000 over 50-61 m from the jetty's south face (the channel, where the laser
+  saw no bottom), under the edits' value, and at the north foot (78 m on) the lidar has the bottom at
+  weight 1 with no edge to fade from. The stack steps -3.97 to +2.50 in one metre at the polygon's south
+  edge, since the edits carry no feather: a riprap face, physical. The feather-0 arm was not needed (and
+  its probe copy was refused by the schema for a `readme` key, which the shipped scene spells otherwise).
+  Where the feather does act, the Plum Island beach, the seam session's own transects in HIERARCHY 4.20
+  are the record. The fix named above now has its number: the hand value should yield where a finer
+  height has data (the lidar's 1 m, the composite's 1.5 m), as the shoreline's finest-witness law does
+  for the mask, so that the edit is a floor under coarse data only. Not done.
+
+Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
+own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
+ledger) are in the table above and run in `--selftest` and `--tool rastertest` on every build.
 
 ## 5. What is open
 
-- The stack order among the heights is grain (StackOrder's default): the 2018 lidar stands over the 2025
-  channel survey where both have a bottom. A date is not a key the stack knows; `over` would say it by
-  hand. The channel itself is lidar nodata, so the survey shows there either way.
-- The three eastern 2011 tiles paint black beyond the flight; a copy with alpha, as the drone ortho got,
-  is one Python line per tile and was not made.
+- The stack order among the heights is now a hand key: noaa.inlethq `over` 1 with its reason in the
+  scene's `_over` (the seam session's call, taken). A date is still not a key the stack knows.
+- The three eastern 2011 tiles paint black beyond the flight, and black is a colour, not an absence: the
+  seam's feather and the capture gate do not see it (under surveyed water the bed classifier covers it).
+  A copy with alpha, as the drone ortho got, is one Python line per tile and was not made.
+- The three non-file height sources (the CUDEM grid, ETOPO 2022, survey.edits) have no own level, so a
+  cold height tile still pays their per-level paint and push fold (the magnify session's ledger, section
+  4): the own-level clause applied to them is the next step of 4.20, not started.
 - Drone imagery AT the Merrimack: the PIEPR raw photos through OpenDroneMap (section 1).
 - MassGIS 2025 (7.5 cm on Cape Cod, 15 cm here) would put a 2025 plane ortho beside the 2023 one.
 - A stale tree folder from the hung first ingest, `cache/trees/usgs.tnb2025.ortho.c94dbf4c` (835 KB,
