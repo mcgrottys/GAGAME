@@ -521,7 +521,7 @@ layer's tile identity carries the law (`HeightSource::Law`). Engine +60 / -2 lin
 | `--selftest` | 29 suites | 29 suites, no unplanted FAIL |
 | transect across the north jetty, 49-77 m | +2.500 on every metre (`survey.edits 1.000 +2.500` over lidar +2.77, composite +3.03) | the composite over the lidar on every metre: -3.07 at the south foot, +2.5 to +3.0 on the crest (51-65 m), the north slope down to -2.4; no edits column |
 | transect along the polygon's midline (11 segments) | | crest +2.1 to +3.7 m end to end; the composite paints it at weight 1 everywhere, the lidar under it at 0.55-1.0 |
-| shipped merrimack.json, view sea, pinned clock, before (the binary of 23:07, a copy) vs after | | 1.3 % px, max 82, SSIM 0.995, all on the jetty's EDGES (diff_ship.png). Not the law: that scene has no height finer than the edits. The edits tree it read, `survey.edits.42dcc867`, was painted on 2026-10-03; against tonight's `8204eaa5` (same scene, same polygons, no witnesses) 2,527 tiles are byte-identical and 52 differ -- at mip 8 a few hundred edge texels a tile on the other side of the polygon's edge (|d| = the crest, 2.5 m, weight 0.5), halving each level up. A built-in layer's leaf carried no paint identity, so the composite kept the fortnight-old edges; the law's identity repainted them. |
+| shipped merrimack.json, view sea, pinned clock, before (the binary of 23:07, a copy) vs after | | 1.3 % px, max 82, SSIM 0.995, all on the jetty's EDGES (diff_ship.png). Not the law: that scene has no height finer than the edits. The edits tree it read, `survey.edits.42dcc867` (2026-10-03), and tonight's `8204eaa5` (same polygons, no witnesses) share 2,579 tiles, 2,527 byte-identical and 52 different, every one at a polygon's edge: the old tree's mip-8 tiles were FOLDED from mip-7 children a deeper view had painted (edge weights in 1/64 steps, the polygon's area in each texel: f5_m8_x10680_y620 holds weights 0.0156, 0.0625, 0.125 ...), the new tree, asked at mip 8 first, painted that level directly (weight 1 or 0 by the texel's centre). First written up here as stale paint; it is the direct paint's area question (the pending card), the same bytes under two legitimate histories. |
 | HQ sea view (hq_sea_after.png vs F_sea of 23:12) | the flat +2.5 m slab | 44 % px, SSIM 0.927: the jetty is the composite's rock surface (rolling +2 to +3 m, the slopes into the water), and the wave field re-solved on the changed bed moves the sea; settled exact in 650 frames, 14.9 ms GPU |
 
 **The spike.** The after-still shows one steep 10 m spike on the jetty about 50 m west of the eye. It is
@@ -534,6 +534,15 @@ ground is the surface-against-bare-earth question of the composite's source (the
 earth, reads +2.1 m there), not the law's; a photo would show the tower. Mark's eye decides whether
 the demo wants the tower or the lidar on top at the jetties (`over` 0 on noaa.inlethq would give the
 bare earth where both have data).
+
+**A grid layer's tiles are keyed by its bytes** (2026-10-18 02:00-02:40, this branch). `noaa.etopo2022` and
+`noaa.cudem.<survey>` answer `HeightSource::Law` with the grid's FNV-64, size, datum link, box and
+feather (compose/Sources.cpp), so a regenerated grid or another station's link repaints their leaves and
+`earth.height`; before, both were keyed by name|unit alone. Engine +44 lines, the test +20. The paint's
+form stays `kTileTreeVersion`'s. Gate: `--selftest` composetest plants two equal grids (one key), the
+-0.092 m link on one (a new key) and one changed cell (a new key); `--tool rastertest` unchanged. The
+cost, the shipped sea view's first boot with every grid leaf and the composite cold against the 01:17
+boot (the edits leaf and the composite cold, the grids warm): the shipped sea view's first boot settled exact in 1,792 frames (174 s) against 515 (97 s) with the grids warm; the height tree read 1,053 tiles in 144.9 s against 26.0 s, residency.load 17.8 ms a job against 5.9, the GPU frame 13.4 ms, unchanged; ETOPO 2022 painted 2,720 tiles, CUDEM 2,320 (1,226 void), the composite composed 4,517. The still against the 01:17 one: 0.28 % of pixels, max 53, SSIM 0.9998, specks on the water. **And the repaint from scratch is not the bytes the long-lived trees held.** Against the trees of 2026-10-03, at texels both weigh fully (weights agree to 0.002 everywhere): CUDEM differs by up to 0.13 m at pyramid mip 8, 0.29 at mip 10, 1.08 at mip 11 (a million texels past 1 cm); ETOPO 2022 by up to 0.02 m at pyramid mips 8-13 -- and by 42, 183, 474, 1,022, 1,583 and 2,658 m at cube16k's mips 1 to 6, with mip 0 identical in all 101 tiles. The reading: a source without an own level paints whatever level is asked. The old trees' coarse levels were FOLDED from finer levels earlier views had painted (area means); tonight's fresh trees painted them DIRECTLY at the first ask (the boot walks coarse first), and `EquirectHeightSource::Sample` is a point bilinear that ignores the grain, so a 39 km texel painted directly is one point of a mountain range where the fold is its mean. The tree's bytes for the three grid layers are a function of the order of asks: a fresh cache (a new machine, this commit's first boot) and a lived-in one hold different heights, kilometres apart at the globe's coarse rungs. The identity cannot mend that; the own-level clause for these three (the magnify session's remaining clause: paint at the grid's own level, fold above, magnify below) makes the bytes a function of the data alone, and is the next step.
 
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
@@ -552,9 +561,12 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
 - The hand edits now yield to finer data (section 4), so what stands on the jetties is the composite's
   surface, light tower included; the lidar's bare earth is one `over` away. A source could declare which
   it is (surface or bare earth) and a scene choose; not built.
-- The built-in height layers' tree identity carried no paint until the edits' did: a texel-centre change
-  in the engine leaves CUDEM's and ETOPO's cached leaves as they were painted. The edits' `Law` is the
-  shape of the fix (a layer names what it paints by); the other two not done.
+- The grid layers' tree identity is now their bytes (the block below); the paint's FORM is still
+  `kTileTreeVersion`'s to bump by hand when the leaf paint changes.
+- A source without an own level (the edits, CUDEM, ETOPO 2022) paints whatever level is asked and folds
+  where a finer one was asked first; at a hard edge the two disagree by up to a texel (the 52 tiles
+  above). The direct paint's area question is the pending card; the own-level clause applied to those
+  three would close it with the fold.
 - Drone imagery AT the Merrimack: the PIEPR raw photos through OpenDroneMap (section 1).
 - MassGIS 2025 (7.5 cm on Cape Cod, 15 cm here) would put a 2025 plane ortho beside the 2023 one.
 - A stale tree folder from the hung first ingest, `cache/trees/usgs.tnb2025.ortho.c94dbf4c` (835 KB,

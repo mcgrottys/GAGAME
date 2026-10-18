@@ -2531,11 +2531,14 @@ below the crest, which on a jetty is everything but the crest line. It is the ga
 stack (Compositor::SampleHeightStack), the tree's point sample and its tile compose inherit it from
 one Sample and cannot drift. The layer's cache identity now carries its law (HeightSource::Law:
 the polygons' content hash and the witnesses' name|structure), so the tree repaints the edits'
-tiles when the polygons or a witness change and at no other time -- and, found on the way, the
-built-in layers' tiles had carried no paint identity at all: the shipped scene's edits tree stood
-as painted on 2026-10-03, with 52 of its 2,581 tiles differing from today's paint by one texel at
-every polygon edge (the crest, 2.5 m, at weight 0.5 on a mip-8 tile, halving a level up), which the
-new identity repainted.
+tiles when the polygons or a witness change and at no other time. Found on the way, and first
+misread as stale paint: the shipped scene's edits tree of 2026-10-03 and tonight's differ in 52 of
+2,581 shared tiles, every one at a polygon's edge -- because the old tree's mip-8 tiles were FOLDED
+from mip-7 children an earlier, deeper view had painted (edge weights in 1/64 steps, the area the
+polygon covers of each texel), while the new tree, asked at mip 8 first, painted that level directly
+(the centre in or out: weight 1 or 0). A source with no own level paints whatever level is asked and
+folds where a finer one was asked first, and at a hard edge the two disagree by up to a texel: the
+area question of the direct paint, open, not a staleness.
 
 Gated: `--tool rastertest` (69 checks): a +50 m polygon over the test hill's east half and 200 m
 past it -- in the disc the edit's weight is 0.000 and the stack the hill (0.03 mm off), past the
@@ -2548,10 +2551,25 @@ transect after: the jetty's stack is the composite over the lidar on every metre
 the crest, the slopes down to the water), the edits' column gone from 49 to 77 m; along the
 polygon's midline the crest is +2.1 to +3.7 m end to end. Stills, frozen clock: the shipped
 merrimack.json sea view (no finer witness in that scene) 1.3 % of pixels at the jetty's edges, the
-stale paint above, not the law; the HQ sea view's jetty is the composite's rock surface, with one
+fold against the direct paint above, not the law; the HQ sea view's jetty is the composite's rock surface, with one
 10 m spike at the east tip -- the composite's own cells there (+9.99, +7.08, +6.50 m): the North
 Jetty light tower standing in BlueTopo's surface, which the hand edit used to flatten. Whether a
 tower is ground is the surface-versus-bare-earth question of that source, not the law's.
+
+**A grid layer's tiles are keyed by its bytes** (2026-10-18). A layer by file carries its bytes in
+its structure string and the tree keys its leaf by them; the two layers that read grids the engine
+loaded for other reasons -- `noaa.etopo2022` (the globe's int16 grid, with the station's MSL to NAVD88
+link applied at the source) and `noaa.cudem.<survey>` (the harvester's float32 grid behind
+BathyModel) -- carried only name|unit, so a regenerated grid or another station's link would have met
+the old tiles in the cache, and the composite that folds them would have kept them too. Now each
+answers `HeightSource::Law` with the grid's FNV-64 and size, the datum link, the box and the feather
+(compose/Sources.cpp), hashed once at the first ask, which is the tree's build after the grid is
+loaded (ETOPO's 64 MB, tens of milliseconds). The paint's own FORM -- the texel centre, the fold of a
+parent from its children -- is `kTileTreeVersion`'s (TileTree.h), which every tree's name already
+folds; a layer does not repeat it, and that constant is bumped by hand when the leaf paint changes,
+which is the one discipline the identity cannot take over. Planted (`--selftest`, composetest): two
+equal grids share a key; the link of -0.092 m on one, or one cell changed, is a new key. The cost
+is one repaint of the three grid leaves and `earth.height` at every view the cache knew: the shipped sea view's first boot settled exact in 1,792 frames (174 s) against 515 (97 s) with the grids warm; the height tree read 1,053 tiles in 144.9 s against 26.0 s, residency.load 17.8 ms a job against 5.9, the GPU frame 13.4 ms, unchanged; ETOPO 2022 painted 2,720 tiles, CUDEM 2,320 (1,226 void), the composite composed 4,517. The still against the 01:17 one: 0.28 % of pixels, max 53, SSIM 0.9998, specks on the water. **And the repaint from scratch is not the bytes the long-lived trees held.** Against the trees of 2026-10-03, at texels both weigh fully (weights agree to 0.002 everywhere): CUDEM differs by up to 0.13 m at pyramid mip 8, 0.29 at mip 10, 1.08 at mip 11 (a million texels past 1 cm); ETOPO 2022 by up to 0.02 m at pyramid mips 8-13 -- and by 42, 183, 474, 1,022, 1,583 and 2,658 m at cube16k's mips 1 to 6, with mip 0 identical in all 101 tiles. The reading: a source without an own level paints whatever level is asked. The old trees' coarse levels were FOLDED from finer levels earlier views had painted (area means); tonight's fresh trees painted them DIRECTLY at the first ask (the boot walks coarse first), and `EquirectHeightSource::Sample` is a point bilinear that ignores the grain, so a 39 km texel painted directly is one point of a mountain range where the fold is its mean. The tree's bytes for the three grid layers are a function of the order of asks: a fresh cache (a new machine, this commit's first boot) and a lived-in one hold different heights, kilometres apart at the globe's coarse rungs. The identity cannot mend that; the own-level clause for these three (the magnify session's remaining clause: paint at the grid's own level, fold above, magnify below) makes the bytes a function of the data alone, and is the next step.
 
 ## 5. Decisions for Mark
 

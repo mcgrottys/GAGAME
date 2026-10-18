@@ -1,5 +1,6 @@
 #include <cstdint>
 #include "compose/Sources.h"
+#include "core/Common.h"
 
 #include "core/Json.h"
 #include "core/TileProviders.h"
@@ -229,7 +230,42 @@ HeightSource::Range EquirectHeightSource::RangeIn(double lat0, double lon0, doub
     return Range::Known;
 }
 
+// THE IDENTITY OF WHAT A BUILT-IN LAYER PAINTS (2026-10-18). A layer by file carries its bytes in its
+// structure string and the tree keys its tiles by them (HeightLayerSource::Identity); these two read
+// grids the engine loaded for other reasons -- the globe's ETOPO, the survey's CUDEM -- and carried
+// only their names, so a regenerated grid, or another station's datum link, would have met its old
+// tiles in the cache. The law is the bytes and the numbers the paint depends on: the grid's FNV-64
+// and size, the datum link, the box and the feather. The paint's own FORM (the texel centre, the fold
+// of a parent from its children) is kTileTreeVersion's, which TileTree folds into every tree's name;
+// a layer does not repeat it. The hash is taken once, at the first ask, which comes when the tree is
+// built -- after the grid is loaded -- and costs the bytes once (ETOPO's 64 MB, some 50 ms).
+std::string EquirectHeightSource::Law() const {
+    if (!m_elev || m_elev->empty()) return std::string();
+    if (!m_hashed) {
+        m_bytesFnv = Fnv1aBytes(m_elev->data(), m_elev->size() * sizeof(int16_t));
+        m_hashed = true;
+    }
+    char b[128];
+    snprintf(b, sizeof(b), "grid int16 %dx%d fnv64 %016llx, vdatum %+.3f m", m_nx, m_ny,
+             static_cast<unsigned long long>(m_bytesFnv), m_datumShift);
+    return b;
+}
+
 // ------------------------------------------------------------------------------ CUDEM
+
+std::string CudemHeightSource::Law() const {
+    if (!m_bathy || !m_bathy->Ready()) return std::string();
+    if (!m_hashed) {
+        const std::vector<float>& e = m_bathy->Elev();
+        m_bytesFnv = Fnv1aBytes(e.data(), e.size() * sizeof(float));
+        m_hashed = true;
+    }
+    char b[192];
+    snprintf(b, sizeof(b), "grid float32 %dx%d fnv64 %016llx at %.6f,%.6f..%.6f,%.6f, feather %.3f",
+             m_bathy->Nx(), m_bathy->Ny(), static_cast<unsigned long long>(m_bytesFnv), m_bathy->Lon0(),
+             m_bathy->Lat0(), m_bathy->Lon1(), m_bathy->Lat1(), m_feather);
+    return b;
+}
 
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
                                      const char* name)

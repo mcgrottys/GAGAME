@@ -72,12 +72,16 @@ public:
     // The grid's cells under the box and the bilinear's one beyond, the longitude wrapped; it owns
     // every box (its weight is 1 everywhere).
     Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
+    // THE IDENTITY OF WHAT IT PAINTS (2026-10-18): the grid's bytes, its size and the datum link.
+    std::string Law() const override;
 
 private:
     const std::vector<int16_t>* m_elev;
     int m_nx, m_ny;
     double m_datumShift = 0.0;
     SourceInfo m_info;
+    mutable uint64_t m_bytesFnv = 0;   // the grid hashed once, at the first ask (after it is loaded)
+    mutable bool m_hashed = false;
 };
 
 // (The plane orthos and the overlays are scene sources now, compose/RasterFileSource.h.)
@@ -101,11 +105,15 @@ public:
     // no cell does. The band follows the feather: ask again and a new feather gives a new box.
     bool FullWeightCells(int& c0, int& r0, int& c1, int& r1) const;
     const BathyModel* Grid() const { return m_bathy; }
+    // THE IDENTITY OF WHAT IT PAINTS (2026-10-18): the grid's bytes, its box and the feather.
+    std::string Law() const override;
 
 private:
     const BathyModel* m_bathy;
     double m_feather;
     SourceInfo m_info;
+    mutable uint64_t m_bytesFnv = 0;
+    mutable bool m_hashed = false;
 };
 
 // M6w: HAND EDITS AS A STACK SOURCE. The mask=land polygons (the OSM-seeded jetty

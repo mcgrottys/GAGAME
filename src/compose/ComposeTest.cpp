@@ -15,6 +15,7 @@
 #include "compose/ColorStackSource.h"
 #include "compose/ComposeTree.h"
 #include "compose/Compositor.h"
+#include "compose/HeightStackSource.h"
 #include "compose/Projections.h"
 #include "compose/Sources.h"
 #include "compose/TileTree.h"
@@ -404,6 +405,25 @@ bool RunComposeSelfTest() {
               "edit polygon paints its crest inside");
         Check(e1.Sample(42.005 * d2r, -70.7 * d2r, 10.0, m) == 0.0f,
               "edit polygon silent outside");
+    }
+
+    // ---- THE IDENTITY OF WHAT A BUILT-IN LAYER PAINTS (2026-10-18): a grid layer's tile key is its
+    // bytes and its datum link, not its name alone. Two equal grids share a key; the link planted on
+    // one of them, or one cell changed, is a new key.
+    {
+        std::vector<int16_t> g1(8 * 4, 7), g2(8 * 4, 7);
+        g2[5] = 8;
+        EquirectHeightSource a("test.eq", "equirect-grid int16 8x4", 1e6, &g1, 8, 4, 0.0);
+        EquirectHeightSource b("test.eq", "equirect-grid int16 8x4", 1e6, &g1, 8, 4, 0.0);
+        EquirectHeightSource c("test.eq", "equirect-grid int16 8x4", 1e6, &g1, 8, 4, -0.092);
+        EquirectHeightSource d("test.eq", "equirect-grid int16 8x4", 1e6, &g2, 8, 4, 0.0);
+        HeightLayerSource la(&a, kHeightFrame), lb(&b, kHeightFrame), lc(&c, kHeightFrame), ld(&d, kHeightFrame);
+        Check(la.Identity() == lb.Identity() && la.Identity().find("fnv64") != std::string::npos,
+              "a grid layer's tile identity is its bytes: the same grid twice, one key");
+        Log("[composetest] the grid layer's key: %s", la.Identity().c_str());
+        Check(la.Identity() != lc.Identity(),
+              "PLANT a datum link of -0.092 m on the same grid: a new key, the old tiles not reused");
+        Check(la.Identity() != ld.Identity(), "one cell of the grid changed: a new key");
     }
 
     // ---- the Google source's finest zoom is the scene's (streaming.googleZoom), and part of
