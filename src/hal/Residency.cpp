@@ -1037,6 +1037,11 @@ void ResidencyManager::FloorMap(const std::vector<std::vector<uint8_t>>& in, uin
     }
 }
 
+uint64_t ResidencyManager::GroundKey(int tenant, const TileRequest& r) const {
+    if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return 0ull;
+    return KeyOf(m_tenants[size_t(tenant)], r);
+}
+
 // 4.7: a tile's bytes landed: it is held, and so is every other slot mapped to its address.
 void ResidencyManager::Landed(Tracked* tile) {
     tile->landed = true;
@@ -1613,6 +1618,40 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     std::vector<std::shared_ptr<Tracked>> toFill, aliases;
     for (const auto& tile : batch) {
         Tenant& t = m_tenants[tile->tenant];
+        // A TILE LANDS ONLY ON ITS OWN GROUND (2026-10-18). The key a read or an alias was decided for is
+        // the slot's ground at that moment; the window may have stepped since (Tenant::Move), and a slot
+        // the step did not tell -- or told after the order's snapshot -- would map another ground's
+        // bytes here, landed and never let go until its next telling: a land page drawn on the sea
+        // (Mark's screenshot of this morning). So the slot's ground is read again here, and bytes whose
+        // key is not the slot's are refused: the slot goes back to Seen and asks under its ground.
+        if (tile->gkey) {
+            const uint64_t now = KeyOf(t, tile->req);
+            if (now != tile->gkey) {
+                ++t.loadsMovedGround;
+                ++movedGroundTotal;
+                if (traceRes) {
+                    Log("[residency] %S slot (%u m%u %u,%u): the ground moved under the %s (key %016llx, the slot's "
+                        "now %016llx): refused, asked again",
+                        t.name.c_str(), tile->req.face, tile->req.mip, tile->req.x, tile->req.y,
+                        tile->alias ? "alias" : "read", static_cast<unsigned long long>(tile->gkey),
+                        static_cast<unsigned long long>(now));
+                }
+                if (!tile->alias) {   // the read was this slot's: the address keeps nothing of it
+                    const auto it = t.held.find(tile->gkey);
+                    if (it != t.held.end() && it->second.pool == UINT32_MAX &&
+                        it->second.reader.face == tile->req.face && it->second.reader.mip == tile->req.mip &&
+                        it->second.reader.x == tile->req.x && it->second.reader.y == tile->req.y) {
+                        t.held.erase(it);
+                    }
+                }
+                tile->alias = false;
+                tile->gkey = 0;
+                tile->data.clear();
+                tile->data.shrink_to_fit();
+                tile->state = TileState::Seen;
+                continue;
+            }
+        }
         // 4.7: a mapping of bytes another slot read -- the address's pool slot, no read, no fill.
         if (tile->alias) {
             const auto it = t.held.find(tile->gkey);

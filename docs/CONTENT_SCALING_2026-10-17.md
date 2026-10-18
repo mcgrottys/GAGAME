@@ -608,6 +608,27 @@ painting its 5,096 MassGIS pages at 34 ms each, the land the orthos. So `globe_t
 composite by name with that reason written beside it, and keeps the rest; the reader that makes a
 composite in the stack cost 3.5 s a page is open (section 5).
 
+**A tile lands only on its own ground** (2026-10-18 13:30-14:10, this branch; the law and its instrument for the
+offshore land page of section 5). A tracked tile's address key -- the slot's ground under the window's binding,
+`ResidencyManager::KeyOf` through the tenant's `globalOf` -- was taken once and kept; a window step between the
+order's decision and the map would have let another ground's bytes land at the slot, landed and never let go
+until its next telling. Now (hal/Residency.*, ResidencyOrder.cpp, FrameLoop.cpp): the key is taken at every
+decision of the order; at the map the slot's ground is read again and bytes whose key is not the slot's are
+refused, the slot sent back to Seen to ask under its ground (counted per tenant in the loader's line, "N refused:
+the slot's ground moved under the read", and in the run's ledger); and three turns after every step the kept
+tiles are audited for their ground as well as their pool slot ("held on another ground (must be 0)"). Engine
++69 / -8 lines. Gated: `--selftest` 29 suites; the jetty rail with `--res-trace`, 460 window moves, 83,724 slots
+told, 79,563 tiles kept, 0 on another ground, 0 refused; a dive rail written for the run over the shipped classic
+keys (high over the mouth to the Salisbury reservation in five seconds, a fast run north along the beach, up
+and back: 160 moves, the ranks 2 to 4 and back), 0 and 0 again; the settled shipped sea view against this
+morning's (02:40, the own-level run): 47 pixels of 1.44 M past one level, the largest 19, SSIM 1.0000 -- not the
+bit-identity the frozen-clock gate has given before, and not placed; the law refuses nothing in a settled run,
+so the 47 are the run's own floor or a landing order the re-keyed decisions changed, and either is worth one
+A/A take when the machine is quiet. So the page Mark saw is not reproduced by a rail with warm loads either;
+the instrument now rides every run, and his flight with `--res-trace` will say "refused" or "held on another
+ground" at the frame, or it will say neither and the page is the GPU's rows against the CPU's bindings within
+a frame, which the next instrument would compare.
+
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
 ledger) are in the table above and run in `--selftest` and `--tool rastertest` on every build.
@@ -653,8 +674,9 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
   only inside its box (Window.hlsli, the C++ twin agrees), the rows are filled after the steps in the same
   frame. What remains is the live case -- a want whose global key was taken under one binding and mapped or
   aliased after the binding stepped, with the loads slow enough (cold composites that morning) to leave the
-  window open -- which no instrument catches today. The instrument that would: at every map and alias,
-  re-derive the slot's ground under the current binding and refuse bytes whose ground is another (counted
-  in the loader's line); Mark's flight with `--res-trace` and the frame of the screenshot would place it.
+  window open. The instrument and the law are built (section 4, the same afternoon): the key at every
+  decision, the ground re-read at the map and refused when it moved, the kept tiles' ground audited; the
+  jetty and dive rails fly clean. Mark's flight with `--res-trace` and the frame of the screenshot places
+  it, or rules the residency out.
 - The scenes list absolute `D:/DataCache/...` paths (as `streaming.gisLand` already does); a second
   machine needs the files at those paths or the entries edited.

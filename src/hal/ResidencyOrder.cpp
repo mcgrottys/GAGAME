@@ -1625,7 +1625,10 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         // dropped before it mapped) takes the read itself.
         {
             Tenant& tn = m_tenants[tr->tenant];
-            if (!tr->gkey) tr->gkey = KeyOf(tn, tr->req);
+            // A TILE LANDS ONLY ON ITS OWN GROUND (2026-10-18): the key is the slot's ground NOW, taken at
+            // every decision (it was taken once and kept; a step between two decisions left it another
+            // ground's). MapAndFill holds the bytes to it again when they meet the slot.
+            tr->gkey = KeyOf(tn, tr->req);
             if (tr->gkey) {
                 auto hit = tn.held.find(tr->gkey);
                 if (hit != tn.held.end()) {
@@ -2019,11 +2022,12 @@ void ResidencyManager::LogLoader() const {
         const uint64_t n = uint64_t(t.loadsRead) + t.loadsPaint;
         if (!n && !t.magnifiedKnown) continue;
         Log("[loader]   %S: %llu loads -- %u read (%.2f ms each), %u painted (%.1f ms each); of them %u "
-            "answered magnified, %u failed or not whole | queue wait %.2f ms a load | %u known magnified, no load",
+            "answered magnified, %u failed or not whole, %u refused (the slot's ground moved under the read) | "
+            "queue wait %.2f ms a load | %u known magnified, no load",
             t.name.c_str(), static_cast<unsigned long long>(n), t.loadsRead,
             t.loadsRead ? double(t.readUs) / (1000.0 * t.loadsRead) : 0.0, t.loadsPaint,
             t.loadsPaint ? double(t.paintUs) / (1000.0 * t.loadsPaint) : 0.0, t.loadsMagnified,
-            t.loadsFailed, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0, t.magnifiedKnown);
+            t.loadsFailed, t.loadsMovedGround, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0, t.magnifiedKnown);
     }
 }
 

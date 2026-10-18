@@ -142,10 +142,12 @@ private:
         int tenant;
         TileRequest req;
         uint32_t pool;
+        uint64_t gkey;   // its ground when kept (ResidencyManager::GroundKey)
     };
     std::vector<KeptTile> m_keptCheck;
     uint64_t m_keptCheckAt = 0, m_windowSteps = 0, m_windowTold = 0, m_windowLeft = 0,
-             m_windowKept = 0, m_windowKeptMoved = 0;
+             m_windowKept = 0, m_windowKeptMoved = 0,
+             m_windowKeptDrift = 0;   // kept tiles whose ground was another three turns on (must be 0)
     // 2026-10-04 (the corridor's struggle): the eight slowest frames of the run, each with the
     // window steps it made and the slots those steps told -- printed at the end beside [perf].
     double m_slowTurnMs = 0.0, m_slowRenderMs = 0.0;   // F13: this frame's, for the slow-frame line
