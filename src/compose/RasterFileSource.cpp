@@ -545,7 +545,7 @@ std::shared_ptr<const RasterFileSource::Edge> RasterFileSource::WindowEdge(size_
         }
     }
     auto e = std::make_shared<Edge>();
-    if (any) {
+    if (any) {   // (a window whose present texels all weigh 1 stays empty below: every absent texel weighs 0 anyway)
         std::vector<int> v(P);
         std::vector<double> z(P + 1), col(P), out(P);
         for (int i = 0; i < P; ++i) {   // down each column, the window's rows in metres
@@ -555,13 +555,17 @@ std::shared_ptr<const RasterFileSource::Edge> RasterFileSource::WindowEdge(size_
         }
         for (int j = 0; j < P; ++j) Dt1(&d[size_t(j) * P], &g[size_t(j) * P], P, m_gx * m_gx, v.data(), z.data());
         e->f.resize(size_t(kWin) * kWin);
+        bool trivial = true;
         for (uint32_t j = 0; j < kWin; ++j) {
             for (uint32_t i = 0; i < kWin; ++i) {
-                const double m = std::sqrt(g[size_t(j + reach) * P + i + reach]);
-                const double t = std::clamp(m / m_feather, 0.0, 1.0);
-                e->f[size_t(j) * kWin + i] = float(t * t * (3.0 - 2.0 * t));
+                const double m2 = g[size_t(j + reach) * P + i + reach];
+                const double t = std::clamp(std::sqrt(m2) / m_feather, 0.0, 1.0);
+                const float f = float(t * t * (3.0 - 2.0 * t));
+                e->f[size_t(j) * kWin + i] = f;
+                if (m2 > 0.0 && f < 1.0f) trivial = false;   // a present texel under the feather
             }
         }
+        if (trivial) e->f.clear();
     }
     s_edges.fetch_add(1, std::memory_order_relaxed);
     s_edgeUs.fetch_add(uint64_t(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tEdge).count()),
@@ -571,7 +575,10 @@ std::shared_ptr<const RasterFileSource::Edge> RasterFileSource::WindowEdge(size_
     if (it != m_edgeIndex.end()) return it->second->second;
     m_edgeLru.emplace_front(key, e);
     m_edgeIndex[key] = m_edgeLru.begin();
-    if (m_edgeLru.size() > kWindows / 4) {   // a window's bytes each, where it holds anything
+    // As many as the windows: at a quarter of them the edges of a 7,400-window run were built 53,483
+    // times (686 s) and the picture never settled (2026-10-17). A window's bytes each where it holds
+    // anything; most hold nothing (no absent texel within the feather, or none present).
+    if (m_edgeLru.size() > kWindows) {
         m_edgeIndex.erase(m_edgeLru.back().first);
         m_edgeLru.pop_back();
     }
