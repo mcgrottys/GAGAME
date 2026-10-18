@@ -687,6 +687,26 @@ level to half a millimetre. Its own gate (C++ build, the old binary and old shad
 mouth still moved 0.42 % of its pixels, the first marsh eye 0.02 %, the high eye 2.0 % (the water's level
 on unmapped tiles), the shipped sea view 0.006 % (84 pixels, max 25). Gated with both laws (16:10-16:24, the old binary and old shaders as the before): `--selftest` 29 suites; the mouth still moved 5.6 % of its pixels, the island's platform (SSIM 0.972); the first marsh eye 1.6 % -- the dark band along the beach's wet line, the same law at the same kind of texel, gone (max 162); the high eye 1.9 %; the shipped sea view 0.04 % (602 pixels, max 25). The eye is kept as the globe scene's view `marsh_island` (`--set scene.view=marsh_island`).
 
+**Tried and withdrawn: "water cannot stand above its own surface, at the texel"** (2026-10-18 17:15-17:50). The
+follow-up of the dark marsh, done here at Mark's word: in `ComposedLandnessEdit`, where the survey said water
+and the bed stood over the live waterline, the height answered land, graded over each reader's own band (the
+pixel's `dryBand`, the vertex's cell), one-sided so survey land below the level stayed land, the hand edits
+law over it. It did what it was for -- the marsh island's platform land at the pixel and the vertex (the mix
+lens red over the island, black in its creeks), the dry beach between the survey's shoreline and the live
+waterline land without a stair, the two sea views within 0.4 % and 0.1 % -- and the refuge-marsh still
+(view `plum_marsh`, 5.7 % of its pixels) showed the hole: the diked pools behind Plum Island's dunes turned
+to land too, and so would every lake, pond and upstream river on the planet, because every inland water
+body is survey water with a bed above the SEA's level. The sea's waterline is the sea's alone; the clause
+is right only for the coast gate's water, and the mask does not say which water a texel is -- the sweep
+knows (the coast rings make the sea, the NHD carve the inland water: GisMask.cpp `m_coast` / `m_water`),
+but `GisMaskSource::Sample` paints r = water, g = r or 255 - r (the finer-height witness), b = edited, a =
+255, and no channel has a bit to spare without changing what every reader forms from it. Withdrawn from the
+shaders whole (the stills above are the record); the two eyes stay as the globe scene's views `marsh_island`
+and `plum_marsh`. What would carry it: the sweep's flag byte gains "inland" (`fl & 4`), the mask texel
+carries it in a form the folds and the bilinear read preserve as a weight, and the clause applies by that
+weight -- a mask format change, so every mask tree repaints (its identity moves with the painter); not for
+the demo's evening.
+
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
 ledger) are in the table above and run in `--selftest` and `--tool rastertest` on every build.
@@ -749,12 +769,11 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
   (section 4, "the third path"). Fixed there; the counter names it in a flight.
 - Two witnesses disagree over the marsh island at the Merrimack's mouth and neither is the renderer's to
   mend: the survey (OSM's coast runs landward of the salt marsh, so the island is sea) and the 2021 CUDEM
-  tile (the island's interior at -0.4..-0.9 m NAVD, where a vegetated marsh cannot stand; raw and resampled
-  agree). Under the finest-witness law the survey answers (no height finer than 1 m), so the platform is a
-  water pixel of depth 0 -- lit correctly now, but flat and without the land's near material -- and the
-  basin is drawn flooded 1.4 m deep at a tide that would not reach a real marsh. A survey texel whose bed
-  stands above the live level could let the height answer (the mesh's own "water cannot stand above its
-  surface", asked at the pixel), and the CUDEM's marsh could yield to a bare-earth lidar; neither built.
+  tile (the interior at -0.4..-0.9 m NAVD, where a vegetated marsh cannot stand; raw and resampled agree).
+  The platform above the tide is a water pixel of depth 0 (lit right since the surface law; flat, no near
+  material), the basin is drawn flooded. The texel-side clause that would make the platform land needs the
+  mask to say which water is the sea's (section 4, "tried and withdrawn"); the basin needs a bare-earth
+  lidar the CUDEM yields to. Neither built.
 - The water bank's land test (`WaterBankLayer::ReanchorRing`: the survey's gate at 16 x 16 over the tile, or
   any of five resident heights under +2.5 m) answers by the height the tree HOLDS, coarse far from the eye,
   and re-asks only when a load lands for that ring; the level over a tile it leaves NULL is now the

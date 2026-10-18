@@ -40,6 +40,8 @@
     {"name": "noaa.enc", "kind": "bridges", "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"}
   ],
   "views": [
+    {"name": "plum_marsh", "_at": "the refuge marsh behind Plum Island's dunes, the eye of Mark's dark-marsh screenshot (2026-10-18)",
+     "at": {"lat": 42.7705, "lon": -70.8045, "alt": 330, "heading": 8, "tilt": 56}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
     {"name": "marsh_island", "_at": "the marsh island at the Merrimack's mouth, looking at Plum Island Point: the platform the survey calls water under a +0.9 m tide (CONTENT_SCALING 4, 2026-10-18)",
      "at": {"lat": 42.800, "lon": -70.835, "alt": 350, "heading": 20, "tilt": 60}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
     {"name": "orbit", "_at": "the planet, the east coast at its centre",
