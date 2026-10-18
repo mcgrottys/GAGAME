@@ -1699,6 +1699,14 @@ model (or a textbook) would hold → what this project measured → the law now 
     1 %; and what it buys on this part is registers, which only a shader at its occupancy limit can
     spend.
 
+51. **The slab was the hand edit as a value, not a floor** (2026-10-18). Read off the stills, the north
+jetty's flat top was a 2.5 m crest FLOOR under the hand polygons that the finer data should have risen
+above; the transect tool read `survey.edits 1.000 +2.500` as the last layer over lidar +2.77 and
+composite +3.03 on the same crest -- the edit overwrote the witnesses it stood in for. The fix is a
+weight, not a value: the edit paints the share of the texel no finer witness covers (HIERARCHY 4.20).
+And the first thing the data showed once it stood was a 10 m light tower in the composite's surface,
+which the slab had been hiding. A prior from the picture is a prior; the transect is the measurement.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.

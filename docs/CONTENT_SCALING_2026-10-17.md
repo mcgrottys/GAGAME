@@ -508,7 +508,32 @@ Read against the pictures (sent to Mark; his eye decides):
   Where the feather does act, the Plum Island beach, the seam session's own transects in HIERARCHY 4.20
   are the record. The fix named above now has its number: the hand value should yield where a finer
   height has data (the lidar's 1 m, the composite's 1.5 m), as the shoreline's finest-witness law does
-  for the mask, so that the edit is a floor under coarse data only. Not done.
+  for the mask, so that the edit is a floor under coarse data only. Done the next morning: below.
+
+**The hand edit yields to a finer witness** (2026-10-18 00:40-01:40, this branch, HIERARCHY 4.20's last
+block). `EditsHeightSource::Uncovered`: the edit's weight is the product of (1 - w_j) over the channel's
+layers finer than its 5 m, the value untouched; the Assembly names the channel as its witnesses; the
+layer's tile identity carries the law (`HeightSource::Law`). Engine +60 / -2 lines, the test +97.
+
+| instrument | before | after |
+|---|---|---|
+| `--tool rastertest` | 65 checks | 69, 0 FAIL: the disc reads the hill with the edit at weight 0.000 (0.03 mm); past the disc the crest at 1.000; the plant (no witnesses named) 50 m over the hill; the identity carries `yields<hill`; across the feathered rim the edit is the hill's complement to 3e-8, the stack steps at most 5.41 m a metre (bound 5.74) where the hard edge steps 72.5 |
+| `--selftest` | 29 suites | 29 suites, no unplanted FAIL |
+| transect across the north jetty, 49-77 m | +2.500 on every metre (`survey.edits 1.000 +2.500` over lidar +2.77, composite +3.03) | the composite over the lidar on every metre: -3.07 at the south foot, +2.5 to +3.0 on the crest (51-65 m), the north slope down to -2.4; no edits column |
+| transect along the polygon's midline (11 segments) | | crest +2.1 to +3.7 m end to end; the composite paints it at weight 1 everywhere, the lidar under it at 0.55-1.0 |
+| shipped merrimack.json, view sea, pinned clock, before (the binary of 23:07, a copy) vs after | | 1.3 % px, max 82, SSIM 0.995, all on the jetty's EDGES (diff_ship.png). Not the law: that scene has no height finer than the edits. The edits tree it read, `survey.edits.42dcc867`, was painted on 2026-10-03; against tonight's `8204eaa5` (same scene, same polygons, no witnesses) 2,527 tiles are byte-identical and 52 differ -- at mip 8 a few hundred edge texels a tile on the other side of the polygon's edge (|d| = the crest, 2.5 m, weight 0.5), halving each level up. A built-in layer's leaf carried no paint identity, so the composite kept the fortnight-old edges; the law's identity repainted them. |
+| HQ sea view (hq_sea_after.png vs F_sea of 23:12) | the flat +2.5 m slab | 44 % px, SSIM 0.927: the jetty is the composite's rock surface (rolling +2 to +3 m, the slopes into the water), and the wave field re-solved on the changed bed moves the sea; settled exact in 650 frames, 14.9 ms GPU |
+
+**The spike.** The after-still shows one steep 10 m spike on the jetty about 50 m west of the eye. It is
+not in any 1 m transect (four crossings near the tip read at most +2.90 m) because it is three cells of
+the composite itself, read straight from `data/bathy/inlethq.f32` inside the North Jetty polygon:
++9.99, +7.08, +6.50 m at -70.80386, 42.81894, the polygon's east tip -- the North Jetty light tower,
+standing in BlueTopo's surface, which the hand edit used to flatten with everything else. The polygon
+holds 9,274 composite cells, median +1.25 m, p95 +3.03, and that is its maximum. Whether a tower is
+ground is the surface-against-bare-earth question of the composite's source (the 2018 lidar, bare
+earth, reads +2.1 m there), not the law's; a photo would show the tower. Mark's eye decides whether
+the demo wants the tower or the lidar on top at the jetties (`over` 0 on noaa.inlethq would give the
+bare earth where both have data).
 
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
@@ -524,6 +549,12 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
 - The three non-file height sources (the CUDEM grid, ETOPO 2022, survey.edits) have no own level, so a
   cold height tile still pays their per-level paint and push fold (the magnify session's ledger, section
   4): the own-level clause applied to them is the next step of 4.20, not started.
+- The hand edits now yield to finer data (section 4), so what stands on the jetties is the composite's
+  surface, light tower included; the lidar's bare earth is one `over` away. A source could declare which
+  it is (surface or bare earth) and a scene choose; not built.
+- The built-in height layers' tree identity carried no paint until the edits' did: a texel-centre change
+  in the engine leaves CUDEM's and ETOPO's cached leaves as they were painted. The edits' `Law` is the
+  shape of the fix (a layer names what it paints by); the other two not done.
 - Drone imagery AT the Merrimack: the PIEPR raw photos through OpenDroneMap (section 1).
 - MassGIS 2025 (7.5 cm on Cape Cod, 15 cm here) would put a 2025 plane ortho beside the 2023 one.
 - A stale tree folder from the hung first ingest, `cache/trees/usgs.tnb2025.ortho.c94dbf4c` (835 KB,

@@ -2503,6 +2503,56 @@ up to a level the classifier's +1.2 m cutoff does not reach.
 
 
 
+**The hand edit yields to a finer witness** (2026-10-18). `survey.edits`, the hand polygons of
+data/gis/edits.geojson, is the last layer of the height stack and painted its crest (+2.5 m NAVD88
+for a land ring, -1 m for a water ring) as a VALUE at weight 1 wherever a polygon lay: the law over
+every survey. Measured with the transect tool across the north jetty on the HQ scene
+(`--tool height-tree-probe:transect=42.818805,-70.8085,42.820005,-70.8085,134`), the stack read
++2.500 on every metre of the jetty's 29 m while the 1 m lidar under it read up to +2.77 m and the
+1.5 m composite +3.03 m on the same crest -- the flat slab of every jetty still was the hand edit
+itself, not a floor the data could rise above. The polygons exist to put land where the surveys
+have none (OSM's jetty ways over CUDEM's 10 m cells); over finer data they were overruling the
+witnesses they stood in for.
+
+The law (compose/Sources.cpp, `EditsHeightSource::Uncovered`): the edit's weight at a point is the
+share of it the finer measured witnesses leave uncovered,
+
+    w = prod_j (1 - w_j)   over the channel's layers with a grain finer than the edit's own (5 m),
+
+the complement of their over-accumulated coverage; the VALUE is untouched. One law at every grain,
+since each w_j at a coarse grain is already that layer's share of the box. Limits: no finer layer
+(or no channel named: `Witnesses` unset) = 1, the paint the edit always had; a finer layer at full
+weight = 0, the edit gone and the data standing; across a finer layer's feather the edit fades as the
+witness rises, by the same metres. Coarser layers (CUDEM, ETOPO) are not asked: the edit exists to
+stand over them. Not a floor (max of edit and data): a floor would hold the lidar's slopes at the
+crest, and the slopes are the data; the two differ everywhere inside a polygon where the data is
+below the crest, which on a jetty is everything but the crest line. It is the gate's shape
+(GateSource: the value is the layer's, the weight a product) read inside the layer, so the CPU's
+stack (Compositor::SampleHeightStack), the tree's point sample and its tile compose inherit it from
+one Sample and cannot drift. The layer's cache identity now carries its law (HeightSource::Law:
+the polygons' content hash and the witnesses' name|structure), so the tree repaints the edits'
+tiles when the polygons or a witness change and at no other time -- and, found on the way, the
+built-in layers' tiles had carried no paint identity at all: the shipped scene's edits tree stood
+as painted on 2026-10-03, with 52 of its 2,581 tiles differing from today's paint by one texel at
+every polygon edge (the crest, 2.5 m, at weight 0.5 on a mip-8 tile, halving a level up), which the
+new identity repainted.
+
+Gated: `--tool rastertest` (69 checks): a +50 m polygon over the test hill's east half and 200 m
+past it -- in the disc the edit's weight is 0.000 and the stack the hill (0.03 mm off), past the
+disc its weight is 1.000 and the stack its crest, west of the polygon the hill; the PLANT with no
+witnesses named paints 50 m over the hill (the law before, kept for a channel that names none);
+the identity carries `yields<hill|...`; across the rim with the hill feathered 20 m the edit's
+weight is the hill's complement to 3e-8 and the stack steps at most 5.41 m a metre (bound 5.74 =
+72.5 m span x 1.5 / 20 + the hill's slope) where the hard edge steps 72.5 m in one metre. The
+transect after: the jetty's stack is the composite over the lidar on every metre (+2.5 to +3.0 on
+the crest, the slopes down to the water), the edits' column gone from 49 to 77 m; along the
+polygon's midline the crest is +2.1 to +3.7 m end to end. Stills, frozen clock: the shipped
+merrimack.json sea view (no finer witness in that scene) 1.3 % of pixels at the jetty's edges, the
+stale paint above, not the law; the HQ sea view's jetty is the composite's rock surface, with one
+10 m spike at the east tip -- the composite's own cells there (+9.99, +7.08, +6.50 m): the North
+Jetty light tower standing in BlueTopo's surface, which the hand edit used to flatten. Whether a
+tower is ground is the surface-versus-bare-earth question of that source, not the law's.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
