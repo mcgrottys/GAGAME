@@ -264,7 +264,8 @@ void RegisterKnownWaterEdges() {
     Register({"water.bank", "globe.mesh", "shading: normal/sigma2/foam", atlasN, atlasN, false,
               "m / sigma2 / 0..1 foam", "rings 1.2..38 m/texel", 1.0,
               "Globe.hlsl WaterVertexColor (one BankSampleT, analytic normal)"});
-    Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false, "m NAVD",
+    Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false,
+              "m about the live waterline (the reader adds gWavesB.w; a NULL tile is the waterline)",
               "+-4", 1.0, "GlobeMesh.hlsl BankSample"});
 
     // ---- M7u: THE CATALOG COMPLETION -- the atlas, the weather federation, the churn's
@@ -457,7 +458,7 @@ void RegisterPixelWaterEdges() {
     // the translucency's depth is measured against. (The M9bg "sanity lens only" edge stays
     // registered beside this one -- --bank-lens is still its own consumer.)
     Register({"water.bank", "globe.ps", "shading: normal/sigma2/level (--pixel-water)", atlasN,
-              atlasN, false, "m / sigma2 / m NAVD", "rings 1.2..38 m/texel", 1.0,
+              atlasN, false, "m / sigma2 / m about the live waterline (+ gWavesB.w)", "rings 1.2..38 m/texel", 1.0,
               "Globe.hlsl WaterPixelColor (one BankSampleT, analytic normal)"});
 }
 

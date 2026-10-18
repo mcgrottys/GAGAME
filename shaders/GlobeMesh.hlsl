@@ -137,8 +137,9 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     const float dispLand = max(max(h, 0.0f), editFloor);
     // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
     // (tide + solver) plus the folded cascade displacement, one tiled resource, ring LOD.
-    // Beyond every ring (or bank off) the M6t sunk plane remains: it exists only so the
-    // SeaLayer grid can cover it, and in one-water mode that grid is retired.
+    // Beyond every ring the water stands at the frame's waterline (below); with the bank off the
+    // M6t sunk plane remains: it exists only so the SeaLayer grid can cover it, and in one-water
+    // mode that grid is retired.
     float dispWater = min(gWavesB.w - 8.0f, -8.0f);
     // M8g: the FULL displacement vector. The vertex used to take level + dy only;
     // in shallow water the ORBITAL (horizontal) displacement dominates the vertical
@@ -157,7 +158,15 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         const float2 bankXZ = fine ? BankXZ(geo) : BankXZOfDir(CsToTangent(dir));
         float bT;
         float3 dDdx, dDdz;
-        dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (bP.x + bD.y) : 0.0f;
+        // THE WATER STANDS AT THE WATERLINE WHERE THE BANK IS SILENT (2026-10-18). The bank's level
+        // plane holds the DEPARTURE from the frame's live waterline (WaterBank.hlsl), so a texel of
+        // a tile the rings left unmapped -- a NULL tile reads zero -- is the waterline, and so is a
+        // point past every ring. It used to be 0 m NAVD both ways: at a 2.35 m tide the water
+        // over a survey-water marsh sat a metre under its bed wherever the ring's land test had
+        // left the tile NULL, and at the tide where it had not -- a square of flooded marsh beside
+        // the same marsh drawn dry (Mark, 2026-10-18, the Merrimack's mouth; the mix lens showed
+        // the classifier calling all of it water).
+        dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (gWavesB.w + bP.x + bD.y) : gWavesB.w;
         // M9bm: THE FOLD GUARD.
         //
         // The lateral term was applied with nothing bounding the Jacobian it induces. Where

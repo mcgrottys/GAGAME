@@ -648,6 +648,45 @@ which a hand flight low over the reservation does and a smooth rail does not (th
 bytes. Counted with the map's refusals in the loader's line ("refused: the slot's ground moved under the
 read") and said under `--res-trace` as "the ground moved under the retiring tile: not rescued". Gated (14:35-15:05): `--selftest` 29 suites; the jetty rail with `--res-trace` at the full pool, 460 moves: the rescue refused 12 times, every one on the rank-5 slice of the colour tenant within a frame of a window step (`[residency] earth.color slot (10 m3 5,4): the ground moved under the retiring tile (key ...9b85, the slot's now ...9b75): not rescued`), 0 at the map, 0 kept tiles on another ground -- the same rail refused 0 the day before, when the rescue was not asked. Mark's own instrument then: a small pool makes the cut release every turn, so the discard-and-replace path runs on a moving camera; `streaming.poolTiles` (default 32,768, the constant it replaces) is now a scene key for it. The dive rail at 3,000 tiles starved instead of churning (840 colour loads, 426 tiles kept, 0 rescues in either arm, the frames identical); at 20,000 tiles, just under the dive's want, the arm with the law refused 2 rescues at one slot, the colour and the mask page together (slot 9 m3 11,6: key ...536b against the slot's ...537b), and the arm without it, the same source with the check cut out and rebuilt, shows no page in its 751 frames either: the two runs' residency timing differs and the other arm did not meet the same slot at the same turn, so the before picture is not on film; the frames of the two arms differ by at most 2 % of pixels on one frame of the descent and 0 on the median frame. The settled shipped sea view against the 02:40 still: 60 pixels past one level of 1.44 M, max 19, SSIM 1.0000, the same floor as before the law. What settles it is the count in Mark's next flight: a "not rescued" line at the frame of a page, or a flight with no page at all.
 
+**The low marsh that went dark within a radius** (2026-10-18 15:10-17:10; Mark: "the low terrain gets dark when
+I zoom in close to it (notice the radius). I wonder if you are drawing something on there or if we might
+actually not be getting the right sun or normals"). Reproduced headless at the river mouth's marsh island
+(`--set scene.view=mouth` of a scratch scene over globe_test, the scene's own 16:00 Z, tide 2.35 m MLLW =
++0.97 m NAVD): the island's platform drawn dark navy with the imagery through it, its basin and the far
+marsh tan, the boundary straight-edged. What it was not, each by a discriminator at the eye: not the
+buildings' sun maps (off: 0.06 % of the pixels at the first marsh eye), not the normals (the lens flat over
+the marsh), not the classifier (`--lens mix`: the WHOLE island is water to the survey, the OSM coast runs
+landward of the salt marsh), not the height's residency (`residency.height`: one rank over the island), not
+the solver (`--trace` at a dark and a tan point: level +0.90 m NAVD at both, solved, bed -0.23 and -0.54, the
+water 1.1 and 1.45 m deep), and not the resample (the raw 2021 CUDEM tile at 3.4 m reads the basin at -0.4
+to -0.9 m within centimetres of the 13.7 m grid). It WAS the terrain cast: `render.shadowSteps=0` removed
+exactly the dark region (5.5 % of the frame, the diff the island's platform and nothing else). The water
+pixel's two rays (`WaterPixelColor`: the sun's, the mirror's) started at the LEVEL, `lvlW + dispW`; over a
+survey-water texel whose bed stands above the level -- the platform at +1.2..1.7 m under a +0.9 m tide,
+which holds no water (`depthW` 0, the bed's albedo shows) -- that start is half a metre under the terrain,
+and `TerrainRay` found the ground above the ray at its first texel: the platform in shadow, lit only by the
+sky, the navy of the screenshot. The straight edges are the island's dikes (the ditched impoundment the
+imagery shows), not a tile's. "Within a radius" because the cast runs where the max lane is built, near the
+eye first. The law: the water's surface stands no lower than its bed, `surfW = max(lvlW + dispW, hp)`, and
+both rays start there -- the level where it stands above the bed, the bed where it does not, which is where
+a land pixel's ray starts. Gate of the law alone (shader A/B on the same binary): the still with it against
+the cast-off still differs in 0.05 % of pixels (max 16), against the plain still in 5.5 % -- the square and
+nothing else.
+
+**Found on the way, and kept: the bank's level where it is silent** (the same afternoon). Reading the water's
+level law for the square turned up a real deviation that was not its cause: `WaterPixelColor` took its level
+from the bank's rings (`lvlW = bP.x`) and 0 where no ring read, the mesh took `bP.x + bD.y` and 0 likewise,
+and a ring tile the bank's land test left unmapped (`ReanchorRing`: `m_maskWet || HeightWet`) is a NULL tile
+of a reserved resource, which reads 0 in every channel -- a level of 0 m NAVD, the tide's whole height below
+the waterline the classifier compared the bed against. The plane now holds the DEPARTURE from the frame's
+live waterline (`gMisc.y` = `GlobeLayer::waterNavd` = `gWavesB.w`, handed by `SetWaterline` beside
+`SetTidePlane`), so an unwritten texel means "the waterline", and every reader adds it back: `lvlW =
+gWavesB.w + bP.x` (and `gWavesB.w` past every ring), the mesh's `dispWater` the same, `ReadBankPoints` and
+the trace probe on the CPU. fp16 holds a departure of decimetres to a tenth of a millimetre where it held the
+level to half a millimetre. Its own gate (C++ build, the old binary and old shaders as the before): the
+mouth still moved 0.42 % of its pixels, the first marsh eye 0.02 %, the high eye 2.0 % (the water's level
+on unmapped tiles), the shipped sea view 0.006 % (84 pixels, max 25). Gated with both laws (16:10-16:24, the old binary and old shaders as the before): `--selftest` 29 suites; the mouth still moved 5.6 % of its pixels, the island's platform (SSIM 0.972); the first marsh eye 1.6 % -- the dark band along the beach's wet line, the same law at the same kind of texel, gone (max 162); the high eye 1.9 %; the shipped sea view 0.04 % (602 pixels, max 25). The eye is kept as the globe scene's view `marsh_island` (`--set scene.view=marsh_island`).
+
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
 ledger) are in the table above and run in `--selftest` and `--tool rastertest` on every build.
@@ -708,5 +747,20 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
   steps in the same frame. FOUND the same afternoon by reading the discard-and-replace path the codemap
   laid out: the rescue of a retiring tile by its coordinate after a step gave its slot another ground
   (section 4, "the third path"). Fixed there; the counter names it in a flight.
+- Two witnesses disagree over the marsh island at the Merrimack's mouth and neither is the renderer's to
+  mend: the survey (OSM's coast runs landward of the salt marsh, so the island is sea) and the 2021 CUDEM
+  tile (the island's interior at -0.4..-0.9 m NAVD, where a vegetated marsh cannot stand; raw and resampled
+  agree). Under the finest-witness law the survey answers (no height finer than 1 m), so the platform is a
+  water pixel of depth 0 -- lit correctly now, but flat and without the land's near material -- and the
+  basin is drawn flooded 1.4 m deep at a tide that would not reach a real marsh. A survey texel whose bed
+  stands above the live level could let the height answer (the mesh's own "water cannot stand above its
+  surface", asked at the pixel), and the CUDEM's marsh could yield to a bare-earth lidar; neither built.
+- The water bank's land test (`WaterBankLayer::ReanchorRing`: the survey's gate at 16 x 16 over the tile, or
+  any of five resident heights under +2.5 m) answers by the height the tree HOLDS, coarse far from the eye,
+  and re-asks only when a load lands for that ring; the level over a tile it leaves NULL is now the
+  waterline (section 4, the marsh), but its waves, foam and current are still absent there, and a
+  survey-water marsh tile judged dry by a coarse height stays flat until the eye brings the fine height.
+  The test could ask the same witness the pixel asks (the mask's landness at the tile's texels, the height's
+  sign where the height is the finer) instead of two tests of its own; not built.
 - The scenes list absolute `D:/DataCache/...` paths (as `streaming.gisLand` already does); a second
   machine needs the files at those paths or the entries edited.

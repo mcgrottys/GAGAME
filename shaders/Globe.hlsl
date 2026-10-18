@@ -905,7 +905,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     }
     float3 nSmooth = upT;    // ring-texel band limit -> the body's diffuse
     float3 nPix = upT;       // + the bands this pixel resolves -> glint, Fresnel, both rays
-    float lvlW = 0.0f;       // live water level here (tide + solver); 0 = geoid far afield
+    float lvlW = gWavesB.w;  // live water level here: the frame's waterline, plus the bank's departure where a ring texel holds one
     float dispW = 0.0f;      // the wave's own vertical displacement here; 0 where no ring reads
     {
         float4 bD, bP, bDet;
@@ -926,7 +926,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
                                            bDet.w * bDet.w * 0.0060f,
                                        bP.y);
             s2 = max(bP.y + max(s2 - mssModel, 0.0f), 0.0015f);
-            lvlW = bP.x;
+            lvlW = gWavesB.w + bP.x;   // the bank holds the DEPARTURE from the waterline (WaterBank.hlsl); a NULL tile's 0 is the waterline
             dispW = bD.y;
             // The wave normal: the tangent bivector's dual, analytic from the reconstruction
             // kernel (priors 21 -- the derivative is still taken at the DATA's grain, because
@@ -1107,8 +1107,17 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // Asked only where a normal that takes the sun faces it: the body's (nSmooth) or the glint's (nPix);
     // everywhere else the answer is multiplied by zero.
     const bool facesSunW = dot(nSmooth, GA_SUN_DIR) > 0.0f || dot(nPix, GA_SUN_DIR) > 0.0f;
+    // THE WATER'S SURFACE STANDS NO LOWER THAN ITS BED (2026-10-18). A pixel the survey calls water
+    // whose bed is above the live level (the marsh island at the Merrimack's mouth: the platform at
+    // +1.2..1.7 m, the OSM coast seaward of it, the tide at +0.9 m) holds no water -- depthW is 0 and
+    // the bed's albedo shows -- but its two rays started at the LEVEL, half a metre under the
+    // terrain, and the cast found the ground above the ray at its first texel: the whole platform in
+    // shadow, the dark navy Mark saw "within a radius" (the island's dikes drew its straight edges).
+    // The rays start at the surface that is there: the level where it stands above the bed, the bed
+    // where it does not -- which is where a land pixel's ray starts. One law for both pixels' rays.
+    const float surfW = max(lvlW + dispW, hp);
     float sunVis = (sunSph > 0.0f && facesSunW)
-                       ? sunSph * TerrainRay(upT, lvlW + dispW, geo, lvl, GA_SUN_DIR, footPx, lod, gGlo.x, false, sunHit)
+                       ? sunSph * TerrainRay(upT, surfW, geo, lvl, GA_SUN_DIR, footPx, lod, gGlo.x, false, sunHit)
                        : 0.0f;
     if (lvl == 0u && sunVis > 0.0f && facesSunW) sunVis *= SunMapClear(rel, upT);
     const float3 hv = normalize(v + GA_SUN_DIR);
@@ -1140,7 +1149,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // and not the sky that was behind it. A ray that meets nothing is the mirror above, unchanged.
     if (gCsShadow.z > 0.5f) {
         TerrainHit mh;
-        TerrainRay(upT, lvlW + dispW, geo, lvl, rDir, footPx, lod, gGlo.x, true, mh);
+        TerrainRay(upT, surfW, geo, lvl, rDir, footPx, lod, gGlo.x, true, mh);
         // Only ground that stands ABOVE the water is a mirror's land: a facet whose ray dips below
         // the surface meets the bed, and what that ray sees is the sea (the seaward share above),
         // never the bed through the back of the surface.

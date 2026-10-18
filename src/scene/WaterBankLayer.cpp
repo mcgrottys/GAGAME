@@ -507,7 +507,8 @@ void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, Bank
             b.ring = m;
             b.texelM = static_cast<float>(texel);
             b.dispX = float(d[0]); b.dispY = float(d[1]); b.dispZ = float(d[2]); b.foam = float(d[3]);
-            b.level = float(p[0]); b.sigma2 = float(p[1]); b.curU = float(p[2]); b.curV = float(p[3]);
+            b.level = float(p[0]) + m_waterline;   // the plane holds the departure from the waterline
+            b.sigma2 = float(p[1]); b.curU = float(p[2]); b.curV = float(p[3]);
             // The detail layout: (gain1, dry, gain0, gain2).
             b.gain1 = float(g[0]); b.dry = float(g[1]); b.gain0 = float(g[2]); b.gain2 = float(g[3]);
             break;
@@ -543,7 +544,7 @@ void WaterBankLayer::TraceProbe(Gpu& gpu, double wx, double wz) {
         Log("[trace] 9b bank ring %d texel %.1f m at (%d,%d): disp (%+.2f,%+.2f,%+.2f) "
             "foam %.2f | level %+.2f sigma2 %.4f cur (%+.2f,%+.2f) | hsScale*expo %.2f "
             "dry %.2f",
-            m, texel, tx, ty, d[0], d[1], d[2], d[3], p[0], p[1], p[2], p[3], det[0],
+            m, texel, tx, ty, d[0], d[1], d[2], d[3], p[0] + m_waterline, p[1], p[2], p[3], det[0],
             det[1]);
         return;
     }
@@ -887,6 +888,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         cb.slotsB[0] = m_swe->UvSrv();
     }
     cb.misc[0] = static_cast<float>(kTileTexels);
+    cb.misc[1] = m_waterline;   // the level plane is written as the departure from this (WaterBank.hlsl)
     cb.misc[2] = static_cast<float>(injectPattern);
     for (int c = 0; c < 3; ++c) cb.slotsA[c] = m_sea->FftDispSrv(c);
     cb.slotsB[1] = m_disp.Uav();

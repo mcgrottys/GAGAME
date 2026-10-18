@@ -40,6 +40,8 @@
     {"name": "noaa.enc", "kind": "bridges", "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"}
   ],
   "views": [
+    {"name": "marsh_island", "_at": "the marsh island at the Merrimack's mouth, looking at Plum Island Point: the platform the survey calls water under a +0.9 m tide (CONTENT_SCALING 4, 2026-10-18)",
+     "at": {"lat": 42.800, "lon": -70.835, "alt": 350, "heading": 20, "tilt": 60}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
     {"name": "orbit", "_at": "the planet, the east coast at its centre",
      "at": {"lat": 36.0, "lon": -72.0, "alt": 0, "heading": 0, "tilt": 0, "range": 20000000}, "fovY": 55, "gauge": "root", "nearZ": 1000},
     {"name": "coast", "_at": "Maine to Florida: the composite's three regions in one view",

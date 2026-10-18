@@ -4182,6 +4182,11 @@ bool FrameLoop::Frame() {
         if (waterBank) waterBank->SetTidePlane(tidePlane);
         if (waterBankB) waterBankB->SetTidePlane(tidePlane);
         if (m_A.waterBankEye) m_A.waterBankEye->SetTidePlane(tidePlane);
+        // THE WATERLINE THE BANK'S LEVEL IS MEASURED FROM: the globe's own (gWavesB.w, below), so a
+        // ring tile the bank never mapped reads as this level and not as 0 m NAVD.
+        if (waterBank) waterBank->SetWaterline(waterNavd);
+        if (waterBankB) waterBankB->SetWaterline(waterNavd);
+        if (m_A.waterBankEye) m_A.waterBankEye->SetWaterline(waterNavd);
     }
     PROF_BEGIN();
     if (swe.Ready()) {
