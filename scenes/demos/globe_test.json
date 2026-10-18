@@ -14,7 +14,15 @@
     "",
     "THE PLANET'S BUILDINGS AND ROADS (2026-10-15): the same folded tree the earth scene draws (docs/BUILDING_LOD.md,",
     "docs/ROADS.md section 5), so the coast folds up into its towns as the views step down. The layer and its",
-    "sources are the earth scene's, merged by name over the composite base (the named-array law)."
+    "sources are the earth scene's, merged by name over the composite base (the named-array law).",
+    "",
+    "THE NAMED-ARRAY LAW REACHED `sources` ON 2026-10-18: until then a scene's sources REPLACED its base's, so this",
+    "scene had none of the place's imagery (the land at the Merrimack was Google at the cache's zoom: Mark's 'why",
+    "does the land look low res'). It now inherits the MassGIS orthos, the highlights and the ETOPO ring, and drops",
+    "the composite scene's water.bed by name: with its five file-backed rungs in the height stack a height page",
+    "cost 3.5 s through the stack's direct readers (824 loads, 53,003 window decodes, the land unpainted after",
+    "3,000 frames); without them the same eye settles exact in 659 frames at 13.8 ms a load (CONTENT_SCALING",
+    "section 4; the reader is open in its section 5)."
   ],
   "base": "scenes/demos/composite_merrimack.json",
   "scene": {"name": "globe-test", "view": "orbit"},
@@ -25,6 +33,7 @@
      "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12}
   ],
   "sources": [
+    {"name": "water.bed", "remove": true},
     {"name": "osm.planet", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"},
     {"name": "osm.roads.planet", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"},
     {"name": "nbi.2025", "kind": "bridges", "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"},

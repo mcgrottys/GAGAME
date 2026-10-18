@@ -571,6 +571,43 @@ field re-solved on it); the HQ sea view 0.12 %, the drone and survey files ownin
 own point sampling above a grid's own level (the probe's sphere numbers), and the edits' ramp width is the
 own texel's, not a declared feather.
 
+**"Why does the land look low res?"** (Mark, 2026-10-18 morning, a screenshot of Plum Island's village from
+the sea in `scenes/demos/globe_test.json`, view `orbit` flown down by hand: the sand and the ground between
+the houses smeared at metres a texel, the roads crisp). The globe scene lists four `sources` of its own --
+the buildings, the roads, the two bridge surveys -- and until this morning a scene's `sources` REPLACED its
+base's: the globe scene's base (composite_merrimack.json) had already dropped the shipped scene's MassGIS
+orthos and highlights for its water composite, and the globe scene dropped the composite and the ETOPO
+ring in turn, so its colour tree at the Merrimack was Google alone under the sea-floor gate (`earth.color
+= earth.land(google.satellite) + seafloor<gis`), and Google at the Merrimack is held at the zoom the cache
+has and magnified past it: at the screenshot's eye 4,967 of 24,511 tiles were served magnified from a
+parent. The same trap had taken the first cut of the HQ scene the evening before. Mark's expectation is the
+design -- the regional orthos are another shell of the one texture the GPU reads blind, inherited by every
+scene at the place -- and the loader already had the law for it: `SceneBuilder::MergeList`, "in place by
+name, remove, append", which every named list (`views`, `layers`, `gates`, `entities`) merges by; `sources`,
+`stations` and `solvers` were declared unnamed although every entry carries a name, and an unnamed list is a
+value an overlay replaces whole (the fleet, the include chain). Now the three are named lists: a derived
+scene adds to its base's, an entry of the same name merges in place, `remove: true` drops one. Of the
+eleven derived scenes with sources, none removed anything on purpose; eight gain back what the replacement
+had silently taken (the globe scene its orthos, highlights, ETOPO ring and water composite; the Haulover
+composite scene its own CUDEM survey). Gated (11:37-12:20, one take each): `--selftest` 29 suites (the scene tests among them), `--tool rastertest`
+70; `--print-scene` of the globe scene resolves eight sources where it listed four. The screenshot's eye
+rebuilt headless (`views.pi`: 42.7985 N -70.7960 E, 260 m, heading 290, tilt 62) in the globe scene: before,
+Google alone, exact in 191 frames with 4,967 tiles served magnified from a parent, the land soft; after the
+law, the scene inherits its base's base's MassGIS orthos, highlights and ETOPO ring -- and its base's
+water-bed composite, five file-backed height rungs it had never actually carried -- and the first boot
+mapped 832 of 24,511 tiles in 3,000 frames: 801 residency loads at 3.7 s each, 73,076 windows decoded at
+frame time (180 s in the decoder) against 0 before, the loader's 48 slots held by height pages so the colour
+pages never got one, the picture unpainted. A second boot on the filled cache was the same (824 loads at
+3.5 s, 53,003 decodes) while every leaf of the height tree read in milliseconds and the solver's bed read
+its page in 0.3 s: the time is in a reader that samples the STACK through the composite's many small
+files at frame time, not in the tree, and which reader was not found tonight (the buildings' stand field
+reads the stack by design, but its four page jobs never ran; the height tenant's own paints measured
+5.8 ms). The attribution is by experiment: the same eye with `{"name": "water.bed", "remove": true}` and
+everything else inherited settles exact in 659 frames at 13.8 ms a load, 209 decodes, the colour tenant
+painting its 5,096 MassGIS pages at 34 ms each, the land the orthos. So `globe_test.json` now drops the
+composite by name with that reason written beside it, and keeps the rest; the reader that makes a
+composite in the stack cost 3.5 s a page is open (section 5).
+
 Nothing else in the merged tree is gated by a still: the seam's, the capture level's and the magnify law's
 own instruments (their rastertest and composetest cases, the overlap report, the transect, the per-leaf
 ledger) are in the table above and run in `--selftest` and `--tool rastertest` on every build.
@@ -597,5 +634,12 @@ ledger) are in the table above and run in `--selftest` and `--tool rastertest` o
 - MassGIS 2025 (7.5 cm on Cape Cod, 15 cm here) would put a 2025 plane ortho beside the 2023 one.
 - A stale tree folder from the hung first ingest, `cache/trees/usgs.tnb2025.ortho.c94dbf4c` (835 KB,
   2,890 files, 2,886 of them zero-byte), is prunable; `tree-prune` is Mark's to run.
+- A scene's `sources` now merge by name (above); the scene files that repeat their base's entries
+  (merrimack_hq, haulover_*, newburyport_*) could drop the repeats, and were left as they are.
+- A composite's file-backed height rungs in the stack make a height page cost 3.5 s and decode tens of
+  thousands of windows at frame time, while the height tree reads them in milliseconds: some reader
+  samples the STACK through those files per load, and which one was not found (the buildings' stand field
+  reads the stack by design but its page jobs never ran; the height tenant's own paints measured 5.8 ms).
+  `globe_test.json` drops the composite by name until it is; the composite scene itself still carries it.
 - The scenes list absolute `D:/DataCache/...` paths (as `streaming.gisLand` already does); a second
   machine needs the files at those paths or the entries edited.
