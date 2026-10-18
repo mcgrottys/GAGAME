@@ -1432,6 +1432,83 @@ bool RunRasterFileSelfTest() {
                   "most %.2f m a metre (bound %.2f) with the hill feathered 20 m, and %.1f m in one metre with its hard "
                   "edge", lawWorst, stepF, bound, stepH);
         }
+        // THE OWN LEVEL OF A GRID LAYER (2026-10-18): an equirect grid the size of ETOPO 2022 (8192 x 4096
+        // int16), a smooth swell plus a checker that flips sign every cell, so a point sample and an area
+        // mean disagree by the checker's height. Asked COLD two levels above its own mip, the tile is the
+        // fold of the fold of its sixteen own-level paints, byte for byte; the plant -- the direct paint of
+        // that level, the law before -- differs from it by the checker; and asked fine-first in a second
+        // root, the same files hold the same bytes (the order of asks no longer chooses them).
+        {
+            const int gnx = 8192, gny = 4096;
+            std::vector<int16_t> grid(size_t(gnx) * gny);
+            for (int y = 0; y < gny; ++y) {
+                for (int x = 0; x < gnx; ++x) {
+                    const double u = (x + 0.5) / gnx, v = (y + 0.5) / gny;
+                    const double swell = 1500.0 * std::sin(6.2831853 * 3.0 * u) * std::cos(3.14159265 * 2.0 * v);
+                    const double checker = ((x ^ y) & 1) ? 800.0 : -800.0;
+                    grid[size_t(y) * gnx + x] = int16_t(std::lround(swell + checker));
+                }
+            }
+            EquirectHeightSource eq("test.equirect", "equirect-grid int16 8192x4096", 489200.0, &grid, gnx, gny, 0.0);
+            HeightLayerSource eql(&eq, kHeightFrame);
+            const Lattice& L = Lattice::Cube(Lattice::kFaceDim << 17, 256, 128);
+            const std::string tg = L.Tag();
+            const int om = eq.OwnMip(L);
+            double oa = 0, ob = 0;
+            L.TexelGround(uint32_t((std::max)(om, 0)), 0.0, 0.0, oa, ob);
+            // the asked tile: face 0, two levels up, at the face's middle
+            const uint32_t up = 2;
+            const uint32_t wide = (L.faceDim >> (om + up)) / L.texW, tall = (L.faceDim >> (om + up)) / L.texH;
+            const TileRequest coarse{0, uint32_t(om + up), wide / 2, tall / 2};
+            TileTree tc(&eql, TileTree::Fmt::FloatW, nullptr, trees + "/grid_coarse_first");
+            tc.EnsureFrame(tg);
+            std::vector<uint8_t> got;
+            const TileTree::Status sc = tc.Tile(L, tg, coarse, got, nullptr);
+            // the reference: sixteen own-level paints, folded twice
+            std::vector<uint8_t> ref(262144, 0);
+            for (uint32_t qy = 0; qy < 2; ++qy) {
+                for (uint32_t qx = 0; qx < 2; ++qx) {
+                    std::vector<uint8_t> mid(262144, 0);
+                    const TileRequest m1{0, uint32_t(om + 1), coarse.x * 2 + qx, coarse.y * 2 + qy};
+                    for (uint32_t ky = 0; ky < 2; ++ky) {
+                        for (uint32_t kx = 0; kx < 2; ++kx) {
+                            const TileRequest own{0, uint32_t(om), m1.x * 2 + kx, m1.y * 2 + ky};
+                            FoldQuarterF(PaintF(eql, L, own), kx, ky, mid);
+                        }
+                    }
+                    FoldQuarterF(mid, qx, qy, ref);
+                }
+            }
+            const std::vector<uint8_t> direct = PaintF(eql, L, coarse);
+            auto worst = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+                const float* p = reinterpret_cast<const float*>(a.data());
+                const float* q = reinterpret_cast<const float*>(b.data());
+                double w = 0.0;
+                for (size_t i = 0; i + 1 < a.size() / 4; i += 2) w = (std::max)(w, double(std::abs(p[i] - q[i])));
+                return w;
+            };
+            const double dRef = got.size() == ref.size() ? worst(got, ref) : 1e9;
+            const double dDirect = got.size() == direct.size() ? worst(got, direct) : 0.0;
+            // fine-first in a second root: the own level first, then the two above
+            TileTree tf(&eql, TileTree::Fmt::FloatW, nullptr, trees + "/grid_fine_first");
+            tf.EnsureFrame(tg);
+            std::vector<uint8_t> tmp;
+            for (uint32_t ky = 0; ky < 4; ++ky)
+                for (uint32_t kx = 0; kx < 4; ++kx)
+                    tf.Tile(L, tg, TileRequest{0, uint32_t(om), coarse.x * 4 + kx, coarse.y * 4 + ky}, tmp, nullptr);
+            for (uint32_t ky = 0; ky < 2; ++ky)
+                for (uint32_t kx = 0; kx < 2; ++kx)
+                    tf.Tile(L, tg, TileRequest{0, uint32_t(om + 1), coarse.x * 2 + kx, coarse.y * 2 + ky}, tmp, nullptr);
+            tf.Tile(L, tg, coarse, tmp, nullptr);
+            size_t names3 = 0;
+            const size_t differ3 = Unequal(tc.Folder() + "\\" + tg, tf.Folder() + "\\" + tg, names3);
+            Check(om > 0 && sc == TileTree::Status::Content && got == ref && dDirect > 500.0 && differ3 == 0 && names3 >= 21,
+                  "a grid layer's own level on the pyramid is mip %d (its texel %.0f x %.0f m at the equator, the cell "
+                  "4,892 m); asked cold two levels above it the tile is the fold of its sixteen own-level paints byte for "
+                  "byte (worst %.3f m); the PLANT, the direct paint of that level, is %.0f m from it (the checker: a "
+                  "point against the mean); asked fine-first in another root, %zu files, %zu differ",
+                  om, oa, ob, dRef, dDirect, names3, differ3);
+        }
         // ---- the levels: the own mip on the pyramid (a height's tile) and on the z14 page, the pass,
         // each fold byte for byte, and the same files asked coarse-first
         const Lattice lats[3] = {Lattice::Cube(Lattice::kFaceDim << 17, 256, 128),

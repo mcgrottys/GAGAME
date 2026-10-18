@@ -74,6 +74,12 @@ public:
     Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
     // THE IDENTITY OF WHAT IT PAINTS (2026-10-18): the grid's bytes, its size and the datum link.
     std::string Law() const override;
+    // ITS OWN LEVEL (HIERARCHY 4.20, 2026-10-18): the lattice level whose texel at the equator is the
+    // grid's cell; the tree folds the levels above it and magnifies the kept tile below. Before this
+    // the layer was painted at whatever level a view asked first -- Sample is a point bilinear that
+    // ignores the grain -- so a coarse tile held one point of a mountain range where the fold holds
+    // its mean, and a fresh cache and a lived-in one disagreed by kilometres. Global: no footprint.
+    int OwnMip(const Lattice& l) const override;
 
 private:
     const std::vector<int16_t>* m_elev;
@@ -107,6 +113,10 @@ public:
     const BathyModel* Grid() const { return m_bathy; }
     // THE IDENTITY OF WHAT IT PAINTS (2026-10-18): the grid's bytes, its box and the feather.
     std::string Law() const override;
+    // ITS OWN LEVEL AND BOX (HIERARCHY 4.20, 2026-10-18): the level whose texel at the grid's centre
+    // is its cell (SourceInfo::cmPerPixel), and the grid's box; folded above, magnified below.
+    int OwnMip(const Lattice& l) const override;
+    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override;
 
 private:
     const BathyModel* m_bathy;
@@ -250,6 +260,12 @@ public:
     // before this date). Named, its weight is the share of the texel those layers leave uncovered.
     void Witnesses(const Compositor* comp, int channel) { m_comp = comp; m_channel = channel; }
     std::string Law() const override;
+    // ITS OWN LEVEL AND BOX (HIERARCHY 4.20, 2026-10-18): the level whose texel at the rings' centre
+    // is the declared 5 m, and the rings' box. Above it the tree folds (a polygon's edge becomes the
+    // area it covers of each coarser texel, the same bytes whichever level a view asked first);
+    // below it the kept tile is magnified, so the hard edge becomes one own texel's ramp.
+    int OwnMip(const Lattice& l) const override;
+    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override;
 
 private:
     float Uncovered(double latRad, double lonRad, double groundResM) const;

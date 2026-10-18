@@ -2571,6 +2571,51 @@ which is the one discipline the identity cannot take over. Planted (`--selftest`
 equal grids share a key; the link of -0.092 m on one, or one cell changed, is a new key. The cost
 is one repaint of the three grid leaves and `earth.height` at every view the cache knew: the shipped sea view's first boot settled exact in 1,792 frames (174 s) against 515 (97 s) with the grids warm; the height tree read 1,053 tiles in 144.9 s against 26.0 s, residency.load 17.8 ms a job against 5.9, the GPU frame 13.4 ms, unchanged; ETOPO 2022 painted 2,720 tiles, CUDEM 2,320 (1,226 void), the composite composed 4,517. The still against the 01:17 one: 0.28 % of pixels, max 53, SSIM 0.9998, specks on the water. **And the repaint from scratch is not the bytes the long-lived trees held.** Against the trees of 2026-10-03, at texels both weigh fully (weights agree to 0.002 everywhere): CUDEM differs by up to 0.13 m at pyramid mip 8, 0.29 at mip 10, 1.08 at mip 11 (a million texels past 1 cm); ETOPO 2022 by up to 0.02 m at pyramid mips 8-13 -- and by 42, 183, 474, 1,022, 1,583 and 2,658 m at cube16k's mips 1 to 6, with mip 0 identical in all 101 tiles. The reading: a source without an own level paints whatever level is asked. The old trees' coarse levels were FOLDED from finer levels earlier views had painted (area means); tonight's fresh trees painted them DIRECTLY at the first ask (the boot walks coarse first), and `EquirectHeightSource::Sample` is a point bilinear that ignores the grain, so a 39 km texel painted directly is one point of a mountain range where the fold is its mean. The tree's bytes for the three grid layers are a function of the order of asks: a fresh cache (a new machine, this commit's first boot) and a lived-in one hold different heights, kilometres apart at the globe's coarse rungs. The identity cannot mend that; the own-level clause for these three (the magnify session's remaining clause: paint at the grid's own level, fold above, magnify below) makes the bytes a function of the data alone, and is the next step.
 
+**The three grid layers declare an own level** (2026-10-18). The clause of 4.20 that the magnify
+session left and the grid identity's repaint measured: `noaa.etopo2022`, `noaa.cudem.<survey>` and
+`survey.edits` answered at every grain, so TileTree::LeafTile painted them at whatever level a view
+asked first and folded upward only where a finer level had been painted before -- the tree's bytes
+were a function of the order of asks (CUDEM up to 1.08 m apart at mip 11 between a fresh and a lived-in
+cache; ETOPO kilometres apart at cube16k's coarse rungs, a point sample of a range against its mean).
+Now each declares `OwnMip` -- the lattice level whose texel at the source's place is its cell
+(ETOPO 4,892 m at the equator, CUDEM its 13.7 m resample, the edits their 5 m), by `Lattice::LevelOf`
+-- and CUDEM and the edits their `Footprint` (the grid's box, the rings' box; ETOPO is global and
+declares none). Nothing else changed: the leaf's own-level paint, the materialized fold above it and
+`MagnifyOwn` below it are the paths a raster by file has taken since the previous day, and the three
+layers' bytes are now a function of the data alone. What it means for each: CUDEM's `Sample` is a point
+bilinear of its 13.7 m grid, so its own level IS that bilinear at ~12 m texels and the levels below are
+the kept texels magnified (a bilinear of a bilinear) where before they were the grid's bilinear at each
+texel directly -- a sub-texel change the probe measures below; ETOPO's own level is the grid itself and
+every coarse rung above it an area mean, where before a rung asked first held point samples; the edits'
+hard edge below 5 m is the own texel's bilinear ramp, one texel of the own level wide, where before it
+was hard at every level (and above 5 m it is the area the polygon covers of each texel, the same bytes
+whichever level came first). Planted (`--tool rastertest`): an equirect grid of ETOPO's size, a swell
+plus a checker that flips every cell, asked cold two levels above its own mip -- the tile is the fold of
+its sixteen own-level paints byte for byte, the direct paint of that level (the law before) is the
+checker's height away from it, and a second root asked fine-first holds the same files byte for byte.
+The gate (02:20-02:40, one take each, one engine at a time): `--tool rastertest` 70 checks, `--selftest` 29
+suites. The own level is part of each layer's key (`Law` says "own level"), found necessary on the first
+pass: without it the lived-in cache served ETOPO's old point-sampled rungs under the new law. Fresh roots,
+before and after: the cold mouth view (the heights-only scene) never settled before (1,575 of 18,703 tiles
+pending at 3,000 frames, residency.load 43.9 ms, ETOPO 2022 painted 3,042 tiles, CUDEM 2,867, the edits 2,949,
+every one at the level asked) and settles exact after in 1,620 frames (loads 34.5 ms; ETOPO paints its own
+level, 8,197 tiles, and magnifies 3,016 below it; CUDEM paints 225 and magnifies 1,731; the edits paint 12);
+the picture 0.09 % of pixels apart. The probe (`--tool height-tree-probe`, fresh roots): a cold 1.5 m sample
+154 ms before, 3 ms after, the run 451 s to 88 s -- the per-level paint and push fold of the three are gone.
+Its |tree - stack| moved where the law says it must and nowhere else: at the place, p95 0.122 to 0.128 m at
+1.5 m, 0.126 to 0.135 at 6 m, 0.209 to 0.207 at 25 m, identical at 100 m and above; the worst at 1.5 m from
+1.18 to 5.20 m, which is the edits' hard edge become one own texel's ramp (4.8 m at mip 10) against the
+stack's hard edge, the crest less the bed; over the sphere p95 0.27 to 13.3 m at 400 m and 7.5 to 13.3 at
+1,600 m, which is the stack's doing, not the tree's: above ETOPO 2022's own level the tree now holds area
+means and the stack still answers with a point bilinear at every grain (`EquirectHeightSource::Sample`
+ignores its grain). The lived-in cache, the three layers' trees fresh under their new keys: the globe's orbit
+view settled in 8 frames where it had held one tile short through 3,000, ETOPO painting its 7,171 own-level
+tiles once, 0.23 % of pixels apart; the globe's mouth view 1.7 %; the shipped sea view 8.9 % (mean 0.71: the
+bed under the water now CUDEM's own level magnified rather than its bilinear at every texel, and the wave
+field re-solved on it); the HQ sea view 0.12 %, the drone and survey files owning it. Not done: the stack's
+own point sampling above a grid's own level (the probe's sphere numbers), and the edits' ramp width is the
+own texel's, not a declared feather.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:

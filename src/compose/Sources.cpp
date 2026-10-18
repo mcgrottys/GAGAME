@@ -1,6 +1,7 @@
 #include <cstdint>
 #include "compose/Sources.h"
 #include "core/Common.h"
+#include "core/Lattice.h"
 
 #include "core/Json.h"
 #include "core/TileProviders.h"
@@ -246,9 +247,16 @@ std::string EquirectHeightSource::Law() const {
         m_hashed = true;
     }
     char b[128];
-    snprintf(b, sizeof(b), "grid int16 %dx%d fnv64 %016llx, vdatum %+.3f m", m_nx, m_ny,
+    snprintf(b, sizeof(b), "grid int16 %dx%d fnv64 %016llx, vdatum %+.3f m, own level", m_nx, m_ny,
              static_cast<unsigned long long>(m_bytesFnv), m_datumShift);
-    return b;
+    return b;   // "own level": the paint law (OwnMip) is part of what the tiles are, so it is part of the key
+}
+
+// The grid's cell is what its maker declared (SourceInfo::cmPerPixel: ETOPO 4,892 m, MOLA 3,697 m, each
+// in its own planet's metres), read at the equator, where an equirect cell is its widest.
+int EquirectHeightSource::OwnMip(const Lattice& l) const {
+    if (!m_elev || m_nx <= 0 || m_info.cmPerPixel <= 0.0) return -1;
+    return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, 0.0, 0.0), 0);
 }
 
 // ------------------------------------------------------------------------------ CUDEM
@@ -261,10 +269,31 @@ std::string CudemHeightSource::Law() const {
         m_hashed = true;
     }
     char b[192];
-    snprintf(b, sizeof(b), "grid float32 %dx%d fnv64 %016llx at %.6f,%.6f..%.6f,%.6f, feather %.3f",
+    snprintf(b, sizeof(b), "grid float32 %dx%d fnv64 %016llx at %.6f,%.6f..%.6f,%.6f, feather %.3f, own level",
              m_bathy->Nx(), m_bathy->Ny(), static_cast<unsigned long long>(m_bytesFnv), m_bathy->Lon0(),
              m_bathy->Lat0(), m_bathy->Lon1(), m_bathy->Lat1(), m_feather);
     return b;
+}
+
+// THE OWN LEVEL OF A GRID LAYER (HIERARCHY 4.20, 2026-10-18). Measured before this: a layer without an
+// own level is painted by TileTree::LeafTile at whatever level a view asks first and folded upward where
+// a finer level was painted earlier, so the tree's bytes were a function of the order of asks -- against
+// trees built over two weeks, a fresh repaint differed at fully weighted texels by up to 1.08 m for the
+// CUDEM grid at pyramid mip 11 and by kilometres for ETOPO at the globe's coarse rungs (a point sample of
+// a mountain range where the fold holds its mean). Declared, the level is painted from the grid, the
+// levels above are its folds (kept, deterministic) and the levels below the kept tile magnified: the
+// same rule a raster by file has had since 2026-10-17, and the bytes become a function of the data.
+int CudemHeightSource::OwnMip(const Lattice& l) const {
+    if (!m_bathy || !m_bathy->Ready() || m_info.cmPerPixel <= 0.0) return -1;
+    const double lat = 0.5 * (m_info.lat0 + m_info.lat1) * kPi / 180.0;
+    const double lon = 0.5 * (m_info.lon0 + m_info.lon1) * kPi / 180.0;
+    return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, lat, lon), 0);
+}
+
+bool CudemHeightSource::Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
+    if (!m_bathy || !m_bathy->Ready()) return false;
+    lon0 = m_info.lon0; lat0 = m_info.lat0; lon1 = m_info.lon1; lat1 = m_info.lat1;
+    return true;
 }
 
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
@@ -380,11 +409,25 @@ float EditsHeightSource::Uncovered(double latRad, double lonRad, double groundRe
     return float(u);
 }
 
-// The identity of what this layer paints: its own content (the polygons' bytes and the crest, which
-// the structure string hashes) and the finer witnesses it yields to, by name and structure, so the
-// tree repaints the edits' tiles when the polygons OR a witness changes, and at no other time.
+int EditsHeightSource::OwnMip(const Lattice& l) const {
+    if (m_rings.empty() || m_info.cmPerPixel <= 0.0) return -1;
+    const double lat = 0.5 * (m_info.lat0 + m_info.lat1) * kPi / 180.0;
+    const double lon = 0.5 * (m_info.lon0 + m_info.lon1) * kPi / 180.0;
+    return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, lat, lon), 0);
+}
+
+bool EditsHeightSource::Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
+    if (m_rings.empty()) return false;
+    lon0 = m_info.lon0; lat0 = m_info.lat0; lon1 = m_info.lon1; lat1 = m_info.lat1;
+    return true;
+}
+
+// The identity of what this layer paints: the finer witnesses it yields to, by name and structure
+// (its own content, the polygons' bytes and the crest, is the structure string, which the layer's
+// identity carries since the footprint is declared), so the tree repaints the edits' tiles when the
+// polygons OR a witness changes, and at no other time.
 std::string EditsHeightSource::Law() const {
-    std::string law = m_info.structure;
+    std::string law = "own level";   // the paint law is part of the key, as for the grid layers
     if (!m_comp || m_channel < 0) return law;
     bool first = true;
     for (HeightSource* hs : m_comp->ChannelAt(m_channel).height) {
