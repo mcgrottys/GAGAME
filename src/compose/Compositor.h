@@ -131,6 +131,10 @@ public:
     // layers declare none, so their trees keep the key they were painted under.
     virtual int OwnMip(const Lattice&) const { return -1; }
     virtual bool Footprint(double&, double&, double&, double&) const { return false; }
+    // THE LAW A LAYER PAINTS BY, when it is more than its bytes (2026-10-18): empty for a layer whose
+    // name is its identity; a layer whose weight depends on OTHER layers names them here (the hand
+    // edits yield to the finer witnesses), so the tree's cached tiles of it follow those layers too.
+    virtual std::string Law() const { return std::string(); }
     // THE RANGE OVER A BOX (degrees): every value Sample can give at any point of the box, at any
     // grain, lies in [lo, hi] -- a bound, not an estimate (a sample is a weighted mean of the source's
     // own values, so it never leaves their range). `full`: the weight is 1 everywhere in the box.

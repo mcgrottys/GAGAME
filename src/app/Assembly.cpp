@@ -572,6 +572,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             hstack.push_back(&srcEdits);
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
+        // THE HAND EDIT YIELDS TO A FINER WITNESS (Sources.cpp, EditsHeightSource::Uncovered): the
+        // channel it stands in names the witnesses; its tiles' identity folds theirs (HeightSource::Law).
+        srcEdits.Witnesses(&compositor, hgtCh);
         // THE HEIGHT TREE (M9as), built as soon as the channel stands: every CPU reader after this line --
         // the solver's bed first -- reads it through Compositor::SampleHeight (compose/HeightTree.h), and
         // the GPU's tenant below is fed from it. Before 2026-10-14 it stood after the solver's bed was

@@ -237,8 +237,16 @@ public:
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
     // The crest where a land ring's box meets the box, -1 where a water ring's does.
     Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
+    // THE HAND EDIT YIELDS TO A FINER WITNESS (2026-10-18): the channel whose finer measured layers
+    // this one yields to. Unnamed, the edit paints at full weight wherever its polygons are (the law
+    // before this date). Named, its weight is the share of the texel those layers leave uncovered.
+    void Witnesses(const Compositor* comp, int channel) { m_comp = comp; m_channel = channel; }
+    std::string Law() const override;
 
 private:
+    float Uncovered(double latRad, double lonRad, double groundResM) const;
+    const Compositor* m_comp = nullptr;
+    int m_channel = -1;
     struct Ring {
         bool land = true;
         double lon0 = 1e9, lat0 = 1e9, lon1 = -1e9, lat1 = -1e9;

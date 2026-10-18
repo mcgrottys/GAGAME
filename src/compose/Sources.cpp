@@ -288,7 +288,7 @@ bool EditsHeightSource::Load(const std::string& geojsonPath, float crestNavd) {
     return true;
 }
 
-float EditsHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
+float EditsHeightSource::Sample(double latRad, double lonRad, double groundResM, float& metres) {
     const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
     for (const Ring& r : m_rings) {
         if (lon < r.lon0 || lon > r.lon1 || lat < r.lat0 || lat > r.lat1) continue;
@@ -304,10 +304,61 @@ float EditsHeightSource::Sample(double latRad, double lonRad, double, float& met
         }
         if (in) {
             metres = r.land ? m_crest : -1.0f;   // riprap crest, or dredged subtidal
-            return 1.0f;
+            return Uncovered(latRad, lonRad, groundResM);
         }
     }
     return 0.0f;
+}
+
+// THE HAND EDIT YIELDS TO A FINER WITNESS (2026-10-18). A polygon's crest is a stand-in for ground the
+// surveys never measured: OSM's jetty ways over CUDEM's 10 m cells, where the laser and the sounder
+// have no value. Measured at the north jetty with the transect tool, the edit painted its +2.5 m over
+// the 1 m lidar's +2.77 m and the 1.5 m composite's +3.03 m on the same crest, a flat slab in every
+// still. So the edit's weight at a point is the share the finer witnesses leave uncovered:
+//
+//     w = prod_j (1 - w_j)   over the channel's layers with a grain finer than this one's (5 m),
+//
+// the complement of their over-accumulated coverage -- one law at every grain, since each w_j at a
+// coarse grain is already that source's share of the box. Its limits: no finer layer (or no channel
+// named) = 1, the value the edit always had; a finer layer at full weight = 0, the edit gone and the
+// data standing; across a finer layer's feather the edit fades as the witness rises, the same metres.
+// The VALUE is never touched, only the weight: a floor would hold the lidar's slopes at the crest, and
+// the slopes are the data. Coarser layers (CUDEM, ETOPO) are not asked: the edit exists to stand over
+// them. One source asking the others for their weight is the gate's shape (GateSource) read inside
+// the layer, so the CPU's stack, the tree's point sample and its tile compose inherit it from this
+// one Sample and cannot drift.
+float EditsHeightSource::Uncovered(double latRad, double lonRad, double groundResM) const {
+    if (!m_comp || m_channel < 0) return 1.0f;
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    double u = 1.0;
+    for (HeightSource* hs : m_comp->ChannelAt(m_channel).height) {
+        if (hs == this) continue;
+        const SourceInfo& s = hs->Info();
+        if (s.cmPerPixel <= 0.0 || s.cmPerPixel >= m_info.cmPerPixel) continue;
+        if (lon < s.lon0 || lon > s.lon1 || lat < s.lat0 || lat > s.lat1) continue;
+        float m = 0.0f;
+        const float w = hs->Sample(latRad, lonRad, groundResM, m);
+        if (w > 0.0f) u *= 1.0 - (std::min)(1.0, double(w));
+        if (u <= 0.0) return 0.0f;
+    }
+    return float(u);
+}
+
+// The identity of what this layer paints: its own content (the polygons' bytes and the crest, which
+// the structure string hashes) and the finer witnesses it yields to, by name and structure, so the
+// tree repaints the edits' tiles when the polygons OR a witness changes, and at no other time.
+std::string EditsHeightSource::Law() const {
+    std::string law = m_info.structure;
+    if (!m_comp || m_channel < 0) return law;
+    bool first = true;
+    for (HeightSource* hs : m_comp->ChannelAt(m_channel).height) {
+        if (hs == this) continue;
+        const SourceInfo& s = hs->Info();
+        if (s.cmPerPixel <= 0.0 || s.cmPerPixel >= m_info.cmPerPixel) continue;
+        law += (first ? "|yields<" : ",") + s.name + "|" + s.structure;
+        first = false;
+    }
+    return law;
 }
 
 HeightSource::Range EditsHeightSource::RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo,

@@ -1339,6 +1339,99 @@ bool RunRasterFileSelfTest() {
             StackOrder(st);
             Check(st[0] == &floor, "the default order puts the coarse floor under the 2 m hill");
         }
+        // THE HAND EDIT YIELDS TO A FINER WITNESS (2026-10-18): a polygon over the hill's east half and
+        // 200 m past the disc, crest +50 m (above everything the hill holds), in a stack of its own with
+        // the floor and the hill, the channel named as its witnesses -- against the same with none named,
+        // and across the disc's rim with the hill feathered, where the witness rises as the edit fades.
+        if (took) {
+            auto radAt = [&](double E, double N, double& la, double& lo) {
+                PixelLatLon(hr, (E - hr.ox) / hr.sx, (N - hr.oy) / hr.sy, la, lo);
+            };
+            const double eE0 = kHillE, eE1 = kHillE + kHillR + 200.0, eN0 = kHillN - 300.0, eN1 = kHillN + 300.0;
+            double c[4][2];
+            radAt(eE0, eN0, c[0][1], c[0][0]); radAt(eE1, eN0, c[1][1], c[1][0]);
+            radAt(eE1, eN1, c[2][1], c[2][0]); radAt(eE0, eN1, c[3][1], c[3][0]);
+            for (auto& p : c) { p[0] /= kD2R; p[1] /= kD2R; }
+            char poly[768];
+            snprintf(poly, sizeof(poly),
+                     "{\"type\":\"FeatureCollection\",\"features\":[{\"type\":\"Feature\",\"properties\":{\"mask\":\"land\","
+                     "\"name\":\"test crest\"},\"geometry\":{\"type\":\"Polygon\",\"coordinates\":[[[%.8f,%.8f],[%.8f,%.8f],"
+                     "[%.8f,%.8f],[%.8f,%.8f],[%.8f,%.8f]]]}}]}",
+                     c[0][0], c[0][1], c[1][0], c[1][1], c[2][0], c[2][1], c[3][0], c[3][1], c[0][0], c[0][1]);
+            WriteText("out/rastertest/edit_crest.json", poly);
+            CountedH hillH;   // its own instance: `hill`'s ask count is read by the clause's checks below
+            const bool th = hillH.Load(reg, hr.file, none, &why);
+            EditsHeightSource ed, ed0;
+            const bool el = ed.Load("out/rastertest/edit_crest.json", 50.0f) &&
+                            ed0.Load("out/rastertest/edit_crest.json", 50.0f);
+            Compositor cy, cn;
+            const int chY = cy.AddHeightChannel("test.hill.edit", {&floor, &hillH, &ed});
+            const int chN = cn.AddHeightChannel("test.hill.edit.plant", {&floor, &hillH, &ed0});
+            ed.Witnesses(&cy, chY);
+            auto at = [&](const Compositor& cc, int cch, double E, double N, EditsHeightSource* e, float* edW) {
+                double la = 0.0, lo = 0.0;
+                radAt(E, N, la, lo);
+                if (e && edW) { float m = 0.0f; *edW = e->Sample(la, lo, kHillG / std::cos(la), m); }
+                return double(cc.SampleHeightStack(cch, la, lo, kHillG / std::cos(la)));
+            };
+            float wIn = -1.0f, wOut = -1.0f, wW = -1.0f;
+            const double hIn = at(cy, chY, kHillE + 300.0, kHillN + 150.0, &ed, &wIn);   // the disc and the polygon
+            const double hOut = at(cy, chY, kHillE + 700.0, kHillN, &ed, &wOut);         // the polygon past the disc
+            const double hWest = at(cy, chY, kHillE - 300.0, kHillN, &ed, &wW);          // the disc, no polygon
+            const double pIn = at(cn, chN, kHillE + 300.0, kHillN + 150.0, nullptr, nullptr);
+            const double dIn = std::abs(hIn - Hill(kHillE + 300.0, kHillN + 150.0));
+            const double dWest = std::abs(hWest - Hill(kHillE - 300.0, kHillN));
+            Check(th && el && wIn == 0.0f && dIn <= tol && wOut == 1.0f && hOut == 50.0 && wW == 0.0f && dWest <= tol,
+                  "the hand edit yields to the finer witness: in the disc its weight is %.3f and the stack the hill "
+                  "(off %.4f mm); past the disc its weight is %.3f and the stack its crest (%.1f m); west of the "
+                  "polygon the hill (off %.4f mm)", wIn, dIn * 1e3, wOut, hOut, dWest * 1e3);
+            Check(th && el && pIn == 50.0,
+                  "PLANT the edit with no witnesses named: its crest over the hill, %.1f m -- the law before, kept "
+                  "for a channel that names none", pIn);
+            HeightLayerSource ly(&ed, kHeightFrame), ln(&ed0, kHeightFrame);
+            const std::string idY = ly.Identity(), idN = ln.Identity();
+            const size_t atLaw = idY.find("yields<" + hillH.Info().name);
+            Check(idY != idN && atLaw != std::string::npos,
+                  "the edit's tile identity carries its witnesses (%s)",
+                  atLaw == std::string::npos ? idY.c_str() : idY.c_str() + atLaw);
+            // Across the rim, 40 m in to 40 m out at 1 m: with the hill feathered 20 m the edit's weight is the
+            // hill's complement to the float, and the stack ramps at most 72.5 m x 1.5 / 20 a metre (the smoothstep's
+            // slope on the span from the rim's value to the crest) plus the hill's own slope; with the hard edge
+            // (feather 0) it steps the crest less the rim in one metre -- the edge the reads had, kept.
+            RasterEntry fe;
+            fe.feather = 20.0;
+            CountedH hillF;
+            const bool tf = hillF.Load(reg, hr.file, fe, &why);
+            EditsHeightSource edF;
+            const bool ef = edF.Load("out/rastertest/edit_crest.json", 50.0f);
+            Compositor cf;
+            const int chF = cf.AddHeightChannel("test.hill.edit.feather", {&floor, &hillF, &edF});
+            edF.Witnesses(&cf, chF);
+            double stepF = 0.0, stepH = 0.0, lawWorst = 0.0;
+            double prevF = at(cf, chF, kHillE + kHillR - 40.0, kHillN, nullptr, nullptr);
+            double prevH = at(cy, chY, kHillE + kHillR - 40.0, kHillN, nullptr, nullptr);
+            for (int i = 1; i <= 80; ++i) {
+                const double E = kHillE + kHillR - 40.0 + i;
+                float we = 0.0f, m = 0.0f;
+                const double hF = at(cf, chF, E, kHillN, &edF, &we);
+                double la = 0.0, lo = 0.0;
+                radAt(E, kHillN, la, lo);
+                const float wh = hillF.Sample(la, lo, kHillG / std::cos(la), m);
+                lawWorst = (std::max)(lawWorst, std::abs(double(we) - (1.0 - (std::min)(1.0, double(wh)))));
+                stepF = (std::max)(stepF, std::abs(hF - prevF));
+                prevF = hF;
+                const double hH = at(cy, chY, E, kHillN, nullptr, nullptr);
+                stepH = (std::max)(stepH, std::abs(hH - prevH));
+                prevH = hH;
+            }
+            // the ramp's span: from the hill's value at the rim (-22.5 m) to the crest, 72.5 m, times the
+            // smoothstep's steepest slope 1.5 / feather, plus the hill's own slope under it
+            const double bound = (50.0 - Hill(kHillE + kHillR, kHillN)) * 1.5 / 20.0 + 0.3;
+            Check(tf && ef && lawWorst <= 1e-6 && stepF <= bound && stepH >= 40.0,
+                  "across the rim the edit's weight is the feathered hill's complement (worst %.1e); the stack steps at "
+                  "most %.2f m a metre (bound %.2f) with the hill feathered 20 m, and %.1f m in one metre with its hard "
+                  "edge", lawWorst, stepF, bound, stepH);
+        }
         // ---- the levels: the own mip on the pyramid (a height's tile) and on the z14 page, the pass,
         // each fold byte for byte, and the same files asked coarse-first
         const Lattice lats[3] = {Lattice::Cube(Lattice::kFaceDim << 17, 256, 128),

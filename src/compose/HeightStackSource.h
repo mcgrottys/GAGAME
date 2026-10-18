@@ -102,7 +102,14 @@ public:
     }
     std::string Identity() const override {
         double a, b, c, d;
-        return DomainSource::Identity() + (Footprint(a, b, c, d) ? "|" + m_src->Info().structure : "");
+        std::string id = DomainSource::Identity() + (Footprint(a, b, c, d) ? "|" + m_src->Info().structure : "");
+        // A layer that paints by a law over other layers carries the law (HeightSource::Law): the hand
+        // edits' tiles repaint when the witnesses they yield to change, and at no other time.
+        if (m_src) {
+            const std::string law = m_src->Law();
+            if (!law.empty()) id += "|" + law;
+        }
+        return id;
     }
 
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
