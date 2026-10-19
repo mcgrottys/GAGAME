@@ -111,10 +111,11 @@ public:
     // M7: per-frame wave-bank binding (SRVs + ring origins).
     // THE COLUMN PLANE (the rolling-wave work, 2026-10-18): the first eye's bank's Eulerian
     // columns, read by GlobeMesh.hlsl MsLip and Globe.hlsl PsSurface. 0xFFFFFFFF = none.
-    void SetWaterColumn(uint32_t srv, float scale, float bias) {
+    void SetWaterColumn(uint32_t srv, float scale, float bias, uint32_t fineSrv = 0xFFFFFFFFu) {
         m_colSrv = srv;
         m_colScale = scale;
         m_colBias = bias;
+        m_colFineSrv = fineSrv;
     }
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
@@ -879,6 +880,7 @@ private:
     double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_colSrv = 0xFFFFFFFFu;   // the column plane (SetWaterColumn)
+    uint32_t m_colFineSrv = 0xFFFFFFFFu;   // ...and its finer level where tubes stand
     float m_colScale = 1000.0f, m_colBias = 64.0f;
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};

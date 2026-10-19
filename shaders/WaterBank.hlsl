@@ -120,7 +120,18 @@ cbuffer BankCb : register(b0) {
     // tile) and 2^32 - 1 (a cleared Min) both read as ABSENT. Appended at the END on both sides.
     uint4  gColU;
     float4 gColA;
+    // THE FINER LEVEL (WaterBankLayer.h): x = its UAV slot (ring 0's columns at 1/w of the texel,
+    // 2048 a band), y = the tube flags' UAV slot (16x16), z = on, w = the ratio. Appended at the END.
+    uint4  gColF;
+    uint4  gFineMap[8];   // the fine tiles resident: row y's 16 bits in word y / 2, high half for odd y
 };
+
+// Is fine tile (tx, ty) resident this frame (a write to an unmapped tile is dropped anyway; this
+// spares the work).
+bool FineMapped(uint tx, uint ty) {
+    const uint w = gFineMap[ty >> 2][(ty >> 1) & 3u];
+    return ((w >> (((ty & 1u) * 16u) + tx)) & 1u) != 0u;
+}
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
 float4 WaveSigRow(uint r) { return (r < 8u) ? gWaveSig[r] : gWaveSig2[r - 8u]; }
@@ -1053,6 +1064,23 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         gUu[gColU.x][dst + uint2(0u, 512u)] = 0u;              // lip top: the inverted branch's MAX
         gUu[gColU.x][dst + uint2(0u, 1024u)] = 0u;             // lip underside: the upright branches' MAX
         gUu[gColU.x][dst + uint2(0u, 1536u)] = 0u;             // the lip's coverage of the texel (0..16 a cell)
+        // THE FINER LEVEL's clears, ring 0 only: this texel's w x w fine texels, four bands (a write
+        // to an unmapped tile is dropped by the hardware); and the tube flags, by tile 0's first
+        // 16x16 threads.
+        if (gColF.z != 0u && t.dstX < 512u && FineMapped((t.dstX + id.x) * gColF.w >> 7, (t.dstY + id.y) * gColF.w >> 7)) {
+            const uint r = gColF.w;
+            const uint2 f0 = uint2(t.dstX + id.x, t.dstY + id.y) * r;
+            for (uint j = 0u; j < r; ++j) {
+                for (uint i = 0u; i < r; ++i) {
+                    const uint2 fd = f0 + uint2(i, j);
+                    gUu[gColF.x][fd] = 0xFFFFFFFFu;
+                    gUu[gColF.x][fd + uint2(0u, 2048u)] = 0u;
+                    gUu[gColF.x][fd + uint2(0u, 4096u)] = 0u;
+                    gUu[gColF.x][fd + uint2(0u, 6144u)] = 0u;
+                }
+            }
+        }
+        if (gColF.z != 0u && id.z == 0u && id.x < 16u && id.y < 16u) gUu[gColF.y][id.xy] = 0u;
     }
 }
 
@@ -1122,39 +1150,68 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
         if (any(hi - lo > 8.0f * t.texelM) || abs(area) < 1e-6f * t.texelM * t.texelM) continue;
         // the label grid's own orientation: (00, 10, 01) turns positive in (x, z); a flipped
         // triangle is the fold
-        const bool inverted = (ti == 0u) ? area < 0.0f : area < 0.0f;
+        const bool inverted = area < 0.0f;
         const float iarea = 1.0f / area;
-        const int2 q0 = int2(floor((lo - ringOrg) / t.texelM));
-        const int2 q1 = int2(floor((hi - ringOrg) / t.texelM));
-        const uint S = inverted ? 4u : 1u;
-        for (int qz = max(q0.y, 0); qz <= min(q1.y, 511); ++qz) {
-            for (int qx = max(q0.x, 0); qx <= min(q1.x, 511); ++qx) {
-                const uint2 dst = uint2(ringX0 + uint(qx), uint(qz));
-                uint hits = 0u;
-                uint vMax = 0u, vMin = 0xFFFFFFFFu;
-                for (uint sj = 0u; sj < S; ++sj) {
-                    for (uint si = 0u; si < S; ++si) {
-                        const float2 p = ringOrg + (float2(float(qx), float(qz)) + (float2(float(si), float(sj)) + 0.5f) / float(S)) * t.texelM;
-                        // barycentric by the sub-areas, the same orientation as `area`
-                        const float wA = ((B.x - p.x) * (C.y - p.y) - (C.x - p.x) * (B.y - p.y)) * iarea;
-                        const float wB = ((C.x - p.x) * (A.y - p.y) - (A.x - p.x) * (C.y - p.y)) * iarea;
-                        const float wC = 1.0f - wA - wB;
-                        const float eps = -1e-4f;
-                        if (wA < eps || wB < eps || wC < eps) continue;
-                        // the crossing's height and the label it came from, less the point
-                        const uint v = ColEncode(wA * hA + wB * hB + wC * hC, wA * lA + wB * lB + wC * lC - p);
-                        vMax = max(vMax, v);
-                        vMin = min(vMin, v);
-                        ++hits;
+        // THE TWO LEVELS: the ring's own texels, and -- on ring 0, where the finer level stands --
+        // the same triangle over the fine texels (1/w of the ring's), into the fine atlas; its
+        // writes to tiles no tube stood in are dropped by the hardware. An inverted triangle flags
+        // the fine tiles its box touches, so the CPU maps them for the frames to come.
+        const bool fineOn = gColF.z != 0u && ringX0 == 0u;
+        for (uint lvl = 0u; lvl < (fineOn ? 2u : 1u); ++lvl) {
+            const float texelL = (lvl == 0u) ? t.texelM : t.texelM / float(gColF.w);
+            const int lastL = (lvl == 0u) ? 511 : int(512u * gColF.w) - 1;
+            const uint slotL = (lvl == 0u) ? cSlot : gColF.x;
+            const uint bandL = (lvl == 0u) ? 512u : 2048u;
+            const uint xoffL = (lvl == 0u) ? ringX0 : 0u;
+            const int2 q0 = int2(floor((lo - ringOrg) / texelL));
+            const int2 q1 = int2(floor((hi - ringOrg) / texelL));
+            if (lvl == 1u && inverted) {
+                for (int fz = max(q0.y, 0) >> 7; fz <= (min(q1.y, lastL) >> 7); ++fz) {
+                    for (int fx = max(q0.x, 0) >> 7; fx <= (min(q1.x, lastL) >> 7); ++fx) {
+                        InterlockedOr(gUu[gColF.y][uint2(uint(fx), uint(fz))], 1u);
                     }
                 }
-                if (hits == 0u) continue;
-                if (inverted) {
-                    InterlockedMax(gUu[cSlot][dst + uint2(0u, 512u)], vMax);
-                    InterlockedAdd(gUu[cSlot][dst + uint2(0u, 1536u)], hits);
-                } else {
-                    InterlockedMin(gUu[cSlot][dst], vMin);
-                    InterlockedMax(gUu[cSlot][dst + uint2(0u, 1024u)], vMax);
+            }
+            const uint S = inverted ? 4u : 1u;
+            // the fine level: only the tiles resident this frame (the flag above asks for the rest)
+            if (lvl == 1u) {
+                bool any = false;
+                for (int fz = max(q0.y, 0) >> 7; fz <= (min(q1.y, lastL) >> 7) && !any; ++fz) {
+                    for (int fx = max(q0.x, 0) >> 7; fx <= (min(q1.x, lastL) >> 7) && !any; ++fx) {
+                        any = FineMapped(uint(fx), uint(fz));
+                    }
+                }
+                if (!any) continue;
+            }
+            for (int qz = max(q0.y, 0); qz <= min(q1.y, lastL); ++qz) {
+                for (int qx = max(q0.x, 0); qx <= min(q1.x, lastL); ++qx) {
+                    const uint2 dst = uint2(xoffL + uint(qx), uint(qz));
+                    uint hits = 0u;
+                    uint vMax = 0u, vMin = 0xFFFFFFFFu;
+                    for (uint sj = 0u; sj < S; ++sj) {
+                        for (uint si = 0u; si < S; ++si) {
+                            const float2 p = ringOrg + (float2(float(qx), float(qz)) + (float2(float(si), float(sj)) + 0.5f) / float(S)) * texelL;
+                            // barycentric by the sub-areas, the same orientation as `area`
+                            const float wA = ((B.x - p.x) * (C.y - p.y) - (C.x - p.x) * (B.y - p.y)) * iarea;
+                            const float wB = ((C.x - p.x) * (A.y - p.y) - (A.x - p.x) * (C.y - p.y)) * iarea;
+                            const float wC = 1.0f - wA - wB;
+                            const float eps = -1e-4f;
+                            if (wA < eps || wB < eps || wC < eps) continue;
+                            // the crossing's height and the label it came from, less the point
+                            const uint v = ColEncode(wA * hA + wB * hB + wC * hC, wA * lA + wB * lB + wC * lC - p);
+                            vMax = max(vMax, v);
+                            vMin = min(vMin, v);
+                            ++hits;
+                        }
+                    }
+                    if (hits == 0u) continue;
+                    if (inverted) {
+                        InterlockedMax(gUu[slotL][dst + uint2(0u, bandL)], vMax);
+                        InterlockedAdd(gUu[slotL][dst + uint2(0u, 3u * bandL)], hits);
+                    } else {
+                        InterlockedMin(gUu[slotL][dst], vMin);
+                        InterlockedMax(gUu[slotL][dst + uint2(0u, 2u * bandL)], vMax);
+                    }
                 }
             }
         }

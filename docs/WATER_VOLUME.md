@@ -311,6 +311,47 @@ face-from-column one differs on 25 % of pixels (SSIM 0.980) -- the orbit of a sh
 What the eye sees at the throat: crests pitched forward with steep faces, dark crest lines where
 the lips stand, no rings.
 
+## 8. The finer column level where tubes stand (2026-10-19, PR 104's fourth commit)
+
+The structure's own answer to the plates and terraces (Mark's crops): ring 0's columns again at a
+quarter of its texel (0.3 m), four bands, in a second reserved atlas (`water.columnF`, 2048 a band,
+16x16 tiles of 128^2) resident only where a tube stood. **Who decides residency:** the scatter
+itself -- an inverted triangle flags the 38 m fine tiles its box touches in a 16x16 texture
+(`InterlockedOr`); the flags go back to the CPU through the frame ring (`hal::RegionReadback`, a
+kilobyte a frame, kFrameCount frames of latency); the CPU maps the flagged tiles' four bands and
+unmaps the rest; the kernel is handed the mapped set (256 bits in the constant buffer) and
+rasterizes and clears only there (a write to an unmapped tile is dropped by the hardware anyway;
+the set spares the work). **Who reads it:** `ColumnFetch` on ring 0, for the lip bands only --
+the lip's departure from the FINE face weighted by the FINE coverage, so the taper and the
+terraces are a quarter texel's -- and falls back to the ring's columns wherever a fine tap is a
+NULL tile. The drawn FACE stays the ring's everywhere: one reconstruction, no seam at a fine
+tile's edge.
+
+Measured (`out/surf/fine2/`, the throat at the shipped sea, `tube_high`):
+
+| | ring 0, 1.2 m | fine, 0.3 m |
+|---|---|---|
+| lip-top step between neighbouring tube texels, p50 / p90 | 0.060 / 0.258 m | 0.010 / 0.020 m |
+| tube area found (coarse-texel equivalents) | 922 | 9,397 |
+| tiles resident | 48 (3 MB) | 41 of 256 (10 MB) |
+| scatter / fill | 0.24 / 3.0 ms | 0.65 / 3.46 ms |
+
+- The terraces fall six-fold in absolute height, to a centimetre.
+- **The surprise:** the fine level finds TEN TIMES the tube area. At 1.2 m the inverted triangle is
+  tested on a 4x4 sub-grid, 0.3 m apart, and a lip thinner than that lands on none of the points in
+  most of the texels it crosses; most lips in this sea are that thin. The coarse coverage band
+  under-reports tubes by an order of magnitude, which also starves MsLip's early-out of them.
+- The cost is about 0.9 ms with 41 tiles resident; it scales with tube area, not with the sea.
+- The still differs from the coarse-only one on 1.6 % of pixels (the lips' rims). Two runs of the
+  fine level are not bit-identical: the flags' latency makes the mapped set depend on which frame
+  the still settled on. A gate on the fine level must compare the column dumps, not the pixels.
+
+What this leaves: the lip GRID is still the meshlet's 9x9 at the helm's 1.2 m, so the sheets' shape
+between vertices is linear whatever the column's grain; a denser lip grid near tubes (an
+amplification stage in front of MsLip: the 81-probe early-out, then 16 groups only where a tube
+stands) is the next step, and `hal::MeshPipelineDesc` already takes an `as` blob. And the early-out
+should read the fine coverage where it is resident, since the coarse band misses most tubes.
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`

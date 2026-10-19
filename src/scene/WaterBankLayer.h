@@ -23,6 +23,7 @@
 #include "compose/SurfaceFrame.h"
 #include "compose/WaterAtlas.h"
 #include "hal/TileAtlas.h"
+#include "hal/Readback.h"
 #include "core/OriginLattice.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
@@ -58,6 +59,16 @@ public:
     static constexpr float kColBias = 64.0f;      // metres below the waterline the encoding reaches
     static constexpr uint32_t kColSubLabels = 2;  // sub-labels an axis a texel in the scatter
     uint32_t ColumnSrv() const { return (column && m_ready) ? m_column.Srv() : 0xFFFFFFFFu; }
+    // THE FINER COLUMN LEVEL WHERE TUBES STAND (2026-10-19): ring 0's columns again at a quarter of
+    // its texel (0.3 m), four bands, resident only in the 38 m tiles a tube stood in on the frame the
+    // flags came back from (the scatter flags a tile when an inverted triangle lands in it; the CPU
+    // reads the 16x16 flags through the frame ring and maps those tiles). A NULL fine tile reads
+    // absent and the readers fall back to ring 0's columns: the hierarchy's law, finest resident.
+    static constexpr uint32_t kFineRatio = 4;
+    static constexpr uint32_t kFineTexels = 2048;                        // kRingTexels * kFineRatio
+    static constexpr uint32_t kFineTiles = 16;                           // 16x16 tiles of 128^2
+    uint32_t ColumnFineSrv() const { return (column && m_ready) ? m_columnF.Srv() : 0xFFFFFFFFu; }
+    uint32_t FineTilesMapped() const { return m_fineMappedCount; }
 
     static constexpr int kMips = 6;         // texel = base * 2^m; at base 1.2: 1.2..38 m
                                             // texels, 0.6..20 km spans (scene bankTexelM)
@@ -305,6 +316,11 @@ private:
         // scale and bias. Appended at the END on both sides.
         uint32_t colU[4];
         float colA[4];
+        // THE FINER LEVEL (gColF): its UAV slot, the tube flags' UAV slot, on, the ratio; then the
+        // MAPPED SET, 16 rows of 16 bits (row y in word y / 2, high half for odd y), so the kernel
+        // rasterizes and clears only the fine tiles that are resident.
+        uint32_t colF[4];
+        uint32_t fineMap[32];
     };
     struct BankTile {
         float orgXZ[2];
@@ -376,7 +392,14 @@ private:
     const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
     float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)
 
-    TileAtlas2D m_column;                     // R32_UINT, three bands of rings: the Eulerian columns
+    TileAtlas2D m_column;                     // R32_UINT, four bands of rings: the Eulerian columns
+    TileAtlas2D m_columnF;                    // ...and ring 0's at a quarter texel, where tubes stand
+    GpuTexture m_flagTex;                     // 16x16: which fine tiles a tube landed in this frame
+    uint32_t m_flagUav = 0xFFFFFFFFu;
+    hal::RegionReadback m_flagRb;             // the flags, back through the frame ring
+    uint8_t m_fineMapped[256] = {};
+    uint32_t m_fineMappedCount = 0;
+    uint32_t m_fineLogged = 0xFFFFFFFFu;
     hal::Pso m_scatter;                       // CsBankScatter (after the fill, a UAV barrier between)
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
                                              // needs to recover sub-ring sparkle (hsScale;

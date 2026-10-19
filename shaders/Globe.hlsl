@@ -137,6 +137,7 @@ cbuffer GlobeCb : register(b1) {
     // appended at the END on both sides (priors 22): x = its SRV (R32_UINT, three bands of 512
     // rows: face, lip underside, lip top), y = on; gColA.x = the fixed point's scale (per metre),
     // .y = its bias (m). Read by ColumnFetch; set A's rings only.
+    // ...z = THE FINER LEVEL's SRV (ring 0's columns at a quarter texel, where tubes stand), w = on.
     uint4  gColU;
     float4 gColA;
 };
@@ -522,6 +523,38 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
         h = lerp(f0, f1, fr.y) + lerp(d0, d1, fr.y);
         cover = lerp(w0, w1, fr.y);
         if (band == 0u) labelOff = lerp(lerp(lo[0], lo[1], fr.x), lerp(lo[2], lo[3], fr.x), fr.y);
+        // THE FINER LEVEL (WaterBankLayer.h): on ring 0, a lip band is read at a quarter of the
+        // texel where the fine tiles hold the point (their face present at every tap -- a NULL tile
+        // reads absent and the ring's read above stands): the lip's departure from the FINE face,
+        // weighted by the fine coverage, so the taper and the terraces are a quarter texel's. The
+        // drawn face stays the ring's (one reconstruction everywhere, no seam at a fine tile's edge).
+        if (band != 0u && m == 0u && gColU.w != 0u) {
+            const float texelF = texel * 0.25f;
+            const float2 tfF = (worldXZ - org) / texelF - 0.5f;
+            const int2 t0F = int2(floor(tfF));
+            const float2 frF = tfF - float2(t0F);
+            if (all(t0F >= 0) && all(t0F < 2047)) {
+                float dF[4], wF[4];
+                bool okAll = true;
+                [unroll] for (int k = 0; k < 4; ++k) {
+                    const int2 tc = t0F + int2(k & 1, k >> 1);
+                    const uint rawF = gTexU[gColU.z].Load(int3(tc.x, tc.y, 0)).x;
+                    okAll = okAll && ColPresent(rawF);
+                    wF[k] = saturate(float(gTexU[gColU.z].Load(int3(tc.x, 6144 + tc.y, 0)).x) * (1.0f / 16.0f));
+                    const uint rawL = gTexU[gColU.z].Load(int3(tc.x, int(band) * 2048 + tc.y, 0)).x;
+                    dF[k] = (wF[k] > 0.0f && ColPresent(rawL) && ColPresent(rawF)) ? wF[k] * (ColH(rawL) - ColH(rawF)) : 0.0f;
+                    if (!(wF[k] > 0.0f && ColPresent(rawL))) wF[k] = 0.0f;
+                }
+                if (okAll) {
+                    const float dF0 = lerp(dF[0], dF[1], frF.x), dF1 = lerp(dF[2], dF[3], frF.x);
+                    const float wF0 = lerp(wF[0], wF[1], frF.x), wF1 = lerp(wF[2], wF[3], frF.x);
+                    h = lerp(f0, f1, fr.y) + lerp(dF0, dF1, frF.y);
+                    cover = lerp(wF0, wF1, frF.y);
+                    slope = float2(lerp(f[1] - f[0], f[3] - f[2], fr.y) / texel + lerp(dF[1] - dF[0], dF[3] - dF[2], frF.y) / texelF,
+                                   (f1 - f0) / texel + (dF1 - dF0) / texelF);
+                }
+            }
+        }
         slope = float2(lerp((f[1] - f[0]) + (d[1] - d[0]), (f[3] - f[2]) + (d[3] - d[2]), fr.y),
                        (f1 - f0) + (d1 - d0)) / texel;
         return true;
