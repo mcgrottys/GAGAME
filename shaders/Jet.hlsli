@@ -13,6 +13,21 @@ float BandPhaseSpeed(float kBand, float depth) {
     return sqrt(9.81f / kBand * tanh(kh));
 }
 
+// THE WAVENUMBER IN THIS DEPTH (the crest law, 2026-10-19): a band's frequency is its deep-water
+// k's (sigma^2 = g kDeep); in depth h the same frequency travels at the k that solves
+// sigma^2 = g k tanh(kh). Guo's explicit form (Coastal Engineering 45, 2002; < 0.75 %):
+// kh = x^2 (1 - exp(-x^(5/2)))^(-2/5), x = sigma sqrt(h/g) = sqrt(kDeep h). Deep: kh -> x^2 (k =
+// kDeep); shallow: kh -> x (k = sigma / sqrt(g h)).
+float ShoaledKh(float kDeep, float depth) {
+    const float x = sqrt(max(kDeep * depth, 1e-6f));
+    return x * x * pow(1.0f - exp(-pow(x, 2.5f)), -0.4f);
+}
+// The Airy orbit's horizontal excursion over its vertical at the surface, coth(kh), with k the
+// band's in this depth: 1 in deep water, the slosh of a long wave in the shallows.
+float OrbitCoth(float kDeep, float depth) {
+    return 1.0f / tanh(ShoaledKh(kDeep, max(depth, 0.3f)));
+}
+
 // Green's-law-style shoaling: amplitude grows as the group speed drops entering shallow water.
 float ShoalFactor(float kBand, float depth) {
     const float kh = kBand * max(depth, 0.15f);

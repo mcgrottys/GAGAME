@@ -321,16 +321,22 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
 //        can finite-difference h in TIME and land on vy, and why using P there would not.
 void OceanCpu::SampleForHull(double wx, double wz, double tSec, double minLambda,
                              OceanSample& out) const {
-    SampleBand(wx, wz, tSec, minLambda, nullptr, out);
+    SampleBand(wx, wz, tSec, minLambda, nullptr, nullptr, out);
 }
 
 void OceanCpu::SampleForHull(double wx, double wz, double tSec, double minLambda,
                              const double gain[kCascades], OceanSample& out) const {
-    SampleBand(wx, wz, tSec, minLambda, gain, out);
+    SampleBand(wx, wz, tSec, minLambda, gain, nullptr, out);
+}
+
+void OceanCpu::SampleForHull(double wx, double wz, double tSec, double minLambda,
+                             const double gain[kCascades], const double latGain[kCascades],
+                             OceanSample& out) const {
+    SampleBand(wx, wz, tSec, minLambda, gain, latGain, out);
 }
 
 void OceanCpu::Sample(double wx, double wz, double tSec, OceanSample& out) const {
-    SampleBand(wx, wz, tSec, 0.0, nullptr, out);
+    SampleBand(wx, wz, tSec, 0.0, nullptr, nullptr, out);
 }
 
 bool OceanCpu::s_rotorMemo = true;
@@ -351,7 +357,7 @@ thread_local RotorMemo t_rotor;
 }  // namespace
 
 void OceanCpu::SampleBand(double wx, double wz, double tSec, double minLambda, const double* gain,
-                          OceanSample& out) const {
+                          const double* latGain, OceanSample& out) const {
     ++s_samples;
     // The eight running sums, in the order OceanSample names them.
     struct Sums {
@@ -450,17 +456,20 @@ void OceanCpu::SampleBand(double wx, double wz, double tSec, double minLambda, c
             Sums s;
             accumulate(c, s);
             const double g = gain[c];
-            t.dx += g * s.dx;
+            // the lateral channels' own gain on top (the crest law and the depth's orbit,
+            // WaterSurfaceTree.cpp): the offset and its Jacobian, never the height, slope or velocity
+            const double gl = g * (latGain ? latGain[c] : 1.0);
+            t.dx += gl * s.dx;
             t.h += g * s.h;
-            t.dz += g * s.dz;
+            t.dz += gl * s.dz;
             t.sx += g * s.sx;
             t.sz += g * s.sz;
             t.vx += g * s.vx;
             t.vy += g * s.vy;
             t.vz += g * s.vz;
-            t.jxx += g * s.jxx;
-            t.jxz += g * s.jxz;
-            t.jzz += g * s.jzz;
+            t.jxx += gl * s.jxx;
+            t.jxz += gl * s.jxz;
+            t.jzz += gl * s.jzz;
         }
     }
     // CsAssemble: float4(fLambda * dx, h, fLambda * dz, 0). The height channel is NOT scaled --

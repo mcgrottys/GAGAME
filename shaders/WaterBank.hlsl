@@ -209,9 +209,17 @@ RWTexture2D<float4> gU[] : register(u0, space2);
 // The heap as uint planes (the column plane's atomics; the root signature's second UAV range).
 RWTexture2D<uint> gUu[] : register(u0, space3);
 
-// The column plane's fixed point (gColA): absent is 0 or ~0, by construction.
-uint ColEncode(float hRel) {
-    return clamp(uint(max((hRel + gColA.y) * gColA.x, 0.0f)), 1u, 0xFFFFFFFEu);
+// THE COLUMN'S WORD (2026-10-19): height-major, so the Min/Max atomics order by height and the
+// LABEL rides along -- the point of the sheet whose particle made this crossing, as its offset
+// from the texel's centre: bits 31..18 the height about the waterline, (h + gColA.y) * gColA.x
+// (a centimetre over +-82 m), bits 17..9 and 8..0 the label's offset east and north in tenths of
+// a metre over +-25.6 m. The height is clamped to [1, 0x3FFE], so a word is never 0 (a NULL tile)
+// nor ~0 (a cleared minimum): absent is those two, by construction. The readers decode the
+// same way (Globe.hlsl ColH / ColOff; WaterBankLayer::DumpFibers).
+uint ColEncode(float hRel, float2 labelOff) {
+    const uint hq = clamp(uint(max((hRel + gColA.y) * gColA.x, 0.0f)), 1u, 0x3FFEu);
+    const uint2 o = uint2(clamp((labelOff + 25.6f) * 10.0f + 0.5f, 0.0f, 511.0f));
+    return (hq << 18) | (o.x << 9) | o.y;
 }
 
 // M9bo: THE CASCADE, PREFILTERED TO THIS RING.
@@ -735,7 +743,25 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
             dv = LoadBilinearWrapMip(gSlotsE[c], cuv, cmip);
         }
-        d += s.xyz * (w * amp);
+        // THE CREST LAW (the rolling-wave work, 2026-10-19; docs/WATER_VOLUME.md section 7). The
+        // breaking factor brk bounds the sea's HEIGHT -- the clipped Rayleigh sea, what the depth
+        // allows to stand. The horizontal excursion is not height and the depth does not bound it:
+        // a crest that cannot rise goes FORWARD. So the lateral term keeps the band's RAW amplitude,
+        // amp / brk, and the vertical the clipped one -- the kinematic criterion in Lagrangian
+        // dress: at the limit the crest particle outruns the phase speed and the sheet folds, which
+        // the column plane carries. Where nothing breaks brk = 1 and the two are one orbit, as
+        // before; no new constant, the limiter's own ratio inverted.
+        // ...and THE ORBIT IS THE DEPTH'S (the same day): a particle's horizontal excursion in
+        // water of depth h is coth(kh) times its vertical (Airy's ellipse at the surface), 1 in
+        // deep water and growing as the wave shoals -- the lateral term had carried the deep-water
+        // ratio everywhere. Measured without it: the storm's crests at the throat stood at
+        // det(1 + J) = 0.33 at their tightest and never folded. The k is the band's IN THIS DEPTH
+        // (Jet.hlsli ShoaledKh: the cascades are synthesized at the deep-water k, and coth of THAT
+        // k reached 113 on the 213 m band in the shallows, 52 m of slosh, a torn sheet). The depth
+        // floor is 0.3 m; the dry weight below takes the geometry out before it.
+        const float cothC = OrbitCoth(gBandK[c], depth);   // the band's k IN THIS DEPTH (Jet.hlsli)
+        d.y += s.y * (w * amp);
+        d.xz += s.xz * (w * amp * cothC / max(brk, 1e-3f));
         // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
         // the old additive term here read it and contributed nothing since M7).
         // Monahan-gated: the Jacobian says WHERE a whitecap sits, the wind says HOW MANY
@@ -758,6 +784,16 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     if (wWin > 0.001f) {
         float3 dW = 0.0f;
         float sigW = 0.0f;
+        // THE CREST LAW for the solved field (the cascade loop above says why): the solver's
+        // limiter scaled every component's amplitude by 1 / max(excess, 1) to hold Hs <= 0.60 h;
+        // the lateral term keeps the RAW amplitude, so it carries that ratio back. The envelope
+        // slice is read here, before the components, for its excess (the same read the foam takes
+        // below).
+        bool envPrev;
+        const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
+        const float lipQ = max(env.y * 2.5f, 1.0f);
+        float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f;
+        float2 sumADir = 0.0f;
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
             bool prev;
             const float4 t4 = WavePageSample(wuv, s, prev);
@@ -853,10 +889,39 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float4 dd = prev ? gWaveDirP[s >> 1] : WaveDirRow(s >> 1);
             const float2 dir2 = (s & 1) ? dd.zw : dd.xy;
             dW.y += wFc * aW * cT;
-            dW.xz -= gWaveB.z * wFc * aW * sT * dir2;
+            // the depth's orbit (the cascade loop says why): coth(kh) on this component's k
+            const float cothW = 1.0f / tanh(kW * max(depth, 0.3f));
+            dW.xz -= gWaveB.z * wFc * aW * cothW * sT * dir2;
+            // the sea's sums for the crest law below: its amplitude, its energy-weighted k, its
+            // orbit's depth factor and its travel
+            sumA += wFc * aW;
+            sumAK += wFc * aW * kW;
+            sumACoth += wFc * aW * cothW;
+            sumADir += wFc * aW * dir2;
         }
-        bool envPrev;
-        const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
+        // THE CREST THROWS FORWARD, THE TROUGH STAYS (the crest law, 2026-10-19). The raw-over-
+        // limited ratio lipQ applied over the whole orbit sheared every crest in the throat
+        // sideways by ten times its height (measured: lateral / vertical 9.8 on 9 % of ring 0), a
+        // sea mid-plunge at every phase, which no breaking sea is; weighting each COMPONENT by its
+        // own crest phase drifted the whole sheet forward instead (32 weights average one half).
+        // The crest is the SEA's: where its elevation stands against its envelope, wCr = 1/2 +
+        // eta / (2 sqrt2 rms), 1 at the crest and 0 in the trough. There the orbit's lateral term
+        // grows by (lipQ - 1) and the crest is carried forward by the same share of the sea's
+        // horizontal amplitude along its travel; at lipQ = 1 nothing is added.
+        // THE THROW'S BOUND: a crest thrown past a quarter wavelength is no longer the same wave
+        // (the loop wider than the crest: the sheet's own limit, k A_h <= pi/2); past it the water
+        // is a bore, the foam's business. One min, the bound the wavelength's.
+        if (sumA > 1e-6f) {
+            const float rmsNow = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;
+            const float aEnv = max(1.4142136f * rmsNow, 1e-3f);
+            const float wCr = saturate(0.5f + 0.5f * dW.y / aEnv);
+            const float kBar = sumAK / sumA;
+            const float cothBar = sumACoth / sumA;
+            const float2 dBar = sumADir / max(length(sumADir), 1e-6f);
+            const float aH = gWaveB.z * aEnv * cothBar;   // the sea's horizontal amplitude
+            const float q1 = min(lipQ - 1.0f, max(1.5707963f / max(kBar * aH, 1e-4f) - 1.0f, 0.0f));
+            dW.xz = dW.xz * (1.0f + q1 * wCr) + q1 * wCr * aH * dBar;
+        }
         rmsW = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;   // the solver's envelope, sheltered like its comps
         excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
         d += dW * wWin;
@@ -1023,86 +1088,74 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
     // This texel in its RING: the ring's atlas x origin, its local coordinate, its world origin.
     const uint ringX0 = (t.dstX / 512u) * 512u;
     const int2 lp = int2(int(t.dstX - ringX0) + int(id.x), int(t.dstY) + int(id.y));
+    if (lp.x >= 511 || lp.y >= 511) return;   // the cell past the ring's last label has no far corners
     const float2 ringOrg = t.orgXZ - float2(float(t.dstX - ringX0), float(t.dstY)) * t.texelM;
     const uint dSlot = gSlotsB.y, pSlot = gSlotsB.z;
-    // The label's displacement and its Jacobian by central differences over the ring (a dry
-    // neighbour tile reads zero, which is the sheet standing still there -- honest enough).
-    const int2 xm = int2(max(lp.x - 1, 0), lp.y), xp = int2(min(lp.x + 1, 511), lp.y);
-    const int2 zm = int2(lp.x, max(lp.y - 1, 0)), zp = int2(lp.x, min(lp.y + 1, 511));
     const int2 a0 = int2(int(ringX0), 0);
-    const float4 D0 = gU[dSlot][uint2(a0 + lp)];
-    const float3 Dxm = gU[dSlot][uint2(a0 + xm)].xyz, Dxp = gU[dSlot][uint2(a0 + xp)].xyz;
-    const float3 Dzm = gU[dSlot][uint2(a0 + zm)].xyz, Dzp = gU[dSlot][uint2(a0 + zp)].xyz;
-    const float3 dDdx = (Dxp - Dxm) / (float(xp.x - xm.x) * t.texelM);
-    const float3 dDdz = (Dzp - Dzm) / (float(zp.y - zm.y) * t.texelM);
-    // The level departure at the label (the param plane's x: lvl - waterline).
-    const float lvlRel = gU[pSlot][uint2(a0 + lp)].x;
-    // areaJac = det(1 + J): the tangent bivector's horizontal magnitude; negative is the fold.
-    const float areaJac = (1.0f + dDdx.x) * (1.0f + dDdz.z) - dDdz.x * dDdx.z;
-    const bool inverted = areaJac < 0.0f;
-    const float2 centre = ringOrg + (float2(lp) + 0.5f) * t.texelM;
-    const uint cSlot = gColU.x;
-    // THE CELL, RASTERIZED (not point-scattered): this label's texel-sized cell maps, to first
-    // order, by the affine map off -> P0 + M off, M = 1 + J (the tangent bivector's matrix). Every
-    // Eulerian texel whose centre lies in the cell's image is written (the images of neighbouring
-    // cells tile the plane, so a stretched cell leaves no hole), by the INVERSE map at that texel's
-    // centre: the label it came from, its height there. An inverted cell is the lip: its coverage
-    // of each texel is counted on a 4x4 sub-grid into band 3 (0..16 a cell), the continuous edge
-    // weight the readers taper the lip by (Globe.hlsl ColumnFetch).
-    const float2 P0 = centre + D0.xz;
-    const float m00 = 1.0f + dDdx.x, m01 = dDdz.x, m10 = dDdx.z, m11 = 1.0f + dDdz.z;
-    const float det = areaJac;
-    const float half = 0.5f * t.texelM;
-    // the image's bounding box, in ring texels
-    float2 lo = P0, hi = P0;
+    // THE CELL IS THE MESH'S (2026-10-19): the four labels at this texel and its +x, +z, +x+z
+    // neighbours, each at its own particle (label + D) and its own height, and the two triangles
+    // GlobeMesh.hlsl cuts between them. The first cut mapped the cell by a first-order affine
+    // image from central differences over 2.4 m, which the chop band (2 m waves) made noisy, so
+    // neighbouring images overlapped or gapped -- concentric rings in the near water. Triangles
+    // between the labels' own particles TILE the sheet exactly as the mesh draws it; a texel
+    // centre inside a triangle takes its barycentric height, and a triangle whose orientation
+    // has flipped is the fold (the inverted branch, counted on a 4x4 sub-grid for the coverage).
+    float2 P[4], L[4];
+    float H[4];
     [unroll] for (uint c = 0u; c < 4u; ++c) {
-        const float2 off = float2((c & 1u) ? half : -half, (c & 2u) ? half : -half);
-        const float2 Pc = P0 + float2(m00 * off.x + m01 * off.y, m10 * off.x + m11 * off.y);
-        lo = min(lo, Pc);
-        hi = max(hi, Pc);
+        const int2 q = lp + int2(int(c & 1u), int(c >> 1u));
+        const float4 D = gU[dSlot][uint2(a0 + q)];
+        L[c] = ringOrg + (float2(q) + 0.5f) * t.texelM;   // the label: the texel's centre
+        P[c] = L[c] + D.xz;                                 // its particle
+        H[c] = gU[pSlot][uint2(a0 + q)].x + D.y;
     }
-    const int2 q0 = int2(floor((lo - ringOrg) / t.texelM));
-    const int2 q1 = int2(floor((hi - ringOrg) / t.texelM));
-    // a cell stretched past 8 texels an axis is a torn sheet, not water: nothing to write
-    if (q1.x - q0.x > 8 || q1.y - q0.y > 8) return;
-    // the fold line itself (det ~ 0) has no inverse: the cell is a line, its image a texel or two --
-    // the point at the centre stands for it
-    const bool thin = abs(det) < 1e-4f;
-    const float idet = thin ? 0.0f : 1.0f / det;
-    const uint S = inverted ? 4u : 1u;        // sub-points a texel axis: coverage for the lip
-    const float eps = 0.02f * t.texelM;
-    for (int qz = max(q0.y, 0); qz <= min(q1.y, 511); ++qz) {
-        for (int qx = max(q0.x, 0); qx <= min(q1.x, 511); ++qx) {
-            const uint2 dst = uint2(ringX0 + uint(qx), uint(qz));
-            uint hits = 0u;
-            uint vMax = 0u, vMin = 0xFFFFFFFFu;
-            for (uint sj = 0u; sj < S; ++sj) {
-                for (uint si = 0u; si < S; ++si) {
-                    const float2 p = ringOrg + (float2(float(qx), float(qz)) + (float2(float(si), float(sj)) + 0.5f) / float(S)) * t.texelM;
-                    float2 off;
-                    if (thin) {
-                        off = (S == 1u) ? float2(0.0f, 0.0f) : (p - P0);   // the centre stands; a sub-point tests the bbox
-                        if (S != 1u && any(abs(off) > half + eps)) continue;
-                        off = 0.0f;
-                    } else {
-                        const float2 r = p - P0;
-                        off = float2(m11 * r.x - m01 * r.y, -m10 * r.x + m00 * r.y) * idet;
-                        if (any(abs(off) > half + eps)) continue;
+    const uint cSlot = gColU.x;
+    // the mesh's split: (00, 10, 01) and (10, 11, 01)
+    const uint3 tri[2] = {uint3(0u, 1u, 2u), uint3(1u, 3u, 2u)};
+    [unroll] for (uint ti = 0u; ti < 2u; ++ti) {
+        const float2 A = P[tri[ti].x], B = P[tri[ti].y], C = P[tri[ti].z];
+        const float hA = H[tri[ti].x], hB = H[tri[ti].y], hC = H[tri[ti].z];
+        const float2 lA = L[tri[ti].x], lB = L[tri[ti].y], lC = L[tri[ti].z];
+        const float area = (B.x - A.x) * (C.y - A.y) - (C.x - A.x) * (B.y - A.y);
+        // a cell stretched past 8 texels an axis is a torn sheet, not water; a flat one is a line
+        const float2 lo = min(A, min(B, C)), hi = max(A, max(B, C));
+        if (any(hi - lo > 8.0f * t.texelM) || abs(area) < 1e-6f * t.texelM * t.texelM) continue;
+        // the label grid's own orientation: (00, 10, 01) turns positive in (x, z); a flipped
+        // triangle is the fold
+        const bool inverted = (ti == 0u) ? area < 0.0f : area < 0.0f;
+        const float iarea = 1.0f / area;
+        const int2 q0 = int2(floor((lo - ringOrg) / t.texelM));
+        const int2 q1 = int2(floor((hi - ringOrg) / t.texelM));
+        const uint S = inverted ? 4u : 1u;
+        for (int qz = max(q0.y, 0); qz <= min(q1.y, 511); ++qz) {
+            for (int qx = max(q0.x, 0); qx <= min(q1.x, 511); ++qx) {
+                const uint2 dst = uint2(ringX0 + uint(qx), uint(qz));
+                uint hits = 0u;
+                uint vMax = 0u, vMin = 0xFFFFFFFFu;
+                for (uint sj = 0u; sj < S; ++sj) {
+                    for (uint si = 0u; si < S; ++si) {
+                        const float2 p = ringOrg + (float2(float(qx), float(qz)) + (float2(float(si), float(sj)) + 0.5f) / float(S)) * t.texelM;
+                        // barycentric by the sub-areas, the same orientation as `area`
+                        const float wA = ((B.x - p.x) * (C.y - p.y) - (C.x - p.x) * (B.y - p.y)) * iarea;
+                        const float wB = ((C.x - p.x) * (A.y - p.y) - (A.x - p.x) * (C.y - p.y)) * iarea;
+                        const float wC = 1.0f - wA - wB;
+                        const float eps = -1e-4f;
+                        if (wA < eps || wB < eps || wC < eps) continue;
+                        // the crossing's height and the label it came from, less the point
+                        const uint v = ColEncode(wA * hA + wB * hB + wC * hC, wA * lA + wB * lB + wC * lC - p);
+                        vMax = max(vMax, v);
+                        vMin = min(vMin, v);
+                        ++hits;
                     }
-                    const float h = lvlRel + D0.y + dDdx.y * off.x + dDdz.y * off.y;
-                    const uint v = ColEncode(h);
-                    vMax = max(vMax, v);
-                    vMin = min(vMin, v);
-                    ++hits;
                 }
-            }
-            if (hits == 0u) continue;
-            if (inverted) {
-                InterlockedMax(gUu[cSlot][dst + uint2(0u, 512u)], vMax);
-                InterlockedAdd(gUu[cSlot][dst + uint2(0u, 1536u)], hits);
-            } else {
-                InterlockedMin(gUu[cSlot][dst], vMin);
-                InterlockedMax(gUu[cSlot][dst + uint2(0u, 1024u)], vMax);
+                if (hits == 0u) continue;
+                if (inverted) {
+                    InterlockedMax(gUu[cSlot][dst + uint2(0u, 512u)], vMax);
+                    InterlockedAdd(gUu[cSlot][dst + uint2(0u, 1536u)], hits);
+                } else {
+                    InterlockedMin(gUu[cSlot][dst], vMin);
+                    InterlockedMax(gUu[cSlot][dst + uint2(0u, 1024u)], vMax);
+                }
             }
         }
     }

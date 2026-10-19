@@ -472,11 +472,18 @@ bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 de
 // in slope alike (the per-tap present/absent read stepped at the texel and spiked the slope --
 // Mark's crop, 2026-10-18). `cover` is the bilinear coverage (0 = no lip here); an absent face is
 // `fallback` (the label's own height). The slope is the bilinear's own (metres per metre).
+// The column's word (WaterBank.hlsl ColEncode): height-major, the label's offset in the low bits.
+bool ColPresent(uint v) { return v != 0u && v != 0xFFFFFFFFu; }
+float ColH(uint v) { return float(v >> 18) / gColA.x - gColA.y; }
+float2 ColOff(uint v) { return float2(float((v >> 9) & 511u), float(v & 511u)) * 0.1f - 25.6f; }
+// labelOff: for band 0, the label standing at this point less the point (the exact inversion the
+// scatter made, bilinear over the taps); the lip bands leave it zero.
 bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out float2 slope,
-                 out float cover) {
+                 out float cover, out float2 labelOff) {
     h = fallback;
     slope = 0.0f;
     cover = 0.0f;
+    labelOff = 0.0f;
     if (gColU.y == 0u || sLvlBank != 0) return false;
     [unroll] for (uint m = 0; m < 6; ++m) {
         const float texel = gBankA.x * (float)(1u << m);
@@ -488,17 +495,22 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
         const float2 fr = tf - float2(t0);
         const int xoff = (int)m * 512;
         float f[4], d[4], w[4];
+        float2 lo[4];
         [unroll] for (int k = 0; k < 4; ++k) {
             const int2 tc = t0 + int2(k & 1, k >> 1);
             const uint rawF = gTexU[gColU.x].Load(int3(xoff + tc.x, tc.y, 0)).x;
-            f[k] = (rawF != 0u && rawF != 0xFFFFFFFFu) ? float(rawF) / gColA.x - gColA.y : fallback;
+            const bool okF = ColPresent(rawF);
+            f[k] = okF ? ColH(rawF) : fallback;
+            // the label's offset at the tap, said from THIS point: the tap's texel centre plus its
+            // stored offset, less the point
+            lo[k] = okF ? (org + (float2(tc) + 0.5f) * texel + ColOff(rawF) - worldXZ) : float2(0.0f, 0.0f);
             d[k] = 0.0f;
             w[k] = 0.0f;
             if (band != 0u) {
                 w[k] = saturate(float(gTexU[gColU.x].Load(int3(xoff + tc.x, 1536 + tc.y, 0)).x) * (1.0f / 16.0f));
                 const uint rawL = gTexU[gColU.x].Load(int3(xoff + tc.x, int(band) * 512 + tc.y, 0)).x;
-                if (w[k] > 0.0f && rawL != 0u && rawL != 0xFFFFFFFFu) {
-                    d[k] = w[k] * (float(rawL) / gColA.x - gColA.y - f[k]);
+                if (w[k] > 0.0f && ColPresent(rawL)) {
+                    d[k] = w[k] * (ColH(rawL) - f[k]);
                 } else {
                     w[k] = 0.0f;
                 }
@@ -509,6 +521,7 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
         const float w0 = lerp(w[0], w[1], fr.x), w1 = lerp(w[2], w[3], fr.x);
         h = lerp(f0, f1, fr.y) + lerp(d0, d1, fr.y);
         cover = lerp(w0, w1, fr.y);
+        if (band == 0u) labelOff = lerp(lerp(lo[0], lo[1], fr.x), lerp(lo[2], lo[3], fr.x), fr.y);
         slope = float2(lerp((f[1] - f[0]) + (d[1] - d[0]), (f[3] - f[2]) + (d[3] - d[2]), fr.y),
                        (f1 - f0) + (d1 - d0)) / texel;
         return true;
@@ -1820,9 +1833,9 @@ float4 PsSurface(VsOut i, out float land) {
             // looks through.
             const uint band = (i.mid & 0x20000000u) != 0u ? 1u : 2u;
             float cv, hTop, hBot;
-            float2 sTop, sBot;
-            ColumnFetch(wxzW, 1u, 0.0f, hTop, sTop, cv);
-            ColumnFetch(wxzW, 2u, 0.0f, hBot, sBot, cv);
+            float2 sTop, sBot, lo;
+            ColumnFetch(wxzW, 1u, 0.0f, hTop, sTop, cv, lo);
+            ColumnFetch(wxzW, 2u, 0.0f, hBot, sBot, cv, lo);
             lipDep = (band == 1u) ? hTop : hBot;
             lipSlope = (band == 1u) ? sTop : sBot;
             lipThick = max(hTop - hBot, 0.0f);

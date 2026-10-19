@@ -177,6 +177,16 @@ inline double BandPhaseSpeed(double kBand, double depth) {
 //  The 0.05 floor under c_g and the 1e-3 floor under sinh(2kh) are the same species of guard:
 //  both denominators go to zero only at h = 0, which the depth floor already excludes.
 // ================================================================================================
+// THE WAVENUMBER IN THIS DEPTH and the Airy orbit's horizontal factor (shaders/Jet.hlsli
+// ShoaledKh / OrbitCoth, the crest law of 2026-10-19): Guo's explicit dispersion, coth(kh).
+inline double ShoaledKh(double kDeep, double depth) {
+    const double x = std::sqrt(wt::Max(kDeep * depth, 1e-6));
+    return x * x * std::pow(1.0 - std::exp(-std::pow(x, 2.5)), -0.4);
+}
+inline double OrbitCoth(double kDeep, double depth) {
+    return 1.0 / std::tanh(ShoaledKh(kDeep, wt::Max(depth, 0.3)));
+}
+
 inline double ShoalFactor(double kBand, double depth) {
     const double kh = kBand * wt::Max(depth, kDepthFloorM);
     const double th = std::tanh(kh);

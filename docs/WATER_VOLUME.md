@@ -264,6 +264,53 @@ the 4x sea's own plateaus and the 1.2 m lip grid.
 reads the label's own particle in a fold (its column twin is still to build); the lips are ribbons at
 the mesh's grid; and the crest law, so a real sea folds at all.
 
+## 7. The crest law (2026-10-19, PR 104's third commit)
+
+The sea never folded at the shipped chop (priors 52). What makes a real breaker fold, found in six
+measured steps, each a dump and a twin, each wrong in a way the next one named:
+
+1. **The lateral keeps the raw amplitude.** The limiter and the breaking factor bound the sea's
+   HEIGHT; the horizontal excursion is not height. Cascades: lateral x 1/brk; the solved field:
+   x max(excess, 1), the solver's own limiter inverted. Measured: the lateral grew 20 %, the
+   tightest crests went from det(1 + J) 0.43 to 0.33. Not enough: 13 inverted texels.
+2. **The orbit is the depth's.** Airy's ellipse: horizontal = coth(kh) x vertical. Put on the deep-
+   water k the cascades are synthesized at, the 213 m band reached coth 113 in the shallows: 52 m
+   of slosh, a torn sheet. The k has to be the band's IN THIS DEPTH -- Guo's explicit dispersion
+   (Coastal Engineering 45, 2002; checked here at 0.79 % against the exact), `ShoaledKh` /
+   `OrbitCoth` in Jet.hlsli and WaterTerms.h. The solved field's k is already finite-depth.
+3. **Applied over the whole orbit, the raw ratio shears every crest sideways** by ten times its
+   height (lateral / vertical 9.8 on 9 % of ring 0): a sea mid-plunge at every phase, which no sea
+   is. A breaker throws its CREST; the trough stays.
+4. **Weighting each of 32 components by its own crest phase drifts the whole sheet** (the weights
+   average one half): the same 59 m throws. The crest is the SEA's: where its elevation stands
+   against its envelope, w = 1/2 + eta / (2 sqrt2 rms), 1 at the crest, 0 in the trough.
+5. **The law** (WaterBank.hlsl's solved loop, after its components; WaveField::ProbeAt the same
+   on the sum, with the Jacobian by the product rule): on the summed orbit D of the solved field,
+   D' = D (1 + q w) + q w A_h d, with q = excess - 1 (0 where nothing breaks), A_h = sqrt2 rms x
+   coth-bar the sea's horizontal amplitude, d the amplitude-weighted travel; bounded by the
+   wavelength, k-bar A_h (1 + q) <= pi/2: a crest thrown past a quarter wavelength is no longer the
+   same wave (the loop wider than the crest), beyond it the water is a bore and the foam's. One
+   min; no constant placed. Measured: lateral / vertical 2.5 (the orbit's), the worst throw 30 m
+   (in the depth floor's shallows, dry-weighted), 2,239 inverted texels, lips 0.14 / 0.70 m p50 /
+   p95 on ring 0.
+6. **Two things the law exposed in the column**, both fixed: the scatter's first-order affine
+   cell image (central differences over 2.4 m, noisy under the 2 m chop band) made neighbouring
+   images overlap or gap -- concentric rings in the near water; the cell is now THE MESH'S two
+   triangles between the labels' own particles, rasterized exactly (`CsBankScatter`), and holes
+   fell 2,531 -> 1,832 on ring 0. And the per-vertex Newton step to the label (`(1 + J) e = D`)
+   blew up where det was small -- rings in the shading, one hull-probe record 0.45 m off; the
+   column now carries the LABEL beside each crossing's height, packed height-major in one word
+   (`ColEncode`: 14 bits of centimetres, 9 + 9 bits of the label's offset), so the atomics keep
+   their order and the mesh reads the exact, fold-aware inversion. Every probe record is then
+   within 3-7 cm rms at correlation 1.00.
+
+Gate (`out/surf/crest7/`): twin 100 % on face, underside and coverage, 99.9 % on the lip top;
+scatter 0.24 ms; lip pass 2.0 ms at the throat; self-test passes; the surf still against the
+face-from-column one differs on 25 % of pixels (SSIM 0.980) -- the orbit of a shallow sea is now
+2.5 times wider than its height, which is the Airy ellipse and not a reconstruction difference.
+What the eye sees at the throat: crests pitched forward with steep faces, dark crest lines where
+the lips stand, no rings.
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`

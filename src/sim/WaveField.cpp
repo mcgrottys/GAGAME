@@ -2095,7 +2095,7 @@ bool WaveField::BlendMidpointTest(double simUnix, const std::vector<PartParam>& 
     return ok;
 }
 
-WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const {
+WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double depthM, double chopM) const {
     Probe p;
     const std::shared_ptr<const Solved> live = Live();
     if (!live || live->atlas.empty()) return p;
@@ -2139,6 +2139,11 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
     // the shift is ~1e-7 m, five orders under the 8-bit atlas's own half-LSB floor, so the
     // 9b/9c twin sees nothing -- it is only ever more accurate.)
     double eta = 0.0, dxS = 0.0, dzS = 0.0, sxS = 0.0, szS = 0.0;
+    // THE CREST LAW's ratio, read before the components: the solver's raw-over-limited excess
+    // at this point (the envelope slice; 1 where nothing breaks). With depthM <= 0 (the
+    // instruments' deep-water read) the orbit is Airy's and the crest is not thrown.
+    const double q1 = (depthM > 0.0) ? (std::max)(bil(t.envSlice, 1) * double(t.excMax), 1.0) - 1.0 : 0.0;
+    double sumA = 0.0, sumAK = 0.0, sumACoth = 0.0, sumADx = 0.0, sumADz = 0.0;
     double vxS = 0.0, vyS = 0.0, vzS = 0.0;
     double jxxS = 0.0, jxzS = 0.0, jzzS = 0.0;
     for (uint32_t c = 0; c < t.nUsed && c < uint32_t(kMaxComp); ++c) {
@@ -2177,18 +2182,59 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
         const double sig = double(t.sigma[c]);
         const double aC = aC0 * ca;   // in phase with the crest
         const double aS = aC0 * sa;   // 90 deg ahead of it
+        // THE ORBIT IS THE DEPTH'S (the crest law, 2026-10-19; WaterBank.hlsl's solved loop): the
+        // horizontal excursion is coth(kh) times the vertical -- Airy's ellipse at the surface, 1
+        // in deep water. depthM <= 0 is the deep-water orbit (the instruments that read the field
+        // alone); the hull's twin hands the depth it stands in.
+        const double coth = (depthM > 0.0) ? 1.0 / std::tanh(k * (std::max)(depthM, 0.3)) : 1.0;
         eta += aC;                                   // eta = a cos(theta)   <- the reference
-        dxS -= aS * dX;                              // D_h = -a sin(theta) d^   (chop = 1;
-        dzS -= aS * dZ;                              //        WaterBank scales this by wfChop)
+        dxS -= aS * dX * coth;                       // D_h = -a sin(theta) coth(kh) d^   (chop = 1;
+        dzS -= aS * dZ * coth;                       //        WaterBank scales this by wfChop)
+        // the sea's sums for the crest law after the loop (the kernel's)
+        sumA += aC0;
+        sumAK += aC0 * k;
+        sumACoth += aC0 * coth;
+        sumADx += aC0 * dX;
+        sumADz += aC0 * dZ;
         sxS -= aS * k * dX;                          // grad eta = -a k sin(theta) d^
         szS -= aS * k * dZ;                          //   (the k is the term: a slope is 1/L)
         vxS += sig * aC * dX;                        // u = +sigma a cos(theta) d^  (crest
         vzS += sig * aC * dZ;                        //   water runs WITH the wave)
         vyS += sig * aS;                             // w = +sigma a sin(theta) == d(eta)/dt
-        const double aKC = aC * k;                   // grad D_h = -a k cos(theta) d^ (x) d^
+        const double aKC = aC * k * coth;            // grad D_h = -a k cos(theta) coth(kh) d^ (x) d^
         jxxS -= aKC * dX * dX;
         jxzS -= aKC * dX * dZ;
         jzzS -= aKC * dZ * dZ;
+    }
+    // THE CREST THROWS FORWARD, THE TROUGH STAYS (WaterBank.hlsl's solved loop, after its
+    // components -- the law and its reasons are there). On the sum: the sea's crest weight from
+    // its elevation against its envelope, the lateral term grown by q1 there and the crest
+    // carried forward by the same share of the sea's horizontal amplitude along its travel; the
+    // throw bounded by the wavelength (k A_h <= pi/2, A_h chopped). The Jacobian follows by the
+    // product rule, grad(w) = grad(eta) / (2 A_env) inside the saturate and 0 outside; the
+    // (x, z) term is symmetrized, as the stored Jacobian is.
+    if (q1 > 0.0 && sumA > 1e-9) {
+        const double rmsNow = bil(t.envSlice, 0) * double(t.envMax);
+        const double aEnv = (std::max)(1.4142135623730951 * rmsNow, 1e-3);
+        const double wRaw = 0.5 + 0.5 * eta / aEnv;
+        const double wCr = (std::min)((std::max)(wRaw, 0.0), 1.0);
+        const bool inBand = wRaw > 0.0 && wRaw < 1.0;
+        const double kBar = sumAK / sumA;
+        const double cothBar = sumACoth / sumA;
+        const double dLen = std::sqrt(sumADx * sumADx + sumADz * sumADz);
+        const double dBx = dLen > 1e-9 ? sumADx / dLen : 0.0, dBz = dLen > 1e-9 ? sumADz / dLen : 0.0;
+        const double aH1 = aEnv * cothBar;                 // the sea's horizontal amplitude, chop 1
+        const double q1c = (std::min)(q1, (std::max)(1.5707963267948966 / (std::max)(kBar * aH1 * chopM, 1e-4) - 1.0, 0.0));
+        const double g = 1.0 + q1c * wCr;
+        const double wx = inBand ? 0.5 * sxS / aEnv : 0.0;   // grad(w) (sxS is grad(eta) so far)
+        const double wz = inBand ? 0.5 * szS / aEnv : 0.0;
+        const double shX = q1c * aH1 * dBx, shZ = q1c * aH1 * dBz;   // the throw per unit of w
+        const double tx = q1c * dxS + shX, tz = q1c * dzS + shZ;     // d(D_new)/d(w)
+        jxxS = jxxS * g + tx * wx;
+        jzzS = jzzS * g + tz * wz;
+        jxzS = jxzS * g + 0.5 * (tx * wz + tz * wx);
+        dxS = dxS * g + shX * wCr;
+        dzS = dzS * g + shZ * wCr;
     }
     p.eta = float(eta);
     p.dx = float(dxS);

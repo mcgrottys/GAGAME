@@ -53,90 +53,89 @@ def ring(a, m):
 
 
 def scatter(dx, dy, dz, lvl, texel, n=None):
-    """The kernel's law (CsBankScatter), in numpy: each label's texel-sized CELL mapped by the
-    affine first-order map (1 + J) and RASTERIZED -- every Eulerian texel whose centre lies in the
-    cell's image written by the inverse map (no hole: the images tile); an inverted cell (the lip)
-    tested on a 4x4 sub-grid and its hits COUNTED (band 3, the coverage). Returns face (upright
-    MIN), lipBot (upright MAX, the tube's ceiling), lipTop (inverted MAX, the crest), NaN absent,
-    the coverage count, and the folded-label mask."""
+    """The kernel's law (CsBankScatter), in numpy: THE MESH'S TRIANGLES. Each cell is the four
+    labels at a texel and its +x, +z, +x+z neighbours at their own particles and heights, cut into
+    the two triangles GlobeMesh.hlsl draws; every Eulerian texel whose centre lies in a triangle
+    takes its barycentric height; a triangle whose orientation flipped is the fold (the inverted
+    branch, counted on a 4x4 sub-grid for the coverage). Returns face (upright MIN), lipBot
+    (upright MAX, the tube's ceiling), lipTop (inverted MAX, the crest), NaN absent, the coverage
+    count, and the folded-label mask (a label is folded when its cell's first triangle is)."""
     H, W = dy.shape
-    xp = np.minimum(np.arange(W) + 1, W - 1)
-    xm = np.maximum(np.arange(W) - 1, 0)
-    zp = np.minimum(np.arange(H) + 1, H - 1)
-    zm = np.maximum(np.arange(H) - 1, 0)
-    sx = (xp - xm)[None, :] * texel
-    sz = (zp - zm)[:, None] * texel
-    D = np.stack([dx, dy, dz], axis=-1)
-    dDdx = (D[:, xp] - D[:, xm]) / sx[..., None]
-    dDdz = (D[zp, :] - D[zm, :]) / sz[..., None]
-    m00, m01, m10, m11 = 1 + dDdx[..., 0], dDdz[..., 0], dDdx[..., 2], 1 + dDdz[..., 2]
-    areaJac = m00 * m11 - m01 * m10
-    inverted = areaJac < 0
+    Px = (np.arange(W)[None, :] + 0.5) * texel + dx
+    Pz = (np.arange(H)[:, None] + 0.5) * texel + dz
+    Hh = lvl + dy
     face = np.full((H, W), np.inf, np.float32)
     lipBot = np.full((H, W), -np.inf, np.float32)
     lipTop = np.full((H, W), -np.inf, np.float32)
     count = np.zeros((H, W), np.int64)
-    jj, ii = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
-    P0x = (ii + 0.5) * texel + D[..., 0]
-    P0z = (jj + 0.5) * texel + D[..., 2]
-    half = 0.5 * texel
-    eps = 0.02 * texel
-    cx = np.stack([P0x + m00 * ox + m01 * oz for ox in (-half, half) for oz in (-half, half)])
-    cz = np.stack([P0z + m10 * ox + m11 * oz for ox in (-half, half) for oz in (-half, half)])
-    q0x = np.floor(cx.min(0) / texel).astype(np.int64)
-    q1x = np.floor(cx.max(0) / texel).astype(np.int64)
-    q0z = np.floor(cz.min(0) / texel).astype(np.int64)
-    q1z = np.floor(cz.max(0) / texel).astype(np.int64)
-    ok = (q1x - q0x <= 8) & (q1z - q0z <= 8)
-    thin = np.abs(areaJac) < 1e-4
-    idet = np.where(thin, 0.0, 1.0 / np.where(thin, 1.0, areaJac))
-    for S, mask in ((1, ok & ~inverted), (4, ok & inverted)):
-        src = np.nonzero(mask)
-        if src[0].size == 0:
-            continue
-        for oz_t in range(9):
-            for ox_t in range(9):
-                qx = q0x[src] + ox_t
-                qz = q0z[src] + oz_t
-                inb = (qx <= q1x[src]) & (qz <= q1z[src]) & (qx >= 0) & (qx < W) & (qz >= 0) & (qz < H)
-                if not inb.any():
-                    continue
-                sel = (src[0][inb], src[1][inb])
-                qxs, qzs = qx[inb], qz[inb]
-                hits = np.zeros(qxs.shape, np.int64)
-                vmax = np.full(qxs.shape, -np.inf)
-                vmin = np.full(qxs.shape, np.inf)
-                th = thin[sel]
-                for sj in range(S):
-                    for si in range(S):
-                        px = (qxs + (si + 0.5) / S) * texel
-                        pz = (qzs + (sj + 0.5) / S) * texel
-                        rx = px - P0x[sel]
-                        rz = pz - P0z[sel]
-                        offx = np.where(th, 0.0, (m11[sel] * rx - m01[sel] * rz) * idet[sel])
-                        offz = np.where(th, 0.0, (-m10[sel] * rx + m00[sel] * rz) * idet[sel])
-                        inside_thin = ((np.abs(rx) <= half + eps) & (np.abs(rz) <= half + eps)) if S > 1 else np.ones(qxs.shape, bool)
-                        inside = np.where(th, inside_thin, (np.abs(offx) <= half + eps) & (np.abs(offz) <= half + eps))
-                        h = lvl[sel] + D[..., 1][sel] + dDdx[..., 1][sel] * offx + dDdz[..., 1][sel] * offz
-                        hits += inside
-                        vmax = np.where(inside, np.maximum(vmax, h), vmax)
-                        vmin = np.where(inside, np.minimum(vmin, h), vmin)
-                got = hits > 0
-                lin = (qzs * W + qxs)[got]
-                if S > 1:
-                    np.maximum.at(lipTop.reshape(-1), lin, vmax[got])
-                    np.add.at(count.reshape(-1), lin, hits[got])
-                else:
-                    np.minimum.at(face.reshape(-1), lin, vmin[got])
-                    np.maximum.at(lipBot.reshape(-1), lin, vmax[got])
+    inverted = np.zeros((H, W), bool)
+    # cells with all four corners inside the ring
+    c00 = (slice(0, H - 1), slice(0, W - 1)); c10 = (slice(0, H - 1), slice(1, W))
+    c01 = (slice(1, H), slice(0, W - 1)); c11 = (slice(1, H), slice(1, W))
+    corners = {0: c00, 1: c10, 2: c01, 3: c11}
+    for ti, (ia, ib, ic) in enumerate(((0, 1, 2), (1, 3, 2))):
+        Ax, Az, Ah = Px[corners[ia]], Pz[corners[ia]], Hh[corners[ia]]
+        Bx, Bz, Bh = Px[corners[ib]], Pz[corners[ib]], Hh[corners[ib]]
+        Cx, Cz, Ch = Px[corners[ic]], Pz[corners[ic]], Hh[corners[ic]]
+        area = (Bx - Ax) * (Cz - Az) - (Cx - Ax) * (Bz - Az)
+        lox, hix = np.minimum(Ax, np.minimum(Bx, Cx)), np.maximum(Ax, np.maximum(Bx, Cx))
+        loz, hiz = np.minimum(Az, np.minimum(Bz, Cz)), np.maximum(Az, np.maximum(Bz, Cz))
+        ok = (hix - lox <= 8 * texel) & (hiz - loz <= 8 * texel) & (np.abs(area) >= 1e-6 * texel * texel)
+        inv = area < 0
+        if ti == 0:
+            inverted[c00] = inv & ok
+        q0x = np.floor(lox / texel).astype(np.int64); q1x = np.floor(hix / texel).astype(np.int64)
+        q0z = np.floor(loz / texel).astype(np.int64); q1z = np.floor(hiz / texel).astype(np.int64)
+        for S, mask in ((1, ok & ~inv), (4, ok & inv)):
+            src = np.nonzero(mask)
+            if src[0].size == 0:
+                continue
+            iar = 1.0 / area[src]
+            A_x, A_z, A_h = Ax[src], Az[src], Ah[src]
+            B_x, B_z, B_h = Bx[src], Bz[src], Bh[src]
+            C_x, C_z, C_h = Cx[src], Cz[src], Ch[src]
+            for oz_t in range(9):
+                for ox_t in range(9):
+                    qx = q0x[src] + ox_t
+                    qz = q0z[src] + oz_t
+                    inb = (qx <= q1x[src]) & (qz <= q1z[src]) & (qx >= 0) & (qx < W) & (qz >= 0) & (qz < H)
+                    if not inb.any():
+                        continue
+                    sel = np.nonzero(inb)[0]
+                    qxs, qzs = qx[sel], qz[sel]
+                    hits = np.zeros(sel.shape, np.int64)
+                    vmax = np.full(sel.shape, -np.inf)
+                    vmin = np.full(sel.shape, np.inf)
+                    for sj in range(S):
+                        for si in range(S):
+                            px = (qxs + (si + 0.5) / S) * texel
+                            pz = (qzs + (sj + 0.5) / S) * texel
+                            wA = ((B_x[sel] - px) * (C_z[sel] - pz) - (C_x[sel] - px) * (B_z[sel] - pz)) * iar[sel]
+                            wB = ((C_x[sel] - px) * (A_z[sel] - pz) - (A_x[sel] - px) * (C_z[sel] - pz)) * iar[sel]
+                            wC = 1.0 - wA - wB
+                            inside = (wA >= -1e-4) & (wB >= -1e-4) & (wC >= -1e-4)
+                            h = wA * A_h[sel] + wB * B_h[sel] + wC * C_h[sel]
+                            hits += inside
+                            vmax = np.where(inside, np.maximum(vmax, h), vmax)
+                            vmin = np.where(inside, np.minimum(vmin, h), vmin)
+                    got = hits > 0
+                    lin = (qzs * W + qxs)[got]
+                    if S > 1:
+                        np.maximum.at(lipTop.reshape(-1), lin, vmax[got])
+                        np.add.at(count.reshape(-1), lin, hits[got])
+                    else:
+                        np.minimum.at(face.reshape(-1), lin, vmin[got])
+                        np.maximum.at(lipBot.reshape(-1), lin, vmax[got])
     face[~np.isfinite(face)] = np.nan
     lipBot[~np.isfinite(lipBot)] = np.nan
     lipTop[~np.isfinite(lipTop)] = np.nan
+    areaJac = np.ones((H, W))
+    areaJac[inverted] = -1.0
     return face, lipBot, lipTop, inverted, areaJac, count
 
 
 print("== THE COLUMN PLANE vs ITS NUMPY TWIN, per ring ==")
-print("ring texel   wet     fold%  tubes%  lipTh p50/p95   holes   twin: face|d|<=1mm  lipTop  lipBot  coverage=")
+print("ring texel   wet     fold%  tubes%  lipTh p50/p95   holes   twin: face|d|<=1cm  lipTop  lipBot  coverage=")
 best = (None, -1, None)
 per_ring = []
 for m in range(N_RINGS):
@@ -160,7 +159,7 @@ for m in range(N_RINGS):
     # the twin: where both present, |d| <= 1 mm (the fixed point's step); presence must agree
     def twin(a, b):
         both = np.isfinite(a) & np.isfinite(b)
-        agree = (np.abs(a - b) <= 1.5e-3) & both
+        agree = (np.abs(a - b) <= 1.1e-2) & both   # the word's centimetre
         pres = (np.isfinite(a) == np.isfinite(b))
         return agree.sum() / max(both.sum(), 1), pres.mean()
     tf, tb, tt = twin(face, kf), twin(lipBot, kb), twin(lipTop, kt)

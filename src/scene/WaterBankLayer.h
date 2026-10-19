@@ -53,7 +53,8 @@ public:
     // lip top), so an overturning crest has geometry instead of a faded lateral term. Scene
     // `water.bank.column`; off, no plane is made and the mesh draws as it did.
     bool column = true;
-    static constexpr float kColScale = 1000.0f;   // the fixed point: a millimetre
+    static constexpr float kColScale = 100.0f;    // the fixed point: a centimetre (14 bits, +-82 m;
+                                                  // the label's offset rides in the low 18 bits)
     static constexpr float kColBias = 64.0f;      // metres below the waterline the encoding reaches
     static constexpr uint32_t kColSubLabels = 2;  // sub-labels an axis a texel in the scatter
     uint32_t ColumnSrv() const { return (column && m_ready) ? m_column.Srv() : 0xFFFFFFFFu; }

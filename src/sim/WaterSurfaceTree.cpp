@@ -228,7 +228,7 @@ double TreeWater::MeanLevelAt(double wx, double wz, double simUnix) const {
 }
 
 void TreeWater::BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
-                        double gain[OceanCpu::kCascades]) const {
+                        double gain[OceanCpu::kCascades], double* brkOut) const {
     const double curX = q.currentSolved ? double(q.u) : 0.0;
     const double curZ = q.currentSolved ? double(q.v) : 0.0;
     for (int c = 0; c < OceanCpu::kCascades; ++c) {
@@ -255,6 +255,7 @@ void TreeWater::BandLaw(const WeatherSample& q, double depth, double hsScale, do
     const double excess = std::sqrt(rms2) * 2.8284271247461903 / BreakHmax(kEff, depth);
     const double brk = BreakFactor(excess);
     for (int c = 0; c < OceanCpu::kCascades; ++c) gain[c] *= brk;
+    if (brkOut) *brkOut = brk;
 }
 
 bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[OceanCpu::kCascades],
@@ -379,23 +380,26 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     double jacXX = 0.0, jacXZ = 0.0, jacZZ = 0.0;   // d(dispX, dispZ)/d(x, z)
 
     if (wGeom > 0.001 && m_wave) {
-        const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix);
+        const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix, depth, m_waveChop);   // the depth's orbit, the throw's bound
         if (p.valid) {
             wWin = wGeom;
             // The swell shadow shelters the solved components as it does the cascades (the kernel's
             // aW = a * aMax * expo).
             const double wS = wWin * expo;
+            // THE CREST LAW rides inside ProbeAt (the crest thrown forward by the solver's excess,
+            // the depth's orbit): its dx/dz and Jacobian carry it; the chop is the scene's.
+            const double lq = wS * m_waveChop;
             dispY += wS * double(p.eta);
-            dispX += wS * m_waveChop * double(p.dx);   // gWaveB.z, see the header
-            dispZ += wS * m_waveChop * double(p.dz);
+            dispX += lq * double(p.dx);   // gWaveB.z, see the header
+            dispZ += lq * double(p.dz);
             slopeX += wS * double(p.sx);
             slopeZ += wS * double(p.sz);
             orbX += wS * double(p.vx);
             orbY += wS * double(p.vy);
             orbZ += wS * double(p.vz);
-            jacXX += wS * m_waveChop * double(p.jxx);  // the offset's gradient carries its chop
-            jacXZ += wS * m_waveChop * double(p.jxz);
-            jacZZ += wS * m_waveChop * double(p.jzz);
+            jacXX += lq * double(p.jxx);  // the offset's gradient carries its chop and the law
+            jacXZ += lq * double(p.jxz);
+            jacZZ += lq * double(p.jzz);
         }
     }
     lap(s_cycProbe);
@@ -408,9 +412,18 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         // bands (0 and 1) yield to the solved field by its weight while the chop band stays on.
         // (The twin used to stand all three down by (1 - wWin) and apply none of the rest.)
         double gain[OceanCpu::kCascades];
-        BandLaw(q, depth, hsScale, expo, gain);
+        double brk = 1.0;
+        BandLaw(q, depth, hsScale, expo, gain, &brk);
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             if (c != 2) gain[c] *= 1.0 - wWin;
+        }
+        // THE CREST LAW for the cascades (the kernel's cascade loop): the breaking factor bounds the
+        // height; the lateral term keeps the raw amplitude, amp / brk; and THE ORBIT IS THE DEPTH'S,
+        // coth(k h) on each band's k -- the lateral channels' own gain, handed to the sampler beside
+        // the height's.
+        double latGain[OceanCpu::kCascades];
+        for (int c = 0; c < OceanCpu::kCascades; ++c) {
+            latGain[c] = (1.0 / std::max(brk, 1e-3)) * OrbitCoth(m_ocean->BandK(c), depth);
         }
         // THE CASCADES ARE READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h), which is the one
         // term of this water that needs a plane at all. Up to four charts touch a place; each is
@@ -429,12 +442,13 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             // integrates to nothing -- summing it is a sincos per bin for a force of zero, and the
             // short cascade is ~85% of the retained bins.
             m_ocean->SampleForHull(ch[i].u[0], ch[i].u[1], CascadeTime(simUnix), 2.0 * m_sampleM,
-                                   gain, o);
+                                   gain, latGain, o);
             const double w = ch[i].w / norm;
             const double* R = ch[i].rot;   // this chart's (east, north) in the place's own
             dispY += w * o.h;
             orbY += w * o.vy;
-            // The horizontal channels are vectors in the chart's axes.
+            // The horizontal channels are vectors in the chart's axes (the crest law and the
+            // depth's orbit rode in latGain).
             dispX += w * (R[0] * o.dx + R[1] * o.dz);
             dispZ += w * (R[2] * o.dx + R[3] * o.dz);
             slopeX += w * (R[0] * o.sx + R[1] * o.sz);

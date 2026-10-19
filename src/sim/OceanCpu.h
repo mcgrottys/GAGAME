@@ -297,6 +297,12 @@ public:
     // the cascade is a gain on all eight; a cascade of gain 0 is skipped without touching a bin.
     void SampleForHull(double wx, double wz, double tSec, double minLambda,
                        const double gain[kCascades], OceanSample& out) const;
+    // ...and a gain on the LATERAL channels alone (dx, dz and their Jacobian), per cascade, on top
+    // of `gain`: the crest law and the depth's orbit (WaterSurfaceTree.cpp), which move a particle
+    // sideways and not up.
+    void SampleForHull(double wx, double wz, double tSec, double minLambda,
+                       const double gain[kCascades], const double latGain[kCascades],
+                       OceanSample& out) const;
 
     bool Ready() const { return m_ready; }
 
@@ -338,7 +344,7 @@ private:
     double m_lambdaMax[kCascades] = {};
 
     void SampleBand(double wx, double wz, double tSec, double minLambda, const double* gain,
-                    OceanSample& out) const;
+                    const double* latGain, OceanSample& out) const;
 
     std::vector<Bin> m_bin[kCascades];
     uint64_t m_epoch = 0;               // F21: moves with every SetSeaState; the memo's key

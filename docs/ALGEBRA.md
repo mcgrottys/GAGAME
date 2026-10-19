@@ -1730,6 +1730,19 @@ Second finding, measured by the twin: up the vertical through a prolate loop the
 lower UPRIGHT (the face), upper UPRIGHT (the tube's ceiling = the loop's floor), INVERTED (the lip's
 top) -- the first cut named the inverted branch the underside and drew the lips as crevasses.
 
+53. **Six wrong crest laws, each measured** (2026-10-19; docs/WATER_VOLUME.md 7). Prior: giving
+the lateral term the breaker's raw amplitude would fold the crests. Measured in order: (a) the
+raw ratio alone moved det(1 + J) from 0.43 to 0.33 -- the deep-water orbit is the ceiling; (b)
+Airy's coth(kh) on the cascades' deep-water k gave coth 113 on the 213 m band in the shallows,
+52 m of slosh -- the k must be the band's in this depth (Guo 2002); (c) the raw ratio over the
+whole orbit sheared every crest sideways ten times its height -- a sea mid-plunge at every
+phase; (d) weighting each of 32 components by its own crest phase drifted the whole sheet (the
+weights average 1/2); (e) the crest is the SEA's, its elevation against its envelope, and the
+throw is bounded by the wavelength; (f) the per-vertex Newton inversion blew up at small det and
+the first-order affine cell images overlapped -- the column carries the label, the scatter
+rasterizes the mesh's own triangles. Law: a closure on a superposition must be written on the
+SUM, not on the terms; the inversion of a sheet belongs to the structure that already holds it.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.

@@ -325,7 +325,10 @@ public:
         float jxx = 0.0f, jxz = 0.0f, jzz = 0.0f;
         float a[kMaxComp] = {}, k[kMaxComp] = {}, phase[kMaxComp] = {};
     };
-    Probe ProbeAt(double wx, double wz, double simUnix) const;
+    // depthM: the water's depth at the point, for the depth's orbit (the lateral term coth(kh) per
+    // component, the crest law of 2026-10-19); <= 0 reads the deep-water orbit (the instruments).
+    // chopM: the scene's chop (the kernel's gWaveB.z), for the throw's bound alone -- dx/dz stay chop 1.
+    Probe ProbeAt(double wx, double wz, double simUnix, double depthM = 0.0, double chopM = 1.0) const;
 
     std::string stats;   // provenance line for the title bar / report
 

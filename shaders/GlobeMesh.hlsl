@@ -188,23 +188,18 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
         // offset, UNCUT: the same sheet where it is single-valued (the twin: the column's face
         // equals it to the millimetre there).
         float hF, cvF;
-        float2 sF;
-        if (sheet == 0u && ColumnFetch(bankXZ, 0u, bP.x + bD.y, hF, sF, cvF)) {
+        float2 sF, lF;
+        if (sheet == 0u && ColumnFetch(bankXZ, 0u, bP.x + bD.y, hF, sF, cvF, lF)) {
             dispWater = gWavesB.w + hF;
             latW = 0.0f;
             // THE LABEL STANDING HERE. The pixel stage reads the water -- its normal, the sub-ring
             // bands, the ripples -- at the vertex's sample point as a LABEL, and the particle drawn
-            // at this Eulerian point came from the label behind it: one Newton step from L = P on
-            // the offset's own Jacobian, (1 + J) e = D, L = P - e (TreeWater's step, the CPU twin,
-            // to the letter), so the pixels shade the particle that stands here and not its
-            // neighbour's. Where the sheet folds (det -> 0) the step has no answer and the label is
-            // the point itself.
-            const float a11 = 1.0f + dDdx.x, a12 = dDdz.x, a21 = dDdx.z, a22 = 1.0f + dDdz.z;
-            const float det = a11 * a22 - a12 * a21;
-            const float2 e = (det > 1e-3f)
-                                 ? float2(a22 * bD.x - a12 * bD.z, -a21 * bD.x + a11 * bD.z) / det
-                                 : float2(0.0f, 0.0f);
-            labelOff = -e * (1.0f - landness);
+            // at this Eulerian point came from the label behind it. The column says which: the
+            // scatter wrote, beside each crossing's height, the label of the triangle that made it
+            // (WaterBank.hlsl ColEncode) -- the exact inversion, fold-aware. (A Newton step on the
+            // bank's Jacobian stood here first and blew up where det(1 + J) was small: rings in
+            // the shading at every steep crest.)
+            labelOff = lF * (1.0f - landness);
         } else {
             latW = float2(bD.x, bD.z) * (1.0f - landness);
         }
@@ -213,8 +208,8 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
         // absence law) and MsLip emits nothing for a cell without one.
         if (sheet != 0u) {
             float hL, cv;
-            float2 sL;
-            ColumnFetch(bankXZ, sheet, bP.x + bD.y, hL, sL, cv);
+            float2 sL, lL;
+            ColumnFetch(bankXZ, sheet, bP.x + bD.y, hL, sL, cv, lL);
             lipHave = cv > 0.0f;
             dispWater = gWavesB.w + hL;
             latW = 0.0f;

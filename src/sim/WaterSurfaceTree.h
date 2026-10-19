@@ -194,8 +194,9 @@ private:
     void Prepare(double wx, double wz, double simUnix, Prep& p) const;
     SurfaceSample Finish(const Prep& p, double wx, double wz, double simUnix, bool displaced) const;
     // The kernel's cascade loop's gains, once for At and BandGains.
+    // brkOut: the breaking factor the gains were scaled by (the crest law reads it back).
     void BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
-                 double gain[OceanCpu::kCascades]) const;
+                 double gain[OceanCpu::kCascades], double* brkOut = nullptr) const;
 
     const WeatherManager* m_wx = nullptr;
     const WaveField* m_wave = nullptr;

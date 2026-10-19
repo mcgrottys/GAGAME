@@ -732,9 +732,10 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
             for (uint32_t x = 0; x < 3072u; ++x) {
                 const uint32_t v = px[x];
                 const bool have = coverage ? v != 0u : (v != 0u && v != 0xFFFFFFFFu);
+                // the column's word: height-major (WaterBank.hlsl ColEncode), the label's offset below
                 plane[static_cast<size_t>(y) * 3072 + x] =
                     coverage ? static_cast<float>(v)
-                    : have ? static_cast<float>(v) / kColScale - kColBias : std::numeric_limits<float>::quiet_NaN();
+                    : have ? static_cast<float>(v >> 18) / kColScale - kColBias : std::numeric_limits<float>::quiet_NaN();
                 if (have) ++present[y / 512];
             }
         }
