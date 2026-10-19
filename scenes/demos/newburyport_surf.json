@@ -9,7 +9,7 @@
     "Launch from the repo root:  build/bin/gagame.exe scenes/demos/newburyport_surf.json"
   ],
   "base": "scenes/demos/newburyport_buildings.json",
-  "scene": {"name": "newburyport-surf", "mode": "world", "view": "surf"},
+  "scene": {"name": "newburyport-surf", "mode": "world", "view": "tube"},
   "time": {"start": "2026-08-28T19:30:00Z"},
   "sea": {
     "storm": {"hs": 3, "tp": 10, "dir": 95}
