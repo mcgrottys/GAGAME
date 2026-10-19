@@ -503,6 +503,35 @@ windows move with what the frame asks for, which is how the storm's direction en
 water. Mark's two guesses, index handling and residency, were both right. Next: read CsChain and
 CsPointOfDir for a far coarse vertex against the windows' extents.
 
+## 12. The window's edge: a filtered read stays inside its box (2026-10-19, PR 104's eleventh commit)
+
+The cones on Mavericks' western horizon (section 11), found and fixed. Mark: "they are obviously on
+the edge of different mip levels."
+
+**The seam.** The eye's windows (Window.hlsli) are boxes of 16384 texels of rung 3(k+1) about the
+eye, one a rank: rank 3's is 19.5 km wide, its edge 9.8 km from the eye -- the horizon from 60 m. A
+box is addressed modulo its own size: its texture is a torus, and the box's eastern edge and its
+western edge are neighbouring texels. The chain tests containment at the POINT (b in [0, 1)) and the
+readers then SAMPLE with a WRAP sampler at the mip their footprint asks for. A far vertex a few
+texels inside the western edge, read at a coarse mip, had a trilinear footprint that reached across
+the edge and blended the eastern edge's texels: the coast and its hills, 19 km east, averaged into
+the sea 10 km west. The height came back a hundred metres and more, the classifier called it land
+(`hLand`), and the vertex rose to `dispLand`. Why the storm's direction moved them: the windows
+slide with what the frame asks for, and the storm's swell march asks westward.
+
+**The law.** A window answers only where the footprint of the read lies within the box. The chain
+now carries each rank's distance to its box's nearest edge (`WalkChain.e*`, Window.hlsli), and
+every FILTERED reader -- the height (trilinear, 2 texels of reach at the mip plus one), the colour
+and the building field (anisotropic, 8), the survey mask (bilinear at its floor, 2) -- skips a rank
+whose footprint crosses the edge (`WalkEdgeOk`). The rank above holds the same ground at its mip 0
+with the point deep inside, so the ladder's answer is the coarser rank's, which is what the far
+vertex should have read all along. The kernels' chain read (HpChainRead) takes POINT loads and a
+mip texel never straddles the texture's seam, so it was never wrong and is unchanged; the C++ twin
+(SurfaceFrame::Chain) is unchanged, since the chain's ranks, slices and addresses are.
+
+Measured: the cones gone from every eye (`out/mavericks/F_high270.png`); the Newburyport throat's
+still and the probe unchanged (the throat's vertices stand deep inside their boxes).
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`
