@@ -235,6 +235,35 @@ lips still read as ribbons at the mesh's 1.2 m grid; a denser lip grid was not b
 brief: measure first), since the slit dominates what the eye sees until the face is drawn from the
 column.
 
+## 5c. The face from the column, the guard gone (same night; PR 104)
+
+Mark's second crop: a dark sheet hanging under a crest "like a reflection". Measured on ring 0's
+4,596 tube columns: the three crossings keep their order (0 floor-below-face; 134 roof-below-floor =
+columns with two folds, which three numbers truncate), but the column's face stands 2.0 m p50 BELOW
+the guarded Lagrangian face the mesh drew at the same texel, the floor 1.3 m below it, the roof level
+with it: both lip sheets hung under the drawn surface, and the tube's floor -- the back face rolled
+over the crest, a mirror of it by construction -- showed under the crest's forward edge.
+
+**Done:** `SurfaceVertex` draws the face from the column's band 0 at the vertex's own ground point
+(Eulerian, no lateral term) wherever a ring holds the point; where none does (another level's rings,
+a planet without a bank) the label's own particle, label plus offset, UNCUT. `kLatFoldFloor` is
+deleted on both processors: the mesh's `smoothstep(0, 0.35, areaJac)` and the hull's `g` in
+`TreeWater`'s one Newton step (`WaterTerms.h` keeps the note). The lateral inversion is now the
+column's; the pixel stage still reads the water at a LABEL, so the vertex carries the label standing
+at its point -- one Newton step on the offset's own Jacobian, `(1 + J) e = D`, label = point - e,
+TreeWater's step to the letter -- in `geo`. Without that step every pixel shaded its neighbour's
+particle and the chop-1.1 still differed from the shipped one on 33 % of its pixels (SSIM 0.965);
+with it 2.8 % differ by more than one LSB, mean |d| 0.17, SSIM 0.9965: the same sea reconstructed
+from texel centres (bilinear) instead of from labels (Catmull), plus the first-order step.
+
+Gate: self-test passes (every FAIL a planted fault, caught); lip pass 0.83 ms without a tube; the
+chop-4 tube views (`out/surf/c4h/`) no longer show the slit or the hanging floor -- what remains is
+the 4x sea's own plateaus and the 1.2 m lip grid.
+
+**What this leaves:** the two-fold columns (3 % of tubes at chop 4) truncate to one tube; the hull
+reads the label's own particle in a fold (its column twin is still to build); the lips are ribbons at
+the mesh's grid; and the crest law, so a real sea folds at all.
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`

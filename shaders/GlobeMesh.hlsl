@@ -48,11 +48,6 @@ StructuredBuffer<MeshletRec> gMeshlets : register(t0, space0);
 //   bit 19      this meshlet meets the upper half (cells 4..7) of that record's edge
 static const uint kSeamNone = 0u, kSeamCoarser = 1u;
 
-// M9bm: the lateral term is fully applied above this areaJac and rolls off to zero at the
-// overturn. 0.35 sits under foamlaw's saturation knee (J = 0.45), so the guard only ever acts
-// where the foam law has already declared the crest broken.
-static const float kLatFoldFloor = 0.35f;
-
 // ONE vertex of the surface: the record's grid position g (node cells, 0..32), CDLOD-morphed
 // and displaced, as the M6j path always computed it. MsMain's 81 vertices and the seam bands
 // below both come from here, so a band vertex is the neighbour's own arithmetic on the
@@ -160,6 +155,7 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
     // never slide onto the rocks; the bank's world xz stays the SAMPLE point --
     // Gerstner convention, same as the reference.
     float2 latW = 0.0f;
+    float2 labelOff = 0.0f;   // the label standing at this point, less the point (the face from the column)
     if (gBankU.z != 0u) {
         float4 bD, bP, bDet;
         // A fine meshlet reads the bank at its exact point, the level's eye plus geo: the
@@ -178,28 +174,40 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
         // the same marsh drawn dry (Mark, 2026-10-18, the Merrimack's mouth; the mix lens showed
         // the classifier calling all of it water).
         dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (gWavesB.w + bP.x + bD.y) : gWavesB.w;
-        // M9bm: THE FOLD GUARD.
-        //
-        // The lateral term was applied with nothing bounding the Jacobian it induces. Where
-        // d(Dx)/dx approaches -1 neighbouring vertices cross, the surface turns over, and the
-        // mesh renders a near-vertical WALL with the water visible behind it -- the user's
-        // "gap ... it looks like the water behind it has the section of wave it's missing".
-        // Seen only under --wireflat: shaded, the crease reads as a wave face.
-        //
-        // areaJac = det(I + J_h) IS the tangent bivector's own magnitude (ALGEBRA
-        // "caustics"), and it reaches zero exactly at the overturn -- "breaking is the
-        // crest's area 2-blade degenerating". So the object already computed for the normal
-        // is the one that detects the fold; no new quantity, no threshold pulled from the air.
-        //
-        // Scaling the lateral term to zero as the blade degenerates loses NOTHING physical:
-        // foamlaw's Jacobian trigger, saturate((0.80 - J) * 4), has already been paying that
-        // excess out as foam since M8. This is the same law the depth-limited breaking clamp
-        // states -- "converts the excess into foam instead of geometry" -- applied to the
-        // horizontal component, which was the one term still exempt from it.
-        const float areaJac =
-            (1.0f + dDdx.x) * (1.0f + dDdz.z) - dDdz.x * dDdx.z;
-        latW = float2(bD.x, bD.z) * (1.0f - landness) *
-               smoothstep(0.0f, kLatFoldFloor, areaJac);
+        // THE FACE FROM THE COLUMN (the rolling-wave work, 2026-10-18 late). Where the column plane
+        // holds this vertex's ground point, the water standing here is the column's band 0 -- the
+        // lowest crossing of the Lagrangian sheet over this point, read at the vertex's OWN point:
+        // Eulerian, no lateral term, no guard. The fold guard that stood here (M9bm: the lateral
+        // term faded to nothing as areaJac fell through kLatFoldFloor = 0.35, because a folded
+        // triangle was a back face culled to "a wall with the water behind it") is gone: the
+        // column carries the fold as three crossings, and the two sheets above the face (MsLip)
+        // draw the tube. Measured before this (docs/WATER_VOLUME.md): on tube columns the guarded
+        // face stood 2 m above the column's, so the tube's floor hung out under the crest like a
+        // reflection. Where the column answers nothing -- outside every ring, another level's
+        // rings, a planet without a bank -- the label's own particle, label plus its lateral
+        // offset, UNCUT: the same sheet where it is single-valued (the twin: the column's face
+        // equals it to the millimetre there).
+        float hF, cvF;
+        float2 sF;
+        if (sheet == 0u && ColumnFetch(bankXZ, 0u, bP.x + bD.y, hF, sF, cvF)) {
+            dispWater = gWavesB.w + hF;
+            latW = 0.0f;
+            // THE LABEL STANDING HERE. The pixel stage reads the water -- its normal, the sub-ring
+            // bands, the ripples -- at the vertex's sample point as a LABEL, and the particle drawn
+            // at this Eulerian point came from the label behind it: one Newton step from L = P on
+            // the offset's own Jacobian, (1 + J) e = D, L = P - e (TreeWater's step, the CPU twin,
+            // to the letter), so the pixels shade the particle that stands here and not its
+            // neighbour's. Where the sheet folds (det -> 0) the step has no answer and the label is
+            // the point itself.
+            const float a11 = 1.0f + dDdx.x, a12 = dDdz.x, a21 = dDdx.z, a22 = 1.0f + dDdz.z;
+            const float det = a11 * a22 - a12 * a21;
+            const float2 e = (det > 1e-3f)
+                                 ? float2(a22 * bD.x - a12 * bD.z, -a21 * bD.x + a11 * bD.z) / det
+                                 : float2(0.0f, 0.0f);
+            labelOff = -e * (1.0f - landness);
+        } else {
+            latW = float2(bD.x, bD.z) * (1.0f - landness);
+        }
         // A LIP SHEET: the column's height at this vertex's own ground point, Eulerian (no
         // lateral term); where the column holds no lip the vertex sits on the face (ColumnFetch's
         // absence law) and MsLip emits nothing for a cell without one.
@@ -229,7 +237,9 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
         o.rel = CsToTangent(dir) * (gGlo.x + disp) - sLvlCamAbs;
     }
     o.rel += BankVec(latW);   // the chart's east and north, in the tangent frame
-    o.geo = geo;   // the label: the lateral term moves the drawn point, never where it is read
+    // the label: the lateral term moves the drawn point, never where it is read; with the face from
+    // the column the point is Eulerian and the label is the one Newton step behind it (labelOff)
+    o.geo = geo + BankVec(labelOff);
     // M9bg: the water's colour, shaded AT THIS VERTEX from its own wave normal (the bank's
     // Loads -- stage-proof) and the analytic sky. The pixel stage does no water work.
     // EVERY vertex is shaded, including dry ones: a shoreline triangle's land corner is still

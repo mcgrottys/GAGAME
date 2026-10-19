@@ -1000,7 +1000,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
 //  tangent bivector (1 + J) keeps its sign; where a crest overturns, det(1 + J) < 0 on the lip's
 //  underside and the vertical through the ground point crosses the surface THREE times: the face
 //  below, the lip's underside, the lip's top. A height field cannot say so, and GlobeMesh.hlsl
-//  fades the lateral term to nothing there (kLatFoldFloor) rather than draw the fold.
+//  faded the lateral term to nothing there (kLatFoldFloor, gone since: the mesh draws band 0).
 //
 //  This kernel SCATTERS every label (sub-sampled) to the Eulerian texel its particle lands in
 //  and folds the column's crossings with three atomics. Which crossing is which (the prolate

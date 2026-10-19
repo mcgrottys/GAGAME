@@ -498,24 +498,27 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     s.vz += k * orbZ;
 
     // ---- THE SURFACE THE MESH DRAWS IS THE DISPLACED ONE (the water match, step 3). The mesh puts
-    // the particle of label L at L + g D(L) (GlobeMesh.hlsl: the lateral offset under the fold guard
-    // g = smoothstep(0, kLatFoldFloor, det(I + J))), so the water standing over this point P is the
-    // particle whose label solves L + g D(L) = P. Answering at P itself put the hull on the wrong
+    // the particle of label L at L + D(L) (GlobeMesh.hlsl; the fold guard g that faded the offset as
+    // det(I + J) fell is GONE on both processors, 2026-10-18: the column plane carries a fold as three
+    // crossings, and the mesh draws the column's face), so the water standing over this point P is
+    // the particle whose label solves L + D(L) = P. Answering at P itself put the hull on the wrong
     // particle: --water-probe measured it 0.14 m below the drawn surface under half-metre waves (a
     // Gerstner sea shows more trough than crest to a fixed point). ONE NEWTON STEP from L = P, on the
-    // offset's own Jacobian: (I + g J) e = g D, L1 = P - e. The height, the slope and the offset then
+    // offset's own Jacobian: (I + J) e = D, L1 = P - e. The height, the slope and the offset then
     // move to L1 at first order from what this assembly already holds -- eta(L1) = eta - S.e, and the
-    // drawn surface's slope in WORLD coordinates is (I + g J)^-T S, the tangent bivector's own
+    // drawn surface's slope in WORLD coordinates is (I + J)^-T S, the tangent bivector's own
     // statement (symmetric here). What remains is second order in the steepness beyond the step
     // (0.19 eps^2 a for one train: ~1 cm at eps 0.3, a 0.7 m), for no second evaluation of the sea.
+    // Where the sheet folds (det <= 0) the step has no answer and the hull reads the label's own
+    // particle: the column's lowest crossing is what the mesh draws there, and reading it on the
+    // CPU is the column's twin on the hull's label patch (docs/WATER_VOLUME.md section 6).
     // The mesh also fades its offset by (1 - landness) at the shore; in water that is 1.
     if (displaced) {
         const double jXX = k * jacXX, jXZ = k * jacXZ, jZZ = k * jacZZ;
-        const double g = wt::Smoothstep(0.0, kLatFoldFloor, (1.0 + jXX) * (1.0 + jZZ) - jXZ * jXZ);
-        const double a11 = 1.0 + g * jXX, a12 = g * jXZ, a22 = 1.0 + g * jZZ;
+        const double a11 = 1.0 + jXX, a12 = jXZ, a22 = 1.0 + jZZ;
         const double det = a11 * a22 - a12 * a12;
-        if (det > 1e-6) {   // the guard's own quadratic can only fail on a doubly folded field
-            const double gx = g * s.dx, gz = g * s.dz;
+        if (det > 1e-6) {   // a folded field has no single answer here
+            const double gx = s.dx, gz = s.dz;
             const double ex = (a22 * gx - a12 * gz) / det;
             const double ez = (a11 * gz - a12 * gx) / det;
             eta -= sx * ex + sz * ez;
