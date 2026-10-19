@@ -489,7 +489,19 @@ Newburyport throat nearly gone, globe.lip 1.26 -> 0.45 ms at the throat.
 the water bank off, with tide/gulf/sea off, with gis/markers/vessels off and with the terrain layer
 off; the 60-second ETOPO has no land within 600 km on those bearings and the CUDEM's western tile
 has no nodata and no spike. They lie between bearings 250 and 292 from the point, far and tall, and
-they are the globe layer's own. Still being traced (the renders T_* in out/mavericks).
+they are the globe layer's own. TRACED THIS FAR (the renders T_*, X_*, E_*, L_* in out/mavericks):
+they are WATER VERTICES LIFTED BY THE LAND TERM. Cutting `disp = lerp(dispWater, dispLand, landness)`
+to `disp = dispWater` removes them; cutting the lateral term or the bank height leaves them whole;
+the bank's every ring is within +-8 m at that eye; the ring size, the cross-fade, the column plane,
+the solved field, the chop, the period and the amplitude (Hs 1 and 5 alike) change nothing; the
+storm's DIRECTION does (from 110 they leave the west), and the day's forecast sea has none. The
+residency and mip lenses paint the spikes in the NEAR water's rank, standing inside the far band's
+rank: far vertices whose height read claims a fine, resident window and gets a land height from it
+(+100 m and more; `landness` follows through `hLand`). So the fault is in the address of a far
+vertex's height read -- the chain's containment or the page texel at a window's edge (the eye's
+windows move with what the frame asks for, which is how the storm's direction enters) -- not in the
+water. Mark's two guesses, index handling and residency, were both right. Next: read CsChain and
+CsPointOfDir for a far coarse vertex against the windows' extents.
 
 ## 6. Next
 
