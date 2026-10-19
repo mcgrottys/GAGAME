@@ -3766,6 +3766,9 @@ bool FrameLoop::Frame() {
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs);
+            // THE COLUMN PLANE (the rolling-wave work): the first eye's bank's Eulerian columns.
+            globe->SetWaterColumn(waterBank->ColumnSrv(), WaterBankLayer::kColScale,
+                                  WaterBankLayer::kColBias);
             globe->SetBankChartUp(waterBank->Chart().up);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
             // bands -- the same plane the bank's texels were filled from (ChartOf).

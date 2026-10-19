@@ -57,7 +57,13 @@ static const float kLatFoldFloor = 0.35f;
 // and displaced, as the M6j path always computed it. MsMain's 81 vertices and the seam bands
 // below both come from here, so a band vertex is the neighbour's own arithmetic on the
 // neighbour's own record (the same doubles the neighbour amplifies from), not an estimate.
-VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
+// `sheet` (the rolling-wave work, 2026-10-18): 0 is the surface as ever -- the Lagrangian sheet,
+// each label drawn at its particle; 1 and 2 are the COLUMN PLANE's two extra sheets (Globe.hlsl
+// ColumnFetch: the lip's top and its underside), Eulerian -- each vertex at its own ground point,
+// at the height the column holds there, no lateral term -- so an overturning crest's tube is
+// drawn by MsLip below. `lipHave`: the column held a lip at this vertex (else it sits on the face).
+VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out bool lipHave) {
+    lipHave = false;
     const float cx0 = float(rec.cell0 & 0xFFu);
     const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
     const bool fine = rec.arc <= 650.0f;
@@ -194,11 +200,25 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
             (1.0f + dDdx.x) * (1.0f + dDdz.z) - dDdz.x * dDdx.z;
         latW = float2(bD.x, bD.z) * (1.0f - landness) *
                smoothstep(0.0f, kLatFoldFloor, areaJac);
+        // A LIP SHEET: the column's height at this vertex's own ground point, Eulerian (no
+        // lateral term); where the column holds no lip the vertex sits on the face (ColumnFetch's
+        // absence law) and MsLip emits nothing for a cell without one.
+        if (sheet != 0u) {
+            float hL, cv;
+            float2 sL;
+            ColumnFetch(bankXZ, sheet, bP.x + bD.y, hL, sL, cv);
+            lipHave = cv > 0.0f;
+            dispWater = gWavesB.w + hL;
+            latW = 0.0f;
+        }
     }
     const float disp = lerp(dispWater, dispLand, landness);
+    if (sheet != 0u && landness >= 0.999f) lipHave = false;   // the lip is water's alone
 
     VsOut o;
-    o.mid = gid;   // M9b: this record's index, for PsMeshlet's tint
+    // M9b: this record's index, for PsMeshlet's tint; bit 30 marks a lip sheet's fragment and
+    // bit 29 the underside's (Globe.hlsl PsSurface).
+    o.mid = gid | ((sheet != 0u) ? 0x40000000u : 0u) | ((sheet == 1u) ? 0x20000000u : 0u);
     o.lvl = rec.level;
     o.dir = dir;
     o.h = h;
@@ -223,6 +243,10 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // is the identity, so the camera's own planet rasterizes exactly as it always did.
     o.pos = mul(float4(TrueRel(o.rel), 1.0f), gViewProj);
     return o;
+}
+VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
+    bool hv;
+    return SurfaceVertexS(rec, gid, g, 0u, hv);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -478,5 +502,76 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         }
         const uint3 t = BandTri(bands[e], gtid - bands[e].tbase);
         tris[128u + gtid] = (mirror != (e == 0u || e == 3u)) ? t.xzy : t;
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// THE LIP SHEETS (the rolling-wave work, 2026-10-18; WaterBank.hlsl CsBankScatter, Globe.hlsl
+// ColumnFetch). One group per meshlet record of the camera's own level, the same 9x9 grid twice:
+// vertices 0..80 the lip's TOP (column band 1, the inverted branch), 81..161 its UNDERSIDE (band
+// 2, the upright branches' max), each at its own
+// ground point at the height the column holds there. A cell none of whose corners has a lip
+// emits a degenerate triangle (nothing is rasterized), so the pass costs its vertices and draws
+// only the tubes. Two-sided (GlobeLayer::BuildMeshPso: cull NONE): the tube is seen from inside.
+// ------------------------------------------------------------------------------------------
+groupshared bool sLipHave[162];
+groupshared uint sLipAny;
+
+// The rings' coordinate of grid point g of a record, as SurfaceVertex forms it, without the rest.
+float2 LipProbeXZ(const MeshletRec rec, float2 g) {
+    const float cx0 = float(rec.cell0 & 0xFFu);
+    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
+    if (rec.arc <= 650.0f) {
+        const float2 du = (g - float2(cx0 + 4.0f, cy0 + 4.0f)) * rec.uvStepCell;
+        return BankXZ(rec.anchorRel + rec.dPdu * du.x + rec.dPdv * du.y);
+    }
+    return BankXZOfDir(CsToTangent(CubeDir(rec.face, rec.uv0 + g * rec.uvStepCell)));
+}
+
+[outputtopology("triangle")]
+[numthreads(128, 1, 1)]
+void MsLip(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
+           out vertices VsOut verts[162], out indices uint3 tris[256]) {
+    const uint count = (uint)gGlo.z;
+    const uint gid = gid3.y * 65535u + gid3.x;
+    const MeshletRec rec = gMeshlets[min(gid, max(count, 1u) - 1u)];
+    // Set A's rings only (the column plane is the first eye's), records not culled.
+    const bool liveA = gid < count && (rec.cell0 >> 31) == 0u && gColU.y != 0u && rec.level == 0u;
+    LoadLevel(rec.level);
+    const float cx0 = float(rec.cell0 & 0xFFu);
+    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
+    // THE EARLY-OUT: a tube within a texel of any of the 81 grid points, one load each; a record
+    // with none emits nothing and costs nothing more (the grid's spacing is the ring's texel at the
+    // helm, so a tube between two probes is a texel wide at most, and the taper hides it).
+    if (gtid == 0u) sLipAny = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    if (liveA && gtid < 81u) {
+        const float2 g = float2(cx0 + float(gtid % 9u), cy0 + float(gtid / 9u));
+        if (ColumnTubeNear(LipProbeXZ(rec, g))) InterlockedOr(sLipAny, 1u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    const bool live = liveA && sLipAny != 0u;
+    SetMeshOutputCounts(live ? 162u : 0u, live ? 256u : 0u);
+    if (!live) return;
+    for (uint vi = gtid; vi < 162u; vi += 128u) {
+        const uint sheet = (vi < 81u) ? 1u : 2u;
+        const uint k = (vi < 81u) ? vi : vi - 81u;
+        const uint x = k % 9u, y = k / 9u;
+        bool hv;
+        verts[vi] = SurfaceVertexS(rec, gid, float2(cx0 + float(x), cy0 + float(y)), sheet, hv);
+        sLipHave[vi] = hv;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    const bool mirror = dot(cross(rec.dPdu, rec.dPdv), rec.upT) < 0.0f;
+    for (uint ti = gtid; ti < 256u; ti += 128u) {
+        const uint sh = (ti < 128u) ? 0u : 1u;      // 0 the underside's grid, 1 the top's
+        const uint tl = ti - sh * 128u;
+        const uint cell = tl / 2u;
+        const uint x = cell % 8u, y = cell / 8u;
+        const uint v0 = sh * 81u + y * 9u + x;
+        const bool any4 = sLipHave[v0] || sLipHave[v0 + 1u] || sLipHave[v0 + 9u] || sLipHave[v0 + 10u];
+        uint3 t = (tl & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u) : uint3(v0, v0 + 1u, v0 + 9u);
+        if (!any4) t = uint3(v0, v0, v0);
+        tris[ti] = mirror ? t.xzy : t;
     }
 }

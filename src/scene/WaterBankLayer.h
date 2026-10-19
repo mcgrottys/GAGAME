@@ -48,6 +48,15 @@ public:
     // filled twice and diffed. Public because it is a debug lever, not state.
     bool flatBed = false;
     float flatBedNavd = -30.0f;
+    // THE COLUMN PLANE (the rolling-wave work, 2026-10-18; WaterBank.hlsl CsBankScatter): the
+    // Lagrangian sheet scattered into Eulerian columns of three crossings (face, lip underside,
+    // lip top), so an overturning crest has geometry instead of a faded lateral term. Scene
+    // `water.bank.column`; off, no plane is made and the mesh draws as it did.
+    bool column = true;
+    static constexpr float kColScale = 1000.0f;   // the fixed point: a millimetre
+    static constexpr float kColBias = 64.0f;      // metres below the waterline the encoding reaches
+    static constexpr uint32_t kColSubLabels = 2;  // sub-labels an axis a texel in the scatter
+    uint32_t ColumnSrv() const { return (column && m_ready) ? m_column.Srv() : 0xFFFFFFFFu; }
 
     static constexpr int kMips = 6;         // texel = base * 2^m; at base 1.2: 1.2..38 m
                                             // texels, 0.6..20 km spans (scene bankTexelM)
@@ -291,6 +300,10 @@ private:
         float svU[4], svV[4], svW[4], svO[4];
         // THE PREVIOUS TABLE (the wave roll; WaterBank.hlsl gWaveSigP..): appended at the END.
         float waveSigP[64], waveDirP[64], waveScaleP[64], waveBP[4];
+        // THE COLUMN PLANE (gColU / gColA): its UAV slot, sub-labels an axis, on; the fixed point's
+        // scale and bias. Appended at the END on both sides.
+        uint32_t colU[4];
+        float colA[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -362,6 +375,8 @@ private:
     const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
     float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)
 
+    TileAtlas2D m_column;                     // R32_UINT, three bands of rings: the Eulerian columns
+    hal::Pso m_scatter;                       // CsBankScatter (after the fill, a UAV barrier between)
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
                                              // needs to recover sub-ring sparkle (hsScale;
                                              // churn joins it next)

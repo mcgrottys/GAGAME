@@ -244,7 +244,11 @@ const Schema& BankSchema() {
         auto& p = kDoc.water.bank;
         Schema* sc = new Schema("water.bank", &p);
         sc->Bind("flatBed", p.flatBed, "replace the bed with a flat floor (--flat-bed)", R)
-            .Bind("flatBedNavd", p.flatBedNavd, Q::Length, "m NAVD88", "the floor's height", R);
+            .Bind("flatBedNavd", p.flatBedNavd, Q::Length, "m NAVD88", "the floor's height", R)
+            .Bind("column", p.column,
+                  "the column plane: the sheet's labels scattered into Eulerian columns, so an "
+                  "overturning crest draws its lip (WaterBank.hlsl CsBankScatter, GlobeMesh.hlsl MsLip)",
+                  R);
         return sc;
     }();
     return *s;

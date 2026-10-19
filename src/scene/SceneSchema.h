@@ -191,6 +191,7 @@ struct SweProps {
 struct BankProps {
     bool flatBed = false;
     float flatBedNavd = -30.0f;
+    bool column = true;   // the Eulerian column plane: overturning crests as geometry (WaterBank.hlsl)
 };
 struct WaterSection {
     bool pixelWater = true;

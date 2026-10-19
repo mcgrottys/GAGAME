@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <filesystem>
 #include <map>
 #include <cmath>
@@ -53,6 +54,12 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                  L"water.param (level + sigma2 + current)");
     m_detail.Init(gpu, kMips * kRingTexels, kRingTexels, DXGI_FORMAT_R16G16B16A16_FLOAT,
                   L"water.detail (hsScale + sparkle context)");
+    // THE COLUMN PLANE: the same rings, four bands tall (face, lip top = the inverted branch, lip underside = the upright max, the lip's coverage), uint
+    // for the scatter's atomics (WaterBank.hlsl CsBankScatter).
+    if (column) {
+        m_column.Init(gpu, kMips * kRingTexels, 4 * kRingTexels, DXGI_FORMAT_R32_UINT,
+                      L"water.column (the Eulerian columns: face, lip top, lip underside, lip coverage)");
+    }
 
     // Root signature: b0 CB, t0 tile list, then the BINDLESS pair -- one unbounded SRV range
     // and one unbounded UAV range over the shared heap, so this kernel reaches every texture
@@ -86,7 +93,9 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                .Cbv(0)
                .Srv(0)
                .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5)})
-               .Table({hal::UavRange(0, hal::kUnbounded, 2)})
+               // space2: the heap as float4 planes; space3: as uint planes (the column plane's
+               // atomics).
+               .Table({hal::UavRange(0, hal::kUnbounded, 2), hal::UavRange(0, hal::kUnbounded, 3)})
                .Sampler(wrap)
                .Sampler(clamp)
                .Build(gpu, "waterbank");
@@ -98,6 +107,17 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                           "waterbank"),
         "WaterBank kernel");
     m_fill->SetName(L"CsBankFill");
+    if (column) {
+        m_scatter = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankScatter", L"cs_6_0"),
+                              "waterbank.scatter"),
+            "WaterBank scatter kernel");
+        m_scatter->SetName(L"CsBankScatter");
+        Log("[waterbank] column plane on: %ux%u hardware tiles a band, %u sub-labels an axis, "
+            "%.0f per m about the waterline, reach %.0f m",
+            m_column.TileW(), m_column.TileH(), kColSubLabels, kColScale, kColBias);
+    }
     m_ready = true;
     Log("[waterbank] %d mip rings x %dx%d tiles (%.1f m .. %.0f m texels, %.1f .. %.0f km "
         "spans); land tiles NULL",
@@ -112,6 +132,12 @@ void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
         sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
     hal::Reload(m_fill, [&] { return hal::BuildCompute(gpu, m_rs.Get(), cs, "waterbank"); },
                 "waterbank");
+    if (column) {
+        const ShaderBlob sb =
+            sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankScatter", L"cs_6_0");
+        hal::Reload(m_scatter, [&] { return hal::BuildCompute(gpu, m_rs.Get(), sb, "waterbank.scatter"); },
+                    "waterbank.scatter");
+    }
 }
 
 void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, const double eye[3]) {
@@ -402,6 +428,22 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
                     m_detail.RequestUnmap(htx, hty0 + k);
                 }
             }
+            // The column plane's three bands of this logical tile, by ITS hardware tile shape
+            // (R32_UINT: 128x128, one a band).
+            if (column) {
+                const uint32_t ctx0 = static_cast<uint32_t>((m * kRingTexels + tx * kTileTexels) / m_column.TileW());
+                const uint32_t ccx = (std::max)(kTileTexels / m_column.TileW(), 1u);
+                const uint32_t ccy = (std::max)(kTileTexels / m_column.TileH(), 1u);
+                for (uint32_t band = 0; band < 4; ++band) {
+                    const uint32_t cty0 = static_cast<uint32_t>((band * kRingTexels + ty * kTileTexels) / m_column.TileH());
+                    for (uint32_t ky = 0; ky < ccy; ++ky) {
+                        for (uint32_t kx = 0; kx < ccx; ++kx) {
+                            if (wet) m_column.RequestMap(ctx0 + kx, cty0 + ky);
+                            else m_column.RequestUnmap(ctx0 + kx, cty0 + ky);
+                        }
+                    }
+                }
+            }
             if (state != (wet ? 1 : 0)) changed = true;
             state = wet ? 1 : 0;
         }
@@ -412,6 +454,10 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
     m_param.CommitMappings(gpu, &fresh);
     fresh.clear();
     m_detail.CommitMappings(gpu, &fresh);
+    if (column) {
+        fresh.clear();
+        m_column.CommitMappings(gpu, &fresh);
+    }
     m_provisional[m] = provisional;
     (void)changed;
 }
@@ -657,6 +703,48 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
         for (size_t i = 0; i < plane.size(); ++i) plane[i] = disp[i * 4 + 1];
         fwrite(plane.data(), sizeof(float), plane.size(), fr);
         fclose(fr);
+    }
+    // THE ROLLING-WAVE WORK (2026-10-18): the whole disp and param planes raw (four channels a
+    // texel), and the column plane decoded (three bands, metres about the waterline, NaN where
+    // absent) -- proofs/wave_volume.py scatters the labels itself and holds the kernel to it.
+    if (FILE* fr = fopen("fiber_disp.f32", "wb")) {
+        fwrite(disp.data(), sizeof(float), disp.size(), fr);
+        fclose(fr);
+    }
+    if (FILE* fr = fopen("fiber_param.f32", "wb")) {
+        fwrite(param.data(), sizeof(float), param.size(), fr);
+        fclose(fr);
+    }
+    if (column) {
+        GpuTexture wrap;
+        wrap.res = m_column.Res();
+        wrap.format = DXGI_FORMAT_R32_UINT;
+        wrap.width = 3072;
+        wrap.height = 4 * 512;
+        wrap.state = m_state;
+        uint32_t pitch = 0;
+        const std::vector<uint8_t> data = gpu.ReadbackTexture(wrap, &pitch);
+        std::vector<float> plane(3072ull * 4 * 512);
+        size_t present[4] = {0, 0, 0, 0};
+        for (uint32_t y = 0; y < 4 * 512; ++y) {
+            const uint32_t* px = reinterpret_cast<const uint32_t*>(data.data() + static_cast<size_t>(pitch) * y);
+            const bool coverage = y >= 3 * 512;   // band 3: the lip's coverage count, not a height
+            for (uint32_t x = 0; x < 3072u; ++x) {
+                const uint32_t v = px[x];
+                const bool have = coverage ? v != 0u : (v != 0u && v != 0xFFFFFFFFu);
+                plane[static_cast<size_t>(y) * 3072 + x] =
+                    coverage ? static_cast<float>(v)
+                    : have ? static_cast<float>(v) / kColScale - kColBias : std::numeric_limits<float>::quiet_NaN();
+                if (have) ++present[y / 512];
+            }
+        }
+        if (FILE* fr = fopen("fiber_column.f32", "wb")) {
+            fwrite(plane.data(), sizeof(float), plane.size(), fr);
+            fclose(fr);
+        }
+        Log("[fibers] column plane: face %zu, lip top (inverted) %zu, lip underside %zu, lip coverage %zu texels present of %zu "
+            "(fiber_column.f32, 4 bands of 3072x512; band 3 = the coverage count)",
+            present[0], present[1], present[2], present[3], static_cast<size_t>(3072) * 512);
     }
     if (FILE* fj = fopen("fiber_meta.json", "wb")) {
         fprintf(fj, "{ \"baseTexelM\": %.3f, \"rings\": [", m_baseTexelM);
@@ -1016,7 +1104,16 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     toUav(m_disp);
     toUav(m_param);
     toUav(m_detail);
+    if (column) toUav(m_column);
     m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // THE COLUMN PLANE's rows (WaterBank.hlsl gColU / gColA).
+    cb.colU[0] = column ? m_column.Uav() : 0xFFFFFFFFu;
+    cb.colU[1] = kColSubLabels;
+    cb.colU[2] = column ? 1u : 0u;
+    cb.colU[3] = 0u;
+    cb.colA[0] = kColScale;
+    cb.colA[1] = kColBias;
+    cb.colA[2] = cb.colA[3] = 0.0f;
 
     {   // M12 step 4b instrument: the bank's constant buffer, fingerprinted at its upload --
         // the gate for the lattice-row moves (winA, geoA from the surface) and for the fills
@@ -1037,6 +1134,15 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     ctx.cmd->Pipeline(m_fill.Get());
     ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16,
                       static_cast<UINT>(tiles.size()));
+    // THE COLUMN PLANE: the scatter reads the planes the fill wrote and the clears it made, so
+    // the fill's writes must land first (a UAV barrier), then the same tiles once more.
+    if (column && m_scatter) {
+        GpuScope sscope(ctx.prof, ctx.cmd->Native(), "waterbank.scatter");
+        ctx.cmd->UavBarriers({m_disp.Res(), m_param.Res(), m_column.Res()});
+        ctx.cmd->Pipeline(m_scatter.Get());
+        ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16, static_cast<UINT>(tiles.size()));
+        ctx.cmd->Pipeline(m_fill.Get());
+    }
     // PHASE B0: THE BANK'S BED TRACE (the header): the same kernel on the same rows and tiles,
     // compiled with HP_TRACE and BANK_TRACE, writing its readings to a target of its own.
     if (traceOn && m_sc) {
@@ -1073,6 +1179,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     toSrv(m_disp);
     toSrv(m_param);
     toSrv(m_detail);
+    if (column) toSrv(m_column);
     m_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 

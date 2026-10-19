@@ -113,6 +113,13 @@ cbuffer BankCb : register(b0) {
     float4 gWaveDirP[16];
     float4 gWaveScaleP[16];
     float4 gWaveBP;
+    // THE COLUMN PLANE (the rolling-wave work, 2026-10-18; CsBankScatter below): x = its UAV slot
+    // (R32_UINT, three bands of 512 rows: face, lip underside, lip top), y = sub-labels an axis,
+    // z = on. gColA: x = the fixed point's scale (per metre), y = its bias (m) -- a height about
+    // the waterline h is stored as (h + bias) * scale, clamped to [1, 2^32 - 2] so that 0 (a NULL
+    // tile) and 2^32 - 1 (a cleared Min) both read as ABSENT. Appended at the END on both sides.
+    uint4  gColU;
+    float4 gColA;
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -199,6 +206,13 @@ Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
 RWTexture2D<float4> gU[] : register(u0, space2);
+// The heap as uint planes (the column plane's atomics; the root signature's second UAV range).
+RWTexture2D<uint> gUu[] : register(u0, space3);
+
+// The column plane's fixed point (gColA): absent is 0 or ~0, by construction.
+uint ColEncode(float hRel) {
+    return clamp(uint(max((hRel + gColA.y) * gColA.x, 0.0f)), 1u, 0xFFFFFFFEu);
+}
 
 // M9bo: THE CASCADE, PREFILTERED TO THIS RING.
 //
@@ -967,4 +981,129 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // Jacobian -- per-band sea-state gains (cascade derivs are unit-sea) and the dry
     // guard (no sparkle on the flats). Layout: (gain1, dry, gain0, gain2).
     gU[gSlotsB.w][dst] = float4(gain1, dry, gain0, gain2);
+    // THE COLUMN PLANE'S CLEAR: this texel's three bands to their identities (Min's to ~0, Max's
+    // to 0) before CsBankScatter writes them (a UAV barrier stands between the two dispatches).
+    if (gColU.z != 0u) {
+        gUu[gColU.x][dst] = 0xFFFFFFFFu;                       // face: the upright branches' MIN
+        gUu[gColU.x][dst + uint2(0u, 512u)] = 0u;              // lip top: the inverted branch's MAX
+        gUu[gColU.x][dst + uint2(0u, 1024u)] = 0u;             // lip underside: the upright branches' MAX
+        gUu[gColU.x][dst + uint2(0u, 1536u)] = 0u;             // the lip's coverage of the texel (0..16 a cell)
+    }
+}
+
+// ================================================================================================
+//  CsBankScatter -- THE COLUMN PLANE: the Lagrangian sheet read back as EULERIAN water columns
+//  (the rolling-wave work, 2026-10-18; docs/WATER_VOLUME.md).
+//
+//  The disp plane is a sheet of LABELS: texel l holds the particle P(l) = l + D(l), and the mesh
+//  draws P at every label. Over a point of the ground the sheet is single-valued only while the
+//  tangent bivector (1 + J) keeps its sign; where a crest overturns, det(1 + J) < 0 on the lip's
+//  underside and the vertical through the ground point crosses the surface THREE times: the face
+//  below, the lip's underside, the lip's top. A height field cannot say so, and GlobeMesh.hlsl
+//  fades the lateral term to nothing there (kLatFoldFloor) rather than draw the fold.
+//
+//  This kernel SCATTERS every label (sub-sampled) to the Eulerian texel its particle lands in
+//  and folds the column's crossings with three atomics. Which crossing is which (the prolate
+//  trochoid, proofs/wave_volume.py's twin measured the order): up the vertical through a loop the
+//  curve is met THREE times -- the lower UPRIGHT branch (the face: water below it), the upper
+//  UPRIGHT branch (the loop's floor: air between the two, the tube), and the INVERTED branch (the
+//  crest, the loop's roof: water between it and the floor, the lip). So: the upright branches'
+//  MIN is the face, their MAX the lip's underside, the inverted branch's MAX the lip's top. A
+//  column with one crossing has face = underside and no inverted branch; one with three is a
+//  tube. That is the sparse voxel of the water along the vertical -- its run-length encoding,
+//  three numbers a column -- and the heightfield is its degenerate case; the coverage of any
+//  coarser voxel is the fold of these intervals. Readers (Globe.hlsl ColumnFetch) take ABSENT
+//  (0 or ~0) as "no lip here". Bands: 0 face, 1 lip top (inverted), 2 lip underside (upright MAX).
+// ================================================================================================
+[numthreads(16, 16, 1)]
+void CsBankScatter(uint3 id : SV_DispatchThreadID) {
+    const uint texels = (uint)gMisc.x;
+    if (id.x >= texels || id.y >= texels || gColU.z == 0u) return;
+    const BankTile t = gTiles[id.z];
+    // This texel in its RING: the ring's atlas x origin, its local coordinate, its world origin.
+    const uint ringX0 = (t.dstX / 512u) * 512u;
+    const int2 lp = int2(int(t.dstX - ringX0) + int(id.x), int(t.dstY) + int(id.y));
+    const float2 ringOrg = t.orgXZ - float2(float(t.dstX - ringX0), float(t.dstY)) * t.texelM;
+    const uint dSlot = gSlotsB.y, pSlot = gSlotsB.z;
+    // The label's displacement and its Jacobian by central differences over the ring (a dry
+    // neighbour tile reads zero, which is the sheet standing still there -- honest enough).
+    const int2 xm = int2(max(lp.x - 1, 0), lp.y), xp = int2(min(lp.x + 1, 511), lp.y);
+    const int2 zm = int2(lp.x, max(lp.y - 1, 0)), zp = int2(lp.x, min(lp.y + 1, 511));
+    const int2 a0 = int2(int(ringX0), 0);
+    const float4 D0 = gU[dSlot][uint2(a0 + lp)];
+    const float3 Dxm = gU[dSlot][uint2(a0 + xm)].xyz, Dxp = gU[dSlot][uint2(a0 + xp)].xyz;
+    const float3 Dzm = gU[dSlot][uint2(a0 + zm)].xyz, Dzp = gU[dSlot][uint2(a0 + zp)].xyz;
+    const float3 dDdx = (Dxp - Dxm) / (float(xp.x - xm.x) * t.texelM);
+    const float3 dDdz = (Dzp - Dzm) / (float(zp.y - zm.y) * t.texelM);
+    // The level departure at the label (the param plane's x: lvl - waterline).
+    const float lvlRel = gU[pSlot][uint2(a0 + lp)].x;
+    // areaJac = det(1 + J): the tangent bivector's horizontal magnitude; negative is the fold.
+    const float areaJac = (1.0f + dDdx.x) * (1.0f + dDdz.z) - dDdz.x * dDdx.z;
+    const bool inverted = areaJac < 0.0f;
+    const float2 centre = ringOrg + (float2(lp) + 0.5f) * t.texelM;
+    const uint cSlot = gColU.x;
+    // THE CELL, RASTERIZED (not point-scattered): this label's texel-sized cell maps, to first
+    // order, by the affine map off -> P0 + M off, M = 1 + J (the tangent bivector's matrix). Every
+    // Eulerian texel whose centre lies in the cell's image is written (the images of neighbouring
+    // cells tile the plane, so a stretched cell leaves no hole), by the INVERSE map at that texel's
+    // centre: the label it came from, its height there. An inverted cell is the lip: its coverage
+    // of each texel is counted on a 4x4 sub-grid into band 3 (0..16 a cell), the continuous edge
+    // weight the readers taper the lip by (Globe.hlsl ColumnFetch).
+    const float2 P0 = centre + D0.xz;
+    const float m00 = 1.0f + dDdx.x, m01 = dDdz.x, m10 = dDdx.z, m11 = 1.0f + dDdz.z;
+    const float det = areaJac;
+    const float half = 0.5f * t.texelM;
+    // the image's bounding box, in ring texels
+    float2 lo = P0, hi = P0;
+    [unroll] for (uint c = 0u; c < 4u; ++c) {
+        const float2 off = float2((c & 1u) ? half : -half, (c & 2u) ? half : -half);
+        const float2 Pc = P0 + float2(m00 * off.x + m01 * off.y, m10 * off.x + m11 * off.y);
+        lo = min(lo, Pc);
+        hi = max(hi, Pc);
+    }
+    const int2 q0 = int2(floor((lo - ringOrg) / t.texelM));
+    const int2 q1 = int2(floor((hi - ringOrg) / t.texelM));
+    // a cell stretched past 8 texels an axis is a torn sheet, not water: nothing to write
+    if (q1.x - q0.x > 8 || q1.y - q0.y > 8) return;
+    // the fold line itself (det ~ 0) has no inverse: the cell is a line, its image a texel or two --
+    // the point at the centre stands for it
+    const bool thin = abs(det) < 1e-4f;
+    const float idet = thin ? 0.0f : 1.0f / det;
+    const uint S = inverted ? 4u : 1u;        // sub-points a texel axis: coverage for the lip
+    const float eps = 0.02f * t.texelM;
+    for (int qz = max(q0.y, 0); qz <= min(q1.y, 511); ++qz) {
+        for (int qx = max(q0.x, 0); qx <= min(q1.x, 511); ++qx) {
+            const uint2 dst = uint2(ringX0 + uint(qx), uint(qz));
+            uint hits = 0u;
+            uint vMax = 0u, vMin = 0xFFFFFFFFu;
+            for (uint sj = 0u; sj < S; ++sj) {
+                for (uint si = 0u; si < S; ++si) {
+                    const float2 p = ringOrg + (float2(float(qx), float(qz)) + (float2(float(si), float(sj)) + 0.5f) / float(S)) * t.texelM;
+                    float2 off;
+                    if (thin) {
+                        off = (S == 1u) ? float2(0.0f, 0.0f) : (p - P0);   // the centre stands; a sub-point tests the bbox
+                        if (S != 1u && any(abs(off) > half + eps)) continue;
+                        off = 0.0f;
+                    } else {
+                        const float2 r = p - P0;
+                        off = float2(m11 * r.x - m01 * r.y, -m10 * r.x + m00 * r.y) * idet;
+                        if (any(abs(off) > half + eps)) continue;
+                    }
+                    const float h = lvlRel + D0.y + dDdx.y * off.x + dDdz.y * off.y;
+                    const uint v = ColEncode(h);
+                    vMax = max(vMax, v);
+                    vMin = min(vMin, v);
+                    ++hits;
+                }
+            }
+            if (hits == 0u) continue;
+            if (inverted) {
+                InterlockedMax(gUu[cSlot][dst + uint2(0u, 512u)], vMax);
+                InterlockedAdd(gUu[cSlot][dst + uint2(0u, 1536u)], hits);
+            } else {
+                InterlockedMin(gUu[cSlot][dst], vMin);
+                InterlockedMax(gUu[cSlot][dst + uint2(0u, 1024u)], vMax);
+            }
+        }
+    }
 }

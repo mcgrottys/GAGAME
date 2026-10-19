@@ -133,6 +133,12 @@ cbuffer GlobeCb : register(b1) {
     // meshlet classes' SRV slot, y = 1 on a kept frame (a meshlet whose pixels were all land is not
     // drawn: the cache has it).
     uint4  gKeepU;
+    // THE COLUMN PLANE (WaterBank.hlsl CsBankScatter; the rolling-wave work, 2026-10-18) --
+    // appended at the END on both sides (priors 22): x = its SRV (R32_UINT, three bands of 512
+    // rows: face, lip underside, lip top), y = on; gColA.x = the fixed point's scale (per metre),
+    // .y = its bias (m). Read by ColumnFetch; set A's rings only.
+    uint4  gColU;
+    float4 gColA;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -455,6 +461,72 @@ bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 de
                 out float texelOut) {
     float3 dx, dz;
     return BankSampleT(worldXZ, disp, param, detail, texelOut, dx, dz);
+}
+
+// THE COLUMN PLANE (WaterBank.hlsl CsBankScatter): the EULERIAN water column at a point of the
+// rings' plane -- band 0 the face, 1 the lip's TOP (the inverted branch), 2 the lip's UNDERSIDE
+// (the upright branches' max), 3 the lip's COVERAGE of the texel (0..16), metres about the
+// waterline -- read from the finest ring that holds the point, bilinear. THE EDGE WEIGHT: a lip
+// band is read as the face plus the lip's DEPARTURE from the face at each tap, weighted by that
+// tap's coverage, so the lip tapers onto the face across a texel of the tube's edge in height and
+// in slope alike (the per-tap present/absent read stepped at the texel and spiked the slope --
+// Mark's crop, 2026-10-18). `cover` is the bilinear coverage (0 = no lip here); an absent face is
+// `fallback` (the label's own height). The slope is the bilinear's own (metres per metre).
+bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out float2 slope,
+                 out float cover) {
+    h = fallback;
+    slope = 0.0f;
+    cover = 0.0f;
+    if (gColU.y == 0u || sLvlBank != 0) return false;
+    [unroll] for (uint m = 0; m < 6; ++m) {
+        const float texel = gBankA.x * (float)(1u << m);
+        const float2 org = BankRingOrg(m);
+        const float2 local = (worldXZ - org) / texel;
+        if (any(local < 2.0f) || any(local > 510.0f)) continue;
+        const float2 tf = local - 0.5f;
+        const int2 t0 = int2(floor(tf));
+        const float2 fr = tf - float2(t0);
+        const int xoff = (int)m * 512;
+        float f[4], d[4], w[4];
+        [unroll] for (int k = 0; k < 4; ++k) {
+            const int2 tc = t0 + int2(k & 1, k >> 1);
+            const uint rawF = gTexU[gColU.x].Load(int3(xoff + tc.x, tc.y, 0)).x;
+            f[k] = (rawF != 0u && rawF != 0xFFFFFFFFu) ? float(rawF) / gColA.x - gColA.y : fallback;
+            d[k] = 0.0f;
+            w[k] = 0.0f;
+            if (band != 0u) {
+                w[k] = saturate(float(gTexU[gColU.x].Load(int3(xoff + tc.x, 1536 + tc.y, 0)).x) * (1.0f / 16.0f));
+                const uint rawL = gTexU[gColU.x].Load(int3(xoff + tc.x, int(band) * 512 + tc.y, 0)).x;
+                if (w[k] > 0.0f && rawL != 0u && rawL != 0xFFFFFFFFu) {
+                    d[k] = w[k] * (float(rawL) / gColA.x - gColA.y - f[k]);
+                } else {
+                    w[k] = 0.0f;
+                }
+            }
+        }
+        const float f0 = lerp(f[0], f[1], fr.x), f1 = lerp(f[2], f[3], fr.x);
+        const float d0 = lerp(d[0], d[1], fr.x), d1 = lerp(d[2], d[3], fr.x);
+        const float w0 = lerp(w[0], w[1], fr.x), w1 = lerp(w[2], w[3], fr.x);
+        h = lerp(f0, f1, fr.y) + lerp(d0, d1, fr.y);
+        cover = lerp(w0, w1, fr.y);
+        slope = float2(lerp((f[1] - f[0]) + (d[1] - d[0]), (f[3] - f[2]) + (d[3] - d[2]), fr.y),
+                       (f1 - f0) + (d1 - d0)) / texel;
+        return true;
+    }
+    return false;
+}
+// Does a tube stand within a texel of this point: the coverage band at the nearest texel of the
+// finest ring holding it (one load; MsLip's early-out, before any vertex is made).
+bool ColumnTubeNear(float2 worldXZ) {
+    if (gColU.y == 0u || sLvlBank != 0) return false;
+    [unroll] for (uint m = 0; m < 6; ++m) {
+        const float texel = gBankA.x * (float)(1u << m);
+        const float2 local = (worldXZ - BankRingOrg(m)) / texel;
+        if (any(local < 2.0f) || any(local > 510.0f)) continue;
+        const int2 tc = int2(floor(local));
+        return gTexU[gColU.x].Load(int3((int)m * 512 + tc.x, 1536 + tc.y, 0)).x != 0u;
+    }
+    return false;
 }
 
 // ---- THE TANGENT BIVECTOR ------------------------------------------------------------------
@@ -871,9 +943,16 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // another level's bed has only its direction -- for the Mercator height. PHASE A2: the colour's
 // windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
 // pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
+// lipSlope / lipOv / lipDep / lipThick: a LIP fragment (GlobeMesh.hlsl MsLip, the column plane's
+// sheets) brings its own slope, the sign of its outward normal (+1 the lip's top, -1 its underside,
+// 0 a fragment of the face as ever), its height about the waterline and the sheet's thickness; the
+// bank's normal and level stand down for it. The rays, the glint and the mirror are the one law
+// either way; the BODY is the thin sheet's (below): what the refracted ray sees through a sheet
+// that thick -- the face under the tube, or the sky behind the lip -- and the sheet's own scatter.
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
-                       float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl) {
+                       float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
+                       float2 lipSlope, float lipOv, float lipDep, float lipThick) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -995,6 +1074,15 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             if (slW > 1.1f) { sx *= 1.1f / slW; sz *= 1.1f / slW; }
             nPix = normalize(upT - east * sx - north * sz);
         }
+    }
+    // A LIP fragment: the sheet's own normal (the underside's points down, into the tube's air)
+    // and its own height; the sub-ring bands above are the face's and do not ride the lip.
+    if (lipOv != 0.0f) {
+        const float3 nL = normalize(upT - east * lipSlope.x - north * lipSlope.y) * lipOv;
+        nSmooth = nL;
+        nPix = nL;
+        lvlW = gWavesB.w + lipDep;
+        dispW = 0.0f;
     }
 
     // ---- THE SPLIT. Schlick on the TRUE per-pixel normal: from straight above F ~ 0.02 and
@@ -1131,7 +1219,26 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // and the mirror itself is part sky, part the very water it stands on.
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
     const half3 sunHere = half3(SunAt(upT, hp));
-    const half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
+    half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
+    // THE THIN SHEET (a lip fragment). The body above is the water under this point -- the face
+    // beneath the tube, lit as ever. A lip is a sheet lipThick metres thick with air on both sides:
+    // the refracted ray crosses it on the path lipThick / |t . n| and comes out the other side, where
+    // it sees the face below (a ray going down) or the sky behind (a ray going up) -- one weight,
+    // continuous through the horizontal. What the sheet keeps of the ray scatters in its own colour,
+    // lit by the sky and by the sun it transmits (the backlit green of a real lip: the sun on the far
+    // side, through the sheet). With no thickness the sheet is transparent and the body stands.
+    if (lipOv != 0.0f) {
+        const float path = lipThick / max(abs(dot(tDir, nPix)), 0.25f);
+        const half3 TwS = exp(-half3(wq.kd * path));
+        const float tUp = dot(tDir, upT);
+        const float3 tSky = normalize(tDir + max(0.02f - tUp, 0.0f) * upT);
+        const half wSky = half(saturate(0.5f + 2.0f * tUp));
+        const half3 behind = lerp(bodyLit, half3(SkyRadianceDirDiscless(tSky, upT)), wSky);
+        const half sunThrough = half(saturate(dot(GA_SUN_DIR, -nPix)) * sunSph);
+        const half3 sheetLit = cScatter * (half3(SkyAmbient(nPix, upT, hp)) +
+                                           (half(ndl * 1.15f) + sunThrough * half(0.8f)) * sunHere);
+        bodyLit = lerp(sheetLit, behind, TwS);
+    }
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1370,10 +1477,14 @@ float4 PsSurface(VsOut i, out float land) {
     const float cosE = sqrt(max(1.0f - sinE * sinE, 1e-6f));
     const float dryBand = max(0.4f, footPxW / cosE);
     float editLandPx = 0.0f, wet = 0.0f;
+    // A LIP fragment (GlobeMesh.hlsl MsLip: the column plane's two extra sheets, mid bit 30; bit 29
+    // the underside) is water whole: the lip is drawn only where the column found one, over water.
+    const bool lipFrag = (i.mid & 0x40000000u) != 0u;
     const float landness =
-        (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
-                                                   dryBand, editLandPx, wet);
+        lipFrag ? 0.0f
+                : (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
+                                      : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
+                                                             dryBand, editLandPx, wet);
     land = landness;
     float3 n = upT;
     float3 alb;
@@ -1699,8 +1810,26 @@ float4 PsSurface(VsOut i, out float land) {
     // of a shoreline pixel is untouched by the choice.
     float3 wcol = i.wcol;
     if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
+        // A lip fragment's own sheet: its slope and height from the column plane, the sign of its
+        // normal by which sheet it is.
+        float2 lipSlope = 0.0f;
+        float lipOv = 0.0f, lipDep = 0.0f, lipThick = 0.0f;
+        if (lipFrag) {
+            // bit 29 = sheet 1 = the lip's top (its normal up); sheet 2 = its underside (down).
+            // The sheet's THICKNESS here (top less underside) is what the thin-sheet radiometry
+            // looks through.
+            const uint band = (i.mid & 0x20000000u) != 0u ? 1u : 2u;
+            float cv, hTop, hBot;
+            float2 sTop, sBot;
+            ColumnFetch(wxzW, 1u, 0.0f, hTop, sTop, cv);
+            ColumnFetch(wxzW, 2u, 0.0f, hBot, sBot, cv);
+            lipDep = (band == 1u) ? hTop : hBot;
+            lipSlope = (band == 1u) ? sTop : sBot;
+            lipThick = max(hTop - hBot, 0.0f);
+            lipOv = (band == 1u) ? 1.0f : -1.0f;
+        }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipSlope, lipOv, lipDep, lipThick);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 

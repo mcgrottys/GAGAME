@@ -109,6 +109,13 @@ public:
         m_estGeo[3] = latSpan;
     }
     // M7: per-frame wave-bank binding (SRVs + ring origins).
+    // THE COLUMN PLANE (the rolling-wave work, 2026-10-18): the first eye's bank's Eulerian
+    // columns, read by GlobeMesh.hlsl MsLip and Globe.hlsl PsSurface. 0xFFFFFFFF = none.
+    void SetWaterColumn(uint32_t srv, float scale, float bias) {
+        m_colSrv = srv;
+        m_colScale = scale;
+        m_colBias = bias;
+    }
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
                       const float bandK[3], const float bandRms[3], const float bandFold[3],
@@ -678,6 +685,10 @@ private:
         float bankChart[16];
         float bankBChart[16];
         uint32_t keepU[4];    // THE KEPT FRAME (Keep): classes' UAV slot, kept frame, keep on, spare
+        // THE COLUMN PLANE (gColU / gColA; WaterBankLayer::ColumnSrv): its SRV, on; the fixed
+        // point's scale and bias. Appended at the END on both sides (priors 22).
+        uint32_t colU[4];
+        float colA[4];
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -867,6 +878,8 @@ private:
     const SurfaceFrame* m_surface = nullptr;
     double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    uint32_t m_colSrv = 0xFFFFFFFFu;   // the column plane (SetWaterColumn)
+    float m_colScale = 1000.0f, m_colBias = 64.0f;
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};
     float m_bankK[3] = {0.03f, 0.15f, 1.0f};
@@ -946,6 +959,7 @@ private:
     bool m_msPath = false;
     uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk
     hal::Pso m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
+    hal::Pso m_msPsoLip;   // THE LIP SHEETS (GlobeMesh.hlsl MsLip): the column plane's tubes, two-sided
     hal::Pso m_psoWire, m_psoMeshlet;
     // The residency lens (shaders/ResidencyLens.hlsl): built only when debugLens asks for it.
     // (14 was the address lens, --lens addr: deleted with the Mercator pages, B3.)

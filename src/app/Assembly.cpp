@@ -850,6 +850,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         A->bankMaskClose.jobs.push_back(waterBank->MaskJobsOf());      // the coast's water makes a ring tile wet
         waterBank->flatBed = S.water.bank.flatBed;
         waterBank->flatBedNavd = S.water.bank.flatBedNavd;
+        waterBank->column = S.water.bank.column;   // the first eye's rings carry the column plane
         if (S.water.bank.flatBed) {
             Log("[bed] --flat-bed %.1f m NAVD: the bank fills against a CONSTANT floor. Diff "
                 "this run's wireframe against a normal one -- whatever differs is what "
@@ -876,6 +877,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             A->bankMaskClose.jobs.push_back(waterBankB->MaskJobsOf());
             waterBankB->flatBed = S.water.bank.flatBed;
             waterBankB->flatBedNavd = S.water.bank.flatBedNavd;
+            waterBankB->column = false;   // set B's sea is read through the gauge; no lip sheets there yet
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             waterBankB->enabled = false;   // until the camera has a level above it
             renderer.AddLayer(std::move(wbB));
@@ -893,6 +895,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             A->bankMaskClose.jobs.push_back(waterBankEye->MaskJobsOf());
             waterBankEye->flatBed = S.water.bank.flatBed;
             waterBankEye->flatBedNavd = S.water.bank.flatBedNavd;
+            waterBankEye->column = false;   // the minimap's rings draw no lip sheets
             waterBankEye->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             waterBankEye->enabled = false;   // until that eye stands low enough to read it
             renderer.AddLayer(std::move(wbE));

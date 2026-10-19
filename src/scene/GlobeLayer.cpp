@@ -827,6 +827,14 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
         if (k.ps.Valid()) m_msPsoKeep = hal::BuildMesh(gpu, k, "globe.mesh.keep");
         if (!m_msPsoKeep) Log("[globe] the kept frame's mesh pipeline failed to build: frames are drawn whole");
     }
+    {   // THE LIP SHEETS (GlobeMesh.hlsl MsLip): the column plane's two extra sheets over the
+        // same records, PsMain's shading, TWO-SIDED -- a tube is seen from inside.
+        hal::MeshPipelineDesc l = d;
+        l.ms = sc.Compile(path, L"MsLip", L"ms_6_5");
+        l.cull = D3D12_CULL_MODE_NONE;
+        if (l.ms.Valid()) m_msPsoLip = hal::BuildMesh(gpu, l, "globe.mesh.lip");
+        if (!m_msPsoLip) Log("[globe] the lip sheets' mesh pipeline failed to build: crests stay single-valued");
+    }
     // M9b: the same pipeline in WIREFRAME. Identical shaders and identical displacement --
     // only the raster fill differs -- so what the lines show is exactly the geometry the
     // solid pass rasterizes, meshlet seams and all. A failure here is not fatal: the solid
@@ -2475,6 +2483,13 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.bankU[1] = m_bankSrv[1];
     m_cb.bankU[2] = (m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
     m_cb.bankU[3] = 512u;
+    // THE COLUMN PLANE (SetWaterColumn): on with the bank it belongs to.
+    m_cb.colU[0] = m_colSrv;
+    m_cb.colU[1] = (m_colSrv != 0xFFFFFFFFu && m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
+    m_cb.colU[2] = m_cb.colU[3] = 0u;
+    m_cb.colA[0] = m_colScale;
+    m_cb.colA[1] = m_colBias;
+    m_cb.colA[2] = m_cb.colA[3] = 0.0f;
     m_cb.bankA[0] = m_bankBase;
     m_cb.bankA[1] = 6.0f;
     m_cb.bankA[2] = static_cast<float>(debugLens);
@@ -2859,6 +2874,20 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
         const UINT n = static_cast<UINT>(meshlets.size());
+        // THE LIP SHEETS (GlobeMesh.hlsl MsLip), after the surface: the same records once more
+        // through the two-sided pipeline, drawing the column plane's tubes into the frame. Only
+        // the shipped look (no lens, no wire, no probe), and only where the column is on.
+        const bool lipOn = m_msPsoLip.Get() && cbData.colU[1] != 0u && surfaceDebug == 0 && !cacheLens &&
+                           !ResidencyLensOn() && !DebugViewOn() && !overdrawProbe;
+        auto lipPass = [&]() {
+            if (!lipOn) return;
+            GpuScope lscope(ctx.prof, ctx.cmd->Native(), "globe.lip");
+            PixMarker(ctx.cmd->Native(), "globe.lip (the column plane's lip sheets, two-sided)");
+            ctx.cmd->Pipeline(m_msPsoLip.Get());
+            ctx.cmd->GraphicsConstantsAt(1, cbVa);
+            ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+            ctx.cmd->Pipeline(msSel);
+        };
         if (overdrawProbe && ctx.viewIndex == 0) {
             // --gate-overdraw: the same records, one world a dispatch, each measured.
             ID3D12Device* dev = ctx.gpu->Device();
@@ -2918,6 +2947,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                                   n <= kClassMax;
             if (!keepable) {
                 ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                lipPass();
             } else {
                 Keep& K = m_keep[ctx.viewIndex];
                 EnsureKeep(*ctx.gpu, K, ctx.frameW, ctx.frameH);
@@ -2931,6 +2961,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                 K.lastKey = key;
                 if (!kept && !fill) {
                     ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                    lipPass();
                     ++keepPlain;
                 } else {
                 GlobeCbData q = cbData;
@@ -2982,6 +3013,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                     ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
                 }
                 ctx.cmd->Targets(ctx.colorRtv, &ctx.depthDsv);
+                lipPass();   // into the frame alone, over the surface just drawn
                 if (!kept) {
                     // THE CLASSES from the pixels (GlobeClass.hlsl), and the frame's depth beside the cache.
                     GpuScope cscope(ctx.prof, cl, "globe.classify");
@@ -3257,6 +3289,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     memcpy(viewHole0, m_viewHole, sizeof(viewHole0));
     const int viewHoleN0 = m_viewHoleCount;
     uint32_t bankSrv0[3] = {m_bankSrv[0], m_bankSrv[1], m_bankSrv[2]};
+    const uint32_t colSrv0 = m_colSrv;
     float bankOrg0[kBankRows];
     for (int i = 0; i < kBankRows; ++i) bankOrg0[i] = m_bankOrg[i];
     const WaveChart::Frame chart0 = m_chartFrame;
@@ -3275,6 +3308,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
         m_bankSrv[0] = rings->disp;
         m_bankSrv[1] = rings->param;
         m_bankSrv[2] = rings->detail;
+        m_colSrv = 0xFFFFFFFFu;   // the column plane is the first eye's rings'; another eye's rings have none
         for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = rings->org[i];
         m_chartFrame = rings->chart;
         m_chartOn = rings->chartOn;
@@ -3325,6 +3359,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     memcpy(m_viewHole, viewHole0, sizeof(viewHole0));
     m_viewHoleCount = viewHoleN0;
     for (int i = 0; i < 3; ++i) m_bankSrv[i] = bankSrv0[i];
+    m_colSrv = colSrv0;
     for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = bankOrg0[i];
     m_chartFrame = chart0;
     m_chartOn = chartOn0;

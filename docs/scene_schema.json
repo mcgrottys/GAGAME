@@ -162,7 +162,8 @@
     ] },
     { "type": "water.bank", "keys": [
       { "key": "flatBed", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "replace the bed with a flat floor (--flat-bed)" },
-      { "key": "flatBedNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m NAVD88", "default": -30, "reload": "restart", "doc": "the floor's height" }
+      { "key": "flatBedNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m NAVD88", "default": -30, "reload": "restart", "doc": "the floor's height" },
+      { "key": "column", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the column plane: the sheet's labels scattered into Eulerian columns, so an overturning crest draws its lip (WaterBank.hlsl CsBankScatter, GlobeMesh.hlsl MsLip)" }
     ] },
     { "type": "water.wavefield", "keys": [
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "the solved wave field, blended inside its feathered window" },
