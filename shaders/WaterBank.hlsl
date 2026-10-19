@@ -1257,6 +1257,13 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
         // the label grid's own orientation: (00, 10, 01) turns positive in (x, z); a flipped
         // triangle is the fold
         const bool inverted = area < 0.0f;
+        // THE WITNESS'S GRAIN (2026-10-19, Mark's horizon of cones at Mavericks): a fold is a
+        // property of the sheet at the finest grain, and a cell of 2.4 m or more cannot witness
+        // one -- a 17 s swell's lateral excursion is tens of metres, and a coarse cell straddling
+        // a crest inverts by aliasing, not by overturning (measured: 1,198 / 345 / 82 lip texels
+        // on rings 1-3, drawn as tents on the horizon). Ring 0 alone writes the inverted branch;
+        // the coarse rings keep the face.
+        if (inverted && ringX0 != 0u) continue;
         const float iarea = 1.0f / area;
         // THE TWO LEVELS: the ring's own texels, and -- on ring 0, where the finer level stands --
         // the same triangle over the fine texels (1/w of the ring's), into the fine atlas; its

@@ -510,15 +510,12 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
             lo[k] = okF ? (org + (float2(tc) + 0.5f) * texel + ColOff(rawF) - worldXZ) : float2(0.0f, 0.0f);
             d[k] = 0.0f;
             w[k] = 0.0f;
-            if (band != 0u) {
-                w[k] = saturate(float(gTexU[gColU.x].Load(int3(xoff + tc.x, 1536 + tc.y, 0)).x) * (1.0f / 16.0f));
-                const uint rawL = gTexU[gColU.x].Load(int3(xoff + tc.x, int(band) * 512 + tc.y, 0)).x;
-                if (w[k] > 0.0f && ColPresent(rawL)) {
-                    d[k] = w[k] * (ColH(rawL) - f[k]);
-                } else {
-                    w[k] = 0.0f;
-                }
-            }
+            // THE LIP IS THE FINE LEVEL'S (2026-10-19, Mark's crop of a small roll drawn as 2 m
+            // slabs): the ring's 1.2 m taps smeared a lip a few decimetres wide into a 2.4 m
+            // bilinear blob, and the dense grid drew the blob. The lip bands are read below from
+            // the finer level alone; where its tile is not yet resident (the flags' two or three
+            // frames) there is no lip, which is a wait, not a wrong picture.
+            // (d[k], w[k] stay zero here.)
         }
         const float f0 = lerp(f[0], f[1], fr.x), f1 = lerp(f[2], f[3], fr.x);
         const float d0 = lerp(d[0], d[1], fr.x), d1 = lerp(d[2], d[3], fr.x);
@@ -557,6 +554,8 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
                     const float wF0 = lerp(wF[0], wF[1], frF.x), wF1 = lerp(wF[2], wF[3], frF.x);
                     h = lerp(f0, f1, fr.y) + lerp(dF0, dF1, frF.y);
                     cover = lerp(wF0, wF1, frF.y);
+                    // the slope is the fine lip's own where the lip stands (its departure's
+                    // gradient over the fine texel), the face's where it tapers to nothing
                     slope = float2(lerp(f[1] - f[0], f[3] - f[2], fr.y) / texel + lerp(dF[1] - dF[0], dF[3] - dF[2], frF.y) / texelF,
                                    (f1 - f0) / texel + (dF1 - dF0) / texelF);
                 }
@@ -1003,7 +1002,7 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
                        float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
-                       float2 lipSlope, float lipOv, float lipDep, float lipThick) {
+                       float2 lipSlope, float lipOv, float lipDep, float lipThick, float lipCov) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -1129,9 +1128,13 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // A LIP fragment: the sheet's own normal (the underside's points down, into the tube's air)
     // and its own height; the sub-ring bands above are the face's and do not ride the lip.
     if (lipOv != 0.0f) {
-        const float3 nL = normalize(upT - east * lipSlope.x - north * lipSlope.y) * lipOv;
-        nSmooth = nL;
-        nPix = nL;
+        // THE EDGE (2026-10-19): where the lip tapers to nothing (its coverage falls) its normal
+        // returns to the face's, so a thin roll's rim is water, not a slab facing the sky and
+        // mirroring it white (Mark's crop); the underside keeps its sign.
+        const float3 nL = normalize(upT - east * lipSlope.x - north * lipSlope.y);
+        const float3 nBlend = normalize(lerp(nPix, nL, saturate(lipCov))) * lipOv;
+        nSmooth = nBlend;
+        nPix = nBlend;
         lvlW = gWavesB.w + lipDep;
         dispW = 0.0f;
     }
@@ -1279,7 +1282,9 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // lit by the sky and by the sun it transmits (the backlit green of a real lip: the sun on the far
     // side, through the sheet). With no thickness the sheet is transparent and the body stands.
     if (lipOv != 0.0f) {
-        const float path = lipThick / max(abs(dot(tDir, nPix)), 0.25f);
+        // the water in the ray's way: the sheet's thickness by the share of the texel the lip
+        // covers (a rim a tenth covered is a tenth as much water)
+        const float path = lipThick * saturate(lipCov) / max(abs(dot(tDir, nPix)), 0.25f);
         const half3 TwS = exp(-half3(wq.kd * path));
         const float tUp = dot(tDir, upT);
         const float3 tSky = normalize(tDir + max(0.02f - tUp, 0.0f) * upT);
@@ -1864,23 +1869,24 @@ float4 PsSurface(VsOut i, out float land) {
         // A lip fragment's own sheet: its slope and height from the column plane, the sign of its
         // normal by which sheet it is.
         float2 lipSlope = 0.0f;
-        float lipOv = 0.0f, lipDep = 0.0f, lipThick = 0.0f;
+        float lipOv = 0.0f, lipDep = 0.0f, lipThick = 0.0f, lipCov = 0.0f;
         if (lipFrag) {
             // bit 29 = sheet 1 = the lip's top (its normal up); sheet 2 = its underside (down).
             // The sheet's THICKNESS here (top less underside) is what the thin-sheet radiometry
             // looks through.
             const uint band = (i.mid & 0x20000000u) != 0u ? 1u : 2u;
-            float cv, hTop, hBot;
+            float cvT, cvB, hTop, hBot;
             float2 sTop, sBot, lo;
-            ColumnFetch(wxzW, 1u, 0.0f, hTop, sTop, cv, lo);
-            ColumnFetch(wxzW, 2u, 0.0f, hBot, sBot, cv, lo);
+            ColumnFetch(wxzW, 1u, 0.0f, hTop, sTop, cvT, lo);
+            ColumnFetch(wxzW, 2u, 0.0f, hBot, sBot, cvB, lo);
             lipDep = (band == 1u) ? hTop : hBot;
             lipSlope = (band == 1u) ? sTop : sBot;
             lipThick = max(hTop - hBot, 0.0f);
             lipOv = (band == 1u) ? 1.0f : -1.0f;
+            lipCov = (band == 1u) ? cvT : cvB;
         }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipSlope, lipOv, lipDep, lipThick);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipSlope, lipOv, lipDep, lipThick, lipCov);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
