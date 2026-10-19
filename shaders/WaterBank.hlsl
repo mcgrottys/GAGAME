@@ -800,6 +800,20 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         sig2 += (1.0f - w) * amp * amp *
                 (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f));
     }
+    // THE LATERAL BOUND (2026-10-19, the chips along the jetty): Airy's orbit is the depth's,
+    // coth(kh) times the vertical, and in half a metre of water that is six times a half-metre
+    // wave -- the sheet's particles cross on every crest and the column reads a tube at every
+    // rock. Linear theory has no such water: a particle thrown past a quarter wavelength is a
+    // bore (the crest law's own bound, section 7, k A_h <= pi/2), so the cascades' summed lateral
+    // term is held to it here on the sea's energy wavenumber IN THIS DEPTH and its raw lateral
+    // amplitude (the envelope over the limiter, times coth). One min; in deep water it is 1.
+    // TreeWater::Finish applies the same factor to its lateral gains.
+    {
+        const float hB = max(depth, 0.3f);
+        const float kSh = ShoaledKh(kEff, hB) / hB;
+        const float aH = 1.4142136f * envRmsRaw * OrbitCoth(kEff, depth) / max(brk, 1e-3f);
+        d.xz *= min(1.0f, 1.5707963f / max(kSh * aH, 1e-4f));
+    }
 
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield): per-cell a, k, and the
     // integrated phase spinor, advanced by the rotor e^{-i sigma t} and folded by THIS
@@ -807,6 +821,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // slope variance (0.5 (a k)^2) to sigma^2 instead of aliasing. eta = sum a cos(phi -
     // sigma t): the reference's surface, wearing our live gains through the window blend.
     float rmsW = 0.0f, excW = 0.0f;
+    // THE SPRAY's spawn quantities, set in the solved block, spent after the shore stop
+    float sprayExcess = 0.0f, sprayK = 0.0f;
+    float2 sprayDir = 0.0f;
     if (wWin > 0.001f) {
         float3 dW = 0.0f;
         float sigW = 0.0f;
@@ -818,8 +835,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         bool envPrev;
         const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
         const float lipQ = max(env.y * 2.5f, 1.0f);
-        float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f, sumVelY = 0.0f;
-        float2 sumADir = 0.0f, sumVel = 0.0f;
+        float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f;
+        float2 sumADir = 0.0f;
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
             bool prev;
             const float4 t4 = WavePageSample(wuv, s, prev);
@@ -924,11 +941,6 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             sumAK += wFc * aW * kW;
             sumACoth += wFc * aW * cothW;
             sumADir += wFc * aW * dir2;
-            // the crest water's velocity (the spray's launch): u = sigma a cos(theta) d^ along the
-            // travel, w = sigma a sin(theta) up, sigma from the finite-depth dispersion at this k
-            const float sigW = sqrt(9.81f * kW * tanh(kW * max(depth, 0.3f)));
-            sumVel += wFc * aW * sigW * cT * dir2;
-            sumVelY += wFc * aW * sigW * sT;
         }
         // THE CREST THROWS FORWARD, THE TROUGH STAYS (the crest law, 2026-10-19). The raw-over-
         // limited ratio lipQ applied over the whole orbit sheared every crest in the throat
@@ -952,47 +964,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float aH = gWaveB.z * aEnv * cothBar;   // the sea's horizontal amplitude
             const float q1 = min(lipQ - 1.0f, max(1.5707963f / max(kBar * aH, 1e-4f) - 1.0f, 0.0f));
             dW.xz = dW.xz * (1.0f + q1 * wCr) + q1 * wCr * aH * dBar;
-            // THE SPRAY (Mark, 2026-10-19): what the bound took is water the sheet cannot carry --
-            // (lipQ - 1 - q1) w A_h metres of throw the crest wanted beyond a quarter wavelength --
-            // and it leaves the sheet as droplets: at a crest texel (w > 3/4, wet), on ring 0, a
-            // droplet a frame with probability gain x that excess x dt, from the crest particle's
-            // position. ITS LAUNCH is the breaking criterion itself: a wave breaks when the crest's
-            // water overtakes the crest, u = c, so the water that leaves the lip moves at the PHASE
-            // SPEED of the sea at this depth, c = sqrt(g tanh(k h) / k) on the summed k, along the
-            // travel (Peregrine 1983: the plunging jet's tip at 1.0-1.5 c), and the jet leaves the
-            // lip upward at about a third of that (the lip's slope at the throw's bound, pi/2 over
-            // the quarter wavelength: tan ~ 1/3). The orbital velocity (a sigma, a metre a second)
-            // was the first cut and gave a tenth-of-a-second flight: the crest's, not the jet's.
-            const float excessThrow = (lipQ - 1.0f - q1) * wCr * aH;
-            if (gSprayU.w != 0u && t.dstX < 512u && excessThrow > 0.0f && wCr > 0.75f && dry > 0.5f && gSprayA.x > 0.0f) {
-                const float lambda = gSprayA.w * excessThrow * gSprayA.x;
-                const uint2 tex = uint2(t.dstX + id.x, t.dstY + id.y);
-                if (SprayHash(tex, gOrg.w) < lambda) {
-                    uint n;
-                    InterlockedAdd(gUu[gSprayU.y][uint2(2u, 0u)], 1u, n);   // the running total
-                    InterlockedAdd(gUu[gSprayU.y][uint2(0u, 0u)], 1u);      // spawned this frame
-                    const uint slot = (n % gSprayU.z) * 2u;
-                    // the crest particle as the sheet draws it (d is scaled by dry and the
-                    // exaggeration below, all three components), in the chart
-                    const float2 pos = xz + dW.xz * (dry * gPatch.w);
-                    const float hgt = lvl + dW.y * (dry * gPatch.w);
-                    const float cPh = sqrt(9.81f * tanh(kBar * max(depth, 0.3f)) / max(kBar, 1e-4f));
-                    // the jet is not one stream: a parcel leaves anywhere in the texel, at 0.7-1.3
-                    // of the phase speed, yawed up to 20 degrees off the travel (without this the
-                    // one texel that spawns each frame drew its parcels as a string of beads on
-                    // one parabola -- measured in the first still)
-                    const float j1 = SprayHash(tex + uint2(7u, 11u), gOrg.w + 1.0f);
-                    const float j2 = SprayHash(tex + uint2(13u, 3u), gOrg.w + 2.0f);
-                    const float j3 = SprayHash(tex + uint2(5u, 17u), gOrg.w + 3.0f);
-                    const float yaw = (j2 - 0.5f) * 0.7f;
-                    const float2 dJ = float2(dBar.x * cos(yaw) - dBar.y * sin(yaw), dBar.x * sin(yaw) + dBar.y * cos(yaw));
-                    const float sp = cPh * (0.7f + 0.6f * j3);
-                    const float3 vel = float3(sp * dJ.x, (0.25f + 0.3f * j1) * sp, sp * dJ.y);
-                    const float2 posJ = pos + (float2(j1, j3) - 0.5f) * t.texelM;
-                    gUb[gSprayU.x][slot] = float4(posJ.x, hgt, posJ.y, 0.0f);
-                    gUb[gSprayU.x][slot + 1u] = float4(vel, 0.25f);
-                }
-            }
+            // THE SPRAY's quantities (the spawn stands after the shore stop below): what the bound
+            // took, (lipQ - 1 - q1) w A_h metres of throw the crest wanted past a quarter
+            // wavelength, at a crest texel (w > 3/4); the summed k and travel for the launch.
+            sprayExcess = (wCr > 0.75f) ? (lipQ - 1.0f - q1) * wCr * aH : 0.0f;
+            sprayK = kBar;
+            sprayDir = dBar;
         }
         rmsW = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;   // the solver's envelope, sheltered like its comps
         excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
@@ -1018,6 +995,64 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         steepFoam = max(steepFoam, smoothstep(0.352f, 0.528f, wakeAk));
     }
     d *= dry * gPatch.w;
+
+    // THE SHORE STOP (2026-10-19, Mark's jetty): the lateral term carried wet labels onto the
+    // riprap -- the orbit and the crest's throw never asked whether the water the particle moves
+    // through is water. The dry weight above is the texel's own; this one is the MEAN DRYNESS
+    // ALONG THE THROW, the detail plane's dry channel (last frame's or this frame's: the bed is
+    // quasi-static; a NULL tile reads 0 = land) sampled at eight points from half a throw to four
+    // throws out, and the whole lateral term rides it. In deep water it is 1 and nothing changes;
+    // toward a wall the term fades over four throws (a standing wave's excursion fades toward
+    // the wall it reflects from), never over one texel. The first cut read the landing point
+    // alone, which stopped the far particle dead a texel before the near one -- the sheet
+    // compressed into the last wet texel and FOLDED there, a row of false tubes along the
+    // jetty (measured: the chips in tube_high). Eight samples a throw apart by half: the mean's
+    // steepest slope is an eighth of a texel's, so the stopped sheet folds only for a throw past
+    // 9.6 m, which the bound forbids. TreeWater::Finish is its twin (the bed at the same points).
+    float dryL = 1.0f;
+    {
+        const uint ringX0 = (t.dstX / 512u) * 512u;
+        const float2 ringOrg = t.orgXZ - float2(float(t.dstX - ringX0), float(t.dstY)) * t.texelM;
+        float acc = 0.0f;
+        [unroll] for (uint i = 1u; i <= 8u; ++i) {
+            const float2 q = xz + d.xz * (0.5f * float(i));
+            const int2 l = clamp(int2(floor((q - ringOrg) / t.texelM)), int2(0, 0), int2(511, 511));
+            acc += gU[gSlotsB.w][uint2(ringX0 + uint(l.x), uint(l.y))].y;
+        }
+        dryL = acc * 0.125f;
+        d.xz *= dryL;
+    }
+    // THE SPRAY (Mark, 2026-10-19; WaterBankLayer.h): the throw the bound took leaves the sheet as
+    // parcels of spray -- at a crest texel of ring 0 whose particle lands on water, a parcel a
+    // frame with probability gain x excess x dt, from the drawn particle's position. ITS LAUNCH is
+    // the breaking criterion itself: a wave breaks when the crest's water overtakes the crest,
+    // u = c, so the water that leaves the lip moves at the PHASE SPEED of the sea at this depth,
+    // c = sqrt(g tanh(k h) / k) on the summed k, along the travel (Peregrine 1983: the plunging
+    // jet's tip at 1.0-1.5 c), yawed up to 20 degrees, at 0.7-1.3 c, rising at a quarter to a half
+    // of c (without the jitter the one texel that spawns each frame drew its parcels as a string
+    // of beads on one parabola). The orbital velocity was the first cut: a metre a second, a
+    // tenth-of-a-second flight. The ring overwrites its oldest.
+    if (gSprayU.w != 0u && t.dstX < 512u && sprayExcess > 0.0f && dry > 0.5f && dryL > 0.5f && gSprayA.x > 0.0f) {
+        const float lambda = gSprayA.w * sprayExcess * gSprayA.x;
+        const uint2 tex = uint2(t.dstX + id.x, t.dstY + id.y);
+        if (SprayHash(tex, gOrg.w) < lambda) {
+            uint n;
+            InterlockedAdd(gUu[gSprayU.y][uint2(2u, 0u)], 1u, n);   // the running total
+            InterlockedAdd(gUu[gSprayU.y][uint2(0u, 0u)], 1u);      // spawned this frame
+            const uint slot = (n % gSprayU.z) * 2u;
+            const float cPh = sqrt(9.81f * tanh(sprayK * max(depth, 0.3f)) / max(sprayK, 1e-4f));
+            const float j1 = SprayHash(tex + uint2(7u, 11u), gOrg.w + 1.0f);
+            const float j2 = SprayHash(tex + uint2(13u, 3u), gOrg.w + 2.0f);
+            const float j3 = SprayHash(tex + uint2(5u, 17u), gOrg.w + 3.0f);
+            const float yaw = (j2 - 0.5f) * 0.7f;
+            const float2 dJ = float2(sprayDir.x * cos(yaw) - sprayDir.y * sin(yaw), sprayDir.x * sin(yaw) + sprayDir.y * cos(yaw));
+            const float sp = cPh * (0.7f + 0.6f * j3);
+            const float3 vel = float3(sp * dJ.x, (0.25f + 0.3f * j1) * sp, sp * dJ.y);
+            const float2 posJ = xz + d.xz + (float2(j1, j3) - 0.5f) * t.texelM;   // the drawn particle
+            gUb[gSprayU.x][slot] = float4(posJ.x, lvl + d.y, posJ.y, 0.0f);
+            gUb[gSprayU.x][slot + 1u] = float4(vel, 0.25f);
+        }
+    }
 
     // The local rms ENVELOPE: unit-sea band rms scaled by this texel's own gains. The
     // depth-excess trigger tests it (never instantaneous |eta| -- television static),
@@ -1192,17 +1227,26 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
     // has flipped is the fold (the inverted branch, counted on a 4x4 sub-grid for the coverage).
     float2 P[4], L[4];
     float H[4];
+    bool W[4];   // the label has water (the detail plane's dry weight is not exactly zero)
     [unroll] for (uint c = 0u; c < 4u; ++c) {
         const int2 q = lp + int2(int(c & 1u), int(c >> 1u));
         const float4 D = gU[dSlot][uint2(a0 + q)];
         L[c] = ringOrg + (float2(q) + 0.5f) * t.texelM;   // the label: the texel's centre
         P[c] = L[c] + D.xz;                                 // its particle
         H[c] = gU[pSlot][uint2(a0 + q)].x + D.y;
+        // THE ABSENCE LAW AT THE SHORE (2026-10-19, the chips along the jetty): a label on a NULL
+        // tile or on land has no water -- its dry weight reads exactly zero -- and it bounds no
+        // water column; a cell with such a corner was rasterized with that corner standing at the
+        // waterline, undisplaced, while its wet neighbours were thrown toward it, and the triangle
+        // between them inverted: a tube along every rock. The sheet's own mesh fades those corners
+        // by landness; the column leaves them out.
+        W[c] = gU[gSlotsB.w][uint2(a0 + q)].y > 0.0f;
     }
     const uint cSlot = gColU.x;
     // the mesh's split: (00, 10, 01) and (10, 11, 01)
     const uint3 tri[2] = {uint3(0u, 1u, 2u), uint3(1u, 3u, 2u)};
     [unroll] for (uint ti = 0u; ti < 2u; ++ti) {
+        if (!(W[tri[ti].x] && W[tri[ti].y] && W[tri[ti].z])) continue;   // no water at a corner
         const float2 A = P[tri[ti].x], B = P[tri[ti].y], C = P[tri[ti].z];
         const float hA = H[tri[ti].x], hB = H[tri[ti].y], hC = H[tri[ti].z];
         const float2 lA = L[tri[ti].x], lB = L[tri[ti].y], lC = L[tri[ti].z];
@@ -1270,6 +1314,15 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
                     if (inverted) {
                         InterlockedMax(gUu[slotL][dst + uint2(0u, bandL)], vMax);
                         InterlockedAdd(gUu[slotL][dst + uint2(0u, 3u * bandL)], hits);
+                        // THE ROOFS (2026-10-19): the coarse 4x4 sub-grid misses lips thinner than
+                        // 0.3 m, which most are (the fine level finds ten times the area), so the
+                        // coarse coverage said "no tube" where there was one -- MsLip's early-out
+                        // and ColumnFetch's taper both read it, and the roofs went missing (Mark's
+                        // black scallops). A fine hit raises the coarse texel's coverage to at
+                        // least one: the tube is KNOWN there, and the fine level supplies its shape.
+                        if (lvl == 1u) {
+                            InterlockedMax(gUu[cSlot][uint2(ringX0 + uint(qx) / gColF.w, 1536u + uint(qz) / gColF.w)], 1u);
+                        }
                     } else {
                         InterlockedMin(gUu[slotL][dst], vMin);
                         InterlockedMax(gUu[slotL][dst + uint2(0u, 2u * bandL)], vMax);

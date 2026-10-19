@@ -228,7 +228,8 @@ double TreeWater::MeanLevelAt(double wx, double wz, double simUnix) const {
 }
 
 void TreeWater::BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
-                        double gain[OceanCpu::kCascades], double* brkOut) const {
+                        double gain[OceanCpu::kCascades], double* brkOut, double* rmsRawOut,
+                        double* kEffOut) const {
     const double curX = q.currentSolved ? double(q.u) : 0.0;
     const double curZ = q.currentSolved ? double(q.v) : 0.0;
     for (int c = 0; c < OceanCpu::kCascades; ++c) {
@@ -256,6 +257,8 @@ void TreeWater::BandLaw(const WeatherSample& q, double depth, double hsScale, do
     const double brk = BreakFactor(excess);
     for (int c = 0; c < OceanCpu::kCascades; ++c) gain[c] *= brk;
     if (brkOut) *brkOut = brk;
+    if (rmsRawOut) *rmsRawOut = std::sqrt(rms2);
+    if (kEffOut) *kEffOut = kEff;
 }
 
 bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[OceanCpu::kCascades],
@@ -412,8 +415,8 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         // bands (0 and 1) yield to the solved field by its weight while the chop band stays on.
         // (The twin used to stand all three down by (1 - wWin) and apply none of the rest.)
         double gain[OceanCpu::kCascades];
-        double brk = 1.0;
-        BandLaw(q, depth, hsScale, expo, gain, &brk);
+        double brk = 1.0, rmsRaw = 0.0, kEff = 0.0;
+        BandLaw(q, depth, hsScale, expo, gain, &brk, &rmsRaw, &kEff);
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             if (c != 2) gain[c] *= 1.0 - wWin;
         }
@@ -422,8 +425,15 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         // coth(k h) on each band's k -- the lateral channels' own gain, handed to the sampler beside
         // the height's.
         double latGain[OceanCpu::kCascades];
+        // THE LATERAL BOUND (the kernel's, after its cascade loop: k A_h <= pi/2 on the sea's
+        // energy wavenumber in this depth; the drawn amplitude carries the exaggeration, as the
+        // kernel's envelope does)
+        const double hB = std::max(depth, 0.3);
+        const double kSh = ShoaledKh(kEff, hB) / hB;
+        const double aH = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / std::max(brk, 1e-3);
+        const double fB = std::min(1.0, 1.5707963267948966 / std::max(kSh * aH, 1e-4));
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
-            latGain[c] = (1.0 / std::max(brk, 1e-3)) * OrbitCoth(m_ocean->BandK(c), depth);
+            latGain[c] = fB * (1.0 / std::max(brk, 1e-3)) * OrbitCoth(m_ocean->BandK(c), depth);
         }
         // THE CASCADES ARE READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h), which is the one
         // term of this water that needs a plane at all. Up to four charts touch a place; each is
@@ -507,6 +517,23 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     double sx = k * slopeX, sz = k * slopeZ;
     s.dx = k * dispX;
     s.dz = k * dispZ;
+    // THE SHORE STOP (2026-10-19; WaterBank.hlsl, after `d *= dry * gPatch.w`, which says why):
+    // the lateral term rides the MEAN DRYNESS ALONG THE THROW -- the bed's smoothstep at eight
+    // points from half a throw to four throws out -- so a crest thrown at a wall fades over four
+    // throws instead of standing wet labels on the riprap (or folding against it). The kernel
+    // reads its detail plane's dry channel at the same points; the twin reads the bed.
+    double dryL = 1.0;
+    if (s.dx != 0.0 || s.dz != 0.0) {
+        double acc = 0.0;
+        for (int i = 1; i <= 8; ++i) {
+            double latL = 0.0, lonL = 0.0;
+            PlaceOf(wx + s.dx * (0.5 * i), wz + s.dz * (0.5 * i), latL, lonL);
+            acc += wt::Smoothstep(0.05, 0.65, q.levelNavd - BedAt(q, latL, lonL));
+        }
+        dryL = acc * 0.125;
+        s.dx *= dryL;
+        s.dz *= dryL;
+    }
     s.vx += k * orbX;
     s.vy += k * orbY;
     s.vz += k * orbZ;
@@ -528,7 +555,9 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     // CPU is the column's twin on the hull's label patch (docs/WATER_VOLUME.md section 6).
     // The mesh also fades its offset by (1 - landness) at the shore; in water that is 1.
     if (displaced) {
-        const double jXX = k * jacXX, jXZ = k * jacXZ, jZZ = k * jacZZ;
+        // the Jacobian of the stopped offset, dryL taken as a constant (its gradient is the
+        // shore's, a second-order term under the step)
+        const double jXX = k * dryL * jacXX, jXZ = k * dryL * jacXZ, jZZ = k * dryL * jacZZ;
         const double a11 = 1.0 + jXX, a12 = jXZ, a22 = 1.0 + jZZ;
         const double det = a11 * a22 - a12 * a12;
         if (det > 1e-6) {   // a folded field has no single answer here

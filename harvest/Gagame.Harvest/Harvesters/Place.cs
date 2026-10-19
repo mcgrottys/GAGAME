@@ -99,6 +99,10 @@ public sealed class Place : IHarvester
     }
 
     static List<double> LL((double lon, double lat) p) => new() { p.lon, p.lat };
+    // A step's list as this run left it (List<Dictionary<...>>, List<List<...>>) or as a reloaded
+    // record holds it (List<object?>): one shape for the manifest (2026-10-19: the blacks run threw
+    // an InvalidCastException at the tides block, the first manifest built in the step's own run).
+    static List<object?> L(object? o) => o is List<object?> l ? l : ((System.Collections.IEnumerable)o!).Cast<object?>().ToList();
 
     void SaveRecord()
     {
@@ -232,7 +236,7 @@ public sealed class Place : IHarvester
         var ofs = Step("ofs") ?? new();
         var raw = (ofs.GetValueOrDefault("raw") as List<object?>) ?? new();
         if (raw.Count == 0) throw new InvalidOperationException("run the ofs step first");
-        var paths = raw.Select(r => (string)((List<object?>)r!)[0]!).ToList();
+        var paths = raw.Select(r => (string)(L(r!))[0]!).ToList();
         var names = paths.Select(Path.GetFileName).Select(n => n!).ToList();
         var fieldDir = Path.GetDirectoryName(paths.First(p => p.Contains(".fields.")))!;
         var (field, declared) = ConvertOfs(_p.Ofs!, fieldDir, names, _p.Box);
@@ -244,8 +248,8 @@ public sealed class Place : IHarvester
 
     void StepOfsCheck(int nStations = 5)
     {
-        var raw = ((List<object?>)Step("ofs")!["raw"]!).Select(r => (string)((List<object?>)r!)[0]!).Where(p => p.Contains(".fields.n")).OrderBy(p => p, StringComparer.Ordinal).ToList();
-        var stations = ((List<object?>)Step("tides")!["stations"]!).Cast<Dictionary<string, object?>>().Take(nStations).ToList();
+        var raw = L(Step("ofs")!["raw"]!).Select(r => (string)(L(r!))[0]!).Where(p => p.Contains(".fields.n")).OrderBy(p => p, StringComparer.Ordinal).ToList();
+        var stations = L(Step("tides")!["stations"]!).Cast<Dictionary<string, object?>>().Take(nStations).ToList();
         var rows = new List<Dictionary<string, object?>>();
         foreach (var path in raw)
         {
@@ -545,7 +549,7 @@ public sealed class Place : IHarvester
         {
             var ofs = Step("ofs") ?? new();
             var rows = ((ofs.GetValueOrDefault("check") as Dictionary<string, object?>)?.GetValueOrDefault("rows") as List<object?>) ?? new();
-            var fields = ((ofs.GetValueOrDefault("raw") as List<object?>) ?? new()).Select(r => (string)((List<object?>)r!)[0]!).Where(f => f.Contains(".fields.n")).OrderBy(f => f, StringComparer.Ordinal).ToList();
+            var fields = ((ofs.GetValueOrDefault("raw") as List<object?>) ?? new()).Select(r => (string)(L(r!))[0]!).Where(f => f.Contains(".fields.n")).OrderBy(f => f, StringComparer.Ordinal).ToList();
             string? valid = null;
             for (var i = 0; i < fields.Count && i < rows.Count; i++)
                 if (Path.GetFileName(fields[i]) == name) valid = (string?)((Dictionary<string, object?>)rows[i]!)["valid_utc"];
@@ -590,7 +594,7 @@ public sealed class Place : IHarvester
             var tiles = meta.Arr("tiles").ToList();
             foreach (var f in bFiles)
             {
-                var fl = (List<object?>)f!;
+                var fl = L(f!);
                 outputs.Add(D(("path", fl[0]), ("bytes", fl[1]), ("kind", "CUDEM topobathy grid (BathyModel format)"),
                     ("source_url", tiles.Select(t => (object?)t.Str("url")).Append(Bathy.IndexUrl).ToList()),
                     ("datum", "vertical NAVD88 height, metres -- declared by the dataset metadata (ncei_nintharcsec_dem_m8483_met.xml: 'The DEMs are referenced vertically to the North American Vertical Datum of 1988. The vertical units of the DEMs are meters.'); horizontal NAD83 geographic (GeographicType 4269 in each tile's GeoKeys; index srs " +
@@ -604,12 +608,12 @@ public sealed class Place : IHarvester
         var t = Step("tides");
         if (t is not null)
         {
-            var stations = ((List<object?>)t["stations"]!).Cast<Dictionary<string, object?>>().ToList();
+            var stations = (L(t["stations"]!)).Cast<Dictionary<string, object?>>().ToList();
             var decl = stations.ToDictionary(s => (string)s["id"]!, s => TideDeclared((string)s["id"]!));
             var year = Convert.ToInt32(t["year"]);
-            foreach (var f in (List<object?>)t["files"]!)
+            foreach (var f in L(t["files"]!))
             {
-                var fl = (List<object?>)f!;
+                var fl = L(f!);
                 var pth = (string)fl[0]!;
                 var sid = Regex.Match(pth, @"official_(\w+)_\d{4}\.f32");
                 var ids = sid.Success ? new List<string> { sid.Groups[1].Value } : stations.Select(s => (string)s["id"]!).ToList();
@@ -630,10 +634,10 @@ public sealed class Place : IHarvester
             foreach (var w in written)
                 if (((string)w["url"]!).Contains("currents_predictions") && w["path"] is string wp && TryLoad(wp).Obj("current_predictions").Str("units") is string un) units.Add(un);
             var ev = cj.Arr("tidal_stations").SelectMany(s => s.Arr("events")).Select(e => e.Num("t")).ToList();
-            var ofsRaw = ((Step("ofs")?.GetValueOrDefault("raw") as List<object?>) ?? new()).Select(r => (string)((List<object?>)r!)[2]!).Where(u => u.Contains(".fields.")).ToList();
-            foreach (var f in (List<object?>)c["files"]!)
+            var ofsRaw = ((Step("ofs")?.GetValueOrDefault("raw") as List<object?>) ?? new()).Select(r => (string)(L(r!))[2]!).Where(u => u.Contains(".fields.")).ToList();
+            foreach (var f in L(c["files"]!))
             {
-                var fl = (List<object?>)f!;
+                var fl = L(f!);
                 var pth = (string)fl[0]!;
                 var isField = pth.EndsWith(".f32");
                 outputs.Add(D(("path", pth), ("bytes", fl[1]),
@@ -649,11 +653,11 @@ public sealed class Place : IHarvester
         var w_ = Step("waves");
         if (w_ is not null)
         {
-            var buoys = ((List<object?>)w_["buoys"]!).Cast<Dictionary<string, object?>>().ToList();
-            var node = (List<object?>)w_["node"]!;
-            foreach (var f in (List<object?>)w_["files"]!)
+            var buoys = (L(w_["buoys"]!)).Cast<Dictionary<string, object?>>().ToList();
+            var node = L(w_["node"]!);
+            foreach (var f in L(w_["files"]!))
             {
-                var fl = (List<object?>)f!;
+                var fl = L(f!);
                 var unitsAll = GribUnits.ToDictionary(k => k.Key, k => (object?)k.Value);
                 unitsAll["ndbc"] = "per realtime2 header row: WSPD m/s, WVHT m, DPD/APD sec, MWD degT";
                 outputs.Add(D(("path", fl[0]), ("bytes", fl[1]), ("kind", "GFS-Wave point forecast + NDBC buoys (SeaState format)"),

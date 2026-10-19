@@ -520,8 +520,15 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
 // only the tubes. Two-sided (GlobeLayer::BuildMeshPso: cull NONE): the tube is seen from inside.
 // ------------------------------------------------------------------------------------------
 groupshared bool sLipHave[162];
-groupshared uint sLipAny;
 
+// THE DENSE LIP GRID (2026-10-19): the lips at the column's finer grain. AsLip, one group a
+// record, runs the 81-probe early-out and, where a tube stands, hands MsLip the record and the
+// 2x2-cell BLOCKS (sixteen a record) any of whose nine corner probes found a tube; MsLip draws
+// one block a group as a 9x9 grid at a QUARTER of the cell -- 0.3 m at the helm, the fine
+// level's own grain -- the same 162 vertices and 256 triangles the first cut drew for the whole
+// record. A record with no tube costs its probes and nothing more; a record with one costs
+// sixteen groups at most. (The first cut's lips were ribbons on the meshlet's 1.2 m grid: the
+// sawtooth in Mark's crops, whatever the column's grain.)
 // The rings' coordinate of grid point g of a record, as SurfaceVertex forms it, without the rest.
 float2 LipProbeXZ(const MeshletRec rec, float2 g) {
     const float cx0 = float(rec.cell0 & 0xFFu);
@@ -533,10 +540,16 @@ float2 LipProbeXZ(const MeshletRec rec, float2 g) {
     return BankXZOfDir(CsToTangent(CubeDir(rec.face, rec.uv0 + g * rec.uvStepCell)));
 }
 
-[outputtopology("triangle")]
+struct LipPayload {
+    uint gid;
+    uint count;
+    uint blocks[16];
+};
+groupshared LipPayload sLipPay;
+groupshared uint sLipBlocks;
+
 [numthreads(128, 1, 1)]
-void MsLip(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
-           out vertices VsOut verts[162], out indices uint3 tris[256]) {
+void AsLip(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID) {
     const uint count = (uint)gGlo.z;
     const uint gid = gid3.y * 65535u + gid3.x;
     const MeshletRec rec = gMeshlets[min(gid, max(count, 1u) - 1u)];
@@ -545,25 +558,55 @@ void MsLip(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     LoadLevel(rec.level);
     const float cx0 = float(rec.cell0 & 0xFFu);
     const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
-    // THE EARLY-OUT: a tube within a texel of any of the 81 grid points, one load each; a record
-    // with none emits nothing and costs nothing more (the grid's spacing is the ring's texel at the
-    // helm, so a tube between two probes is a texel wide at most, and the taper hides it).
-    if (gtid == 0u) sLipAny = 0u;
+    if (gtid == 0u) sLipBlocks = 0u;
     GroupMemoryBarrierWithGroupSync();
+    // THE EARLY-OUT: a tube within a texel of any of the 81 grid points, one load each; a probe
+    // that finds one wakes the blocks it is a corner of (block b holds cells 2b..2b+1, corners
+    // 2b..2b+2: an interior probe belongs to four blocks).
     if (liveA && gtid < 81u) {
-        const float2 g = float2(cx0 + float(gtid % 9u), cy0 + float(gtid / 9u));
-        if (ColumnTubeNear(LipProbeXZ(rec, g))) InterlockedOr(sLipAny, 1u);
+        const uint px = gtid % 9u, py = gtid / 9u;
+        if (ColumnTubeNear(LipProbeXZ(rec, float2(cx0 + float(px), cy0 + float(py))))) {
+            uint mask = 0u;
+            for (uint by = 0u; by < 4u; ++by) {
+                for (uint bx = 0u; bx < 4u; ++bx) {
+                    if (px >= 2u * bx && px <= 2u * bx + 2u && py >= 2u * by && py <= 2u * by + 2u) mask |= 1u << (by * 4u + bx);
+                }
+            }
+            InterlockedOr(sLipBlocks, mask);
+        }
     }
     GroupMemoryBarrierWithGroupSync();
-    const bool live = liveA && sLipAny != 0u;
-    SetMeshOutputCounts(live ? 162u : 0u, live ? 256u : 0u);
-    if (!live) return;
+    if (gtid == 0u) {
+        sLipPay.gid = gid;
+        uint n = 0u;
+        for (uint bk = 0u; bk < 16u; ++bk) {
+            if ((sLipBlocks >> bk) & 1u) sLipPay.blocks[n++] = bk;
+        }
+        sLipPay.count = n;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    DispatchMesh(sLipPay.count, 1, 1, sLipPay);
+}
+
+[outputtopology("triangle")]
+[numthreads(128, 1, 1)]
+void MsLip(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID, in payload LipPayload pay,
+           out vertices VsOut verts[162], out indices uint3 tris[256]) {
+    const uint count = (uint)gGlo.z;
+    const uint gid = pay.gid;
+    const MeshletRec rec = gMeshlets[min(gid, max(count, 1u) - 1u)];
+    LoadLevel(rec.level);
+    const float cx0 = float(rec.cell0 & 0xFFu);
+    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
+    const uint blk = pay.blocks[min(gid3.x, 15u)];
+    const float2 b0 = float2(cx0 + 2.0f * float(blk & 3u), cy0 + 2.0f * float(blk >> 2));
+    SetMeshOutputCounts(162u, 256u);
     for (uint vi = gtid; vi < 162u; vi += 128u) {
         const uint sheet = (vi < 81u) ? 1u : 2u;
         const uint k = (vi < 81u) ? vi : vi - 81u;
         const uint x = k % 9u, y = k / 9u;
         bool hv;
-        verts[vi] = SurfaceVertexS(rec, gid, float2(cx0 + float(x), cy0 + float(y)), sheet, hv);
+        verts[vi] = SurfaceVertexS(rec, gid, b0 + float2(float(x), float(y)) * 0.25f, sheet, hv);
         sLipHave[vi] = hv;
     }
     GroupMemoryBarrierWithGroupSync();

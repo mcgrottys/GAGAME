@@ -195,8 +195,11 @@ private:
     SurfaceSample Finish(const Prep& p, double wx, double wz, double simUnix, bool displaced) const;
     // The kernel's cascade loop's gains, once for At and BandGains.
     // brkOut: the breaking factor the gains were scaled by (the crest law reads it back).
+    // ...rmsRawOut / kEffOut: the raw envelope rms (the gains before the limiter) and the sea's
+    // energy wavenumber, the lateral bound's inputs (WaterBank.hlsl, after the cascade loop).
     void BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
-                 double gain[OceanCpu::kCascades], double* brkOut = nullptr) const;
+                 double gain[OceanCpu::kCascades], double* brkOut = nullptr,
+                 double* rmsRawOut = nullptr, double* kEffOut = nullptr) const;
 
     const WeatherManager* m_wx = nullptr;
     const WaveField* m_wave = nullptr;

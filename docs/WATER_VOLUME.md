@@ -337,10 +337,17 @@ Measured (`out/surf/fine2/`, the throat at the shipped sea, `tube_high`):
 | scatter / fill | 0.24 / 3.0 ms | 0.65 / 3.46 ms |
 
 - The terraces fall six-fold in absolute height, to a centimetre.
-- **The surprise:** the fine level finds TEN TIMES the tube area. At 1.2 m the inverted triangle is
-  tested on a 4x4 sub-grid, 0.3 m apart, and a lip thinner than that lands on none of the points in
-  most of the texels it crosses; most lips in this sea are that thin. The coarse coverage band
-  under-reports tubes by an order of magnitude, which also starves MsLip's early-out of them.
+- ~~**The surprise:** the fine level finds TEN TIMES the tube area.~~ **RETRACTED 2026-10-19.** The
+  "ten times" was the DUMP's, not the sea's: `fiber_columnF.f32` is read back with a texture copy,
+  and a copy from a tile the fine atlas does not map returns whatever the pool page last held -- on
+  this GPU the face band's clear value, 0xFFFFFFFF, which the coverage column counted as a tube
+  (35,413 of the dump's 36,449 coverage texels in section 10's still were that word). Tested tile by
+  tile against the ring's face, 14 fine tiles were current and held 1,036 coverage texels: 65
+  coarse-texel equivalents, where the ring's own band held 520. The fine level finds LESS tube
+  area than the coarse 4x4 sub-grid, not more; what it adds is the lips' grain. A shader's read of
+  an unmapped tile returns zero (the renderer was never fooled); a copy's does not: the dump must
+  mask by the mapped set, or be read through a shader. The early-out's blindness in Mark's crops
+  was real, but its cause is section 10's, not this.
 - The cost is about 0.9 ms with 41 tiles resident; it scales with tube area, not with the sea.
 - The still differs from the coarse-only one on 1.6 % of pixels (the lips' rims). Two runs of the
   fine level are not bit-identical: the flags' latency makes the mapped set depend on which frame
@@ -385,6 +392,76 @@ lateral term carries water into the rocks because nothing stops it at the shore 
 landing point is never asked whether it is dry); the fold law then fires against the jetty and the
 spray inherits it, its dry gate being the texel's, not the landing point's. The shore stop on the
 lateral term, both processors, comes before any more spray work.
+
+## 10. The lip fixes: the shore stop, the lateral bound, the roofs, the dense grid (2026-10-19, PR 104's seventh commit)
+
+Mark's read of the spray still: the white lip facets and the parcels stood along the north JETTY,
+not on a wave; and the lips were "very pixelated". Four laws, one picture.
+
+**The shore stop** (CsBankFill after `d *= dry * gPatch.w`; TreeWater::Finish). The lateral term --
+the orbit and the crest's throw -- carried wet labels onto the riprap, because nothing asked
+whether the water the particle moves through is water. Now the whole lateral term rides the MEAN
+DRYNESS ALONG THE THROW: the detail plane's dry channel sampled at eight points from half a throw
+to four throws out (the bed is quasi-static; a NULL tile reads zero = land), the twin reading the
+bed at the same points. In deep water it is 1; toward a wall the term fades over four throws, the
+way a standing wave's excursion fades toward the wall it reflects from. The first cut read the
+LANDING point alone and that was worse: the far particle stopped dead a texel before the near one,
+the sheet compressed into the last wet texel and folded there, a row of false tubes along the
+jetty (the chips in `B_tube_high`). The mean's steepest slope is an eighth of a texel's, so the
+stopped sheet can fold only for a throw past 9.6 m, which the bound below forbids.
+
+**The lateral bound** (after the cascade loop; the twin's lateral gains). Airy's orbit is the
+depth's, coth(kh) times the vertical, and in half a metre of water that is six times a half-metre
+wave: the particles crossed on every crest at the rocks and the column read a tube at every one
+-- the chips that survived the shore stop (`D_tube_high`). Linear theory has no such water. The
+crest law's own bound (section 7, a particle thrown past a quarter wavelength is a bore) now holds
+the cascades' summed lateral term too, on the sea's energy wavenumber IN THIS DEPTH and its raw
+lateral amplitude: `d.xz *= min(1, (pi/2) / (k_sh A_h))`. One min; in deep water it is 1.
+
+**The absence law at the shore** (CsBankScatter). A label on a NULL tile or on land has no water
+(its dry weight reads exactly zero) and bounds no water column; a cell with such a corner was
+rasterized with that corner standing undisplaced at the waterline while its wet neighbours were
+thrown toward it, and the triangle inverted. The column leaves those triangles out, as the sheet's
+own mesh fades those corners by landness.
+
+**The roofs** (CsBankScatter). The fine level's inverted hits raise the COARSE coverage of their
+parent texel to at least one, so MsLip's early-out and ColumnFetch's taper know the tube is there
+and the fine level supplies its shape. (Measured: every fine-coverage parent in a current fine
+tile is tagged, 204 of 204.) And ColumnFetch's fine slope is no longer thrown away: the ring's
+slope was assigned AFTER the fine block and overwrote it.
+
+**The dense lip grid** (GlobeMesh.hlsl AsLip / MsLip; GlobeLayer builds the lip pipeline with the
+amplification stage). The lips were ribbons on the meshlet's 9x9 grid at 1.2 m whatever the
+column's grain. Now AsLip, one group a record, runs the 81-probe early-out and hands MsLip the
+record and the 2x2-cell BLOCKS (sixteen a record) any of whose nine corner probes found a tube;
+MsLip draws one block a group as a 9x9 grid at a QUARTER of the cell -- 0.3 m at the helm, the
+fine level's grain -- the same 162 vertices and 256 triangles the first cut drew for the whole
+record. A record with no tube costs its probes and nothing more.
+
+Measured (`out/surf/lips/`, the frozen clock, `A_*` before and `E_*` after):
+
+| | before | after |
+|---|---|---|
+| globe.lip, tube_high | 2.33 ms | 1.26 ms |
+| waterbank.fill / scatter | 3.24 / 0.67 ms | 3.17 / 0.61 ms |
+| pixels changed, tube / tube_high | | 14,120 / 33,694 of 1,440,000 |
+| hull probe (helm_boat, 30 records) | 3-7 cm rms, corr 1.00 | 3-10 cm rms, corr 1.00 on 12 records; record 60 see below |
+
+The lip pass halves (the dense grid draws only the blocks a tube stands in, and the amplification
+stage's probes replace the mesh groups' own); the picture changes on 1-2 % of the pixels: the jetty's
+lip facets are gone, the throat's lips are at the fine grain. Still open: the pale chips along the
+jetty's wet toe in `tube_high` survive every one of the four laws -- the still with the column plane
+off (`N_tube_high`) says whether they are lips at all or the coast's own stair steps.
+
+**Record 60 of the probe** (the river mouth, 11 m deep, the hull's water 1.3 m rms where the bank
+holds 0.19) is not these laws': the twin's eta is the plain sum of the solved components, untouched
+by any of them, and the run's log shows the solved field's identity moving ("a worker's field
+offered ... 52 held tiles stay drawn, stale") a few records before -- the GPU's pages and the CPU's
+atlas were not the same field at that record. In the first run of the day the swap had not happened
+by record 60 (the twin's window weight was 0 there) and every record agreed. An ownership question
+for the wave table, filed here, not fixed.
+
+**Also measured and retracted:** section 8's "ten times the tube area" (see the note there).
 
 ## 6. Next
 

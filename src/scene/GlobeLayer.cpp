@@ -848,9 +848,10 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     {   // THE LIP SHEETS (GlobeMesh.hlsl MsLip): the column plane's two extra sheets over the
         // same records, PsMain's shading, TWO-SIDED -- a tube is seen from inside.
         hal::MeshPipelineDesc l = d;
+        l.as = sc.Compile(path, L"AsLip", L"as_6_5");   // the early-out and the dense grid's blocks
         l.ms = sc.Compile(path, L"MsLip", L"ms_6_5");
         l.cull = D3D12_CULL_MODE_NONE;
-        if (l.ms.Valid()) m_msPsoLip = hal::BuildMesh(gpu, l, "globe.mesh.lip");
+        if (l.ms.Valid() && l.as.Valid()) m_msPsoLip = hal::BuildMesh(gpu, l, "globe.mesh.lip");
         if (!m_msPsoLip) Log("[globe] the lip sheets' mesh pipeline failed to build: crests stay single-valued");
     }
     // M9b: the same pipeline in WIREFRAME. Identical shaders and identical displacement --

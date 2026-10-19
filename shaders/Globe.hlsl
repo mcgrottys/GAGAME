@@ -526,6 +526,10 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
         h = lerp(f0, f1, fr.y) + lerp(d0, d1, fr.y);
         cover = lerp(w0, w1, fr.y);
         if (band == 0u) labelOff = lerp(lerp(lo[0], lo[1], fr.x), lerp(lo[2], lo[3], fr.x), fr.y);
+        // the ring's slope; the finer level below overrides it where it holds the point (it used to
+        // be assigned AFTER that block, which threw the fine slope away -- 2026-10-19)
+        slope = float2(lerp((f[1] - f[0]) + (d[1] - d[0]), (f[3] - f[2]) + (d[3] - d[2]), fr.y),
+                       (f1 - f0) + (d1 - d0)) / texel;
         // THE FINER LEVEL (WaterBankLayer.h): on ring 0, a lip band is read at a quarter of the
         // texel where the fine tiles hold the point (their face present at every tap -- a NULL tile
         // reads absent and the ring's read above stands): the lip's departure from the FINE face,
@@ -558,8 +562,6 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
                 }
             }
         }
-        slope = float2(lerp((f[1] - f[0]) + (d[1] - d[0]), (f[3] - f[2]) + (d[3] - d[2]), fr.y),
-                       (f1 - f0) + (d1 - d0)) / texel;
         return true;
     }
     return false;
