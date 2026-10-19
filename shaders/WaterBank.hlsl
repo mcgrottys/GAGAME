@@ -124,6 +124,12 @@ cbuffer BankCb : register(b0) {
     // 2048 a band), y = the tube flags' UAV slot (16x16), z = on, w = the ratio. Appended at the END.
     uint4  gColF;
     uint4  gFineMap[8];   // the fine tiles resident: row y's 16 bits in word y / 2, high half for odd y
+    // THE SPRAY (WaterBankLayer.h): x = the particles' UAV slot (RWStructuredBuffer<float4>, two a
+    // particle: (x, h, z, age) and (vx, vy, vz, size)), y = the counters' (4x1: spawned, alive, the
+    // running total), z = the ring's size, w = on; gSprayA = dt, the terminal speed, the life, the
+    // spawn gain. Appended at the END on both sides.
+    uint4  gSprayU;
+    float4 gSprayA;
 };
 
 // Is fine tile (tx, ty) resident this frame (a write to an unmapped tile is dropped anyway; this
@@ -219,6 +225,15 @@ Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's
 RWTexture2D<float4> gU[] : register(u0, space2);
 // The heap as uint planes (the column plane's atomics; the root signature's second UAV range).
 RWTexture2D<uint> gUu[] : register(u0, space3);
+// ...and as float4-strided buffers (the spray's ring; the third UAV range).
+RWStructuredBuffer<float4> gUb[] : register(u0, space4);
+
+// A hash in [0, 1) of a texel and the frame, for the spray's spawn (the fill's gOrg.w is the time).
+float SprayHash(uint2 texel, float timeS) {
+    uint h = texel.x * 73856093u ^ texel.y * 19349663u ^ asuint(timeS) * 83492791u;
+    h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+    return float(h & 0xFFFFFFu) / 16777216.0f;
+}
 
 // THE COLUMN'S WORD (2026-10-19): height-major, so the Min/Max atomics order by height and the
 // LABEL rides along -- the point of the sheet whose particle made this crossing, as its offset
@@ -803,8 +818,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         bool envPrev;
         const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
         const float lipQ = max(env.y * 2.5f, 1.0f);
-        float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f;
-        float2 sumADir = 0.0f;
+        float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f, sumVelY = 0.0f;
+        float2 sumADir = 0.0f, sumVel = 0.0f;
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
             bool prev;
             const float4 t4 = WavePageSample(wuv, s, prev);
@@ -909,6 +924,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             sumAK += wFc * aW * kW;
             sumACoth += wFc * aW * cothW;
             sumADir += wFc * aW * dir2;
+            // the crest water's velocity (the spray's launch): u = sigma a cos(theta) d^ along the
+            // travel, w = sigma a sin(theta) up, sigma from the finite-depth dispersion at this k
+            const float sigW = sqrt(9.81f * kW * tanh(kW * max(depth, 0.3f)));
+            sumVel += wFc * aW * sigW * cT * dir2;
+            sumVelY += wFc * aW * sigW * sT;
         }
         // THE CREST THROWS FORWARD, THE TROUGH STAYS (the crest law, 2026-10-19). The raw-over-
         // limited ratio lipQ applied over the whole orbit sheared every crest in the throat
@@ -932,6 +952,47 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float aH = gWaveB.z * aEnv * cothBar;   // the sea's horizontal amplitude
             const float q1 = min(lipQ - 1.0f, max(1.5707963f / max(kBar * aH, 1e-4f) - 1.0f, 0.0f));
             dW.xz = dW.xz * (1.0f + q1 * wCr) + q1 * wCr * aH * dBar;
+            // THE SPRAY (Mark, 2026-10-19): what the bound took is water the sheet cannot carry --
+            // (lipQ - 1 - q1) w A_h metres of throw the crest wanted beyond a quarter wavelength --
+            // and it leaves the sheet as droplets: at a crest texel (w > 3/4, wet), on ring 0, a
+            // droplet a frame with probability gain x that excess x dt, from the crest particle's
+            // position. ITS LAUNCH is the breaking criterion itself: a wave breaks when the crest's
+            // water overtakes the crest, u = c, so the water that leaves the lip moves at the PHASE
+            // SPEED of the sea at this depth, c = sqrt(g tanh(k h) / k) on the summed k, along the
+            // travel (Peregrine 1983: the plunging jet's tip at 1.0-1.5 c), and the jet leaves the
+            // lip upward at about a third of that (the lip's slope at the throw's bound, pi/2 over
+            // the quarter wavelength: tan ~ 1/3). The orbital velocity (a sigma, a metre a second)
+            // was the first cut and gave a tenth-of-a-second flight: the crest's, not the jet's.
+            const float excessThrow = (lipQ - 1.0f - q1) * wCr * aH;
+            if (gSprayU.w != 0u && t.dstX < 512u && excessThrow > 0.0f && wCr > 0.75f && dry > 0.5f && gSprayA.x > 0.0f) {
+                const float lambda = gSprayA.w * excessThrow * gSprayA.x;
+                const uint2 tex = uint2(t.dstX + id.x, t.dstY + id.y);
+                if (SprayHash(tex, gOrg.w) < lambda) {
+                    uint n;
+                    InterlockedAdd(gUu[gSprayU.y][uint2(2u, 0u)], 1u, n);   // the running total
+                    InterlockedAdd(gUu[gSprayU.y][uint2(0u, 0u)], 1u);      // spawned this frame
+                    const uint slot = (n % gSprayU.z) * 2u;
+                    // the crest particle as the sheet draws it (d is scaled by dry and the
+                    // exaggeration below, all three components), in the chart
+                    const float2 pos = xz + dW.xz * (dry * gPatch.w);
+                    const float hgt = lvl + dW.y * (dry * gPatch.w);
+                    const float cPh = sqrt(9.81f * tanh(kBar * max(depth, 0.3f)) / max(kBar, 1e-4f));
+                    // the jet is not one stream: a parcel leaves anywhere in the texel, at 0.7-1.3
+                    // of the phase speed, yawed up to 20 degrees off the travel (without this the
+                    // one texel that spawns each frame drew its parcels as a string of beads on
+                    // one parabola -- measured in the first still)
+                    const float j1 = SprayHash(tex + uint2(7u, 11u), gOrg.w + 1.0f);
+                    const float j2 = SprayHash(tex + uint2(13u, 3u), gOrg.w + 2.0f);
+                    const float j3 = SprayHash(tex + uint2(5u, 17u), gOrg.w + 3.0f);
+                    const float yaw = (j2 - 0.5f) * 0.7f;
+                    const float2 dJ = float2(dBar.x * cos(yaw) - dBar.y * sin(yaw), dBar.x * sin(yaw) + dBar.y * cos(yaw));
+                    const float sp = cPh * (0.7f + 0.6f * j3);
+                    const float3 vel = float3(sp * dJ.x, (0.25f + 0.3f * j1) * sp, sp * dJ.y);
+                    const float2 posJ = pos + (float2(j1, j3) - 0.5f) * t.texelM;
+                    gUb[gSprayU.x][slot] = float4(posJ.x, hgt, posJ.y, 0.0f);
+                    gUb[gSprayU.x][slot + 1u] = float4(vel, 0.25f);
+                }
+            }
         }
         rmsW = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;   // the solver's envelope, sheltered like its comps
         excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
@@ -1081,6 +1142,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             }
         }
         if (gColF.z != 0u && id.z == 0u && id.x < 16u && id.y < 16u) gUu[gColF.y][id.xy] = 0u;
+        if (gSprayU.w != 0u && id.z == 0u && id.x < 2u && id.y == 0u) gUu[gSprayU.y][uint2(id.x, 0u)] = 0u;
     }
 }
 
@@ -1216,4 +1278,50 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
             }
         }
     }
+}
+
+// ================================================================================================
+//  CsSprayStep -- THE DROPLETS (WaterBankLayer.h, the spray): one thread a particle. Alive while
+//  age >= 0: gravity, the drag of a water drop in air written by its terminal speed (quadratic
+//  drag equals gravity at |v| = vT: a = -g |v| v / vT^2 -- Gunn & Kinzer 1949 measured vT 4-6.5 m/s
+//  for 1-2 mm drops), then the step; a droplet dies when it falls below the column's face at its
+//  ground point (the face this frame, the scatter before this), leaves ring 0, or outlives its
+//  life. The alive count goes to the counters for the ledger.
+// ================================================================================================
+[numthreads(256, 1, 1)]
+void CsSprayStep(uint3 id : SV_DispatchThreadID) {
+    if (gSprayU.w == 0u || id.x >= gSprayU.z) return;
+    const uint slot = id.x * 2u;
+    float4 P = gUb[gSprayU.x][slot];
+    float4 V = gUb[gSprayU.x][slot + 1u];
+    if (P.w < 0.0f) return;
+    const float dt = gSprayA.x;
+    if (dt <= 0.0f) {
+        InterlockedAdd(gUu[gSprayU.y][uint2(1u, 0u)], 1u);
+        return;
+    }
+    float3 v = V.xyz;
+    const float g = 9.81f;
+    const float vT = max(gSprayA.y, 0.5f);
+    v.y -= g * dt;
+    v -= (g / (vT * vT)) * length(v) * v * dt;
+    P.xyz += v * dt;
+    P.w += dt;
+    bool dead = P.w > gSprayA.z;
+    // the face under the droplet, from ring 0's column (band 0; absent = the waterline)
+    const float2 local = (P.xz - gOrg.xy) / gOrg.z;
+    if (any(local < 0.0f) || any(local >= 512.0f)) {
+        dead = true;
+    } else {
+        const uint raw = gUu[gColU.x][uint2(uint(local.x), uint(local.y))];
+        const float face = gMisc.y + ((raw != 0u && raw != 0xFFFFFFFFu) ? float(raw >> 18) / gColA.x - gColA.y : 0.0f);
+        if (P.y < face) dead = true;
+    }
+    if (dead) {
+        P.w = -1.0f;
+    } else {
+        InterlockedAdd(gUu[gSprayU.y][uint2(1u, 0u)], 1u);
+    }
+    gUb[gSprayU.x][slot] = P;
+    gUb[gSprayU.x][slot + 1u] = float4(v, V.w);
 }

@@ -67,7 +67,40 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                         L"water.columnF flags (a tube landed in this fine tile)");
         m_flagUav = hal::Uav2D(gpu, m_flagTex.res.Get(), DXGI_FORMAT_R32_UINT);
-        m_flagRb.Init(gpu, 256ull * kFineTiles, L"water.columnF flags readback");
+        m_flagRb.Init(gpu, 256ull * kFineTiles + 256ull, L"water.columnF flags + spray counters readback");
+        // THE SPRAY's ring of particles (WaterBankLayer.h): one buffer, two views -- float4-strided
+        // for the kernels (RWStructuredBuffer<float4>), uint-strided for the sprite shader's gBufU.
+        {
+            D3D12_HEAP_PROPERTIES hp{};
+            hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width = uint64_t(kSprayMax) * 32u;
+            rd.Height = 1;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                           IID_PPV_ARGS(&m_sprayBuf)));
+            m_sprayBuf->SetName(L"water.spray (the droplets the crest law throws)");
+            m_sprayState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            m_sprayUav = gpu.SrvHeap().Alloc();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
+            u.Format = DXGI_FORMAT_UNKNOWN;
+            u.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            u.Buffer.NumElements = kSprayMax * 2u;
+            u.Buffer.StructureByteStride = 16;
+            gpu.Device()->CreateUnorderedAccessView(m_sprayBuf.Get(), nullptr, &u, gpu.SrvHeap().Cpu(m_sprayUav));
+            m_spraySrv = gpu.CreateStructuredBufferSrv(m_sprayBuf.Get(), kSprayMax * 8u, 4);
+            m_sprayCount = gpu.CreateTexture2D(4, 1, DXGI_FORMAT_R32_UINT,
+                                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                               L"water.spray counters (spawned, alive, total)");
+            m_sprayCountUav = hal::Uav2D(gpu, m_sprayCount.res.Get(), DXGI_FORMAT_R32_UINT);
+        }
     }
 
     // Root signature: b0 CB, t0 tile list, then the BINDLESS pair -- one unbounded SRV range
@@ -104,7 +137,8 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5)})
                // space2: the heap as float4 planes; space3: as uint planes (the column plane's
                // atomics).
-               .Table({hal::UavRange(0, hal::kUnbounded, 2), hal::UavRange(0, hal::kUnbounded, 3)})
+               .Table({hal::UavRange(0, hal::kUnbounded, 2), hal::UavRange(0, hal::kUnbounded, 3),
+                       hal::UavRange(0, hal::kUnbounded, 4)})   // space4: structured float4 (the spray)
                .Sampler(wrap)
                .Sampler(clamp)
                .Build(gpu, "waterbank");
@@ -123,6 +157,12 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                               "waterbank.scatter"),
             "WaterBank scatter kernel");
         m_scatter->SetName(L"CsBankScatter");
+        m_sprayStep = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsSprayStep", L"cs_6_0"),
+                              "waterbank.spray"),
+            "WaterBank spray kernel");
+        m_sprayStep->SetName(L"CsSprayStep");
         Log("[waterbank] column plane on: %ux%u hardware tiles a band, %u sub-labels an axis, "
             "%.0f per m about the waterline, reach %.0f m; the finer level: %u texels a band at "
             "1/%u of ring 0's texel, %ux%u tiles mapped where tubes stand",
@@ -148,6 +188,10 @@ void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
             sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankScatter", L"cs_6_0");
         hal::Reload(m_scatter, [&] { return hal::BuildCompute(gpu, m_rs.Get(), sb, "waterbank.scatter"); },
                     "waterbank.scatter");
+        const ShaderBlob sp =
+            sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsSprayStep", L"cs_6_0");
+        hal::Reload(m_sprayStep, [&] { return hal::BuildCompute(gpu, m_rs.Get(), sp, "waterbank.spray"); },
+                    "waterbank.spray");
     }
 }
 
@@ -1156,6 +1200,12 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         // unmapped. A tile's mapping changes only on a flip.
         if (m_flagRb.Ready() && m_flagRb.BeginSlot(ctx.gpu->FrameIndex()) > 0) {
             for (const hal::RegionReadback::Region& g : m_flagRb.Delivered()) {
+                if (g.tag == 1u && g.w == 4 && g.bytes.size() >= 16) {   // the spray's counters
+                    const uint32_t* c = reinterpret_cast<const uint32_t*>(g.bytes.data());
+                    m_spraySpawned = c[0];
+                    m_sprayAlive = c[1];
+                    continue;
+                }
                 if (g.w != kFineTiles || g.h != kFineTiles || g.bytes.size() < size_t(kFineTiles) * kFineTiles * 4) continue;
                 const uint32_t* f = reinterpret_cast<const uint32_t*>(g.bytes.data());
                 uint32_t n = 0;
@@ -1179,8 +1229,27 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
             }
         }
         ctx.cmd->Barrier(m_flagTex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ctx.cmd->Barrier(m_sprayCount, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (m_sprayState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            ctx.cmd->Barrier(m_sprayBuf.Get(), m_sprayState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            m_sprayState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
     }
     m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // THE SPRAY's rows: dt from the sim clock (capped as the frame is), the drop's terminal speed,
+    // its life, the spawn gain (droplets a frame per metre of throw the sheet cannot carry).
+    {
+        const double dt = (m_lastSimUnix > 0.0) ? std::min(std::max(m_simUnix - m_lastSimUnix, 0.0), 0.25) : 0.0;
+        m_lastSimUnix = m_simUnix;
+        cb.sprayU[0] = column ? m_sprayUav : 0xFFFFFFFFu;
+        cb.sprayU[1] = column ? m_sprayCountUav : 0xFFFFFFFFu;
+        cb.sprayU[2] = kSprayMax;
+        cb.sprayU[3] = column ? 1u : 0u;
+        cb.sprayA[0] = static_cast<float>(dt);
+        cb.sprayA[1] = kSprayTerminalMs;
+        cb.sprayA[2] = kSprayLifeS;
+        cb.sprayA[3] = 6.0f;
+    }
     cb.colF[0] = column ? m_columnF.Uav() : 0xFFFFFFFFu;
     cb.colF[1] = column ? m_flagUav : 0xFFFFFFFFu;
     cb.colF[2] = column ? 1u : 0u;
@@ -1227,11 +1296,28 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         ctx.cmd->Pipeline(m_scatter.Get());
         ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16, static_cast<UINT>(tiles.size()));
         ctx.cmd->Pipeline(m_fill.Get());
-        // the flags back to the CPU through the ring: next frame but kFrameCount it maps the tiles
+        // THE SPRAY's step, after the scatter (the column's face is this frame's for the deaths).
+        if (m_sprayStep) {
+            GpuScope pscope(ctx.prof, ctx.cmd->Native(), "waterbank.spray");
+            ctx.cmd->UavBarriers({m_sprayBuf.Get(), m_column.Res(), m_sprayCount.res.Get()});
+            ctx.cmd->Pipeline(m_sprayStep.Get());
+            ctx.cmd->Dispatch(kSprayMax / 256, 1, 1);
+            ctx.cmd->Pipeline(m_fill.Get());
+            ctx.cmd->UavBarrier(m_sprayBuf.Get());
+            ctx.cmd->Barrier(m_sprayBuf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_sprayState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        // the flags and the spray's counters back to the CPU through the ring
         if (m_flagRb.Ready()) {
-            ctx.cmd->UavBarrier(m_flagTex.res.Get());
+            ctx.cmd->UavBarriers({m_flagTex.res.Get(), m_sprayCount.res.Get()});
             ctx.cmd->Barrier(m_flagTex, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            ctx.cmd->Barrier(m_sprayCount, D3D12_RESOURCE_STATE_COPY_SOURCE);
             m_flagRb.CopyRegion(*ctx.cmd, m_flagTex.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, kFineTiles, kFineTiles, 0u);
+            m_flagRb.CopyRegion(*ctx.cmd, m_sprayCount.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, 4, 1, 1u);
+        }
+        if (++m_sprayLogFrame % 120u == 0u) {
+            Log("[spray] %u droplets alive, %u spawned a frame (of a ring of %u)", m_sprayAlive, m_spraySpawned, kSprayMax);
         }
     }
     // PHASE B0: THE BANK'S BED TRACE (the header): the same kernel on the same rows and tiles,

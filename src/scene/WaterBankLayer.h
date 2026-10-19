@@ -69,6 +69,18 @@ public:
     static constexpr uint32_t kFineTiles = 16;                           // 16x16 tiles of 128^2
     uint32_t ColumnFineSrv() const { return (column && m_ready) ? m_columnF.Srv() : 0xFFFFFFFFu; }
     uint32_t FineTilesMapped() const { return m_fineMappedCount; }
+    // THE SPRAY (2026-10-19, Mark's idea): the water the crest law cannot carry -- the throw the
+    // quarter-wavelength bound removes -- leaves the sheet as DROPLETS. A fixed ring of particles
+    // on the GPU (two float4 each: position in the rings' chart + age, velocity + size), spawned by
+    // the fill kernel at crest texels where the bound bites, stepped by CsSprayStep (gravity, the
+    // drag of a water drop in air by its terminal velocity, death at the column's face or by age),
+    // drawn by GlobeLayer as lit sprites after the lip sheets. Not water a hull feels: no CPU twin.
+    static constexpr uint32_t kSprayMax = 65536;
+    static constexpr float kSprayTerminalMs = 5.0f;   // Gunn & Kinzer 1949: a 1-2 mm drop falls at 4-6.5 m/s
+    static constexpr float kSprayLifeS = 6.0f;
+    uint32_t SpraySrv() const { return (column && m_ready) ? m_spraySrv : 0xFFFFFFFFu; }
+    uint32_t SprayAlive() const { return m_sprayAlive; }
+    uint32_t SpraySpawned() const { return m_spraySpawned; }
 
     static constexpr int kMips = 6;         // texel = base * 2^m; at base 1.2: 1.2..38 m
                                             // texels, 0.6..20 km spans (scene bankTexelM)
@@ -321,6 +333,10 @@ private:
         // rasterizes and clears only the fine tiles that are resident.
         uint32_t colF[4];
         uint32_t fineMap[32];
+        // THE SPRAY (gSprayU / gSprayA): the particles' UAV slot, the counters' UAV slot, the ring's
+        // size, on; dt (s), the drop's terminal speed (m/s), its life (s), the spawn gain.
+        uint32_t sprayU[4];
+        float sprayA[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -399,6 +415,14 @@ private:
     hal::RegionReadback m_flagRb;             // the flags, back through the frame ring
     uint8_t m_fineMapped[256] = {};
     uint32_t m_fineMappedCount = 0;
+    Com<ID3D12Resource> m_sprayBuf;           // kSprayMax x 2 float4
+    uint32_t m_sprayUav = 0xFFFFFFFFu, m_spraySrv = 0xFFFFFFFFu;
+    D3D12_RESOURCE_STATES m_sprayState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    GpuTexture m_sprayCount;                  // 4x1: spawned this frame, alive this frame, the running total
+    uint32_t m_sprayCountUav = 0xFFFFFFFFu;
+    hal::Pso m_sprayStep;
+    uint32_t m_sprayAlive = 0, m_spraySpawned = 0, m_sprayLogFrame = 0;
+    double m_lastSimUnix = 0.0;
     uint32_t m_fineLogged = 0xFFFFFFFFu;
     hal::Pso m_scatter;                       // CsBankScatter (after the fill, a UAV barrier between)
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS

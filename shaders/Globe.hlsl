@@ -140,6 +140,9 @@ cbuffer GlobeCb : register(b1) {
     // ...z = THE FINER LEVEL's SRV (ring 0's columns at a quarter texel, where tubes stand), w = on.
     uint4  gColU;
     float4 gColA;
+    // THE SPRAY (WaterBankLayer.h): x = the droplets' SRV (gBufU, eight uints a droplet: x, h, z,
+    // age, vx, vy, vz, size), y = the ring's size, z = on. Appended at the END (priors 22).
+    uint4  gSprayU;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -2137,4 +2140,57 @@ LimbOut PsLimb(SkyVsOut i) {
     const float4 clip = mul(float4(rdT * max(sLvlSigma * max(t0c, 0.0f), 1e-3f), 1.0f), gViewProj);
     o.depth = saturate(clip.z / clip.w);
     return o;
+}
+
+// ------------------------------------------------------------------ THE SPRAY (the droplets)
+//
+// Six vertices an instance, one instance a droplet of the ring (WaterBankLayer.h): a camera-facing
+// quad at the droplet's position -- its chart coordinates turned into the tangent frame by the
+// rings' chart rows (BankXZ's inverse: east and north by the eye's coordinate along each, up by
+// the height over the eye's altitude) -- lit as foam: the sun on the sphere's up and the sky, a
+// soft disc. A dead droplet (age < 0) collapses to nothing.
+struct SprayVsOut {
+    float4 pos : SV_Position;
+    float2 uv : TEXCOORD0;
+    float3 upT : TEXCOORD1;
+    float age : TEXCOORD2;
+};
+
+SprayVsOut VsSpray(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
+    SprayVsOut o;
+    LoadLevel(0u);
+    const uint b = inst * 8u;
+    const float age = asfloat(gBufU[gSprayU.x][b + 3u]);
+    const float3 p = float3(asfloat(gBufU[gSprayU.x][b]), asfloat(gBufU[gSprayU.x][b + 1u]), asfloat(gBufU[gSprayU.x][b + 2u]));
+    // a droplet is a parcel of spray, not one drop: it spreads as it flies (a sprite's radius
+    // grows a quarter metre a second) and thins by the same share (PsSpray)
+    const float size = asfloat(gBufU[gSprayU.x][b + 7u]) + 0.25f * max(age, 0.0f);
+    const float4 e = BankChartRow(0u), n = BankChartRow(1u);
+    const float3 upT = BankChartRow(2u).xyz;
+    // the chart point less the eye: along east and north by the coordinates' difference, up by the
+    // height over the eye's altitude (the sphere's sag within ring 0 is millimetres)
+    // (BankXZ's inverse: its q less the chart set's eye about the camera, zero at the root)
+    float3 rel = e.xyz * (p.x - e.w) + n.xyz * (p.z - n.w) + upT * (p.y - sLvlEyeY)
+               - (sLvlCamAbs - BankChartRow(3u).xyz);
+    const uint corner = (vid == 0u || vid == 3u) ? 0u : (vid == 1u) ? 1u : (vid == 2u || vid == 4u) ? 2u : 3u;
+    const float2 c = float2((corner & 1u) ? 1.0f : -1.0f, (corner & 2u) ? 1.0f : -1.0f);
+    const float3 view = normalize(rel);
+    const float3 right = normalize(cross(upT, view));
+    const float3 up2 = cross(view, right);
+    rel += (right * c.x + up2 * c.y) * ((age >= 0.0f) ? size : 0.0f);
+    o.pos = mul(float4(TrueRel(rel), 1.0f), gViewProj);
+    o.uv = c;
+    o.upT = upT;
+    o.age = age;
+    return o;
+}
+
+float4 PsSpray(SprayVsOut i) : SV_Target {
+    if (i.age < 0.0f) discard;
+    const float r2 = dot(i.uv, i.uv);
+    if (r2 > 1.0f) discard;
+    // foam's light: the sun on the sphere's up, the sky from above, as the water's foam takes it
+    const float3 lit = SunAt(i.upT, 0.0f) * saturate(dot(GA_SUN_DIR, i.upT)) * 0.9f + SkyAmbient(i.upT, i.upT, 0.0f);
+    const float a = (1.0f - r2) * (1.0f - r2) * 0.45f / (1.0f + i.age);
+    return float4(lit * 0.85f, a);
 }

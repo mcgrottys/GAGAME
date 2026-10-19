@@ -352,6 +352,40 @@ amplification stage in front of MsLip: the 81-probe early-out, then 16 groups on
 stands) is the next step, and `hal::MeshPipelineDesc` already takes an `as` blob. And the early-out
 should read the fine coverage where it is resident, since the coarse band misses most tubes.
 
+## 9. The spray: the throw the sheet cannot carry (2026-10-19, PR 104's fifth commit)
+
+Mark's idea: the energy the fold law has nowhere to put, and the droplets a breaker shoots out,
+become particles. The quantity is already in the crest law (section 7): the throw bound removes
+`(lipQ - 1 - q1) w A_h` metres of the excursion the crest wanted past a quarter wavelength. That
+water leaves the sheet as a parcel of spray.
+
+**Where it lives.** A ring of 65,536 particles on the GPU (`water.spray`, two float4 each: chart
+position + age, velocity + size), no CPU twin -- spray is not water a hull feels. CsBankFill spawns
+at a crest texel of ring 0 (w > 3/4, wet) with probability gain x excess x dt, a parcel anywhere in
+the texel. **Its launch is the breaking criterion itself:** a wave breaks when the crest's water
+overtakes the crest, u = c, so a parcel leaves at the sea's phase speed at this depth,
+c = sqrt(g tanh(k h) / k) on the summed k, along the travel, yawed up to 20 degrees, at 0.7-1.3 c,
+rising at a quarter to a half of c (Peregrine 1983: the plunging jet's tip at 1.0-1.5 c). The
+orbital velocity was the first cut -- a metre a second, a tenth-of-a-second flight. CsSprayStep is
+gravity and the drag of a drop in air written by its terminal speed (a = -g |v| v / vT^2, Gunn &
+Kinzer 1949: 4-6.5 m/s for 1-2 mm drops; vT = 5), death below the column's face at the parcel's
+ground point (band 0, this frame's), outside ring 0, or past six seconds. GlobeLayer draws the
+ring after the lip sheets as camera-facing discs lit as foam, radius 0.25 m growing a quarter metre
+a second, alpha falling as 1 / (1 + age). The counters (spawned, alive) ride the frame ring with the
+fine tiles' flags; `[spray]` logs them every 120 frames.
+
+Measured at the throat (`out/surf/spray/C_*`): 27-46 parcels a frame, 320-630 alive (a flight of
+about half a second), `waterbank.spray` 0.010 ms, `globe.spray` 0.003 ms.
+
+What the still showed: the parcels stand on the crest where the lip sheets stand -- the chart
+inverse in VsSpray is right -- and the first cut drew them as a string of beads on one parabola
+(one texel spawning each frame); the jitter is the mend. **And a wrong site:** in `tube_high` the
+parcels and the white lip facets stand along the north jetty, not on a wave (Mark). The sheet's
+lateral term carries water into the rocks because nothing stops it at the shore (the particle's
+landing point is never asked whether it is dry); the fold law then fires against the jetty and the
+spray inherits it, its dry gate being the texel's, not the landing point's. The shore stop on the
+lateral term, both processors, comes before any more spray work.
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`

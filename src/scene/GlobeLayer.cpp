@@ -665,6 +665,24 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
             return false;
         }
     }
+    {   // THE SPRAY's sprites (Globe.hlsl VsSpray / PsSpray): alpha over the frame, depth-tested
+        // against the surface and the lips, no write.
+        hal::GraphicsPipelineDesc sp;
+        sp.rootSig = m_rootSig;
+        sp.vs = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"VsSpray", L"vs_6_0");
+        sp.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsSpray", L"ps_6_0");
+        sp.blend = true;
+        sp.srcBlend = D3D12_BLEND_SRC_ALPHA;
+        sp.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        sp.srcBlendAlpha = D3D12_BLEND_ONE;
+        sp.dstBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        sp.depthTest = true;
+        sp.depthWrite = false;
+        sp.depthClip = TRUE;
+        if (sp.vs.Valid() && sp.ps.Valid()) {
+            hal::Reload(m_sprayPso, [&] { return hal::BuildGraphics(gpu, sp, "globe.spray"); }, "globe.spray");
+        }
+    }
 
     // THE KEPT FRAME's composite (GlobeKeep.hlsl): the cache's colour and depth into the frame,
     // depth-tested and written as the surface would have been.
@@ -2488,6 +2506,10 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.colU[1] = (m_colSrv != 0xFFFFFFFFu && m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
     m_cb.colU[2] = m_colFineSrv;
     m_cb.colU[3] = (m_cb.colU[1] != 0u && m_colFineSrv != 0xFFFFFFFFu) ? 1u : 0u;
+    m_cb.sprayU[0] = m_spraySrv;
+    m_cb.sprayU[1] = m_sprayN;
+    m_cb.sprayU[2] = (m_cb.colU[1] != 0u && m_spraySrv != 0xFFFFFFFFu && m_sprayN != 0u) ? 1u : 0u;
+    m_cb.sprayU[3] = 0u;
     m_cb.colA[0] = m_colScale;
     m_cb.colA[1] = m_colBias;
     m_cb.colA[2] = m_cb.colA[3] = 0.0f;
@@ -2887,6 +2909,16 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
             ctx.cmd->Pipeline(m_msPsoLip.Get());
             ctx.cmd->GraphicsConstantsAt(1, cbVa);
             ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+            // THE SPRAY after the lips: six vertices a droplet, the ring's whole length (dead ones
+            // collapse), the globe's root signature (the droplets ride gBufU).
+            if (m_sprayPso.Get() && cbData.sprayU[2] != 0u && ctx.viewIndex == 0) {
+                GpuScope sscope(ctx.prof, ctx.cmd->Native(), "globe.spray");
+                PixMarker(ctx.cmd->Native(), "globe.spray (the droplets the crest law throws)");
+                ctx.cmd->Pipeline(m_sprayPso.Get());
+                ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ctx.cmd->GraphicsConstantsAt(1, cbVa);
+                ctx.cmd->Draw(6, cbData.sprayU[1], 0, 0);
+            }
             ctx.cmd->Pipeline(msSel);
         };
         if (overdrawProbe && ctx.viewIndex == 0) {

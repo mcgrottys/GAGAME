@@ -111,6 +111,10 @@ public:
     // M7: per-frame wave-bank binding (SRVs + ring origins).
     // THE COLUMN PLANE (the rolling-wave work, 2026-10-18): the first eye's bank's Eulerian
     // columns, read by GlobeMesh.hlsl MsLip and Globe.hlsl PsSurface. 0xFFFFFFFF = none.
+    void SetWaterSpray(uint32_t srv, uint32_t n) {
+        m_spraySrv = srv;
+        m_sprayN = n;
+    }
     void SetWaterColumn(uint32_t srv, float scale, float bias, uint32_t fineSrv = 0xFFFFFFFFu) {
         m_colSrv = srv;
         m_colScale = scale;
@@ -690,6 +694,7 @@ private:
         // point's scale and bias. Appended at the END on both sides (priors 22).
         uint32_t colU[4];
         float colA[4];
+        uint32_t sprayU[4];   // THE SPRAY (gSprayU): the droplets' SRV, the ring's size, on
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -881,6 +886,8 @@ private:
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_colSrv = 0xFFFFFFFFu;   // the column plane (SetWaterColumn)
     uint32_t m_colFineSrv = 0xFFFFFFFFu;   // ...and its finer level where tubes stand
+    uint32_t m_spraySrv = 0xFFFFFFFFu, m_sprayN = 0;   // the droplets (SetWaterSpray)
+    hal::Pso m_sprayPso;
     float m_colScale = 1000.0f, m_colBias = 64.0f;
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};
