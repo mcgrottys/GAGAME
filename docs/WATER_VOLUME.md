@@ -463,6 +463,34 @@ for the wave table, filed here, not fixed.
 
 **Also measured and retracted:** section 8's "ten times the tube area" (see the note there).
 
+## 11. The lips are the fine level's; a fold is witnessed on ring 0 (2026-10-19, PR 104's ninth commit)
+
+Mark's crop of a small roll at Mavericks: a crest crease a metre wide ran down to a lip drawn as
+2 to 3 m white slabs. Three causes, three laws.
+
+- **Footprint.** The lip bands were read bilinearly from the ring's 1.2 m taps with the coverage
+  taper, so a roll a few decimetres wide smeared into a 2.4 m blob, and the dense grid (section 10)
+  drew the blob faithfully. ColumnFetch now reads the lip bands from the finer level alone; where
+  its tile is not yet resident (the flags' two or three frames) there is no lip -- a wait, not a
+  wrong picture. The early-out still reads the coarse coverage (the roof flag), so the blocks are
+  dispatched the frame the tube appears and the vertices wait for the fine data.
+- **Normal.** The slabs faced the sky and mirrored it white. The lip's normal now returns to the
+  face's as its coverage falls, so a thin roll's rim is water; the thin-sheet path is the
+  thickness by the coverage.
+- **The witness's grain.** Mavericks' dump held lips on rings 1-3 (1,198 / 345 / 82 texels at 2.4
+  to 9.6 m): a 17 s swell's lateral excursion is tens of metres and a coarse cell straddling a
+  crest inverts by aliasing, not by overturning. Ring 0 alone writes the inverted branch; the
+  coarse rings keep the face.
+
+Measured: the slabs at the roll gone (the crease stays, as it should), the jetty's chips at the
+Newburyport throat nearly gone, globe.lip 1.26 -> 0.45 ms at the throat.
+
+**Not the lips:** the cones on Mavericks' western horizon (Mark: "likely related"). They stand with
+the water bank off, with tide/gulf/sea off, with gis/markers/vessels off and with the terrain layer
+off; the 60-second ETOPO has no land within 600 km on those bearings and the CUDEM's western tile
+has no nodata and no spike. They lie between bearings 250 and 292 from the point, far and tall, and
+they are the globe layer's own. Still being traced (the renders T_* in out/mavericks).
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`
