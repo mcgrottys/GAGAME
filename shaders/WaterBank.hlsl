@@ -122,22 +122,40 @@ cbuffer BankCb : register(b0) {
     float4 gColA;
     // THE FINER LEVEL (WaterBankLayer.h): x = its UAV slot (ring 0's columns at 1/w of the texel,
     // 2048 a band), y = the tube flags' UAV slot (16x16), z = on, w = the ratio. Appended at the END.
-    uint4  gColF;
-    uint4  gFineMap[8];   // the fine tiles resident: row y's 16 bits in word y / 2, high half for odd y
-    // THE SPRAY (WaterBankLayer.h): x = the particles' UAV slot (RWStructuredBuffer<float4>, two a
-    // particle: (x, h, z, age) and (vx, vy, vz, size)), y = the counters' (4x1: spawned, alive, the
-    // running total), z = the ring's size, w = on; gSprayA = dt, the terminal speed, the life, the
-    // spawn gain. Appended at the END on both sides.
+    // THE COLUMN LADDER (2026-10-20, Mark: nothing in code is "fine" or "coarse"): the rings UNDER
+    // ring 0 -- ring -1 at half its texel, ring -2 at a quarter, ... -- each a mip of the one above
+    // over ring 0's span, resident only where the ring above witnessed a fold. gColR[k] is ring
+    // -(k+1): x its UAV slot, y its flags' UAV slot (the tiles the ring above flagged this frame),
+    // z its texels a side, w its tiles a side; gColN.x the rings under, .y on. gColMap holds the
+    // mapped set of every ring under, ring k's bits at ColMapBase(k), row-major by tile.
+    uint4  gColR[3];
+    uint4  gColN;
+    uint4  gColMap[32];
     uint4  gSprayU;
     float4 gSprayA;
 };
 
-// Is fine tile (tx, ty) resident this frame (a write to an unmapped tile is dropped anyway; this
-// spares the work).
-bool FineMapped(uint tx, uint ty) {
-    const uint w = gFineMap[ty >> 2][(ty >> 1) & 3u];
-    return ((w >> (((ty & 1u) * 16u) + tx)) & 1u) != 0u;
+// The ladder's ring under k: its texel over ring 0's, its mapped set.
+uint ColRingDiv(uint k) { return 2u << k; }   // ring -(k+1) has 2^(k+1) texels to ring 0's one
+uint ColMapBase(uint k) { return (k == 0u) ? 0u : (k == 1u) ? 64u : 320u; }   // 8x8, 16x16, 32x32 tiles
+bool ColMapped(uint k, uint tx, uint ty) {
+    const uint bit = ColMapBase(k) + ty * gColR[k].w + tx;
+    const uint w = gColMap[bit >> 7][(bit >> 5) & 3u];
+    return ((w >> (bit & 31u)) & 1u) != 0u;
 }
+// Is any tile of ring under k mapped under the box [lo, hi] (ring-0 texel coordinates, floats)?
+bool ColAnyMapped(uint k, float2 lo, float2 hi) {
+    const uint d = ColRingDiv(k);
+    const int last = int(512u * d) - 1;
+    const int2 a = int2(floor(lo * float(d))), b = int2(floor(hi * float(d)));
+    for (int fz = max(a.y, 0) >> 7; fz <= (min(b.y, last) >> 7); ++fz) {
+        for (int fx = max(a.x, 0) >> 7; fx <= (min(b.x, last) >> 7); ++fx) {
+            if (ColMapped(k, uint(fx), uint(fz))) return true;
+        }
+    }
+    return false;
+}
+
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
 float4 WaveSigRow(uint r) { return (r < 8u) ? gWaveSig[r] : gWaveSig2[r - 8u]; }
@@ -1184,23 +1202,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         gUu[gColU.x][dst + uint2(0u, 512u)] = 0u;              // lip top: the inverted branch's MAX
         gUu[gColU.x][dst + uint2(0u, 1024u)] = 0u;             // lip underside: the upright branches' MAX
         gUu[gColU.x][dst + uint2(0u, 1536u)] = 0u;             // the lip's coverage of the texel (0..16 a cell)
-        // THE FINER LEVEL's clears, ring 0 only: this texel's w x w fine texels, four bands (a write
-        // to an unmapped tile is dropped by the hardware); and the tube flags, by tile 0's first
-        // 16x16 threads.
-        if (gColF.z != 0u && t.dstX < 512u && FineMapped((t.dstX + id.x) * gColF.w >> 7, (t.dstY + id.y) * gColF.w >> 7)) {
-            const uint r = gColF.w;
-            const uint2 f0 = uint2(t.dstX + id.x, t.dstY + id.y) * r;
-            for (uint j = 0u; j < r; ++j) {
-                for (uint i = 0u; i < r; ++i) {
-                    const uint2 fd = f0 + uint2(i, j);
-                    gUu[gColF.x][fd] = 0xFFFFFFFFu;
-                    gUu[gColF.x][fd + uint2(0u, 2048u)] = 0u;
-                    gUu[gColF.x][fd + uint2(0u, 4096u)] = 0u;
-                    gUu[gColF.x][fd + uint2(0u, 6144u)] = 0u;
-                }
+        // the ladder's flags, by tile 0's first threads (the rings' own clears: CsColumnClear)
+        if (gColN.y != 0u && id.z == 0u) {
+            for (uint k = 0u; k < gColN.x; ++k) {
+                if (id.x < gColR[k].w && id.y < gColR[k].w) gUu[gColR[k].y][id.xy] = 0u;
             }
         }
-        if (gColF.z != 0u && id.z == 0u && id.x < 16u && id.y < 16u) gUu[gColF.y][id.xy] = 0u;
         if (gSprayU.w != 0u && id.z == 0u && id.x < 2u && id.y == 0u) gUu[gSprayU.y][uint2(id.x, 0u)] = 0u;
     }
 }
@@ -1235,12 +1242,13 @@ float4 ScatterCatmullW(float t) {
     return 0.5f * float4(-t3 + 2.0f * t2 - t, 3.0f * t3 - 5.0f * t2 + 2.0f, -3.0f * t3 + 4.0f * t2 + t, t3 - t2);
 }
 
-// ONE TRIANGLE OF THE SHEET INTO ONE LEVEL (2026-10-20): the body CsBankScatter ran inline for the
-// cell's two triangles, now shared by the coarse pass (the cell's own two) and the fine pass (the
-// 32 of the cell's cubic subdivision). A, B, C the particles; hA.. their heights about the
-// waterline; lA.. their labels; lvl 0 the ring's texels, 1 the finer level's.
+// ONE TRIANGLE OF THE SHEET INTO ONE RING (2026-10-20): the body CsBankScatter runs for the
+// cell's two triangles into its own ring, and for the sub-cells of the cell's cubic subdivision
+// into every ring under that is mapped there. A, B, C the particles; hA.. their heights about the
+// waterline; lA.. their labels. `ring` >= 0 is the bank ring the cell belongs to (its texels in the
+// ring atlas at ringX0); `ring` < 0 is ring under k = -ring - 1 (gColR[k]).
 void ScatterTri(float2 A, float2 B, float2 C, float hA, float hB, float hC, float2 lA, float2 lB, float2 lC,
-                uint lvl, float texelM, uint ringX0, float2 ringOrg, uint cSlot) {
+                int ring, float texelM, uint ringX0, float2 ringOrg, uint cSlot) {
     const float area = (B.x - A.x) * (C.y - A.y) - (C.x - A.x) * (B.y - A.y);
     // a cell stretched past 8 texels an axis is a torn sheet, not water; a flat one is a line
     const float2 lo = min(A, min(B, C)), hi = max(A, max(B, C));
@@ -1251,43 +1259,37 @@ void ScatterTri(float2 A, float2 B, float2 C, float hA, float hB, float hC, floa
     // THE WITNESS'S GRAIN (2026-10-19, Mark's horizon of cones at Mavericks): a fold is a
     // property of the sheet at the finest grain, and a cell of 2.4 m or more cannot witness
     // one -- a 17 s swell's lateral excursion is tens of metres, and a coarse cell straddling
-    // a crest inverts by aliasing, not by overturning (measured: 1,198 / 345 / 82 lip texels
-    // on rings 1-3, drawn as tents on the horizon). Ring 0 alone writes the inverted branch;
-    // the coarse rings keep the face.
-    if (inverted && ringX0 != 0u) return;
+    // a crest inverts by aliasing, not by overturning. Ring 0 and the rings under it alone
+    // write the inverted branch; the rings above keep the face.
+    if (inverted && ring > 0) return;
     const float iarea = 1.0f / area;
-    const float texelL = (lvl == 0u) ? texelM : texelM / float(gColF.w);
-    const int lastL = (lvl == 0u) ? 511 : int(512u * gColF.w) - 1;
-    const uint slotL = (lvl == 0u) ? cSlot : gColF.x;
-    const uint bandL = (lvl == 0u) ? 512u : 2048u;
-    const uint xoffL = (lvl == 0u) ? ringX0 : 0u;
+    const uint k = (ring < 0) ? uint(-ring - 1) : 0u;
+    const uint div = (ring < 0) ? ColRingDiv(k) : 1u;
+    const float texelL = texelM / float(div);
+    const int lastL = int(512u * div) - 1;
+    const uint slotL = (ring < 0) ? gColR[k].x : cSlot;
+    const uint bandL = 512u * div;
+    const uint xoffL = (ring < 0) ? 0u : ringX0;
     const int2 q0 = int2(floor((lo - ringOrg) / texelL));
     const int2 q1 = int2(floor((hi - ringOrg) / texelL));
-    // THE FLAGS: an inverted triangle of the COARSE pass on ring 0 flags the fine tiles its box
-    // touches (in the fine level's texels), so the CPU maps them for the frames to come -- the fine
-    // pass itself runs only where they are mapped, so the flags must come from the pass that
-    // always runs.
-    if (lvl == 0u && inverted && gColF.z != 0u) {
-        const float texelF = texelM / float(gColF.w);
-        const int lastF = int(512u * gColF.w) - 1;
-        const int2 f0 = int2(floor((lo - ringOrg) / texelF)), f1 = int2(floor((hi - ringOrg) / texelF));
-        for (int fz = max(f0.y, 0) >> 7; fz <= (min(f1.y, lastF) >> 7); ++fz) {
-            for (int fx = max(f0.x, 0) >> 7; fx <= (min(f1.x, lastF) >> 7); ++fx) {
-                InterlockedOr(gUu[gColF.y][uint2(uint(fx), uint(fz))], 1u);
+    // THE FLAGS: an inverted triangle of ring r flags the tiles of ring r - 1 its box touches (in
+    // that ring's texels), so the CPU maps them for the frames to come: the residency of every ring
+    // is nested under the ring above it, and the flags come from the pass that ran.
+    const int under = -ring;   // ring r - 1 is ring under index -r (0 for ring 0)
+    if (inverted && ring <= 0 && uint(under) < gColN.x) {
+        const uint ku = uint(under);
+        const uint du = ColRingDiv(ku);
+        const int lastU = int(512u * du) - 1;
+        const int2 f0 = int2(floor((lo - ringOrg) / (texelM / float(du)))), f1 = int2(floor((hi - ringOrg) / (texelM / float(du))));
+        for (int fz = max(f0.y, 0) >> 7; fz <= (min(f1.y, lastU) >> 7); ++fz) {
+            for (int fx = max(f0.x, 0) >> 7; fx <= (min(f1.x, lastU) >> 7); ++fx) {
+                InterlockedOr(gUu[gColR[ku].y][uint2(uint(fx), uint(fz))], 1u);
             }
         }
     }
     const uint S = inverted ? 4u : 1u;
-    // the fine level: only the tiles resident this frame
-    if (lvl == 1u) {
-        bool any = false;
-        for (int fz = max(q0.y, 0) >> 7; fz <= (min(q1.y, lastL) >> 7) && !any; ++fz) {
-            for (int fx = max(q0.x, 0) >> 7; fx <= (min(q1.x, lastL) >> 7) && !any; ++fx) {
-                any = FineMapped(uint(fx), uint(fz));
-            }
-        }
-        if (!any) return;
-    }
+    // a ring under: only where its tiles are resident this frame
+    if (ring < 0 && !ColAnyMapped(k, (lo - ringOrg) / texelM, (hi - ringOrg) / texelM)) return;
     for (int qz = max(q0.y, 0); qz <= min(q1.y, lastL); ++qz) {
         for (int qx = max(q0.x, 0); qx <= min(q1.x, lastL); ++qx) {
             const uint2 dst = uint2(xoffL + uint(qx), uint(qz));
@@ -1313,13 +1315,11 @@ void ScatterTri(float2 A, float2 B, float2 C, float hA, float hB, float hC, floa
             if (inverted) {
                 InterlockedMax(gUu[slotL][dst + uint2(0u, bandL)], vMax);
                 InterlockedAdd(gUu[slotL][dst + uint2(0u, 3u * bandL)], hits);
-                // THE ROOFS (2026-10-19): the coarse 4x4 sub-grid misses lips thinner than
-                // 0.3 m, so the coarse coverage said "no tube" where there was one -- MsLip's
-                // early-out and ColumnFetch's taper both read it (Mark's black scallops). A fine
-                // hit raises the coarse texel's coverage to at least one: the tube is KNOWN
-                // there, and the fine level supplies its shape.
-                if (lvl == 1u) {
-                    InterlockedMax(gUu[cSlot][uint2(ringX0 + uint(qx) / gColF.w, 1536u + uint(qz) / gColF.w)], 1u);
+                // THE ROOFS (2026-10-19): a ring under's inverted hit raises ring 0's coverage of
+                // the parent texel to at least one, so MsLip's early-out and ColumnFetch's taper
+                // know the tube is there and the ladder supplies its shape.
+                if (ring < 0) {
+                    InterlockedMax(gUu[cSlot][uint2(ringX0 + uint(qx) / div, 1536u + uint(qz) / div)], 1u);
                 }
             } else {
                 InterlockedMin(gUu[slotL][dst], vMin);
@@ -1327,6 +1327,24 @@ void ScatterTri(float2 A, float2 B, float2 C, float hA, float hB, float hC, floa
             }
         }
     }
+}
+
+// A point of the sheet inside a ring-0 cell at the label fraction fr, from the Catmull-Rom of the
+// 4 x 4 label patch about the cell (the mesh's own cubic of the bank, Globe.hlsl CatmullW).
+void SheetAt(float4 Dp[16], float Lv[16], float2 fr, int2 lp, float2 ringOrg, float texelM,
+             out float2 P, out float2 L, out float H) {
+    const float4 wx = ScatterCatmullW(fr.x), wz = ScatterCatmullW(fr.y);
+    float4 D = 0.0f;
+    float lv = 0.0f;
+    [unroll] for (int j = 0; j < 4; ++j) {
+        [unroll] for (int i = 0; i < 4; ++i) {
+            D += wx[i] * wz[j] * Dp[j * 4 + i];
+            lv += wx[i] * wz[j] * Lv[j * 4 + i];
+        }
+    }
+    L = ringOrg + (float2(lp) + fr + 0.5f) * texelM;
+    P = L + D.xz;
+    H = lv + D.y;
 }
 
 [numthreads(16, 16, 1)]
@@ -1341,6 +1359,7 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
     const float2 ringOrg = t.orgXZ - float2(float(t.dstX - ringX0), float(t.dstY)) * t.texelM;
     const uint dSlot = gSlotsB.y, pSlot = gSlotsB.z;
     const int2 a0 = int2(int(ringX0), 0);
+    const int ring = int(t.dstX / 512u);
     // THE CELL IS THE MESH'S (2026-10-19): the four labels at this texel and its +x, +z, +x+z
     // neighbours, each at its own particle (label + D) and its own height, and the two triangles
     // GlobeMesh.hlsl cuts between them. Triangles between the labels' own particles TILE the
@@ -1363,74 +1382,50 @@ void CsBankScatter(uint3 id : SV_DispatchThreadID) {
         W[c] = gU[gSlotsB.w][uint2(a0 + q)].y > 0.0f;
     }
     const uint cSlot = gColU.x;
-    // THE COARSE PASS: the mesh's split, (00, 10, 01) and (10, 11, 01), into the ring's texels.
+    // THE CELL'S OWN RING: the mesh's split, (00, 10, 01) and (10, 11, 01), into the ring's texels.
     const uint3 tri[2] = {uint3(0u, 1u, 2u), uint3(1u, 3u, 2u)};
     [unroll] for (uint ti = 0u; ti < 2u; ++ti) {
         if (!(W[tri[ti].x] && W[tri[ti].y] && W[tri[ti].z])) continue;   // no water at a corner
         ScatterTri(P[tri[ti].x], P[tri[ti].y], P[tri[ti].z], H[tri[ti].x], H[tri[ti].y], H[tri[ti].z],
-                   L[tri[ti].x], L[tri[ti].y], L[tri[ti].z], 0u, t.texelM, ringX0, ringOrg, cSlot);
+                   L[tri[ti].x], L[tri[ti].y], L[tri[ti].z], ring, t.texelM, ringX0, ringOrg, cSlot);
     }
-    // THE FINE PASS, THE CUBIC SHEET (2026-10-20, Mark's "blocky zipper"): on ring 0, where the
-    // finer level stands, the cell's roof was planar -- its two triangles between four particles
-    // -- so a tube seen from above was a staircase of 1.2 m blocks. The sheet between the labels
-    // is the mesh's own Catmull-Rom of the bank (GlobeMesh.hlsl reads it so), and the cell is cut
-    // into 4 x 4 sub-cells whose corners stand on that cubic: 32 small planar triangles tile the
-    // curved cell, into the fine texels alone. The cost is the triangle setup, not the loads: the
-    // 4 x 4 label patch is read once a cell, and the pass runs only where a fine tile is mapped
-    // (ScatterTri's own check), so it scales with the tube area and not with the sea.
-    const bool fineOn = gColF.z != 0u && ringX0 == 0u;
-    if (fineOn && W[0] && W[1] && W[2] && W[3]) {
-        // is any fine tile under this cell's box mapped? (the cell's particles bound the box)
-        const float texelF = t.texelM / float(gColF.w);
-        const int lastF = int(512u * gColF.w) - 1;
+    // THE RINGS UNDER, THE CUBIC SHEET (2026-10-20, Mark's "blocky zipper"): a ring-0 cell's roof
+    // was planar -- its two triangles between four particles -- so a tube seen from above was a
+    // staircase of 1.2 m blocks. The sheet between the labels is the mesh's own Catmull-Rom of the
+    // bank, and for every ring under that is mapped under this cell the cell is cut into n x n
+    // sub-cells (n = that ring's texels to ring 0's) whose corners stand on that cubic: small
+    // planar triangles tile the curved cell, into that ring's texels. The cost is the triangle
+    // setup where a tube stands and nothing where none does: residency pays for the cubic.
+    if (ring == 0 && gColN.y != 0u && W[0] && W[1] && W[2] && W[3]) {
         const float2 lo = min(min(P[0], P[1]), min(P[2], P[3])), hi = max(max(P[0], P[1]), max(P[2], P[3]));
-        const int2 f0 = int2(floor((lo - ringOrg) / texelF)), f1 = int2(floor((hi - ringOrg) / texelF));
-        bool anyMapped = false;
-        for (int fz = max(f0.y, 0) >> 7; fz <= (min(f1.y, lastF) >> 7) && !anyMapped; ++fz) {
-            for (int fx = max(f0.x, 0) >> 7; fx <= (min(f1.x, lastF) >> 7) && !anyMapped; ++fx) {
-                anyMapped = FineMapped(uint(fx), uint(fz));
-            }
-        }
-        if (anyMapped) {
-            // the 4 x 4 label patch about the cell (clamped at the ring's edge), displacement and level
-            float4 Dp[16];
-            float Lv[16];
-            [unroll] for (int j = 0; j < 4; ++j) {
-                [unroll] for (int i = 0; i < 4; ++i) {
-                    const int2 q = clamp(lp + int2(i - 1, j - 1), int2(0, 0), int2(511, 511));
-                    Dp[j * 4 + i] = gU[dSlot][uint2(a0 + q)];
-                    Lv[j * 4 + i] = gU[pSlot][uint2(a0 + q)].x;
-                }
-            }
-            // the 5 x 5 corners of the sub-cells on the cubic sheet
-            float2 Pf[25], Lf[25];
-            float Hf[25];
-            [unroll] for (int jj = 0; jj < 5; ++jj) {
-                [unroll] for (int ii = 0; ii < 5; ++ii) {
-                    const float2 fr = float2(float(ii), float(jj)) * 0.25f;   // the label fraction in the cell
-                    const float4 wx = ScatterCatmullW(fr.x), wz = ScatterCatmullW(fr.y);
-                    float4 D = 0.0f;
-                    float lv = 0.0f;
-                    [unroll] for (int j = 0; j < 4; ++j) {
-                        [unroll] for (int i = 0; i < 4; ++i) {
-                            D += wx[i] * wz[j] * Dp[j * 4 + i];
-                            lv += wx[i] * wz[j] * Lv[j * 4 + i];
-                        }
+        float4 Dp[16];
+        float Lv[16];
+        bool patch = false;
+        for (uint k = 0u; k < gColN.x; ++k) {
+            if (!ColAnyMapped(k, (lo - ringOrg) / t.texelM, (hi - ringOrg) / t.texelM)) continue;
+            if (!patch) {   // the 4 x 4 label patch about the cell (clamped at the ring's edge), once
+                [unroll] for (int j = 0; j < 4; ++j) {
+                    [unroll] for (int i = 0; i < 4; ++i) {
+                        const int2 q = clamp(lp + int2(i - 1, j - 1), int2(0, 0), int2(511, 511));
+                        Dp[j * 4 + i] = gU[dSlot][uint2(a0 + q)];
+                        Lv[j * 4 + i] = gU[pSlot][uint2(a0 + q)].x;
                     }
-                    const int k = jj * 5 + ii;
-                    Lf[k] = ringOrg + (float2(lp) + fr + 0.5f) * t.texelM;   // the label at this fraction
-                    Pf[k] = Lf[k] + D.xz;
-                    Hf[k] = lv + D.y;
                 }
+                patch = true;
             }
-            // the sub-cells' triangles, the mesh's split in each
-            [unroll] for (int jj = 0; jj < 4; ++jj) {
-                [unroll] for (int ii = 0; ii < 4; ++ii) {
-                    const int k00 = jj * 5 + ii, k10 = k00 + 1, k01 = k00 + 5, k11 = k01 + 1;
-                    ScatterTri(Pf[k00], Pf[k10], Pf[k01], Hf[k00], Hf[k10], Hf[k01], Lf[k00], Lf[k10], Lf[k01],
-                               1u, t.texelM, ringX0, ringOrg, cSlot);
-                    ScatterTri(Pf[k10], Pf[k11], Pf[k01], Hf[k10], Hf[k11], Hf[k01], Lf[k10], Lf[k11], Lf[k01],
-                               1u, t.texelM, ringX0, ringOrg, cSlot);
+            const uint n = ColRingDiv(k);
+            const float step = 1.0f / float(n);
+            for (uint jj = 0u; jj < n; ++jj) {
+                for (uint ii = 0u; ii < n; ++ii) {
+                    float2 P00, P10, P01, P11, L00, L10, L01, L11;
+                    float H00, H10, H01, H11;
+                    const float2 f = float2(float(ii), float(jj)) * step;
+                    SheetAt(Dp, Lv, f, lp, ringOrg, t.texelM, P00, L00, H00);
+                    SheetAt(Dp, Lv, f + float2(step, 0.0f), lp, ringOrg, t.texelM, P10, L10, H10);
+                    SheetAt(Dp, Lv, f + float2(0.0f, step), lp, ringOrg, t.texelM, P01, L01, H01);
+                    SheetAt(Dp, Lv, f + float2(step, step), lp, ringOrg, t.texelM, P11, L11, H11);
+                    ScatterTri(P00, P10, P01, H00, H10, H01, L00, L10, L01, -int(k) - 1, t.texelM, ringX0, ringOrg, cSlot);
+                    ScatterTri(P10, P11, P01, H10, H11, H01, L10, L11, L01, -int(k) - 1, t.texelM, ringX0, ringOrg, cSlot);
                 }
             }
         }
@@ -1484,19 +1479,20 @@ void CsSprayStep(uint3 id : SV_DispatchThreadID) {
 }
 
 // ================================================================================================
-//  CsFineClear -- THE MAPPED FINE TILES CLEARED (2026-10-19 night, the poles in Mark's video): the
-//  fill cleared a fine tile only under the coarse texels it visited, and a fine tile mapped under a
-//  coarse tile the fill never visits (a NULL tile at the shore an inverted triangle's box touched)
-//  kept whatever its pool page last held -- a lip sheet from the face to a hundred metres. One
-//  thread a fine texel; the mapped set is the constant buffer's; the four bands to their absent
-//  values (the face's minimum to ~0, the rest to 0). Idempotent beside the fill's own clears.
+//  CsColumnClear -- THE MAPPED TILES OF EVERY RING UNDER CLEARED (2026-10-20): one thread a texel,
+//  id.z the ring under; a tile the ring above flagged and the CPU mapped keeps whatever its pool
+//  page last held until it is written (the poles in Mark's video), so the four bands go to absent
+//  (the face's minimum to ~0, the rest to 0) every frame before the scatter, where mapped.
 // ================================================================================================
 [numthreads(8, 8, 1)]
-void CsFineClear(uint3 id : SV_DispatchThreadID) {
-    if (gColF.z == 0u || id.x >= 2048u || id.y >= 2048u) return;
-    if (!FineMapped(id.x >> 7, id.y >> 7)) return;
-    gUu[gColF.x][id.xy] = 0xFFFFFFFFu;
-    gUu[gColF.x][id.xy + uint2(0u, 2048u)] = 0u;
-    gUu[gColF.x][id.xy + uint2(0u, 4096u)] = 0u;
-    gUu[gColF.x][id.xy + uint2(0u, 6144u)] = 0u;
+void CsColumnClear(uint3 id : SV_DispatchThreadID) {
+    const uint k = id.z;
+    if (gColN.y == 0u || k >= gColN.x) return;
+    const uint texels = gColR[k].z;
+    if (id.x >= texels || id.y >= texels) return;
+    if (!ColMapped(k, id.x >> 7, id.y >> 7)) return;
+    gUu[gColR[k].x][id.xy] = 0xFFFFFFFFu;
+    gUu[gColR[k].x][id.xy + uint2(0u, texels)] = 0u;
+    gUu[gColR[k].x][id.xy + uint2(0u, 2u * texels)] = 0u;
+    gUu[gColR[k].x][id.xy + uint2(0u, 3u * texels)] = 0u;
 }

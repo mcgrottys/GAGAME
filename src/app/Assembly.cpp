@@ -851,6 +851,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         waterBank->flatBed = S.water.bank.flatBed;
         waterBank->flatBedNavd = S.water.bank.flatBedNavd;
         waterBank->column = S.water.bank.column;   // the first eye's rings carry the column plane
+        waterBank->columnTexel = S.water.bank.columnTexel;
         if (S.water.bank.flatBed) {
             Log("[bed] --flat-bed %.1f m NAVD: the bank fills against a CONSTANT floor. Diff "
                 "this run's wireframe against a normal one -- whatever differs is what "

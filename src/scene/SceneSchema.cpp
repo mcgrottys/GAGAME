@@ -248,6 +248,10 @@ const Schema& BankSchema() {
             .Bind("column", p.column,
                   "the column plane: the sheet's labels scattered into Eulerian columns, so an "
                   "overturning crest draws its lip (WaterBank.hlsl CsBankScatter, GlobeMesh.hlsl MsLip)",
+                  R)
+            .Bind("columnTexel", p.columnTexel, Q::Length, "m",
+                  "the finest texel the column ladder reaches: rings under ring 0 halve its 1.2 m until they reach it "
+                  "(0.3 = two rings), each resident only where the ring above witnessed a fold",
                   R);
         return sc;
     }();

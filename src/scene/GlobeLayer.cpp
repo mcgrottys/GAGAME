@@ -2505,8 +2505,14 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // THE COLUMN PLANE (SetWaterColumn): on with the bank it belongs to.
     m_cb.colU[0] = m_colSrv;
     m_cb.colU[1] = (m_colSrv != 0xFFFFFFFFu && m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
-    m_cb.colU[2] = m_colFineSrv;
-    m_cb.colU[3] = (m_cb.colU[1] != 0u && m_colFineSrv != 0xFFFFFFFFu) ? 1u : 0u;
+    m_cb.colU[2] = m_colRings;
+    m_cb.colU[3] = 0u;
+    for (uint32_t k = 0; k < 3; ++k) {
+        m_cb.colR[k * 4 + 0] = m_colRingSrv[k];
+        m_cb.colR[k * 4 + 1] = m_colRingTexels[k];
+        m_cb.colR[k * 4 + 2] = m_colRingTiles[k];
+        m_cb.colR[k * 4 + 3] = (m_cb.colU[1] != 0u && k < m_colRings && m_colRingSrv[k] != 0xFFFFFFFFu) ? 1u : 0u;
+    }
     m_cb.sprayU[0] = m_spraySrv;
     m_cb.sprayU[1] = m_sprayN;
     m_cb.sprayU[2] = (m_cb.colU[1] != 0u && m_spraySrv != 0xFFFFFFFFu && m_sprayN != 0u) ? 1u : 0u;
@@ -3324,7 +3330,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     const int viewHoleN0 = m_viewHoleCount;
     uint32_t bankSrv0[3] = {m_bankSrv[0], m_bankSrv[1], m_bankSrv[2]};
     const uint32_t colSrv0 = m_colSrv;
-    const uint32_t colFineSrv0 = m_colFineSrv;
+    const uint32_t colRings0 = m_colRings;
     float bankOrg0[kBankRows];
     for (int i = 0; i < kBankRows; ++i) bankOrg0[i] = m_bankOrg[i];
     const WaveChart::Frame chart0 = m_chartFrame;
@@ -3344,7 +3350,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
         m_bankSrv[1] = rings->param;
         m_bankSrv[2] = rings->detail;
         m_colSrv = 0xFFFFFFFFu;   // the column plane is the first eye's rings'; another eye's rings have none
-        m_colFineSrv = 0xFFFFFFFFu;
+        m_colRings = 0;
         for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = rings->org[i];
         m_chartFrame = rings->chart;
         m_chartOn = rings->chartOn;
@@ -3396,7 +3402,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     m_viewHoleCount = viewHoleN0;
     for (int i = 0; i < 3; ++i) m_bankSrv[i] = bankSrv0[i];
     m_colSrv = colSrv0;
-    m_colFineSrv = colFineSrv0;
+    m_colRings = colRings0;
     for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = bankOrg0[i];
     m_chartFrame = chart0;
     m_chartOn = chartOn0;

@@ -668,8 +668,21 @@ the first ring that answers; the clear runs over the mapped set of every ring. T
 the records of any level, not level 0. Nothing in the code says fine or coarse; a ring knows its
 texel and its parent.
 
-This is the next piece of work on the column plane, before more laws are added to the two-level
-shape. What is committed tonight stands on that shape and is measured on it.
+DONE the same night (PR 104's next commit). `water.columnF`, `kFine*`, `gColF`, `FineMapped`, `CsFineClear`
+and the scatter's `lvl == 0 / 1` are gone. The column is ring 0's atlas (six rings, the bank's) and a
+ladder of RINGS UNDER it: ring -(k+1) at ring 0's texel over 2^(k+1), 512 x 2^(k+1) texels a side over
+ring 0's span, four bands, its own reserved atlas of 128^2 tiles and its own flags; how deep the ladder
+goes is the scene's (`water.bank.columnTexel`, the finest texel it reaches, 0.3 m by default = two
+rings under; 0.15 m = three, the API's 16384-texel ceiling). The laws are relative: a fold witnessed by
+a triangle of ring r flags the tiles of ring r - 1 its box touches; the CPU maps those tiles and
+their neighbours (nested residency between every pair of rings); `CsColumnClear` clears the mapped
+tiles of every ring under; the scatter writes a cell's own ring, and for every ring under that is
+mapped beneath the cell, the cell's cubic subdivision into n x n sub-cells, n that ring's texels to
+ring 0's; `ColumnFetch` walks the rings under finest-first for the lip bands and takes the first that
+holds the point; the dump writes `fiber_column_r-k.f32` per ring, masked by its mapped set. Nothing is
+named by its grain; a ring knows its texel and its parent. (MsLip's block grid is still a quarter
+cell -- the mesh's own grid, not the column's; a third ring under is finer than it.)
+
 
 ## 6. Next
 

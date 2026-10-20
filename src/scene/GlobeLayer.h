@@ -115,11 +115,20 @@ public:
         m_spraySrv = srv;
         m_sprayN = n;
     }
-    void SetWaterColumn(uint32_t srv, float scale, float bias, uint32_t fineSrv = 0xFFFFFFFFu) {
+    // ...and the column ladder's rings under ring 0: n of them, each its SRV, its texels and its
+    // tiles a side (WaterBankLayer.h ColumnRingSrv / ColumnRingTexels / ColumnRingTiles).
+    void SetWaterColumn(uint32_t srv, float scale, float bias, uint32_t ringsUnder = 0,
+                        const uint32_t* ringSrv = nullptr, const uint32_t* ringTexels = nullptr,
+                        const uint32_t* ringTiles = nullptr) {
         m_colSrv = srv;
         m_colScale = scale;
         m_colBias = bias;
-        m_colFineSrv = fineSrv;
+        m_colRings = ringsUnder > 3 ? 3 : ringsUnder;
+        for (uint32_t k = 0; k < 3; ++k) {
+            m_colRingSrv[k] = k < m_colRings ? ringSrv[k] : 0xFFFFFFFFu;
+            m_colRingTexels[k] = k < m_colRings ? ringTexels[k] : 0u;
+            m_colRingTiles[k] = k < m_colRings ? ringTiles[k] : 0u;
+        }
     }
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
@@ -694,6 +703,7 @@ private:
         // point's scale and bias. Appended at the END on both sides (priors 22).
         uint32_t colU[4];
         float colA[4];
+        uint32_t colR[12];   // the column ladder's rings under: SRV, texels, tiles, on
         uint32_t sprayU[4];   // THE SPRAY (gSprayU): the droplets' SRV, the ring's size, on
     };
     // Mirrors WindCb in GlobeWind.hlsl.
@@ -885,7 +895,9 @@ private:
     double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_colSrv = 0xFFFFFFFFu;   // the column plane (SetWaterColumn)
-    uint32_t m_colFineSrv = 0xFFFFFFFFu;   // ...and its finer level where tubes stand
+    uint32_t m_colRings = 0;                                       // ...and its ladder's rings under ring 0
+    uint32_t m_colRingSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    uint32_t m_colRingTexels[3] = {0, 0, 0}, m_colRingTiles[3] = {0, 0, 0};
     uint32_t m_spraySrv = 0xFFFFFFFFu, m_sprayN = 0;   // the droplets (SetWaterSpray)
     hal::Pso m_sprayPso;
     float m_colScale = 1000.0f, m_colBias = 64.0f;

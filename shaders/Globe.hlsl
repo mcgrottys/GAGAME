@@ -137,9 +137,11 @@ cbuffer GlobeCb : register(b1) {
     // appended at the END on both sides (priors 22): x = its SRV (R32_UINT, three bands of 512
     // rows: face, lip underside, lip top), y = on; gColA.x = the fixed point's scale (per metre),
     // .y = its bias (m). Read by ColumnFetch; set A's rings only.
-    // ...z = THE FINER LEVEL's SRV (ring 0's columns at a quarter texel, where tubes stand), w = on.
+    // ...z = THE RINGS UNDER ring 0 (the column ladder, WaterBankLayer.h), w unused; gColR[k] is
+    // ring -(k+1): x its SRV, y its texels a side, z its tiles a side, w on.
     uint4  gColU;
     float4 gColA;
+    uint4  gColR[3];
     // THE SPRAY (WaterBankLayer.h): x = the droplets' SRV (gBufU, eight uints a droplet: x, h, z,
     // age, vx, vy, vz, size), y = the ring's size, z = on. Appended at the END (priors 22).
     uint4  gSprayU;
@@ -527,47 +529,48 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
         // be assigned AFTER that block, which threw the fine slope away -- 2026-10-19)
         slope = float2(lerp((f[1] - f[0]) + (d[1] - d[0]), (f[3] - f[2]) + (d[3] - d[2]), fr.y),
                        (f1 - f0) + (d1 - d0)) / texel;
-        // THE FINER LEVEL (WaterBankLayer.h): on ring 0, a lip band is read at a quarter of the
-        // texel where the fine tiles hold the point (their face present at every tap -- a NULL tile
-        // reads absent and the ring's read above stands): the lip's departure from the FINE face,
-        // weighted by the fine coverage, so the taper and the terraces are a quarter texel's. The
-        // drawn face stays the ring's (one reconstruction everywhere, no seam at a fine tile's edge).
-        if (band != 0u && m == 0u && gColU.w != 0u) {
-            const float texelF = texel * 0.25f;
-            const float2 tfF = (worldXZ - org) / texelF - 0.5f;
-            const int2 t0F = int2(floor(tfF));
-            const float2 frF = tfF - float2(t0F);
-            if (all(t0F >= 0) && all(t0F < 2047)) {
-                // THE END CAP (2026-10-20, Mark's spike at the tube's end): a lip band's vertex
-                // with no lip used to stand on the FACE -- under a roof, the trough -- so at the end
-                // of a tube the sheet drew a wall from the trough up to the crest. The lip's height is
-                // read as the coverage-weighted mean of the lip's own heights, and the vertex stands
-                // between the sheet's own surface (`fallback`: the uncut particle, the unbroken
-                // crest) and that lip height by the coverage: the roof merges into the crest.
+        // THE COLUMN LADDER (2026-10-20): on ring 0, a lip band is read from the FINEST ring under
+        // that holds the point with its face present at every tap (a NULL tile reads absent and
+        // the next ring up is asked); a lip is drawn from the ladder alone -- where no ring under
+        // holds the point yet (the flags' two or three frames) there is no lip, a wait, not a
+        // wrong picture. The lip's height is the coverage-weighted mean of the lip's own heights,
+        // and the vertex stands between the sheet's own surface (`fallback`, the unbroken crest)
+        // and that height by the coverage, so a tube's end merges into the crest (the end cap).
+        if (band != 0u && m == 0u) {
+            for (int kk = int(gColU.z) - 1; kk >= 0; --kk) {
+                const uint k = uint(kk);
+                if (gColR[k].w == 0u) continue;
+                const float div = float(2u << k);
+                const float texelF = texel / div;
+                const uint nF = gColR[k].y;
+                const float2 tfF = (worldXZ - org) / texelF - 0.5f;
+                const int2 t0F = int2(floor(tfF));
+                const float2 frF = tfF - float2(t0F);
+                if (!(all(t0F >= 0) && all(t0F < int(nF) - 1))) continue;
                 float lH[4], wF[4];
                 bool okAll = true;
-                [unroll] for (int k = 0; k < 4; ++k) {
-                    const int2 tc = t0F + int2(k & 1, k >> 1);
-                    const uint rawF = gTexU[gColU.z].Load(int3(tc.x, tc.y, 0)).x;
+                [unroll] for (int q = 0; q < 4; ++q) {
+                    const int2 tc = t0F + int2(q & 1, q >> 1);
+                    const uint rawF = gTexU[gColR[k].x].Load(int3(tc.x, tc.y, 0)).x;
                     okAll = okAll && ColPresent(rawF);
-                    wF[k] = saturate(float(gTexU[gColU.z].Load(int3(tc.x, 6144 + tc.y, 0)).x) * (1.0f / 16.0f));
-                    const uint rawL = gTexU[gColU.z].Load(int3(tc.x, int(band) * 2048 + tc.y, 0)).x;
-                    const bool haveL = wF[k] > 0.0f && ColPresent(rawL);
-                    lH[k] = haveL ? wF[k] * ColH(rawL) : 0.0f;   // weighted by its coverage
-                    if (!haveL) wF[k] = 0.0f;
+                    wF[q] = saturate(float(gTexU[gColR[k].x].Load(int3(tc.x, int(3u * nF) + tc.y, 0)).x) * (1.0f / 16.0f));
+                    const uint rawL = gTexU[gColR[k].x].Load(int3(tc.x, int(band * nF) + tc.y, 0)).x;
+                    const bool haveL = wF[q] > 0.0f && ColPresent(rawL);
+                    lH[q] = haveL ? wF[q] * ColH(rawL) : 0.0f;   // weighted by its coverage
+                    if (!haveL) wF[q] = 0.0f;
                 }
-                if (okAll) {
-                    const float lH0 = lerp(lH[0], lH[1], frF.x), lH1 = lerp(lH[2], lH[3], frF.x);
-                    const float wF0 = lerp(wF[0], wF[1], frF.x), wF1 = lerp(wF[2], wF[3], frF.x);
-                    const float wS = lerp(wF0, wF1, frF.y);
-                    const float hLip = lerp(lH0, lH1, frF.y) / max(wS, 1e-4f);   // the lip's mean height
-                    cover = saturate(wS);
-                    h = lerp(fallback, hLip, cover);
-                    // the slope: the lip's own gradient where it stands, the face's where it tapers
-                    const float2 gL = float2(lerp(lH[1] - lH[0], lH[3] - lH[2], frF.y), lH1 - lH0) / (max(wS, 1e-4f) * texelF);
-                    const float2 gFace = float2(lerp(f[1] - f[0], f[3] - f[2], fr.y), f1 - f0) / texel;
-                    slope = lerp(gFace, gL, cover);
-                }
+                if (!okAll) continue;
+                const float lH0 = lerp(lH[0], lH[1], frF.x), lH1 = lerp(lH[2], lH[3], frF.x);
+                const float wF0 = lerp(wF[0], wF[1], frF.x), wF1 = lerp(wF[2], wF[3], frF.x);
+                const float wS = lerp(wF0, wF1, frF.y);
+                const float hLip = lerp(lH0, lH1, frF.y) / max(wS, 1e-4f);   // the lip's mean height
+                cover = saturate(wS);
+                h = lerp(fallback, hLip, cover);
+                // the slope: the lip's own gradient where it stands, the face's where it tapers
+                const float2 gL = float2(lerp(lH[1] - lH[0], lH[3] - lH[2], frF.y), lH1 - lH0) / (max(wS, 1e-4f) * texelF);
+                const float2 gFace = float2(lerp(f[1] - f[0], f[3] - f[2], fr.y), f1 - f0) / texel;
+                slope = lerp(gFace, gL, cover);
+                break;
             }
         }
         return true;

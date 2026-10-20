@@ -3769,8 +3769,16 @@ bool FrameLoop::Frame() {
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs);
             // THE COLUMN PLANE (the rolling-wave work): the first eye's bank's Eulerian columns.
-            globe->SetWaterColumn(waterBank->ColumnSrv(), WaterBankLayer::kColScale,
-                                  WaterBankLayer::kColBias, waterBank->ColumnFineSrv());
+            {
+                uint32_t rs[3], rt[3], rl[3];
+                for (uint32_t k = 0; k < 3; ++k) {
+                    rs[k] = waterBank->ColumnRingSrv(k);
+                    rt[k] = waterBank->ColumnRingTexels(k);
+                    rl[k] = waterBank->ColumnRingTiles(k);
+                }
+                globe->SetWaterColumn(waterBank->ColumnSrv(), WaterBankLayer::kColScale,
+                                      WaterBankLayer::kColBias, waterBank->ColumnRingsUnder(), rs, rt, rl);
+            }
             globe->SetWaterSpray(waterBank->SpraySrv(), WaterBankLayer::kSprayMax);
             globe->SetBankChartUp(waterBank->Chart().up);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
