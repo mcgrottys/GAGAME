@@ -163,6 +163,12 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                               "waterbank.spray"),
             "WaterBank spray kernel");
         m_sprayStep->SetName(L"CsSprayStep");
+        m_fineClear = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsFineClear", L"cs_6_0"),
+                              "waterbank.fineclear"),
+            "WaterBank fine clear kernel");
+        m_fineClear->SetName(L"CsFineClear");
         Log("[waterbank] column plane on: %ux%u hardware tiles a band, %u sub-labels an axis, "
             "%.0f per m about the waterline, reach %.0f m; the finer level: %u texels a band at "
             "1/%u of ring 0's texel, %ux%u tiles mapped where tubes stand",
@@ -192,6 +198,10 @@ void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
             sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsSprayStep", L"cs_6_0");
         hal::Reload(m_sprayStep, [&] { return hal::BuildCompute(gpu, m_rs.Get(), sp, "waterbank.spray"); },
                     "waterbank.spray");
+        const ShaderBlob fc =
+            sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsFineClear", L"cs_6_0");
+        hal::Reload(m_fineClear, [&] { return hal::BuildCompute(gpu, m_rs.Get(), fc, "waterbank.fineclear"); },
+                    "waterbank.fineclear");
     }
 }
 
@@ -1211,7 +1221,18 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 uint32_t n = 0;
                 for (uint32_t ty = 0; ty < kFineTiles; ++ty) {
                     for (uint32_t tx = 0; tx < kFineTiles; ++tx) {
-                        const uint8_t want = f[ty * kFineTiles + tx] != 0u ? 1 : 0;
+                        // THE NEIGHBOURS TOO (2026-10-19 night, the square-ended lips in Mark's
+                        // video): ColumnFetch's fine taps at a tile's edge read the neighbour, and
+                        // an unmapped neighbour reads absent, so a lip ended on the tile grid. A
+                        // flagged tile maps its eight neighbours with it.
+                        uint8_t want = 0;
+                        for (int dy = -1; dy <= 1 && !want; ++dy) {
+                            for (int dx = -1; dx <= 1 && !want; ++dx) {
+                                const int nx = int(tx) + dx, ny = int(ty) + dy;
+                                if (nx < 0 || ny < 0 || nx >= int(kFineTiles) || ny >= int(kFineTiles)) continue;
+                                if (f[uint32_t(ny) * kFineTiles + uint32_t(nx)] != 0u) want = 1;
+                            }
+                        }
                         uint8_t& have = m_fineMapped[ty * kFineTiles + tx];
                         if (want != have) {
                             for (uint32_t band = 0; band < 4; ++band) {
@@ -1248,7 +1269,9 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         cb.sprayA[0] = static_cast<float>(dt);
         cb.sprayA[1] = kSprayTerminalMs;
         cb.sprayA[2] = kSprayLifeS;
-        cb.sprayA[3] = 6.0f;
+        // the spawn gain: parcels a frame per metre of excursion past the cusp per second -- a
+        // volume budget, not a carpet (Mark's video: a parcel per crest texel per frame)
+        cb.sprayA[3] = 0.25f;
     }
     cb.colF[0] = column ? m_columnF.Uav() : 0xFFFFFFFFu;
     cb.colF[1] = column ? m_flagUav : 0xFFFFFFFFu;
@@ -1285,6 +1308,12 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         1, ctx.gpu->PushConstants(tiles.data(), tiles.size() * sizeof(BankTile)));
     ctx.cmd->ComputeBindless(2);
     ctx.cmd->ComputeBindless(3);
+    if (m_fineClear && column && m_fineMappedCount > 0) {   // the mapped fine tiles to absent (CsFineClear)
+        GpuScope fcscope(ctx.prof, ctx.cmd->Native(), "waterbank.fineclear");
+        ctx.cmd->Pipeline(m_fineClear.Get());
+        ctx.cmd->Dispatch(kFineTexels / 8, kFineTexels / 8, 1);
+        ctx.cmd->UavBarrier(m_columnF.Res());
+    }
     ctx.cmd->Pipeline(m_fill.Get());
     ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16,
                       static_cast<UINT>(tiles.size()));

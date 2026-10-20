@@ -421,6 +421,7 @@ private:
     GpuTexture m_sprayCount;                  // 4x1: spawned this frame, alive this frame, the running total
     uint32_t m_sprayCountUav = 0xFFFFFFFFu;
     hal::Pso m_sprayStep;
+    hal::Pso m_fineClear;                     // CsFineClear: the mapped fine tiles to absent, every frame
     uint32_t m_sprayAlive = 0, m_spraySpawned = 0, m_sprayLogFrame = 0;
     double m_lastSimUnix = 0.0;
     uint32_t m_fineLogged = 0xFFFFFFFFu;

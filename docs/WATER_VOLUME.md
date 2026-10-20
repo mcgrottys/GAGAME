@@ -602,6 +602,21 @@ Point's lee from the WNW (the swell march says so and it is true of the place);
 `scenes/demos/mavericks_beach.json` brings Hs 3 m from 245 into the bay over a field that spans
 the beach, and the bay still looked calm at frame 900 -- untested further tonight.
 
+**What the minute of video showed (Mark's three crops).** Poles: thin vertical slivers from the
+water to the top of the frame, a few frames at a time. The fill cleared a fine tile only under the
+coarse texels it visited, and a fine tile mapped under a coarse tile the fill never visits (a NULL
+tile at the shore whose box an inverted triangle touched) kept whatever its pool page last held; the
+lip sheet then ran from the face to the stale word's height, a hundred metres on this encoding. Now
+`CsFineClear` sets every mapped fine tile's four bands to absent each frame before the scatter.
+Square ends: the lips stopped on the 38 m tile grid, because ColumnFetch's fine taps at a tile's
+edge read the neighbour and an unmapped neighbour reads absent; a flagged tile now maps its eight
+neighbours with it. The carpet: a parcel of spray per crest texel per frame once the spawn ran on
+the excursion past the cusp, drawn as quarter-metre discs; the spawn gain is a volume budget again
+(0.25 a frame per metre of excursion per second) and the discs are 0.12 m growing 0.12 m a second at
+alpha 0.35. The staircase behind the carpet is the lip sheet showing the 1.2 m label grid edge-on:
+a throw of twenty metres across sixteen labels is piecewise planar, and that is the grain of ring 0,
+not a fault -- the finer label grid is the next step for the lips' shape.
+
 **Recording.** The recorder is fed only on the rail path, so a plain headless run writes an empty
 mp4. A scene can now name its own rail file (`rails.file`); `scenes/rails/mavericks_lineup.json`
 holds the lineup eye for sixty seconds, and `capture.railDir` with `capture.mp4` records it.

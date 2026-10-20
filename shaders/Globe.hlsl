@@ -2172,7 +2172,7 @@ SprayVsOut VsSpray(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     const float3 p = float3(asfloat(gBufU[gSprayU.x][b]), asfloat(gBufU[gSprayU.x][b + 1u]), asfloat(gBufU[gSprayU.x][b + 2u]));
     // a droplet is a parcel of spray, not one drop: it spreads as it flies (a sprite's radius
     // grows a quarter metre a second) and thins by the same share (PsSpray)
-    const float size = asfloat(gBufU[gSprayU.x][b + 7u]) + 0.25f * max(age, 0.0f);
+    const float size = asfloat(gBufU[gSprayU.x][b + 7u]) + 0.12f * max(age, 0.0f);
     const float4 e = BankChartRow(0u), n = BankChartRow(1u);
     const float3 upT = BankChartRow(2u).xyz;
     // the chart point less the eye: along east and north by the coordinates' difference, up by the
@@ -2199,6 +2199,6 @@ float4 PsSpray(SprayVsOut i) : SV_Target {
     if (r2 > 1.0f) discard;
     // foam's light: the sun on the sphere's up, the sky from above, as the water's foam takes it
     const float3 lit = SunAt(i.upT, 0.0f) * saturate(dot(GA_SUN_DIR, i.upT)) * 0.9f + SkyAmbient(i.upT, i.upT, 0.0f);
-    const float a = (1.0f - r2) * (1.0f - r2) * 0.45f / (1.0f + i.age);
+    const float a = (1.0f - r2) * (1.0f - r2) * 0.35f / (1.0f + i.age);
     return float4(lit * 0.85f, a);
 }

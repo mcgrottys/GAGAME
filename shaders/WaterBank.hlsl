@@ -1074,7 +1074,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float3 vel = float3(sp * dJ.x, (0.25f + 0.3f * j1) * sp, sp * dJ.y);
             const float2 posJ = xz + d.xz + (float2(j1, j3) - 0.5f) * t.texelM;   // the drawn particle
             gUb[gSprayU.x][slot] = float4(posJ.x, lvl + d.y, posJ.y, 0.0f);
-            gUb[gSprayU.x][slot + 1u] = float4(vel, 0.25f);
+            gUb[gSprayU.x][slot + 1u] = float4(vel, 0.12f);
         }
     }
 
@@ -1408,4 +1408,22 @@ void CsSprayStep(uint3 id : SV_DispatchThreadID) {
     }
     gUb[gSprayU.x][slot] = P;
     gUb[gSprayU.x][slot + 1u] = float4(v, V.w);
+}
+
+// ================================================================================================
+//  CsFineClear -- THE MAPPED FINE TILES CLEARED (2026-10-19 night, the poles in Mark's video): the
+//  fill cleared a fine tile only under the coarse texels it visited, and a fine tile mapped under a
+//  coarse tile the fill never visits (a NULL tile at the shore an inverted triangle's box touched)
+//  kept whatever its pool page last held -- a lip sheet from the face to a hundred metres. One
+//  thread a fine texel; the mapped set is the constant buffer's; the four bands to their absent
+//  values (the face's minimum to ~0, the rest to 0). Idempotent beside the fill's own clears.
+// ================================================================================================
+[numthreads(8, 8, 1)]
+void CsFineClear(uint3 id : SV_DispatchThreadID) {
+    if (gColF.z == 0u || id.x >= 2048u || id.y >= 2048u) return;
+    if (!FineMapped(id.x >> 7, id.y >> 7)) return;
+    gUu[gColF.x][id.xy] = 0xFFFFFFFFu;
+    gUu[gColF.x][id.xy + uint2(0u, 2048u)] = 0u;
+    gUu[gColF.x][id.xy + uint2(0u, 4096u)] = 0u;
+    gUu[gColF.x][id.xy + uint2(0u, 6144u)] = 0u;
 }
