@@ -1830,7 +1830,13 @@ void WaveField::Hold(const std::shared_ptr<const Solved>& s) {
     std::lock_guard<std::mutex> lk(m_heldMx);
     std::erase_if(m_held, [&](const std::shared_ptr<const Solved>& h) { return h->key == s->key; });
     m_held.push_back(s);
-    while (m_held.size() > kHeldMax) m_held.erase(m_held.begin());   // the oldest goes
+    auto heldBytes = [&] {
+        size_t b = 0;
+        for (const auto& h : m_held) b += SolvedBytes(*h);
+        return b;
+    };
+    // the oldest goes, while there are too many or they weigh past the budget (the newest stays)
+    while (m_held.size() > 1 && (m_held.size() > kHeldMax || heldBytes() > kHeldBytes)) m_held.erase(m_held.begin());
 }
 
 std::shared_ptr<const WaveField::Solved> WaveField::Fetch(uint64_t key, double simUnix,
@@ -2245,6 +2251,25 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         jxzS = jxzS * g + 0.5 * (tx * wz + tz * wx);
         dxS = dxS * g + shX * wCr;
         dzS = dzS * g + shZ * wCr;
+        // THE LIP FALLS (WaterBank.hlsl's solved loop, the law and its reasons there): water thrown
+        // past the cusp falls k coth(kh) e^2 / 2, bounded by the trough; its slope by the chain rule
+        // through w where it falls freely, flat where it lies on the trough.
+        const double aHc = aH1 * chopM;
+        const double ePast = (std::max)(aHc * g - 1.0 / (std::max)(kBar, 1e-4), 0.0);
+        const double kG = kBar * cothBar;
+        const double fall = 0.5 * kG * ePast * ePast;
+        if (fall > 0.0) {
+            const double free = eta - fall, floorY = (std::min)(eta, -aEnv);
+            if (free >= floorY) {
+                const double dd = kG * ePast * aHc * q1c;   // d(fall)/d(w)
+                sxS -= dd * wx;
+                szS -= dd * wz;
+                eta = free;
+            } else {
+                sxS = szS = 0.0;
+                eta = floorY;
+            }
+        }
     }
     p.eta = float(eta);
     p.dx = float(dxS);

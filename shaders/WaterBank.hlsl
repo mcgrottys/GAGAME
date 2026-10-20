@@ -1007,6 +1007,17 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float excessShare = 1.0f - 1.0f / max(eCr * eCr, 1.0f);
             const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * excessShare;
             dW.xz = dW.xz * (1.0f + q1 * wCr) + q1 * wCr * aH * dBar;
+            // THE LIP FALLS (2026-10-20, Mark: "we get lip but it doesn't seem to roll into the
+            // wave"). The law above carries the crest forward and leaves it at its height: a shelf.
+            // Water thrown past the cusp has left the face; it flies at the phase speed c and falls
+            // as anything thrown does, g t^2 / 2 after a flight of t = e / c, and c^2 = g tanh(kh) / k,
+            // so the fall is k coth(kh) e^2 / 2 for e the excursion past the cusp (the spray's own
+            // measure, 1 / k). Nothing at the cusp, growing with the throw, most at the crest's
+            // water thrown farthest -- the lip's tip curls down in front of the face -- and bounded
+            // where water meets water, the trough. WaveField::ProbeAt carries the same.
+            const float ePast = max(aH * (1.0f + q1 * wCr) - 1.0f / max(kBar, 1e-4f), 0.0f);
+            const float fall = 0.5f * kBar * cothBar * ePast * ePast;
+            dW.y = max(dW.y - fall, min(dW.y, -aEnv));
             // THE SPRAY's quantities (the spawn stands after the shore stop below): the crest's
             // excursion past the CUSP (1 / k) is a loop's water, the plunging lip's -- that is what
             // leaves the sheet as spray, at a crest texel (w > 3/4); the summed k and travel for

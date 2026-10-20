@@ -752,9 +752,30 @@ walk now runs every frame while the folds move (SetView 3.5 ms on the CPU, kept 
 pass 14.2 -> 15.3 ms. From 100 m closer than the peak (`--campos -387,-370 --cam 6,300,-5`) the crest
 reads as a curling lip, smooth and connected along its length.
 
-**Next.** Decide what the column ladder is for, now that nothing draws from it (the thickness the
-shading could see through, the hull's lip) -- or retire it and keep the fold grid, which is all the
-renderer reads of it.
+**The crash, and the lip that did not roll (the same night).** Mark's interactive session died at
+frame 2,735 in `wavecore::Solve` (bad_alloc). Measured from outside (private bytes every 10 s): not a
+leak, steps -- the wave field's re-solve. The solver's cell is the z16 page texel whatever the
+scene's `cellM` says (`WaveFieldSource::Align`), so the 5.95 x 3.5 km box that also held Half Moon
+Bay's beach was 3200 x 1920 = 6.1 M cells: a 155 s solve that held 12.9 GB and never gave it back
+(three held solves of ~1.6 GB each, a count set where a solve was 577 MB). The reef scene's box is
+the reef's again (3.2 x 2 km, 1792 x 1152: an 8 s solve; private bytes peak 6.8 GB through two
+re-solves and fall back), the beach keeps its own scene, and the held solves are budgeted by bytes
+(1.5 GB; the newest always held).
+
+Mark: "we get lip but it doesn't seem to roll into the wave." The crest law carried the crest
+forward and left it at its height -- a shelf. THE LIP FALLS: water thrown past the cusp has left the
+face and flies at the phase speed, falling g t^2 / 2 after t = e / c, i.e. k coth(kh) e^2 / 2 for e
+the excursion past the cusp (the spray's own measure) -- nothing at the cusp, most for the crest's
+water thrown farthest, bounded where it meets the trough. Both processors (the solved field's law
+in the fill; `WaveField::ProbeAt` with its slope by the chain rule through w, flat on the trough).
+Measured: the crest at the close pose curls down in front of the face as a dark band; the hull
+probe at the helm 6-8 cm rms, corr 1.00 every band (9-11 cm before); self-test 37. The cascades'
+crest law has no crest weight or cusp measure yet, so the fall is the solved field's alone.
+
+**Next.** The falling sheet is lit as the bottom of the sea (near black): the thin sheet's light --
+what a lip passes, backlit green -- went with the lip shading, and comes back on the sheet's own
+two-sided normal and its thickness. Then the fall for the cascades' sea, and what the column ladder
+is for now (the fold grid is all the renderer reads of it).
 
 ## 6. Next
 

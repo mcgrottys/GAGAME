@@ -69,13 +69,13 @@
       "westBoundary": false
     },
     "wavefield": {
-      "orgX": -900,
-      "orgZ": -2400,
-      "nx": 1700,
+      "orgX": -2200,
+      "orgZ": -1700,
+      "nx": 1600,
       "ny": 1000,
-      "cellM": 3.5,
+      "cellM": 2,
       "barNormalDeg": 110,
-      "_box": "5.95 x 3.5 km at 3.5 m: from 900 m west of the point (the outer reef) to 350 m behind Half Moon Bay's beach (its feather of 120 m lies on the sand, not on the surf), 2.4 km south to 1.1 km north"
+      "_box": "3.2 x 2 km: the reef, the lineup and the swell's approach from the WNW. The solver's cell is the z16 page texel whatever cellM says (1.9 m here, WaveFieldSource::Align), so the box's metres are its cost: the 5.95 x 3.5 km box that also held Half Moon Bay's beach (2026-10-19) was 6.1 M cells, and its re-solve held 12.9 GB and ran a 2,700-frame session out of memory (2026-10-20). The beach is mavericks_beach.json's own field."
     }
   },
   "sources": [
