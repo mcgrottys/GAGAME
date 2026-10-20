@@ -3780,6 +3780,12 @@ bool FrameLoop::Frame() {
                                       WaterBankLayer::kColBias, waterBank->ColumnRingsUnder(), rs, rt, rl);
             }
             globe->SetWaterSpray(waterBank->SpraySrv(), WaterBankLayer::kSprayMax);
+            {   // THE SEA'S FOLDS: the morph's distance and the walk's blocks, about ring 0's origin
+                float ox = 0.0f, oz = 0.0f;
+                waterBank->RingOrigin(0, ox, oz);
+                globe->SetWaterFolds(waterBank->FoldDistSrv(), &waterBank->FoldCells(), ox, oz, waterBank->FoldBlockM(),
+                                     waterBank->Chart().east, waterBank->Chart().north, waterBank->ColumnRingsUnder());
+            }
             globe->SetBankChartUp(waterBank->Chart().up);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
             // bands -- the same plane the bank's texels were filled from (ChartOf).
@@ -4113,6 +4119,7 @@ bool FrameLoop::Frame() {
             walkWantNsAcc += globe->walkWantNs;
             morphFullAcc += globe->walkMorphFull;
             morphPartAcc += globe->walkMorphPart;
+            m_walkFoldAcc += globe->walkFoldLeaves;
             wantTouchAcc += resMgr.wantTouches;
             wantHitAcc += resMgr.wantHits;
             ++walkFrames;
@@ -5481,10 +5488,10 @@ int FrameLoop::Finish() {
             const auto ms = [&](uint64_t cyc) { return double(cyc) / tscPerNs / 1e6 / nf; };
             const double walkMs = m_profMs[7] / (std::max)(1u, frameMsN);
             const double emitMs = double(m_walkWantNsAcc) / nf / 1e6, meshMs = double(m_walkMeshNsAcc) / nf / 1e6;
-            Log("[walk] a frame's mean over %llu frames: %.0f nodes, %.0f leaves; SetView %.2f ms = leaf emit "
-                "%.2f + meshlets %.2f + the walk's own (cull, split, the leaf's rest) %.2f",
+            Log("[walk] a frame's mean over %llu frames: %.0f nodes, %.0f leaves (%.0f under the mesh's depth, the sea's "
+                "folds'); SetView %.2f ms = leaf emit %.2f + meshlets %.2f + the walk's own (cull, split, the leaf's rest) %.2f",
                 static_cast<unsigned long long>(m_walkFrames), double(m_walkNodesAcc) / nf, double(m_walkLeavesAcc) / nf,
-                walkMs, emitMs, meshMs, walkMs - emitMs - meshMs);
+                double(m_walkFoldAcc) / nf, walkMs, emitMs, meshMs, walkMs - emitMs - meshMs);
             Log("[walk]   the leaf's emit: %.0f cube wants, %.0f window wants of %.0f (world, slice) pairs "
                 "(%.0f found asked by an earlier world, %.0f behind the face, %.0f outside the box, %.0f past "
                 "the floor), %.0f corner projections",

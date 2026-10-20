@@ -79,7 +79,16 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                 r.mapped.assign(size_t(r.tiles) * r.tiles, 0);
             }
         }
-        m_flagRb.Init(gpu, 4ull * 32 * 32 * kColumnRingsUnderMax + 256ull, L"water.column flags + spray counters readback");
+        m_flagRb.Init(gpu, 4ull * 32 * 32 * kColumnRingsUnderMax + 4ull * kFoldGrid * kFoldGrid + 256ull,
+                      L"water.column flags + fold grid + spray counters readback");
+        // THE SEA'S FOLDS (WaterBankLayer.h): the grid and its distance
+        m_fold = gpu.CreateTexture2D(kFoldGrid, kFoldGrid, DXGI_FORMAT_R32_UINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"water.folds (ring 0's inverted triangles, 8-texel blocks)");
+        m_foldUav = hal::Uav2D(gpu, m_fold.res.Get(), DXGI_FORMAT_R32_UINT);
+        m_foldDist = gpu.CreateTexture2D(kFoldGrid, kFoldGrid, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"water.folds distance (blocks)");
+        m_foldDistUav = hal::Uav2D(gpu, m_foldDist.res.Get(), DXGI_FORMAT_R32_FLOAT);
+        m_foldDistSrv = hal::Srv2D(gpu, m_foldDist.res.Get(), DXGI_FORMAT_R32_FLOAT);
         // THE SPRAY's ring of particles (WaterBankLayer.h): one buffer, two views -- float4-strided
         // for the kernels (RWStructuredBuffer<float4>), uint-strided for the sprite shader's gBufU.
         {
@@ -181,6 +190,12 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                               "waterbank.columnclear"),
             "WaterBank column clear kernel");
         m_columnClear->SetName(L"CsColumnClear");
+        m_foldDistPso = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsFoldDist", L"cs_6_0"),
+                              "waterbank.folddist"),
+            "WaterBank fold distance kernel");
+        m_foldDistPso->SetName(L"CsFoldDist");
         Log("[waterbank] column plane on: %ux%u hardware tiles a band, %u sub-labels an axis, "
             "%.0f per m about the waterline, reach %.0f m; the ladder: %u rings under ring 0, the finest "
             "%.3f m (%u texels a side), each resident where the ring above witnessed a fold",
@@ -1251,6 +1266,14 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     m_sprayAlive = c[1];
                     continue;
                 }
+                if (g.tag == 9u && g.w == kFoldGrid && g.h == kFoldGrid && g.bytes.size() >= size_t(kFoldGrid) * kFoldGrid * 4) {
+                    const uint32_t* f = reinterpret_cast<const uint32_t*>(g.bytes.data());
+                    m_foldCells.clear();
+                    for (uint32_t i = 0; i < kFoldGrid * kFoldGrid; ++i) {
+                        if (f[i] != 0u) m_foldCells.push_back(static_cast<uint16_t>((i % kFoldGrid) | ((i / kFoldGrid) << 8)));
+                    }
+                    continue;
+                }
                 if (g.tag < 2u || g.tag - 2u >= m_ringsUnder) continue;
                 ColumnRing& r = m_under[g.tag - 2u];
                 if (g.w != r.tiles || g.h != r.tiles || g.bytes.size() < size_t(r.tiles) * r.tiles * 4) continue;
@@ -1284,6 +1307,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         }
         for (uint32_t k = 0; k < m_ringsUnder; ++k) ctx.cmd->Barrier(m_under[k].flags, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         ctx.cmd->Barrier(m_sprayCount, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ctx.cmd->Barrier(m_fold, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ctx.cmd->Barrier(m_foldDist, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (m_sprayState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
             ctx.cmd->Barrier(m_sprayBuf.Get(), m_sprayState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             m_sprayState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -1323,7 +1348,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     }
     cb.colN[0] = m_ringsUnder;
     cb.colN[1] = (column && m_ringsUnder) ? 1u : 0u;
-    cb.colN[2] = cb.colN[3] = 0u;
+    cb.colN[2] = (column && m_foldUav) ? m_foldUav : 0u;
+    cb.colN[3] = (column && m_foldDistUav) ? m_foldDistUav : 0u;
     cb.colU[0] = column ? m_column.Uav() : 0xFFFFFFFFu;
     cb.colU[1] = kColSubLabels;
     cb.colU[2] = column ? 1u : 0u;
@@ -1369,6 +1395,15 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         for (uint32_t k = 0; k < m_ringsUnder; ++k) ctx.cmd->UavBarriers({m_under[k].atlas.Res(), m_under[k].flags.res.Get()});
         ctx.cmd->Pipeline(m_scatter.Get());
         ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16, static_cast<UINT>(tiles.size()));
+        // THE FOLDS' DISTANCE, from the grid the scatter just marked; the globe reads it this frame
+        if (m_foldDistPso) {
+            GpuScope fdscope(ctx.prof, ctx.cmd->Native(), "waterbank.folddist");
+            ctx.cmd->UavBarrier(m_fold.res.Get());
+            ctx.cmd->Pipeline(m_foldDistPso.Get());
+            ctx.cmd->Dispatch(kFoldGrid / 8, kFoldGrid / 8, 1);
+            ctx.cmd->UavBarrier(m_foldDist.res.Get());
+            ctx.cmd->Barrier(m_foldDist, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
         ctx.cmd->Pipeline(m_fill.Get());
         // THE SPRAY's step, after the scatter (the column's face is this frame's for the deaths).
         if (m_sprayStep) {
@@ -1393,9 +1428,13 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 m_flagRb.CopyRegion(*ctx.cmd, r.flags.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, r.tiles, r.tiles, 2u + k);
             }
             m_flagRb.CopyRegion(*ctx.cmd, m_sprayCount.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, 4, 1, 1u);
+            ctx.cmd->UavBarrier(m_fold.res.Get());
+            ctx.cmd->Barrier(m_fold, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            m_flagRb.CopyRegion(*ctx.cmd, m_fold.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, kFoldGrid, kFoldGrid, 9u);
         }
         if (++m_sprayLogFrame % 120u == 0u) {
-            Log("[spray] %u droplets alive, %u spawned a frame (of a ring of %u)", m_sprayAlive, m_spraySpawned, kSprayMax);
+            Log("[spray] %u droplets alive, %u spawned a frame (of a ring of %u); %zu fold blocks of %u", m_sprayAlive,
+                m_spraySpawned, kSprayMax, m_foldCells.size(), kFoldGrid * kFoldGrid);
         }
     }
     // PHASE B0: THE BANK'S BED TRACE (the header): the same kernel on the same rows and tiles,

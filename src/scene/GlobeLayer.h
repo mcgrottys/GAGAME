@@ -130,6 +130,20 @@ public:
             m_colRingTiles[k] = k < m_colRings ? ringTiles[k] : 0u;
         }
     }
+    // THE SEA'S FOLDS (2026-10-20, WaterBankLayer.h): the distance field the vertex morphs on, and
+    // for the walk the blocks a fold stood over (bx | bz << 8 of a 64 x 64 grid of blockM about ring
+    // 0's origin, in the rings' chart, whose east and north are given in the planet frame), and how
+    // many levels under the mesh's own depth a fold may refine (the column ladder's rings under).
+    void SetWaterFolds(uint32_t distSrv, const std::vector<uint16_t>* cells, double orgX, double orgZ,
+                       double blockM, const double east[3], const double north[3], uint32_t levelsUnder) {
+        m_foldDistSrv = distSrv;
+        m_foldCells = cells;
+        m_foldOrg[0] = orgX;
+        m_foldOrg[1] = orgZ;
+        m_foldB = blockM;
+        for (int i = 0; i < 3; ++i) { m_foldE[i] = east[i]; m_foldN[i] = north[i]; }
+        m_foldUnder = levelsUnder;
+    }
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
                       const float bandK[3], const float bandRms[3], const float bandFold[3],
@@ -199,6 +213,11 @@ public:
         // the bank actually reaches -- see WalkNode.
         float waveGrainM = 0.0f;
         int waveMaxDepth = kMaxDepth;
+        // THE SEA'S FOLDS (SetWaterFolds), copied at capture (the walk may run on a worker while the
+        // bank's readback rewrites its own list): empty = none; foldMaxDepth the deepest a fold refines.
+        std::vector<uint16_t> foldCells;
+        double foldOrg[2] = {}, foldB = 0.0, foldE[3] = {}, foldN[3] = {};
+        int foldMaxDepth = 0;
         float pixAng = 1.0e-3f;     // one pixel's angle: the relief-mip selector
         bool wants = false;         // a residency manager and at least one cube tenant
         int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1, bldT = -1;
@@ -816,6 +835,7 @@ public:
     // M9bk probe: leaves sitting past their own morph band (k == 1: the odd vertices are
     // snapped onto the even ones, so the level renders at HALF the density the walk paid for).
     mutable uint64_t walkMorphFull = 0, walkMorphPart = 0;
+    mutable uint64_t walkFoldLeaves = 0;   // leaves under the mesh's own depth: the sea's folds' (SplitAt)
     // M13 step 0 (--water-tiles): WHAT WOULD THE WATER COST ON THE PLANET'S OWN LATTICE? The
     // counter answers it before a line of the kernel moves: under the plan's rule each water leaf
     // reads the cube-quadtree tile at its level - 2 (one texel per cell) and the one at level - 3
@@ -833,6 +853,7 @@ public:
         leafStats = LeafStats{};
         walkMeshNs = 0;
         walkMorphFull = walkMorphPart = 0;
+        walkFoldLeaves = 0;
         if (waterTileCount) {
             waterTiles.clear();
             for (uint32_t& c : waterTilesByLevel) c = 0;
@@ -898,6 +919,10 @@ private:
     uint32_t m_colRings = 0;                                       // ...and its ladder's rings under ring 0
     uint32_t m_colRingSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_colRingTexels[3] = {0, 0, 0}, m_colRingTiles[3] = {0, 0, 0};
+    uint32_t m_foldDistSrv = 0xFFFFFFFFu;   // SetWaterFolds
+    const std::vector<uint16_t>* m_foldCells = nullptr;
+    double m_foldOrg[2] = {}, m_foldB = 0.0, m_foldE[3] = {}, m_foldN[3] = {};
+    uint32_t m_foldUnder = 0;
     uint32_t m_spraySrv = 0xFFFFFFFFu, m_sprayN = 0;   // the droplets (SetWaterSpray)
     hal::Pso m_sprayPso;
     float m_colScale = 1000.0f, m_colBias = 64.0f;

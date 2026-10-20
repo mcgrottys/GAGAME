@@ -346,6 +346,20 @@ float3 BankVec(float2 v) { return BankChartRow(0u).xyz * v.x + BankChartRow(1u).
 // from doubles (row 3 w, WaterBankLayer::ChartRows) -- no 6.4e6 m float anywhere, and up is the
 // chart's up wherever on the planet the origin stands. Second order in s / R^2 (a millimetre at
 // 4 km from the origin).
+// THE SEA'S FOLDS' DISTANCE (WaterBank.hlsl CsFoldDist): metres from a point of the rings' chart to
+// the nearest 8-texel block of ring 0 a fold stood over, bilinear between the blocks' centres (Loads:
+// this runs in the mesh stage); 1e9 where none is near or no fold grid is bound (gColU.w).
+float FoldDist(float2 xz) {
+    if (gColU.w == 0xFFFFFFFFu || gColU.y == 0u || sLvlBank != 0) return 1.0e9f;
+    const float B = gBankA.x * 8.0f;
+    const float2 l = (xz - BankRingOrg(0u)) / B - 0.5f;
+    if (any(l < 0.0f) || any(l > 63.0f)) return 1.0e9f;
+    const int2 t0 = min(int2(floor(l)), int2(62, 62));
+    const float2 f = l - float2(t0);
+    const float d00 = gTex[gColU.w][t0].x, d10 = gTex[gColU.w][t0 + int2(1, 0)].x;
+    const float d01 = gTex[gColU.w][t0 + int2(0, 1)].x, d11 = gTex[gColU.w][t0 + int2(1, 1)].x;
+    return lerp(lerp(d00, d10, f.x), lerp(d01, d11, f.x), f.y) * B;
+}
 float3 ChartPointRel(float2 c, float alt) {
     const float4 e = BankChartRow(0u), n = BankChartRow(1u), u = BankChartRow(2u), r3 = BankChartRow(3u);
     const float R = gGlo.x;

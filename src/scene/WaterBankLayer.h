@@ -85,6 +85,14 @@ public:
     static constexpr float kSprayTerminalMs = 5.0f;   // Gunn & Kinzer 1949: a 1-2 mm drop falls at 4-6.5 m/s
     static constexpr float kSprayLifeS = 6.0f;
     uint32_t SpraySrv() const { return (column && m_ready) ? m_spraySrv : 0xFFFFFFFFu; }
+    // THE SEA'S FOLDS (2026-10-20): ring 0's inverted triangles marked on a 64 x 64 grid of 8-texel
+    // blocks (the scatter), their distance field for the globe's morph (CsFoldDist, in blocks),
+    // and the grid back on the CPU for the walk (the blocks a fold stood over, bx | bz << 8, as of
+    // the readback's frame, about ring 0's origin of this one -- a frame or two of slip).
+    static constexpr uint32_t kFoldGrid = 64;
+    uint32_t FoldDistSrv() const { return (column && m_ready && m_foldDistSrv) ? m_foldDistSrv : 0xFFFFFFFFu; }
+    const std::vector<uint16_t>& FoldCells() const { return m_foldCells; }
+    double FoldBlockM() const { return 8.0 * m_baseTexelM; }
     uint32_t SprayAlive() const { return m_sprayAlive; }
     uint32_t SpraySpawned() const { return m_spraySpawned; }
 
@@ -464,7 +472,11 @@ private:
     uint64_t m_landSeen[kMips] = {};   // the height tree's loads when each ring's land test last ran
     uint8_t m_wet[kMips][kRingTiles * kRingTiles] = {};   // per logical tile
     double m_simUnix = 0, m_camX = 0, m_camZ = 0;   // the eye in the chart
-    double m_camH = 0;   // ...and its height over the chart's tangent plane (P.up - R): ChartRows' row 3 w
+    double m_camH = 0;
+    GpuTexture m_fold, m_foldDist;   // the fold grid (R32_UINT) and its distance (R32_FLOAT), 64 x 64
+    uint32_t m_foldUav = 0, m_foldDistUav = 0, m_foldDistSrv = 0;
+    std::vector<uint16_t> m_foldCells;
+    hal::Pso m_foldDistPso;   // ...and its height over the chart's tangent plane (P.up - R): ChartRows' row 3 w
     double m_eyeFlat[3] = {};                       // ...and in the flat frame
     Space::Anchor m_chart{};                        // the rings' plane (Chart above)
     OriginLattice::Origin m_origin{};               // ...which is this origin of the planet's cloud

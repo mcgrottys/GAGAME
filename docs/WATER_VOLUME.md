@@ -733,11 +733,28 @@ Measured at Mavericks' peak and lineup: one connected sheet, the overturned part
 the crest; no slats, no curtains, no gaps along the back. The lip is small: the loop is a few 1.19 m
 cells across. Self-test 37.
 
-**Next.** The loop's size on screen is the label grid's: refine the walk below level 18 where the
-sea folds (the ladder's residency already says where) and read the bank's displacement on the
-Catmull-Rom of the labels (`SheetAt`'s law) so sub-label vertices stand on a smooth sheet. Then
-decide what the column ladder is for, now that nothing draws from it (the thickness the shading
-could see through; the hull's lip).
+**The walk refines where the sea folds (the same night, Mark: "refine the walk below level 18 where
+the sea folds").** The scatter marks ring 0's inverted triangles on a 64 x 64 FOLD GRID of 8-texel
+blocks (9.6 m at Mavericks); `CsFoldDist` turns it into a distance field (0.11 ms); the grid comes
+back to the CPU through the flags' readback. `SplitAt` keeps splitting a node under the mesh's own
+depth while a fold block lies within arc x kLodFactor of it -- the eye's graded law measured from the
+fold, so neighbours stay a level apart and the seam bands close them -- down to the depth the column
+ladder reaches (`columnTexel`: two levels under 18, 0.3 m cells) and floored by the pixel as the wave
+rule is. The vertex morphs on the nearer of the eye and the fold (`FoldDist`, a function of the point
+alone, so seams agree). The fold cells are part of the walk's digest (the walk is kept on an
+unchanged digest; without them it never saw the folds move) and are copied into the walk's
+parameters (the walk may run on a worker while the readback rewrites the bank's list). No new read
+was needed for the smooth sheet: `BankFetch` already reads the displacement on the labels'
+Catmull-Rom (4 x 4), so a vertex under the label grain stands on it.
+
+Measured at the peak: 51-55 fold blocks of 4096; 313 leaves a frame under level 18 (of 1,644); the
+walk now runs every frame while the folds move (SetView 3.5 ms on the CPU, kept before); the globe
+pass 14.2 -> 15.3 ms. From 100 m closer than the peak (`--campos -387,-370 --cam 6,300,-5`) the crest
+reads as a curling lip, smooth and connected along its length.
+
+**Next.** Decide what the column ladder is for, now that nothing draws from it (the thickness the
+shading could see through, the hull's lip) -- or retire it and keep the fold grid, which is all the
+renderer reads of it.
 
 ## 6. Next
 

@@ -997,9 +997,27 @@ double SplitRange(const WalkParams& wp, double arc) {
     return d;
 }
 
+// THE SEA'S FOLDS (2026-10-20): is a block a fold stood over within D metres of the planet point P
+// (a node's centre on the geoid)? P's chart coordinates are its dots with the chart's east and
+// north; a block is a square of the grid about ring 0's origin. The nearest is not needed, only
+// whether one is in reach.
+static bool FoldWithin(const WalkParams& wp, const double P[3], double D) {
+    const double cx = P[0] * wp.foldE[0] + P[1] * wp.foldE[1] + P[2] * wp.foldE[2] - wp.foldOrg[0];
+    const double cz = P[0] * wp.foldN[0] + P[1] * wp.foldN[1] + P[2] * wp.foldN[2] - wp.foldOrg[1];
+    const double B = wp.foldB;
+    for (const uint16_t c : wp.foldCells) {
+        const double x0 = double(c & 0xFFu) * B, z0 = double(c >> 8) * B;
+        const double dx = (std::max)((std::max)(x0 - cx, cx - (x0 + B)), 0.0);
+        const double dz = (std::max)((std::max)(z0 - cz, cz - (z0 + B)), 0.0);
+        if (dx * dx + dz * dz < D * D) return true;
+    }
+    return false;
+}
+
 // Whether a node of this level and arc, `dist` from an eye, is split (WalkNode's rule, said once so
-// every world of a shared walk asks it from its own eye).
-bool SplitAt(const WalkParams& wp, int level, double arc, double dist) {
+// every world of a shared walk asks it from its own eye). `foldNear`: a fold of the sea lies within
+// arc * kLodFactor of the node (FoldWithin; asked only under the mesh's own depth).
+bool SplitAt(const WalkParams& wp, int level, double arc, double dist, bool foldNear = false) {
     // M6j/M8h: the mesh path walks two rungs past CUDEM scale (level 18 = 1.19 m vertex
     // spacing -- level 16's 4.77 m exactly saturated the old 4.8 m bank ring and could
     // not articulate what a finer ring stores; the user's call: more wave vertices).
@@ -1051,6 +1069,15 @@ bool SplitAt(const WalkParams& wp, int level, double arc, double dist) {
             const double pxFloor = dist * wp.pixAng * GlobeLayer::kWavePxFloor;
             split = cell > (std::max)(waveTexel, pxFloor);
         }
+    }
+    // THE SEA'S FOLDS (2026-10-20, Mark: "refine the walk below level 18 where the sea folds").
+    // Under the mesh's own depth a node keeps splitting while a fold of the sheet lies within the
+    // distance rule's reach of it -- the eye's own graded law, measured from the fold instead of
+    // the eye, so neighbours stay a level apart and the seam bands close them -- down to the depth
+    // the column ladder reaches (columnTexel), floored by the pixel as the wave rule is. The vertex
+    // morphs on the same distance (GlobeMesh.hlsl, FoldDist).
+    if (!split && foldNear && level >= wp.maxDepth && level < wp.foldMaxDepth) {
+        split = arc / 32.0 > dist * static_cast<double>(wp.pixAng) * GlobeLayer::kWavePxFloor;
     }
     return split;
 }
@@ -1209,7 +1236,10 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
     // drawn -- and the walk goes on down only for the worlds that need more. One traversal, one
     // set of tile requests, and every world at its own grain.
     if (wp.worldCount == 0) {
-        if (SplitAt(wp, level, arc, dist)) {
+        const double P[3] = {px, py, pz};
+        const bool foldNear = !wp.foldCells.empty() && level >= wp.maxDepth &&
+                              level < wp.foldMaxDepth && FoldWithin(wp, P, arc * GlobeLayer::kLodFactor);
+        if (SplitAt(wp, level, arc, dist, foldNear)) {
             const double h = size * 0.5;
             WalkNode(wp, nodes, face, level + 1, u0, v0, h, leaf, active);
             WalkNode(wp, nodes, face, level + 1, u0 + h, v0, h, leaf, active);
@@ -1768,6 +1798,14 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     // the bank IS the water's geometry. Off elsewhere, so nothing but the helm changes.
     wp.waveGrainM = (m_msPath && m_bankSrv[0] != 0xFFFFFFFFu) ? m_bankBase : 0.0f;
     wp.waveMaxDepth = kWaveMaxDepth;
+    if (wp.waveGrainM > 0.0f && m_foldCells && m_foldB > 0.0) {
+        wp.foldCells = *m_foldCells;
+        wp.foldOrg[0] = m_foldOrg[0];
+        wp.foldOrg[1] = m_foldOrg[1];
+        wp.foldB = m_foldB;
+        for (int i = 0; i < 3; ++i) { wp.foldE[i] = m_foldE[i]; wp.foldN[i] = m_foldN[i]; }
+        wp.foldMaxDepth = wp.maxDepth + static_cast<int>(m_foldUnder);
+    }
     wp.pixAng = cam.fovY / (std::max)(viewportH, 1.0f);
     wp.wants = m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0);
     wp.surfT = m_surfT;
@@ -1836,6 +1874,10 @@ void GlobeLayer::DigestWalk(std::vector<uint8_t>& d, const WalkParams& wp) {
     put(wp.wnK, sizeof(wp.wnK)); put(wp.wnFace, sizeof(wp.wnFace)); put(wp.wnRung, sizeof(wp.wnRung));
     put(wp.wnAx, sizeof(wp.wnAx)); put(wp.wnAy, sizeof(wp.wnAy)); put(wp.wnSlice, sizeof(wp.wnSlice));
     putI(wp.probeCullFar ? 1 : 0); put(wp.occ, sizeof(wp.occ));
+    // the sea's folds: where they stand moves the walk
+    putI(static_cast<int>(wp.foldCells.size()));
+    if (!wp.foldCells.empty()) put(wp.foldCells.data(), wp.foldCells.size() * sizeof(uint16_t));
+    put(wp.foldOrg, sizeof(wp.foldOrg)); putD(wp.foldB); putI(wp.foldMaxDepth);
 }
 
 void GlobeLayer::StartPredictWalk(const Camera& cam, const Camera& pred, float viewportH) {
@@ -1997,6 +2039,7 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
         // snapped onto even = the level renders at half the resolution the walk paid for)?
         if (dist > morphEnd) ++walkMorphFull;
         else if (dist > morphStart) ++walkMorphPart;
+        if (std::lround(-std::log2(size)) > wp.maxDepth) ++walkFoldLeaves;   // only the folds go under it
         if (m_msPath) {
             // EVERY WORLD THAT STOPS HERE draws this tile (M13), anchored at its own eye and
             // morphed from it -- the records its own walk would have made. The tile was asked of
@@ -2497,7 +2540,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.colU[0] = m_colSrv;
     m_cb.colU[1] = (m_colSrv != 0xFFFFFFFFu && m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
     m_cb.colU[2] = m_colRings;
-    m_cb.colU[3] = 0u;
+    m_cb.colU[3] = m_foldDistSrv;   // the sea's folds' distance (GlobeMesh.hlsl: the morph)
     for (uint32_t k = 0; k < 3; ++k) {
         m_cb.colR[k * 4 + 0] = m_colRingSrv[k];
         m_cb.colR[k * 4 + 1] = m_colRingTexels[k];

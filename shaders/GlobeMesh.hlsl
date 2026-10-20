@@ -61,7 +61,14 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
     float d0;
     if (fine) {
         const float2 duC = (g - float2(cx0 + 4.0f, cy0 + 4.0f)) * rec.uvStepCell;
-        d0 = length(rec.anchorRel + rec.dPdu * duC.x + rec.dPdv * duC.y);
+        const float3 p0 = rec.anchorRel + rec.dPdu * duC.x + rec.dPdv * duC.y;
+        d0 = length(p0);
+        // THE SEA'S FOLDS (2026-10-20): the walk keeps splitting under the mesh's own depth where the
+        // sheet turns over (GlobeLayer SplitAt), by the distance from the fold as it splits by the
+        // distance from the eye; the vertex morphs on the nearer of the two, so a node the fold holds
+        // is drawn at the grain it was split for. A function of the point alone: both sides of a
+        // seam agree.
+        if (rec.level == 0u) d0 = min(d0, FoldDist(BankXZ(p0)));
     } else {
         const float3 dir0 = CubeDir(rec.face, rec.uv0 + g * rec.uvStepCell);
         d0 = length(CsToTangent(dir0) * gGlo.x - sLvlCamAbs);   // M10: the level's own eye

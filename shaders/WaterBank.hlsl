@@ -126,7 +126,9 @@ cbuffer BankCb : register(b0) {
     // ring 0 -- ring -1 at half its texel, ring -2 at a quarter, ... -- each a mip of the one above
     // over ring 0's span, resident only where the ring above witnessed a fold. gColR[k] is ring
     // -(k+1): x its UAV slot, y its flags' UAV slot (the tiles the ring above flagged this frame),
-    // z its texels a side, w its tiles a side; gColN.x the rings under, .y on. gColMap holds the
+    // z its texels a side, w its tiles a side; gColN.x the rings under, .y on, .z the FOLD GRID's UAV
+    // slot (64 x 64 blocks of 8 ring-0 texels: an inverted triangle of ring 0 stood over the block),
+    // .w the folds' DISTANCE's UAV slot (CsFoldDist; 0 = none). gColMap holds the
     // mapped set of every ring under, ring k's bits at ColMapBase(k), row-major by tile.
     uint4  gColR[3];
     uint4  gColN;
@@ -1209,6 +1211,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             }
         }
         if (gSprayU.w != 0u && id.z == 0u && id.x < 2u && id.y == 0u) gUu[gSprayU.y][uint2(id.x, 0u)] = 0u;
+        // the fold grid, by tile 0's threads (64 x 64 of its 128 x 128)
+        if (gColN.z != 0u && id.z == 0u && id.x < 64u && id.y < 64u) gUu[gColN.z][id.xy] = 0u;
     }
 }
 
@@ -1275,6 +1279,18 @@ void ScatterTri(float2 A, float2 B, float2 C, float hA, float hB, float hC, floa
     // THE FLAGS: an inverted triangle of ring r flags the tiles of ring r - 1 its box touches (in
     // that ring's texels), so the CPU maps them for the frames to come: the residency of every ring
     // is nested under the ring above it, and the flags come from the pass that ran.
+    // THE FOLD GRID (2026-10-20): an inverted triangle of ring 0 -- the sheet turned over -- marks
+    // the 8-texel blocks its box touches. The globe's walk refines the mesh where these stand
+    // (GlobeLayer SplitAt) and the vertex morphs on the distance from them (CsFoldDist).
+    if (inverted && ring == 0 && gColN.z != 0u) {
+        const float blockM = texelM * 8.0f;
+        const int2 b0 = int2(floor((lo - ringOrg) / blockM)), b1 = int2(floor((hi - ringOrg) / blockM));
+        for (int bz = max(b0.y, 0); bz <= min(b1.y, 63); ++bz) {
+            for (int bx = max(b0.x, 0); bx <= min(b1.x, 63); ++bx) {
+                InterlockedOr(gUu[gColN.z][uint2(uint(bx), uint(bz))], 1u);
+            }
+        }
+    }
     const int under = -ring;   // ring r - 1 is ring under index -r (0 for ring 0)
     if (inverted && ring <= 0 && uint(under) < gColN.x) {
         const uint ku = uint(under);
@@ -1495,4 +1511,23 @@ void CsColumnClear(uint3 id : SV_DispatchThreadID) {
     gUu[gColR[k].x][id.xy + uint2(0u, texels)] = 0u;
     gUu[gColR[k].x][id.xy + uint2(0u, 2u * texels)] = 0u;
     gUu[gColR[k].x][id.xy + uint2(0u, 3u * texels)] = 0u;
+}
+
+// THE FOLDS' DISTANCE (2026-10-20): for every block of the fold grid, the distance in BLOCKS from
+// its centre to the nearest block a fold stood over (0 inside one), searched 16 blocks out; past
+// that, none (1e9). The globe's vertex morphs on it below the mesh's own depth, as a vertex the
+// eye holds morphs on its distance from the eye (GlobeMesh.hlsl SurfaceVertexL).
+[numthreads(8, 8, 1)]
+void CsFoldDist(uint3 id : SV_DispatchThreadID) {
+    if (gColN.z == 0u || gColN.w == 0u || id.x >= 64u || id.y >= 64u) return;
+    float best = 1.0e9f;
+    for (int dz = -16; dz <= 16; ++dz) {
+        for (int dx = -16; dx <= 16; ++dx) {
+            const int2 c = int2(id.xy) + int2(dx, dz);
+            if (any(c < 0) || any(c > 63)) continue;
+            if (gUu[gColN.z][uint2(c)] == 0u) continue;
+            best = min(best, length(max(abs(float2(float(dx), float(dz))) - 0.5f, 0.0f)));
+        }
+    }
+    gU[gColN.w][id.xy] = float4(best, 0.0f, 0.0f, 0.0f);
 }
