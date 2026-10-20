@@ -538,7 +538,13 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
             const int2 t0F = int2(floor(tfF));
             const float2 frF = tfF - float2(t0F);
             if (all(t0F >= 0) && all(t0F < 2047)) {
-                float dF[4], wF[4];
+                // THE END CAP (2026-10-20, Mark's spike at the tube's end): a lip band's vertex
+                // with no lip used to stand on the FACE -- under a roof, the trough -- so at the end
+                // of a tube the sheet drew a wall from the trough up to the crest. The lip's height is
+                // read as the coverage-weighted mean of the lip's own heights, and the vertex stands
+                // between the sheet's own surface (`fallback`: the uncut particle, the unbroken
+                // crest) and that lip height by the coverage: the roof merges into the crest.
+                float lH[4], wF[4];
                 bool okAll = true;
                 [unroll] for (int k = 0; k < 4; ++k) {
                     const int2 tc = t0F + int2(k & 1, k >> 1);
@@ -546,18 +552,21 @@ bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out flo
                     okAll = okAll && ColPresent(rawF);
                     wF[k] = saturate(float(gTexU[gColU.z].Load(int3(tc.x, 6144 + tc.y, 0)).x) * (1.0f / 16.0f));
                     const uint rawL = gTexU[gColU.z].Load(int3(tc.x, int(band) * 2048 + tc.y, 0)).x;
-                    dF[k] = (wF[k] > 0.0f && ColPresent(rawL) && ColPresent(rawF)) ? wF[k] * (ColH(rawL) - ColH(rawF)) : 0.0f;
-                    if (!(wF[k] > 0.0f && ColPresent(rawL))) wF[k] = 0.0f;
+                    const bool haveL = wF[k] > 0.0f && ColPresent(rawL);
+                    lH[k] = haveL ? wF[k] * ColH(rawL) : 0.0f;   // weighted by its coverage
+                    if (!haveL) wF[k] = 0.0f;
                 }
                 if (okAll) {
-                    const float dF0 = lerp(dF[0], dF[1], frF.x), dF1 = lerp(dF[2], dF[3], frF.x);
+                    const float lH0 = lerp(lH[0], lH[1], frF.x), lH1 = lerp(lH[2], lH[3], frF.x);
                     const float wF0 = lerp(wF[0], wF[1], frF.x), wF1 = lerp(wF[2], wF[3], frF.x);
-                    h = lerp(f0, f1, fr.y) + lerp(dF0, dF1, frF.y);
-                    cover = lerp(wF0, wF1, frF.y);
-                    // the slope is the fine lip's own where the lip stands (its departure's
-                    // gradient over the fine texel), the face's where it tapers to nothing
-                    slope = float2(lerp(f[1] - f[0], f[3] - f[2], fr.y) / texel + lerp(dF[1] - dF[0], dF[3] - dF[2], frF.y) / texelF,
-                                   (f1 - f0) / texel + (dF1 - dF0) / texelF);
+                    const float wS = lerp(wF0, wF1, frF.y);
+                    const float hLip = lerp(lH0, lH1, frF.y) / max(wS, 1e-4f);   // the lip's mean height
+                    cover = saturate(wS);
+                    h = lerp(fallback, hLip, cover);
+                    // the slope: the lip's own gradient where it stands, the face's where it tapers
+                    const float2 gL = float2(lerp(lH[1] - lH[0], lH[3] - lH[2], frF.y), lH1 - lH0) / (max(wS, 1e-4f) * texelF);
+                    const float2 gFace = float2(lerp(f[1] - f[0], f[3] - f[2], fr.y), f1 - f0) / texel;
+                    slope = lerp(gFace, gL, cover);
                 }
             }
         }
@@ -2183,9 +2192,19 @@ SprayVsOut VsSpray(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     const uint corner = (vid == 0u || vid == 3u) ? 0u : (vid == 1u) ? 1u : (vid == 2u || vid == 4u) ? 2u : 3u;
     const float2 c = float2((corner & 1u) ? 1.0f : -1.0f, (corner & 2u) ? 1.0f : -1.0f);
     const float3 view = normalize(rel);
-    const float3 right = normalize(cross(upT, view));
-    const float3 up2 = cross(view, right);
-    rel += (right * c.x + up2 * c.y) * ((age >= 0.0f) ? size : 0.0f);
+    // A STREAK, NOT A BEAD (2026-10-20, Mark's dotted arcs): a parcel's sprite is stretched along
+    // its velocity in the sprite's plane by the distance it flies in a twelfth of a second, so a
+    // texel's parcels, one a frame, read as one jet and not as beads on a parabola.
+    const float3 vel = float3(asfloat(gBufU[gSprayU.x][b + 4u]), asfloat(gBufU[gSprayU.x][b + 5u]), asfloat(gBufU[gSprayU.x][b + 6u]));
+    const float3 velT = e.xyz * vel.x + upT * vel.y + n.xyz * vel.z;   // the chart's axes into the tangent frame
+    float3 along = velT - view * dot(velT, view);
+    const float alongLen = length(along);
+    const float3 right0 = normalize(cross(upT, view));
+    const float3 up0 = cross(view, right0);
+    along = (alongLen > 1e-3f) ? along / alongLen : up0;
+    const float3 across = normalize(cross(view, along));
+    const float stretch = size + alongLen * (1.0f / 12.0f);
+    rel += (across * c.x * size + along * c.y * stretch) * ((age >= 0.0f) ? 1.0f : 0.0f);
     o.pos = mul(float4(TrueRel(rel), 1.0f), gViewProj);
     o.uv = c;
     o.upT = upT;

@@ -617,6 +617,20 @@ alpha 0.35. The staircase behind the carpet is the lip sheet showing the 1.2 m l
 a throw of twenty metres across sixteen labels is piecewise planar, and that is the grain of ring 0,
 not a fault -- the finer label grid is the next step for the lips' shape.
 
+**The tube's end cap and the spray's streaks (2026-10-20, Mark's next two crops).** The spike at
+the end of every roll was the lip sheet's end: a lip band's vertex with no lip stood on the column's
+FACE, which under a roof is the trough, so the sheet drew a wall from the trough to the crest where
+the tube ended. ColumnFetch now reads the lip's height as the coverage-weighted mean of the lip's own
+heights and stands the vertex between the sheet's own surface (the uncut particle, the unbroken
+crest) and that height by the coverage: the roof merges into the crest. The dotted arcs were one
+texel's parcels, one a frame, on one parabola; a parcel's sprite is now stretched along its velocity
+in the sprite's plane by the distance it flies in a twelfth of a second, a jet instead of beads. The
+blocky zipper seen from above is the lip sheet's cells on the 1.2 m label grid: each cell's roof is
+planar because the scatter rasterizes the cell's two triangles between the four labels' particles
+with barycentric heights. The next step for the lips' shape is a cubic scatter -- the sheet's height
+inside a cell from the Catmull-Rom of the label grid, as the mesh already reads the bank -- on the
+fine level alone.
+
 **Recording.** The recorder is fed only on the rail path, so a plain headless run writes an empty
 mp4. A scene can now name its own rail file (`rails.file`); `scenes/rails/mavericks_lineup.json`
 holds the lineup eye for sixty seconds, and `capture.railDir` with `capture.mp4` records it.
@@ -624,6 +638,32 @@ holds the lineup eye for sixty seconds, and `capture.railDir` with `capture.mp4`
 Gate: the hull probe (helm_boat, 30 records) at 9-11 cm rms, correlation 1.00 on every record that
 prints one, no crash under the watchdog; the self-test's 37 pass. The twin's bed lap grew 0.3 -> 3.8 ms
 a frame for the profile's sixteen reads (memoised after the first pass).
+
+## 14. The column must be a ladder, not two named levels (2026-10-20, Mark's design bar)
+
+Mark: "nothing should be defined as coarse or fine in code I hope. I assume you are being implicit
+that you are referring to the mip levels and the nested layers of mega textures." It is not implicit
+today, and that is a fault against the bar he set the same night (the sparse voxel water is for global
+coverage: tsunamis, an impact's ripples from orbit). The bank's rings ARE a mip ladder; the column's
+"finer level" is a second, named atlas (`water.columnF`, `kFine*`, `gColF`, `FineMapped`, `CsFineClear`,
+`lvl == 0 / 1` in the scatter, the fine-only branch in ColumnFetch) with its own residency and its own
+kernel paths: 65 / 44 / 61 mentions in WaterBank.hlsl, Globe.hlsl and WaterBankLayer.cpp. (The
+meshlets' `fine` in GlobeMesh.hlsl is an older, different word: a record within 650 m, the one whose
+points come from doubles.)
+
+**The shape it should have.** The column is a ring ladder like the bank's, one atlas, every ring a
+mip of the one below it, with the rings' residency nested: a ring is resident where the ring above it
+witnessed a fold (the flags, which today are the fine level's alone, become the law between EVERY
+pair of rings), and the ladder may go down as far as the sea asks -- 0.3 m at a reef, 2 cm at a
+model's edge, never named. The scatter writes every ring whose texel is at or under the cell's grain
+where that ring is mapped; the cubic sheet (section 13's addendum) is cut to the grain of the finest
+ring the cell reaches, not to "the fine level"; the readers walk the ladder finest-first and take
+the first ring that answers; the clear runs over the mapped set of every ring. The lip pass draws
+the records of any level, not level 0. Nothing in the code says fine or coarse; a ring knows its
+texel and its parent.
+
+This is the next piece of work on the column plane, before more laws are added to the two-level
+shape. What is committed tonight stands on that shape and is measured on it.
 
 ## 6. Next
 
