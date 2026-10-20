@@ -52,13 +52,7 @@ static const uint kSeamNone = 0u, kSeamCoarser = 1u;
 // and displaced, as the M6j path always computed it. MsMain's 81 vertices and the seam bands
 // below both come from here, so a band vertex is the neighbour's own arithmetic on the
 // neighbour's own record (the same doubles the neighbour amplifies from), not an estimate.
-// `sheet` (the rolling-wave work, 2026-10-18): 0 is the surface as ever -- the Lagrangian sheet,
-// each label drawn at its particle; 1 and 2 are the COLUMN PLANE's two extra sheets (Globe.hlsl
-// ColumnFetch: the lip's top and its underside), Eulerian -- each vertex at its own ground point,
-// at the height the column holds there, no lateral term -- so an overturning crest's tube is
-// drawn by MsLip below. `lipHave`: the column held a lip at this vertex (else it sits on the face).
-VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out bool lipHave) {
-    lipHave = false;
+VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut) {
     const float cx0 = float(rec.cell0 & 0xFFu);
     const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
     const bool fine = rec.arc <= 650.0f;
@@ -155,7 +149,6 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
     // never slide onto the rocks; the bank's world xz stays the SAMPLE point --
     // Gerstner convention, same as the reference.
     float2 latW = 0.0f;
-    float2 labelOff = 0.0f;   // the label standing at this point, less the point (the face from the column)
     if (gBankU.z != 0u) {
         float4 bD, bP, bDet;
         // A fine meshlet reads the bank at its exact point, the level's eye plus geo: the
@@ -174,54 +167,27 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
         // the same marsh drawn dry (Mark, 2026-10-18, the Merrimack's mouth; the mix lens showed
         // the classifier calling all of it water).
         dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (gWavesB.w + bP.x + bD.y) : gWavesB.w;
-        // THE FACE FROM THE COLUMN (the rolling-wave work, 2026-10-18 late). Where the column plane
-        // holds this vertex's ground point, the water standing here is the column's band 0 -- the
-        // lowest crossing of the Lagrangian sheet over this point, read at the vertex's OWN point:
-        // Eulerian, no lateral term, no guard. The fold guard that stood here (M9bm: the lateral
-        // term faded to nothing as areaJac fell through kLatFoldFloor = 0.35, because a folded
-        // triangle was a back face culled to "a wall with the water behind it") is gone: the
-        // column carries the fold as three crossings, and the two sheets above the face (MsLip)
-        // draw the tube. Measured before this (docs/WATER_VOLUME.md): on tube columns the guarded
-        // face stood 2 m above the column's, so the tube's floor hung out under the crest like a
-        // reflection. Where the column answers nothing -- outside every ring, another level's
-        // rings, a planet without a bank -- the label's own particle, label plus its lateral
-        // offset, UNCUT: the same sheet where it is single-valued (the twin: the column's face
-        // equals it to the millimetre there).
-        float hF, cvF;
-        float2 sF, lF;
-        if (sheet == 0u && ColumnFetch(bankXZ, 0u, bP.x + bD.y, hF, sF, cvF, lF)) {
-            dispWater = gWavesB.w + hF;
-            latW = 0.0f;
-            // THE LABEL STANDING HERE. The pixel stage reads the water -- its normal, the sub-ring
-            // bands, the ripples -- at the vertex's sample point as a LABEL, and the particle drawn
-            // at this Eulerian point came from the label behind it. The column says which: the
-            // scatter wrote, beside each crossing's height, the label of the triangle that made it
-            // (WaterBank.hlsl ColEncode) -- the exact inversion, fold-aware. (A Newton step on the
-            // bank's Jacobian stood here first and blew up where det(1 + J) was small: rings in
-            // the shading at every steep crest.)
-            labelOff = lF * (1.0f - landness);
-        } else {
-            latW = float2(bD.x, bD.z) * (1.0f - landness);
-        }
-        // A LIP SHEET: the column's height at this vertex's own ground point, Eulerian (no
-        // lateral term); where the column holds no lip the vertex sits on the face (ColumnFetch's
-        // absence law) and MsLip emits nothing for a cell without one.
-        if (sheet != 0u) {
-            float hL, cv;
-            float2 sL, lL;
-            ColumnFetch(bankXZ, sheet, bP.x + bD.y, hL, sL, cv, lL);
-            lipHave = cv > 0.0f;
-            dispWater = gWavesB.w + hL;
-            latW = 0.0f;
-        }
+        // THE LAGRANGIAN SHEET, DRAWN WHOLE (2026-10-20, Mark: "switch to drawing the Lagrangian
+        // sheet"). The water vertex is its label at its particle: the label plus its lateral
+        // displacement, at its level plus its vertical. Where the sea overturns, the sheet folds
+        // over itself -- the crest's labels run backwards and their triangles turn over -- and the
+        // tube is those triangles, drawn: MsMain culls a back face only where it is not water, so
+        // the folded part of the sheet is seen from either side (SV_CullPrimitive). The column
+        // plane's face and the two lip sheets rebuilt from its bands (MsLip, 2026-10-18..20) are
+        // gone from the drawing: a fold rebuilt from Eulerian height bands loses which crossing
+        // joins which across a texel, and every artefact of that week was the rebuild -- the
+        // curtains, the end caps, the square ends, the slats. The column stays a READER (the
+        // spray's death, the hull's twin). The fold guard that once stood here (M9bm: the lateral
+        // term faded as areaJac fell, because a folded triangle was a culled back face, "a wall
+        // with the water behind it") is not back: nothing culls the water now.
+        latW = float2(bD.x, bD.z) * (1.0f - landness);
     }
     const float disp = lerp(dispWater, dispLand, landness);
-    if (sheet != 0u && landness >= 0.999f) lipHave = false;   // the lip is water's alone
+    landOut = landness;
 
     VsOut o;
-    // M9b: this record's index, for PsMeshlet's tint; bit 30 marks a lip sheet's fragment and
-    // bit 29 the underside's (Globe.hlsl PsSurface).
-    o.mid = gid | ((sheet != 0u) ? 0x40000000u : 0u) | ((sheet == 1u) ? 0x20000000u : 0u);
+    // M9b: this record's index, for PsMeshlet's tint.
+    o.mid = gid;
     o.lvl = rec.level;
     o.dir = dir;
     o.h = h;
@@ -232,9 +198,8 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
         o.rel = CsToTangent(dir) * (gGlo.x + disp) - sLvlCamAbs;
     }
     o.rel += BankVec(latW);   // the chart's east and north, in the tangent frame
-    // the label: the lateral term moves the drawn point, never where it is read; with the face from
-    // the column the point is Eulerian and the label is the one Newton step behind it (labelOff)
-    o.geo = geo + BankVec(labelOff);
+    // the label: the lateral term moves the drawn point, never where it is read
+    o.geo = geo;
     // M9bg: the water's colour, shaded AT THIS VERTEX from its own wave normal (the bank's
     // Loads -- stage-proof) and the analytic sky. The pixel stage does no water work.
     // EVERY vertex is shaded, including dry ones: a shoreline triangle's land corner is still
@@ -250,10 +215,9 @@ VsOut SurfaceVertexS(const MeshletRec rec, uint gid, float2 g, uint sheet, out b
     return o;
 }
 VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
-    bool hv;
-    return SurfaceVertexS(rec, gid, g, 0u, hv);
+    float land;
+    return SurfaceVertexL(rec, gid, g, land);
 }
-
 // ------------------------------------------------------------------------------------------
 // Step 23: THE SEAM BANDS -- the shell made watertight (docs/ALGEBRA.md priors 28).
 //
@@ -418,10 +382,24 @@ uint3 BandTri(const Band bd, uint t) {
 
 // One thread block per meshlet: 9x9 = 81 vertices, 8x8x2 = 128 triangles, plus up to four
 // seam bands (step 23: at most 64 vertices and 56 triangles more).
+// THE CULL IS THE MESH SHADER'S (2026-10-20): the pipeline culls nothing, and a grid triangle is
+// dropped here when it shows the camera its back AND none of its corners is water. Land culls as
+// it always did; the sea's sheet is two-sided, so where it folds over itself the turned-over
+// triangles -- the tube -- are drawn. Back means: the displaced triangle turns to the eye the side
+// its undisplaced self turns away from it (the flat triangle is seen from above, outside).
+// Seam bands never cull (they stand behind by construction).
+struct PrimCull {
+    bool cull : SV_CullPrimitive;
+};
+groupshared float3 sMsRel[81];
+groupshared float3 sMsGeo[81];
+groupshared bool sMsWater[81];
+
 [outputtopology("triangle")]
 [numthreads(128, 1, 1)]
 void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
-            out vertices VsOut verts[145], out indices uint3 tris[184]) {
+            out vertices VsOut verts[145], out indices uint3 tris[184],
+            out primitives PrimCull prims[184]) {
     // M10: the dispatch is 2-D (one dimension caps at 65535 groups); fold it back to the record.
     // The tail groups of the last row emit nothing (gGlo.z = the record count) -- through the ONE
     // SetMeshOutputCounts the validator allows (two call sites fail validation even on exclusive
@@ -455,8 +433,12 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         // path was.
         const uint x = gtid % 9u, y = gtid / 9u;
         const float2 g = float2(cx0 + float(x), cy0 + float(y));
-        const VsOut o = SurfaceVertex(rec, gid, g);
+        float landV;
+        const VsOut o = SurfaceVertexL(rec, gid, g, landV);
         verts[gtid] = o;
+        sMsRel[gtid] = o.rel;
+        sMsGeo[gtid] = o.geo;
+        sMsWater[gtid] = landV < 0.999f;
         // Step 23: a seam vertex also writes its band copies -- itself, pushed behind, for
         // any band on its edge, and its outward copy for a hairline band. A corner vertex
         // sits on two edges.
@@ -478,13 +460,22 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     // A band's turn, in its own (along the seam, out of the record) frame, is the same on every
     // edge; that frame keeps the grid's turn on E and N and mirrors it on W and S.
     const bool mirror = dot(cross(rec.dPdu, rec.dPdv), rec.upT) < 0.0f;
+    GroupMemoryBarrierWithGroupSync();   // the grid's positions, for the cull
     if (gtid < 128u) {
         const uint cell = gtid / 2u;
         const uint x = cell % 8u, y = cell / 8u;
         const uint v0 = y * 9u + x;
-        const uint3 t = (gtid & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u)
-                                    : uint3(v0, v0 + 1u, v0 + 9u);
-        tris[gtid] = mirror ? t.xzy : t;
+        uint3 t = (gtid & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u)
+                              : uint3(v0, v0 + 1u, v0 + 9u);
+        t = mirror ? t.xzy : t;
+        tris[gtid] = t;
+        const float3 r0 = sMsRel[t.x], r1 = sMsRel[t.y], r2 = sMsRel[t.z];
+        const float3 g0 = sMsGeo[t.x], g1 = sMsGeo[t.y], g2 = sMsGeo[t.z];
+        const float faceOut = dot(cross(g1 - g0, g2 - g0), rec.upT);   // the wound turn's sign, outward
+        const float faceEye = dot(cross(r1 - r0, r2 - r0), -r0);       // ...and toward the eye, displaced
+        const bool back = faceOut * faceEye < 0.0f;
+        const bool water = sMsWater[t.x] || sMsWater[t.y] || sMsWater[t.z];
+        prims[gtid].cull = back && !water;
     }
 
     // Step 23: the coarse vertices of the level bands (five per band, threads 0..19 at most)
@@ -507,119 +498,6 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         }
         const uint3 t = BandTri(bands[e], gtid - bands[e].tbase);
         tris[128u + gtid] = (mirror != (e == 0u || e == 3u)) ? t.xzy : t;
-    }
-}
-
-// ------------------------------------------------------------------------------------------
-// THE LIP SHEETS (the rolling-wave work, 2026-10-18; WaterBank.hlsl CsBankScatter, Globe.hlsl
-// ColumnFetch). One group per meshlet record of the camera's own level, the same 9x9 grid twice:
-// vertices 0..80 the lip's TOP (column band 1, the inverted branch), 81..161 its UNDERSIDE (band
-// 2, the upright branches' max), each at its own
-// ground point at the height the column holds there. A cell none of whose corners has a lip
-// emits a degenerate triangle (nothing is rasterized), so the pass costs its vertices and draws
-// only the tubes. Two-sided (GlobeLayer::BuildMeshPso: cull NONE): the tube is seen from inside.
-// ------------------------------------------------------------------------------------------
-groupshared bool sLipHave[162];
-
-// THE DENSE LIP GRID (2026-10-19): the lips at the column's finer grain. AsLip, one group a
-// record, runs the 81-probe early-out and, where a tube stands, hands MsLip the record and the
-// 2x2-cell BLOCKS (sixteen a record) any of whose nine corner probes found a tube; MsLip draws
-// one block a group as a 9x9 grid at a QUARTER of the cell -- 0.3 m at the helm, the fine
-// level's own grain -- the same 162 vertices and 256 triangles the first cut drew for the whole
-// record. A record with no tube costs its probes and nothing more; a record with one costs
-// sixteen groups at most. (The first cut's lips were ribbons on the meshlet's 1.2 m grid: the
-// sawtooth in Mark's crops, whatever the column's grain.)
-// The rings' coordinate of grid point g of a record, as SurfaceVertex forms it, without the rest.
-float2 LipProbeXZ(const MeshletRec rec, float2 g) {
-    const float cx0 = float(rec.cell0 & 0xFFu);
-    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
-    if (rec.arc <= 650.0f) {
-        const float2 du = (g - float2(cx0 + 4.0f, cy0 + 4.0f)) * rec.uvStepCell;
-        return BankXZ(rec.anchorRel + rec.dPdu * du.x + rec.dPdv * du.y);
-    }
-    return BankXZOfDir(CsToTangent(CubeDir(rec.face, rec.uv0 + g * rec.uvStepCell)));
-}
-
-struct LipPayload {
-    uint gid;
-    uint count;
-    uint blocks[16];
-};
-groupshared LipPayload sLipPay;
-groupshared uint sLipBlocks;
-
-[numthreads(128, 1, 1)]
-void AsLip(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID) {
-    const uint count = (uint)gGlo.z;
-    const uint gid = gid3.y * 65535u + gid3.x;
-    const MeshletRec rec = gMeshlets[min(gid, max(count, 1u) - 1u)];
-    // Set A's rings only (the column plane is the first eye's), records not culled.
-    const bool liveA = gid < count && (rec.cell0 >> 31) == 0u && gColU.y != 0u && rec.level == 0u;
-    LoadLevel(rec.level);
-    const float cx0 = float(rec.cell0 & 0xFFu);
-    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
-    if (gtid == 0u) sLipBlocks = 0u;
-    GroupMemoryBarrierWithGroupSync();
-    // THE EARLY-OUT: a tube within a texel of any of the 81 grid points, one load each; a probe
-    // that finds one wakes the blocks it is a corner of (block b holds cells 2b..2b+1, corners
-    // 2b..2b+2: an interior probe belongs to four blocks).
-    if (liveA && gtid < 81u) {
-        const uint px = gtid % 9u, py = gtid / 9u;
-        if (ColumnTubeNear(LipProbeXZ(rec, float2(cx0 + float(px), cy0 + float(py))))) {
-            uint mask = 0u;
-            for (uint by = 0u; by < 4u; ++by) {
-                for (uint bx = 0u; bx < 4u; ++bx) {
-                    if (px >= 2u * bx && px <= 2u * bx + 2u && py >= 2u * by && py <= 2u * by + 2u) mask |= 1u << (by * 4u + bx);
-                }
-            }
-            InterlockedOr(sLipBlocks, mask);
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (gtid == 0u) {
-        sLipPay.gid = gid;
-        uint n = 0u;
-        for (uint bk = 0u; bk < 16u; ++bk) {
-            if ((sLipBlocks >> bk) & 1u) sLipPay.blocks[n++] = bk;
-        }
-        sLipPay.count = n;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    DispatchMesh(sLipPay.count, 1, 1, sLipPay);
-}
-
-[outputtopology("triangle")]
-[numthreads(128, 1, 1)]
-void MsLip(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID, in payload LipPayload pay,
-           out vertices VsOut verts[162], out indices uint3 tris[256]) {
-    const uint count = (uint)gGlo.z;
-    const uint gid = pay.gid;
-    const MeshletRec rec = gMeshlets[min(gid, max(count, 1u) - 1u)];
-    LoadLevel(rec.level);
-    const float cx0 = float(rec.cell0 & 0xFFu);
-    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
-    const uint blk = pay.blocks[min(gid3.x, 15u)];
-    const float2 b0 = float2(cx0 + 2.0f * float(blk & 3u), cy0 + 2.0f * float(blk >> 2));
-    SetMeshOutputCounts(162u, 256u);
-    for (uint vi = gtid; vi < 162u; vi += 128u) {
-        const uint sheet = (vi < 81u) ? 1u : 2u;
-        const uint k = (vi < 81u) ? vi : vi - 81u;
-        const uint x = k % 9u, y = k / 9u;
-        bool hv;
-        verts[vi] = SurfaceVertexS(rec, gid, b0 + float2(float(x), float(y)) * 0.25f, sheet, hv);
-        sLipHave[vi] = hv;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    const bool mirror = dot(cross(rec.dPdu, rec.dPdv), rec.upT) < 0.0f;
-    for (uint ti = gtid; ti < 256u; ti += 128u) {
-        const uint sh = (ti < 128u) ? 0u : 1u;      // 0 the underside's grid, 1 the top's
-        const uint tl = ti - sh * 128u;
-        const uint cell = tl / 2u;
-        const uint x = cell % 8u, y = cell / 8u;
-        const uint v0 = sh * 81u + y * 9u + x;
-        const bool any4 = sLipHave[v0] || sLipHave[v0 + 1u] || sLipHave[v0 + 9u] || sLipHave[v0 + 10u];
-        uint3 t = (tl & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u) : uint3(v0, v0 + 1u, v0 + 9u);
-        if (!any4) t = uint3(v0, v0, v0);
-        tris[ti] = mirror ? t.xzy : t;
+        prims[128u + gtid].cull = false;
     }
 }

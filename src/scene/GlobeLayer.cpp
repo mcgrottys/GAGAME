@@ -826,7 +826,7 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     // Back faces culled: MsMain winds every triangle, bands included, one way about the surface's
     // outward normal, whichever way the cube face orients its uv (the VS fallback above still mixes
     // winding and stays NONE). The wireframe twins inherit it and show what is rasterized.
-    d.cull = D3D12_CULL_MODE_BACK;
+    d.cull = D3D12_CULL_MODE_NONE;   // the mesh shader culls (MsMain: land's back faces; the sea is two-sided)
     d.depthClip = TRUE;
     d.depthTest = true;
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
@@ -844,15 +844,6 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
         k.rtvFormat2 = DXGI_FORMAT_R32_UINT;
         if (k.ps.Valid()) m_msPsoKeep = hal::BuildMesh(gpu, k, "globe.mesh.keep");
         if (!m_msPsoKeep) Log("[globe] the kept frame's mesh pipeline failed to build: frames are drawn whole");
-    }
-    {   // THE LIP SHEETS (GlobeMesh.hlsl MsLip): the column plane's two extra sheets over the
-        // same records, PsMain's shading, TWO-SIDED -- a tube is seen from inside.
-        hal::MeshPipelineDesc l = d;
-        l.as = sc.Compile(path, L"AsLip", L"as_6_5");   // the early-out and the dense grid's blocks
-        l.ms = sc.Compile(path, L"MsLip", L"ms_6_5");
-        l.cull = D3D12_CULL_MODE_NONE;
-        if (l.ms.Valid() && l.as.Valid()) m_msPsoLip = hal::BuildMesh(gpu, l, "globe.mesh.lip");
-        if (!m_msPsoLip) Log("[globe] the lip sheets' mesh pipeline failed to build: crests stay single-valued");
     }
     // M9b: the same pipeline in WIREFRAME. Identical shaders and identical displacement --
     // only the raster fill differs -- so what the lines show is exactly the geometry the
@@ -2736,12 +2727,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // identity axes and that eye's own coordinates -- what every reader read before charts floated.
     auto chartRows = [&](float* dst, const float* src, const float* eye) {
         memcpy(dst, src, 16 * sizeof(float));
-        if (src[0] == 0.0f && src[1] == 0.0f && src[2] == 0.0f) {
+        const bool none = src[0] == 0.0f && src[1] == 0.0f && src[2] == 0.0f;
+        if (none) {
             const float id[12] = {1.0f, 0.0f, 0.0f, eye[0], 0.0f, 0.0f, 1.0f, eye[2], 0.0f, 1.0f, 0.0f, 0.0f};
             memcpy(dst, id, sizeof(id));
         }
         for (int i = 0; i < 3; ++i) dst[12 + i] = eye[i];
-        dst[15] = 0.0f;
+        // w: the eye's height over the chart's tangent plane (the bank's doubles; the root's chart
+        // has the level's flat y, row 2 w of its slot)
+        dst[15] = none ? eye[11] : src[15];
     };
     chartRows(m_cb.bankChart, &m_bankOrg[12], &m_levelRows[0]);
     // Set B's eye: the first slot of the TABLE whose bank is set B -- a Droste level or a gate
@@ -2904,20 +2898,12 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
         const UINT n = static_cast<UINT>(meshlets.size());
-        // THE LIP SHEETS (GlobeMesh.hlsl MsLip), after the surface: the same records once more
-        // through the two-sided pipeline, drawing the column plane's tubes into the frame. Only
-        // the shipped look (no lens, no wire, no probe), and only where the column is on.
-        const bool lipOn = m_msPsoLip.Get() && cbData.colU[1] != 0u && surfaceDebug == 0 && !cacheLens &&
-                           !ResidencyLensOn() && !DebugViewOn() && !overdrawProbe;
+        // THE SPRAY, after the surface (the tube is the surface's own sheet now): six vertices a
+        // droplet, the ring's whole length (dead ones collapse), the globe's root signature (the
+        // droplets ride gBufU). Only the shipped look (no lens, no wire, no probe).
+        const bool sprayOn = surfaceDebug == 0 && !cacheLens && !ResidencyLensOn() && !DebugViewOn() && !overdrawProbe;
         auto lipPass = [&]() {
-            if (!lipOn) return;
-            GpuScope lscope(ctx.prof, ctx.cmd->Native(), "globe.lip");
-            PixMarker(ctx.cmd->Native(), "globe.lip (the column plane's lip sheets, two-sided)");
-            ctx.cmd->Pipeline(m_msPsoLip.Get());
-            ctx.cmd->GraphicsConstantsAt(1, cbVa);
-            ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
-            // THE SPRAY after the lips: six vertices a droplet, the ring's whole length (dead ones
-            // collapse), the globe's root signature (the droplets ride gBufU).
+            if (!sprayOn) return;
             if (m_sprayPso.Get() && cbData.sprayU[2] != 0u && ctx.viewIndex == 0) {
                 GpuScope sscope(ctx.prof, ctx.cmd->Native(), "globe.spray");
                 PixMarker(ctx.cmd->Native(), "globe.spray (the droplets the crest law throws)");

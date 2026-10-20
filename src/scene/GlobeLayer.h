@@ -110,7 +110,7 @@ public:
     }
     // M7: per-frame wave-bank binding (SRVs + ring origins).
     // THE COLUMN PLANE (the rolling-wave work, 2026-10-18): the first eye's bank's Eulerian
-    // columns, read by GlobeMesh.hlsl MsLip and Globe.hlsl PsSurface. 0xFFFFFFFF = none.
+    // columns (no drawing reads them since the sheet is drawn whole, 2026-10-20). 0xFFFFFFFF = none.
     void SetWaterSpray(uint32_t srv, uint32_t n) {
         m_spraySrv = srv;
         m_sprayN = n;
@@ -980,7 +980,6 @@ private:
     bool m_msPath = false;
     uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk
     hal::Pso m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
-    hal::Pso m_msPsoLip;   // THE LIP SHEETS (GlobeMesh.hlsl MsLip): the column plane's tubes, two-sided
     hal::Pso m_psoWire, m_psoMeshlet;
     // The residency lens (shaders/ResidencyLens.hlsl): built only when debugLens asks for it.
     // (14 was the address lens, --lens addr: deleted with the Mercator pages, B3.)

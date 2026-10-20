@@ -464,6 +464,7 @@ private:
     uint64_t m_landSeen[kMips] = {};   // the height tree's loads when each ring's land test last ran
     uint8_t m_wet[kMips][kRingTiles * kRingTiles] = {};   // per logical tile
     double m_simUnix = 0, m_camX = 0, m_camZ = 0;   // the eye in the chart
+    double m_camH = 0;   // ...and its height over the chart's tangent plane (P.up - R): ChartRows' row 3 w
     double m_eyeFlat[3] = {};                       // ...and in the flat frame
     Space::Anchor m_chart{};                        // the rings' plane (Chart above)
     OriginLattice::Origin m_origin{};               // ...which is this origin of the planet's cloud

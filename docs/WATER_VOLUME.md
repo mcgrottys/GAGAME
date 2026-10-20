@@ -684,6 +684,61 @@ named by its grain; a ring knows its texel and its parent. (MsLip's block grid i
 cell -- the mesh's own grid, not the column's; a third ring under is finer than it.)
 
 
+## 15. The Lagrangian sheet, drawn whole (2026-10-20, Mark: "switch to drawing the Lagrangian sheet")
+
+Mark's crops of the minute on the ladder, from behind the set wave: gaps along the lip's back, a comb
+of hanging slivers along its front, and from the shoulder a dark palisade. Then his question: "I'm
+wondering if you might be over complicating your mesh/ribbons." He was right, and the measurements
+said where.
+
+**What was measured first.** The lips moved onto the column ladder's own texels (an AS group per tile
+of the finest ring, an MS group per 8x8-texel block, each vertex the exact word at a texel centre,
+stood by the lattice origin's arithmetic) -- and the palisade stayed. So it was in the DATA: the ring
+-2 dump at the peak view holds the top band smooth (1-3 cm a texel, max 0.64 m) and 261 underside
+texels 2-8 m under their neighbours, every one at the lip's edge with partial coverage, every one
+with the underside equal to the face to the centimetre. At a fold line the texel's centre stands
+under no upright arm of the loop, and "the upright branches' max" there is the face. A law closing the
+underside onto the top at the fold line took the slats away -- and left a flat shelf. The lip
+triangles' curtains to the label's height (the end cap's fallback) were the slivers. Each of these
+was the same fault: a folded surface REBUILT from Eulerian height bands does not know which crossing
+joins which across a texel, and every artefact of the week (curtains, end caps, square ends, slats,
+the shelf) was the rebuild.
+
+**The change.** The water vertex is its label at its particle (label + lateral displacement, level +
+vertical): the Lagrangian sheet, which is the folded surface already -- the crest's labels run
+backwards and their triangles turn over. The pipeline culls nothing; `MsMain` culls per primitive
+(`SV_CullPrimitive`) a triangle that shows the eye its back AND has no water corner, so land culls as
+it always did and the sea's sheet is two-sided: the turned-over triangles are the tube, drawn. "Back"
+is said in the triangle's own terms -- the displaced triangle turns to the eye the side its undisplaced
+self turns away. The pixel water turns the bank's normal to the side of the sheet the eye is on
+(the drawn triangle's own normal from rel's screen derivatives), so the tube's ceiling seen from
+below is lit as a ceiling. The mesh is already at the label grain where the waves are (`SplitAt`'s
+wave-grain rule: level 18, 1.19 m cells within the inner rings), so no new amplification was needed
+to draw it.
+
+Gone: `MsLip`/`AsLip` and the lip PSO and pass (the spray keeps its draw after the surface),
+`ColumnFetch` and every pixel reader of the column, the lip fragments' thin-sheet radiometry, the
+face from the column in `SurfaceVertex`. The column plane and its ladder still run (the spray's death
+reads ring 0's face; the dumps); nothing draws from them now.
+
+**The frame (Mark: "the same methods as 3d buildings ... the orientations adjust to the part of the
+world they are on").** `ChartPointRel` stands a point of the rings' chart -- the lattice origin under
+the eye, the buildings' floating origin -- at its height, eye-relative, from small numbers only: the
+horizontal scale (R + alt)/R, the sag s(R + alt)/2R^2 under the chart's plane, and the eye's own
+height over that plane carried from doubles (`WaterBankLayer::ChartRows`, row 3 w). The spray stands
+on it (it took the flat frame's y as an altitude before, and the sag as zero). Wherever the origin
+stands, up is the chart's up.
+
+Measured at Mavericks' peak and lineup: one connected sheet, the overturned part a thin band along
+the crest; no slats, no curtains, no gaps along the back. The lip is small: the loop is a few 1.19 m
+cells across. Self-test 37.
+
+**Next.** The loop's size on screen is the label grid's: refine the walk below level 18 where the
+sea folds (the ladder's residency already says where) and read the bank's displacement on the
+Catmull-Rom of the labels (`SheetAt`'s law) so sub-label vertices stand on a smooth sheet. Then
+decide what the column ladder is for, now that nothing draws from it (the thickness the shading
+could see through; the hull's lip).
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`

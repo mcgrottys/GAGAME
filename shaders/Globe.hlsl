@@ -136,7 +136,7 @@ cbuffer GlobeCb : register(b1) {
     // THE COLUMN PLANE (WaterBank.hlsl CsBankScatter; the rolling-wave work, 2026-10-18) --
     // appended at the END on both sides (priors 22): x = its SRV (R32_UINT, three bands of 512
     // rows: face, lip underside, lip top), y = on; gColA.x = the fixed point's scale (per metre),
-    // .y = its bias (m). Read by ColumnFetch; set A's rings only.
+    // .y = its bias (m); set A's rings only.
     // ...z = THE RINGS UNDER ring 0 (the column ladder, WaterBankLayer.h), w unused; gColR[k] is
     // ring -(k+1): x its SRV, y its texels a side, z its tiles a side, w on.
     uint4  gColU;
@@ -335,6 +335,25 @@ float2 BankXZOfDir(float3 dirT) {
 // A vector of the rings' plane (the lateral displacement, metres along the chart's east and north)
 // in the tangent frame.
 float3 BankVec(float2 v) { return BankChartRow(0u).xyz * v.x + BankChartRow(1u).xyz * v.y; }
+// A POINT OF THE RINGS' CHART, eye-relative in the level's tangent frame (2026-10-20, Mark: "the
+// same methods as 3d buildings ... the orientations adjust to the part of the world they are
+// on"). The chart is the lattice origin under the eye (core/OriginLattice.h, the buildings'
+// floating origin): chart (x, z) is the radial projection R (d.e, d.n) of the point's direction
+// about that origin's tangent point, `alt` the point's height over the geoid. The point is
+// (R + alt) d, and its offset from the eye, along the chart's own east, north and up, is a
+// difference of small numbers term by term: the horizontal scale (R + alt) / R, the sag
+// s (R + alt) / 2R^2 under the tangent plane, and the eye's own height over that plane carried
+// from doubles (row 3 w, WaterBankLayer::ChartRows) -- no 6.4e6 m float anywhere, and up is the
+// chart's up wherever on the planet the origin stands. Second order in s / R^2 (a millimetre at
+// 4 km from the origin).
+float3 ChartPointRel(float2 c, float alt) {
+    const float4 e = BankChartRow(0u), n = BankChartRow(1u), u = BankChartRow(2u), r3 = BankChartRow(3u);
+    const float R = gGlo.x;
+    const float sc = 1.0f + alt / R;
+    const float sag = (c.x * c.x + c.y * c.y) * sc / (2.0f * R);
+    return e.xyz * (c.x * sc - e.w) + n.xyz * (c.y * sc - n.w) + u.xyz * (alt - sag - r3.w)
+         - (sLvlCamAbs - r3.xyz);
+}
 
 uint BankDispSrv() { return (sLvlBank == 1) ? gBankBU.x : gBankU.x; }
 uint BankParamSrv() { return (sLvlBank == 1) ? gBankBU.y : gBankU.y; }
@@ -467,128 +486,6 @@ bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 de
                 out float texelOut) {
     float3 dx, dz;
     return BankSampleT(worldXZ, disp, param, detail, texelOut, dx, dz);
-}
-
-// THE COLUMN PLANE (WaterBank.hlsl CsBankScatter): the EULERIAN water column at a point of the
-// rings' plane -- band 0 the face, 1 the lip's TOP (the inverted branch), 2 the lip's UNDERSIDE
-// (the upright branches' max), 3 the lip's COVERAGE of the texel (0..16), metres about the
-// waterline -- read from the finest ring that holds the point, bilinear. THE EDGE WEIGHT: a lip
-// band is read as the face plus the lip's DEPARTURE from the face at each tap, weighted by that
-// tap's coverage, so the lip tapers onto the face across a texel of the tube's edge in height and
-// in slope alike (the per-tap present/absent read stepped at the texel and spiked the slope --
-// Mark's crop, 2026-10-18). `cover` is the bilinear coverage (0 = no lip here); an absent face is
-// `fallback` (the label's own height). The slope is the bilinear's own (metres per metre).
-// The column's word (WaterBank.hlsl ColEncode): height-major, the label's offset in the low bits.
-bool ColPresent(uint v) { return v != 0u && v != 0xFFFFFFFFu; }
-float ColH(uint v) { return float(v >> 18) / gColA.x - gColA.y; }
-float2 ColOff(uint v) { return float2(float((v >> 9) & 511u), float(v & 511u)) * 0.1f - 25.6f; }
-// labelOff: for band 0, the label standing at this point less the point (the exact inversion the
-// scatter made, bilinear over the taps); the lip bands leave it zero.
-bool ColumnFetch(float2 worldXZ, uint band, float fallback, out float h, out float2 slope,
-                 out float cover, out float2 labelOff) {
-    h = fallback;
-    slope = 0.0f;
-    cover = 0.0f;
-    labelOff = 0.0f;
-    if (gColU.y == 0u || sLvlBank != 0) return false;
-    [unroll] for (uint m = 0; m < 6; ++m) {
-        const float texel = gBankA.x * (float)(1u << m);
-        const float2 org = BankRingOrg(m);
-        const float2 local = (worldXZ - org) / texel;
-        if (any(local < 2.0f) || any(local > 510.0f)) continue;
-        const float2 tf = local - 0.5f;
-        const int2 t0 = int2(floor(tf));
-        const float2 fr = tf - float2(t0);
-        const int xoff = (int)m * 512;
-        float f[4], d[4], w[4];
-        float2 lo[4];
-        [unroll] for (int k = 0; k < 4; ++k) {
-            const int2 tc = t0 + int2(k & 1, k >> 1);
-            const uint rawF = gTexU[gColU.x].Load(int3(xoff + tc.x, tc.y, 0)).x;
-            const bool okF = ColPresent(rawF);
-            f[k] = okF ? ColH(rawF) : fallback;
-            // the label's offset at the tap, said from THIS point: the tap's texel centre plus its
-            // stored offset, less the point
-            lo[k] = okF ? (org + (float2(tc) + 0.5f) * texel + ColOff(rawF) - worldXZ) : float2(0.0f, 0.0f);
-            d[k] = 0.0f;
-            w[k] = 0.0f;
-            // THE LIP IS THE FINE LEVEL'S (2026-10-19, Mark's crop of a small roll drawn as 2 m
-            // slabs): the ring's 1.2 m taps smeared a lip a few decimetres wide into a 2.4 m
-            // bilinear blob, and the dense grid drew the blob. The lip bands are read below from
-            // the finer level alone; where its tile is not yet resident (the flags' two or three
-            // frames) there is no lip, which is a wait, not a wrong picture.
-            // (d[k], w[k] stay zero here.)
-        }
-        const float f0 = lerp(f[0], f[1], fr.x), f1 = lerp(f[2], f[3], fr.x);
-        const float d0 = lerp(d[0], d[1], fr.x), d1 = lerp(d[2], d[3], fr.x);
-        const float w0 = lerp(w[0], w[1], fr.x), w1 = lerp(w[2], w[3], fr.x);
-        h = lerp(f0, f1, fr.y) + lerp(d0, d1, fr.y);
-        cover = lerp(w0, w1, fr.y);
-        if (band == 0u) labelOff = lerp(lerp(lo[0], lo[1], fr.x), lerp(lo[2], lo[3], fr.x), fr.y);
-        // the ring's slope; the finer level below overrides it where it holds the point (it used to
-        // be assigned AFTER that block, which threw the fine slope away -- 2026-10-19)
-        slope = float2(lerp((f[1] - f[0]) + (d[1] - d[0]), (f[3] - f[2]) + (d[3] - d[2]), fr.y),
-                       (f1 - f0) + (d1 - d0)) / texel;
-        // THE COLUMN LADDER (2026-10-20): on ring 0, a lip band is read from the FINEST ring under
-        // that holds the point with its face present at every tap (a NULL tile reads absent and
-        // the next ring up is asked); a lip is drawn from the ladder alone -- where no ring under
-        // holds the point yet (the flags' two or three frames) there is no lip, a wait, not a
-        // wrong picture. The lip's height is the coverage-weighted mean of the lip's own heights,
-        // and the vertex stands between the sheet's own surface (`fallback`, the unbroken crest)
-        // and that height by the coverage, so a tube's end merges into the crest (the end cap).
-        if (band != 0u && m == 0u) {
-            for (int kk = int(gColU.z) - 1; kk >= 0; --kk) {
-                const uint k = uint(kk);
-                if (gColR[k].w == 0u) continue;
-                const float div = float(2u << k);
-                const float texelF = texel / div;
-                const uint nF = gColR[k].y;
-                const float2 tfF = (worldXZ - org) / texelF - 0.5f;
-                const int2 t0F = int2(floor(tfF));
-                const float2 frF = tfF - float2(t0F);
-                if (!(all(t0F >= 0) && all(t0F < int(nF) - 1))) continue;
-                float lH[4], wF[4];
-                bool okAll = true;
-                [unroll] for (int q = 0; q < 4; ++q) {
-                    const int2 tc = t0F + int2(q & 1, q >> 1);
-                    const uint rawF = gTexU[gColR[k].x].Load(int3(tc.x, tc.y, 0)).x;
-                    okAll = okAll && ColPresent(rawF);
-                    wF[q] = saturate(float(gTexU[gColR[k].x].Load(int3(tc.x, int(3u * nF) + tc.y, 0)).x) * (1.0f / 16.0f));
-                    const uint rawL = gTexU[gColR[k].x].Load(int3(tc.x, int(band * nF) + tc.y, 0)).x;
-                    const bool haveL = wF[q] > 0.0f && ColPresent(rawL);
-                    lH[q] = haveL ? wF[q] * ColH(rawL) : 0.0f;   // weighted by its coverage
-                    if (!haveL) wF[q] = 0.0f;
-                }
-                if (!okAll) continue;
-                const float lH0 = lerp(lH[0], lH[1], frF.x), lH1 = lerp(lH[2], lH[3], frF.x);
-                const float wF0 = lerp(wF[0], wF[1], frF.x), wF1 = lerp(wF[2], wF[3], frF.x);
-                const float wS = lerp(wF0, wF1, frF.y);
-                const float hLip = lerp(lH0, lH1, frF.y) / max(wS, 1e-4f);   // the lip's mean height
-                cover = saturate(wS);
-                h = lerp(fallback, hLip, cover);
-                // the slope: the lip's own gradient where it stands, the face's where it tapers
-                const float2 gL = float2(lerp(lH[1] - lH[0], lH[3] - lH[2], frF.y), lH1 - lH0) / (max(wS, 1e-4f) * texelF);
-                const float2 gFace = float2(lerp(f[1] - f[0], f[3] - f[2], fr.y), f1 - f0) / texel;
-                slope = lerp(gFace, gL, cover);
-                break;
-            }
-        }
-        return true;
-    }
-    return false;
-}
-// Does a tube stand within a texel of this point: the coverage band at the nearest texel of the
-// finest ring holding it (one load; MsLip's early-out, before any vertex is made).
-bool ColumnTubeNear(float2 worldXZ) {
-    if (gColU.y == 0u || sLvlBank != 0) return false;
-    [unroll] for (uint m = 0; m < 6; ++m) {
-        const float texel = gBankA.x * (float)(1u << m);
-        const float2 local = (worldXZ - BankRingOrg(m)) / texel;
-        if (any(local < 2.0f) || any(local > 510.0f)) continue;
-        const int2 tc = int2(floor(local));
-        return gTexU[gColU.x].Load(int3((int)m * 512 + tc.x, 1536 + tc.y, 0)).x != 0u;
-    }
-    return false;
 }
 
 // ---- THE TANGENT BIVECTOR ------------------------------------------------------------------
@@ -1005,16 +902,12 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // another level's bed has only its direction -- for the Mercator height. PHASE A2: the colour's
 // windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
 // pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
-// lipSlope / lipOv / lipDep / lipThick: a LIP fragment (GlobeMesh.hlsl MsLip, the column plane's
-// sheets) brings its own slope, the sign of its outward normal (+1 the lip's top, -1 its underside,
-// 0 a fragment of the face as ever), its height about the waterline and the sheet's thickness; the
-// bank's normal and level stand down for it. The rays, the glint and the mirror are the one law
-// either way; the BODY is the thin sheet's (below): what the refracted ray sees through a sheet
-// that thick -- the face under the tube, or the sky behind the lip -- and the sheet's own scatter.
+// nGeo: the drawn triangle's own normal (PsSurface: the cross of rel's screen derivatives, either
+// sign): the side of the sheet the eye is on (TWO-SIDED, below).
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
                        float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
-                       float2 lipSlope, float lipOv, float lipDep, float lipThick, float lipCov) {
+                       float3 nGeo) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -1137,18 +1030,22 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             nPix = normalize(upT - east * sx - north * sz);
         }
     }
-    // A LIP fragment: the sheet's own normal (the underside's points down, into the tube's air)
-    // and its own height; the sub-ring bands above are the face's and do not ride the lip.
-    if (lipOv != 0.0f) {
-        // THE EDGE (2026-10-19): where the lip tapers to nothing (its coverage falls) its normal
-        // returns to the face's, so a thin roll's rim is water, not a slab facing the sky and
-        // mirroring it white (Mark's crop); the underside keeps its sign.
-        const float3 nL = normalize(upT - east * lipSlope.x - north * lipSlope.y);
-        const float3 nBlend = normalize(lerp(nPix, nL, saturate(lipCov))) * lipOv;
-        nSmooth = nBlend;
-        nPix = nBlend;
-        lvlW = gWavesB.w + lipDep;
-        dispW = 0.0f;
+    // TWO-SIDED WATER (2026-10-20, the Lagrangian sheet drawn whole). Where the sea overturns, the
+    // eye sees the sheet from below -- the tube's ceiling, the lip's underside -- and the bank's
+    // normal (the surface's slope, always turned up) is the far side's. The drawn triangle says
+    // which side the eye is on; the normal is turned to it. Over an unfolded sea both point up and
+    // nothing changes.
+    {
+        float3 ng = nGeo;
+        const float lg = length(ng);
+        if (lg > 0.0f) {
+            ng /= lg;
+            if (dot(ng, v) < 0.0f) ng = -ng;
+            if (dot(nPix, ng) < 0.0f) {
+                nPix = -nPix;
+                nSmooth = -nSmooth;
+            }
+        }
     }
 
     // ---- THE SPLIT. Schlick on the TRUE per-pixel normal: from straight above F ~ 0.02 and
@@ -1286,27 +1183,6 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
     const half3 sunHere = half3(SunAt(upT, hp));
     half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
-    // THE THIN SHEET (a lip fragment). The body above is the water under this point -- the face
-    // beneath the tube, lit as ever. A lip is a sheet lipThick metres thick with air on both sides:
-    // the refracted ray crosses it on the path lipThick / |t . n| and comes out the other side, where
-    // it sees the face below (a ray going down) or the sky behind (a ray going up) -- one weight,
-    // continuous through the horizontal. What the sheet keeps of the ray scatters in its own colour,
-    // lit by the sky and by the sun it transmits (the backlit green of a real lip: the sun on the far
-    // side, through the sheet). With no thickness the sheet is transparent and the body stands.
-    if (lipOv != 0.0f) {
-        // the water in the ray's way: the sheet's thickness by the share of the texel the lip
-        // covers (a rim a tenth covered is a tenth as much water)
-        const float path = lipThick * saturate(lipCov) / max(abs(dot(tDir, nPix)), 0.25f);
-        const half3 TwS = exp(-half3(wq.kd * path));
-        const float tUp = dot(tDir, upT);
-        const float3 tSky = normalize(tDir + max(0.02f - tUp, 0.0f) * upT);
-        const half wSky = half(saturate(0.5f + 2.0f * tUp));
-        const half3 behind = lerp(bodyLit, half3(SkyRadianceDirDiscless(tSky, upT)), wSky);
-        const half sunThrough = half(saturate(dot(GA_SUN_DIR, -nPix)) * sunSph);
-        const half3 sheetLit = cScatter * (half3(SkyAmbient(nPix, upT, hp)) +
-                                           (half(ndl * 1.15f) + sunThrough * half(0.8f)) * sunHere);
-        bodyLit = lerp(sheetLit, behind, TwS);
-    }
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1449,6 +1325,8 @@ float CloudMarch(float3 rel, float2 pix, out float3 scat) {
 // the kept frame's cache; GlobeLayer.h Keep). PsMain and PsMainKeep below are its two entries.
 float4 PsSurface(VsOut i, out float land) {
     land = 1.0f;
+    // the drawn triangle's own normal, in uniform flow (the water's two sides: WaterPixelColor)
+    const float3 nGeo = cross(ddx(i.rel), ddy(i.rel));
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
     LoadLevel(i.lvl);
@@ -1545,14 +1423,10 @@ float4 PsSurface(VsOut i, out float land) {
     const float cosE = sqrt(max(1.0f - sinE * sinE, 1e-6f));
     const float dryBand = max(0.4f, footPxW / cosE);
     float editLandPx = 0.0f, wet = 0.0f;
-    // A LIP fragment (GlobeMesh.hlsl MsLip: the column plane's two extra sheets, mid bit 30; bit 29
-    // the underside) is water whole: the lip is drawn only where the column found one, over water.
-    const bool lipFrag = (i.mid & 0x40000000u) != 0u;
     const float landness =
-        lipFrag ? 0.0f
-                : (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                                      : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
-                                                             dryBand, editLandPx, wet);
+        (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
+                            : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
+                                                   dryBand, editLandPx, wet);
     land = landness;
     float3 n = upT;
     float3 alb;
@@ -1878,27 +1752,8 @@ float4 PsSurface(VsOut i, out float land) {
     // of a shoreline pixel is untouched by the choice.
     float3 wcol = i.wcol;
     if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
-        // A lip fragment's own sheet: its slope and height from the column plane, the sign of its
-        // normal by which sheet it is.
-        float2 lipSlope = 0.0f;
-        float lipOv = 0.0f, lipDep = 0.0f, lipThick = 0.0f, lipCov = 0.0f;
-        if (lipFrag) {
-            // bit 29 = sheet 1 = the lip's top (its normal up); sheet 2 = its underside (down).
-            // The sheet's THICKNESS here (top less underside) is what the thin-sheet radiometry
-            // looks through.
-            const uint band = (i.mid & 0x20000000u) != 0u ? 1u : 2u;
-            float cvT, cvB, hTop, hBot;
-            float2 sTop, sBot, lo;
-            ColumnFetch(wxzW, 1u, 0.0f, hTop, sTop, cvT, lo);
-            ColumnFetch(wxzW, 2u, 0.0f, hBot, sBot, cvB, lo);
-            lipDep = (band == 1u) ? hTop : hBot;
-            lipSlope = (band == 1u) ? sTop : sBot;
-            lipThick = max(hTop - hBot, 0.0f);
-            lipOv = (band == 1u) ? 1.0f : -1.0f;
-            lipCov = (band == 1u) ? cvT : cvB;
-        }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipSlope, lipOv, lipDep, lipThick, lipCov);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, nGeo);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
@@ -2187,11 +2042,9 @@ SprayVsOut VsSpray(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     const float size = asfloat(gBufU[gSprayU.x][b + 7u]) + 0.12f * max(age, 0.0f);
     const float4 e = BankChartRow(0u), n = BankChartRow(1u);
     const float3 upT = BankChartRow(2u).xyz;
-    // the chart point less the eye: along east and north by the coordinates' difference, up by the
-    // height over the eye's altitude (the sphere's sag within ring 0 is millimetres)
-    // (BankXZ's inverse: its q less the chart set's eye about the camera, zero at the root)
-    float3 rel = e.xyz * (p.x - e.w) + n.xyz * (p.z - n.w) + upT * (p.y - sLvlEyeY)
-               - (sLvlCamAbs - BankChartRow(3u).xyz);
+    // the chart point less the eye, on the lattice origin's own arithmetic (ChartPointRel: the
+    // sag and the eye's height over the chart's plane from doubles, wherever the origin stands)
+    float3 rel = ChartPointRel(p.xz, p.y);
     const uint corner = (vid == 0u || vid == 3u) ? 0u : (vid == 1u) ? 1u : (vid == 2u || vid == 4u) ? 2u : 3u;
     const float2 c = float2((corner & 1u) ? 1.0f : -1.0f, (corner & 2u) ? 1.0f : -1.0f);
     const float3 view = normalize(rel);

@@ -218,6 +218,8 @@ void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
     }
 }
 
+static bool SameRows(const Space::Anchor& a, const Space::Anchor& b);   // below
+
 void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, const double eye[3]) {
     m_simUnix = simUnix;
     for (int i = 0; i < 3; ++i) m_eyeFlat[i] = eye[i];
@@ -248,6 +250,16 @@ void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, const double eye[3]) {
         m_chartSet = true;
     }
     ChartOfFlat(eye[0], eye[1], eye[2], m_camX, m_camZ);
+    // THE EYE OVER THE CHART'S PLANE (2026-10-20): P.up - R in doubles, so a reader can stand a
+    // chart point at its height without a 6.4e6 m float (Globe.hlsl ChartPointRel). At the root's
+    // chart it is the flat frame's own y.
+    if (!m_surface || !m_chartSet || SameRows(m_chart, m_surface->flat)) {
+        m_camH = eye[1];
+    } else {
+        double P[3];
+        m_surface->flat.PlanetOf(eye[0], eye[1], eye[2], P);
+        m_camH = P[0] * m_chart.up[0] + P[1] * m_chart.up[1] + P[2] * m_chart.up[2] - m_chart.planetR;
+    }
     const double camX = m_camX, camZ = m_camZ;
     // Where the rings stand is not a drawing decision: `enabled` says whether this frame FILLS
     // them (Render), and a bank anchored while nothing reads it is mapped and ready for the
@@ -297,6 +309,7 @@ void WaterBankLayer::ChartRows(float out[16]) const {
     out[3] = static_cast<float>(m_camX);
     out[7] = static_cast<float>(m_camZ);
     out[11] = root ? 0.0f : 1.0f;
+    out[15] = static_cast<float>(m_camH);   // row 3's w: the eye over the chart's plane (row 3 xyz: GlobeLayer's eye)
 }
 
 void WaterBankLayer::SetBoats(const float* a32, const float* b32) {

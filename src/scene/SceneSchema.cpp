@@ -246,8 +246,8 @@ const Schema& BankSchema() {
         sc->Bind("flatBed", p.flatBed, "replace the bed with a flat floor (--flat-bed)", R)
             .Bind("flatBedNavd", p.flatBedNavd, Q::Length, "m NAVD88", "the floor's height", R)
             .Bind("column", p.column,
-                  "the column plane: the sheet's labels scattered into Eulerian columns, so an "
-                  "overturning crest draws its lip (WaterBank.hlsl CsBankScatter, GlobeMesh.hlsl MsLip)",
+                  "the column plane: the sheet's labels scattered into Eulerian columns, a reader of an "
+                  "overturning crest (WaterBank.hlsl CsBankScatter; the crest is drawn by the sheet itself)",
                   R)
             .Bind("columnTexel", p.columnTexel, Q::Length, "m",
                   "the finest texel the column ladder reaches: rings under ring 0 halve its 1.2 m until they reach it "
