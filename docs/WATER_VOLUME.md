@@ -629,6 +629,12 @@ blocky zipper seen from above is the lip sheet's cells on the 1.2 m label grid: 
 planar because the scatter rasterizes the cell's two triangles between the four labels' particles
 with barycentric heights. The next step for the lips' shape is a cubic scatter -- the sheet's height
 inside a cell from the Catmull-Rom of the label grid, as the mesh already reads the bank -- on the
+DONE the same night: the fine pass cuts each cell into 4 x 4 sub-cells whose corners stand on the
+Catmull-Rom of the 4 x 4 label patch, 32 small planar triangles tiling the curved cell, written only
+where a fine tile is mapped (residency is what pays for it, as Mark asked). Measured at the lineup:
+the lip top's second difference along x fell 0.030 -> 0.010 m at the median; the scatter 0.30 -> 0.55
+ms; the lip's height over the face rose 0.5 -> 2.6 m at the median, which is more tiles holding set
+waves (4 -> 16 current) and possibly the cubic's overshoot at a fold -- not yet separated.
 fine level alone.
 
 **Recording.** The recorder is fed only on the rail path, so a plain headless run writes an empty
