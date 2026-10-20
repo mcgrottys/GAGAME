@@ -1038,8 +1038,10 @@ std::optional<int> FrameLoop::Session() {
             return (v && v->hasAt) ? &v->at : nullptr;
         };
         std::string rwhy;
-        if (railName && !S.railDirW.empty()) {
-            const std::string path = std::string("scenes/rails/") + railName + ".json";
+        if ((railName || !S.rails.file.empty()) && !S.railDirW.empty()) {
+            // a scene's own rail file wins over the named one (rails.file, 2026-10-19)
+            const std::string path = !S.rails.file.empty() ? S.rails.file
+                                                           : std::string("scenes/rails/") + railName + ".json";
             if (!m_rail.Load(path, &rwhy) || !m_rail.Resolve(m_railFrame, &rwhy)) {
                 Log("FATAL: [rail] %s", rwhy.c_str());
                 return 1;

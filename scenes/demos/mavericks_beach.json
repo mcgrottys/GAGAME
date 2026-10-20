@@ -1,0 +1,80 @@
+{
+  "_readme": [
+    "HALF MOON BAY'S BEACH BREAK -- the Mavericks scene turned to the beach (2026-10-19). The bay",
+    "south-east of Pillar Point is in the point's lee from the WNW groundswell that fires the reef",
+    "(the swell march says so, and it is true of the place: the inner bay is calm when Mavericks is",
+    "breaking), so this scene brings the same swell from 245, the WSW, straight into the bay: Hs 3 m,",
+    "Tp 14 s, a sand bar in 2-5 m of water 100-300 m out, the 10 m line 600 m out -- a beach break.",
+    "The solved field spans the beach (4.2 x 3.5 km at 2.5 m); the eyes stand on the sand and over",
+    "the bar. Everything else is scenes/demos/mavericks.json's.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/mavericks_beach.json"
+  ],
+  "base": "scenes/demos/mavericks.json",
+  "scene": {
+    "name": "mavericks-beach",
+    "view": "beach"
+  },
+  "sea": {
+    "storm": {
+      "hs": 3,
+      "tp": 14,
+      "dir": 245
+    }
+  },
+  "water": {
+    "wavefield": {
+      "orgX": 800,
+      "orgZ": -3000,
+      "nx": 1700,
+      "ny": 1400,
+      "cellM": 2.5,
+      "barNormalDeg": 65,
+      "gammaHs": 0.6
+    }
+  },
+  "views": [
+    {
+      "name": "beach",
+      "_at": "on the sand, 5 m up, looking WSW into the swell breaking on the bar",
+      "at": {
+        "x": 4150,
+        "alt": 5,
+        "z": -1400,
+        "az": 250,
+        "pitch": -4
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "name": "bar",
+      "_at": "12 m over the inner bar, 250 m out, looking SW along the breaking line",
+      "at": {
+        "x": 3800,
+        "alt": 12,
+        "z": -1300,
+        "az": 225,
+        "pitch": -8
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "name": "beach_high",
+      "_at": "60 m over the beach break, looking SW along the bar",
+      "at": {
+        "x": 3900,
+        "alt": 60,
+        "z": -1600,
+        "az": 230,
+        "pitch": -25
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ]
+}

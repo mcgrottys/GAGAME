@@ -335,6 +335,34 @@ void TreeWater::Prepare(double wx, double wz, double simUnix, Prep& p) const {
     p.dry = wt::Smoothstep(0.05, 0.65, depth);
     p.expo = ExposureAt(latDeg, lonDeg);
     p.hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
+    // THE SHORE STOP'S PROFILE (Prep): the dry weight at 8 stations each way along the sea's travel,
+    // spaced so the eight stations reach four throws at the crest law's largest excursion here --
+    // the loop's limit pi / 2k, or three times the Airy orbit where that is smaller. Finish reads
+    // the mean dryness along its actual throw from this profile (WaterBank.hlsl reads its detail
+    // plane at the same fractions of the throw): one law, the twin's quadrature along the travel.
+    {
+        double ux = m_peakValid ? m_peakDirX : 1.0, uz = m_peakValid ? m_peakDirZ : 0.0;
+        const double ul = std::sqrt(ux * ux + uz * uz);
+        if (ul > 1e-9) { ux /= ul; uz /= ul; } else { ux = 1.0; uz = 0.0; }
+        double aMax = 2.0;
+        if (m_ocean && m_ocean->Ready() && depth > 0.05) {
+            double g[OceanCpu::kCascades];
+            double brk = 1.0, rmsRaw = 0.0, kEff = 0.0;
+            BandLaw(q, depth, p.hsScale, p.expo, g, &brk, &rmsRaw, &kEff);
+            const double aLoop = 1.5707963267948966 / (std::max)(kEff, 1e-4);
+            const double aH0 = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / (std::max)(brk, 1e-3);
+            aMax = (std::min)((std::max)(3.0 * aH0, 2.0), aLoop);
+        }
+        p.profStep = 0.5 * aMax;   // 8 stations reach 4 x aMax
+        p.profDirX = ux;
+        p.profDirZ = uz;
+        for (int i = -8; i <= 8; ++i) {
+            const double sx = wx + ux * p.profStep * i, sz = wz + uz * p.profStep * i;
+            double latS = 0.0, lonS = 0.0;
+            PlaceOf(sx, sz, latS, lonS);
+            p.dryProf[i + 8] = wt::Smoothstep(0.05, 0.65, q.levelNavd - BedAt(q, latS, lonS));
+        }
+    }
     lap(s_cycBed);
 
     // ---- THE WAVES, in CsBankFill's order and with its weights. The solved field owns the
@@ -524,11 +552,17 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     // reads its detail plane's dry channel at the same points; the twin reads the bed.
     double dryL = 1.0;
     if (s.dx != 0.0 || s.dz != 0.0) {
+        // the throw's reach along the travel, read from Prepare's profile (no tree read here)
+        const double along = s.dx * p.profDirX + s.dz * p.profDirZ;
         double acc = 0.0;
         for (int i = 1; i <= 8; ++i) {
-            double latL = 0.0, lonL = 0.0;
-            PlaceOf(wx + s.dx * (0.5 * i), wz + s.dz * (0.5 * i), latL, lonL);
-            acc += wt::Smoothstep(0.05, 0.65, q.levelNavd - BedAt(q, latL, lonL));
+            const double t = (0.5 * i) * along / (std::max)(p.profStep, 1e-6);   // in stations
+            const double tc = (std::min)((std::max)(t, -8.0), 8.0);
+            const double f0 = std::floor(tc);
+            const int i0 = (std::min)((std::max)(int(f0) + 8, 0), 16);
+            const int i1 = (std::min)(i0 + 1, 16);
+            const double fr = tc - f0;
+            acc += p.dryProf[i0] * (1.0 - fr) + p.dryProf[i1] * fr;
         }
         dryL = acc * 0.125;
         s.dx *= dryL;

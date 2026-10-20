@@ -962,12 +962,36 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float cothBar = sumACoth / sumA;
             const float2 dBar = sumADir / max(length(sumADir), 1e-6f);
             const float aH = gWaveB.z * aEnv * cothBar;   // the sea's horizontal amplitude
-            const float q1 = min(lipQ - 1.0f, max(1.5707963f / max(kBar * aH, 1e-4f) - 1.0f, 0.0f));
+            // THE CREST'S STEEPNESS CLIMBS TO THE CUSP (2026-10-19 late, Mark: "adjustments to the
+            // shallow/beach waves"). The first cut's gain was the limiter's ratio itself, lipQ - 1,
+            // which at a 7 m reef under a 5 m swell is 0.2: a tongue 5 cm thick thrown a metre
+            // (measured at Mavericks' bowl: lips 0.3 m over the face at the median, 2.7 m wide at
+            // the 90th). Linear theory's orbit in shallow water is k A_h = (H / 2h) <= 0.3 whatever
+            // the wave does, so no ratio of heights reaches the cusp (k A_h = 1, the crest's water
+            // at the phase speed) or the loop (pi / 2). The energy the depth cannot carry is what
+            // carries the crest forward: the share of the raw variance above the limit, 1 - 1/lipQ^2
+            // (the clipped Rayleigh sea's own measure, WaterTerms.h BreakFactor), takes the crest's
+            // excursion from the sea's own, A_h, toward the loop's limit, pi / 2k. At lipQ = 1
+            // nothing is added; at 1.5 the crest stands at the cusp; past 2 it overturns; the bound
+            // is never crossed. One law, no corner, the twin WaveField::ProbeAt's.
+            // THE SET WAVE (the same night): the limiter's excess is the SEA's, Hs against the depth,
+            // and the crest weight w saturates at the significant amplitude, so every crest above it
+            // was thrown alike and the set waves -- 1.5 to 2 times the significant crest, the ones
+            // that tube -- got an average crest's throw (measured: 1,401 folds on ring 0 and lips
+            // 0.2 m over the face). The excess that folds THIS crest is the sea's times this crest's
+            // height over the significant amplitude: a crest twice the significant one stands at
+            // twice the sea's excess against the depth. Below the significant crest the share falls
+            // with it; in the trough it is nothing (w is too).
+            const float aLoop = 1.5707963f / max(kBar, 1e-4f);
+            const float eCr = lipQ * max(dW.y / aEnv, 0.0f);
+            const float excessShare = 1.0f - 1.0f / max(eCr * eCr, 1.0f);
+            const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * excessShare;
             dW.xz = dW.xz * (1.0f + q1 * wCr) + q1 * wCr * aH * dBar;
-            // THE SPRAY's quantities (the spawn stands after the shore stop below): what the bound
-            // took, (lipQ - 1 - q1) w A_h metres of throw the crest wanted past a quarter
-            // wavelength, at a crest texel (w > 3/4); the summed k and travel for the launch.
-            sprayExcess = (wCr > 0.75f) ? (lipQ - 1.0f - q1) * wCr * aH : 0.0f;
+            // THE SPRAY's quantities (the spawn stands after the shore stop below): the crest's
+            // excursion past the CUSP (1 / k) is a loop's water, the plunging lip's -- that is what
+            // leaves the sheet as spray, at a crest texel (w > 3/4); the summed k and travel for
+            // the launch.
+            sprayExcess = (wCr > 0.75f) ? max(aH * (1.0f + q1) - 1.0f / max(kBar, 1e-4f), 0.0f) * wCr : 0.0f;
             sprayK = kBar;
             sprayDir = dBar;
         }

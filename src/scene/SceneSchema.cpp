@@ -583,6 +583,7 @@ const Schema& RailsSchema() {
                      {"none", "classic", "zoom", "flood", "jetty", "droste", "droste-out"},
                      "the rail flown (--rail, --rail-zoom, --rail-flood, --rail-jetty, --rail-droste[-out])", R)
             .List("keys", &RailKeySchema_(), "an authored keyed flight, inline (the shipped rails are scenes/rails/<active>.json)", false)
+            .BindPath("file", p.file, "a rail file of the scene's own (scenes/rails/*.json's shape), flown instead of the named one when capture.railDir is set (2026-10-19: scenes/rails/mavericks_lineup.json)", R)
             .Nest("droste", DrosteRailSchema(), &p.droste, "the dive");
         return sc;
     }();

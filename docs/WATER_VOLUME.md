@@ -532,6 +532,84 @@ mip texel never straddles the texture's seam, so it was never wrong and is uncha
 Measured: the cones gone from every eye (`out/mavericks/F_high270.png`); the Newburyport throat's
 still and the probe unchanged (the throat's vertices stand deep inside their boxes).
 
+## 13. The crest climbs to the cusp (2026-10-19 late, PR 104's twelfth commit)
+
+Mark: "continue what remains so we can start seeing barrels at the beach ... you might need to make
+some adjustments to how we handle the shallow/beach waves."
+
+**Measured first** (Mavericks' bowl, the point's eye, the current fine tiles): the lips were tongues --
+5 cm thick at the median, 0.4 m at the 90th; 0.3 m over the face at the median; 2.7 m wide at the
+90th. No barrel. The crest law's gain was the limiter's own ratio, lipQ - 1, and at a 7 m reef under a
+5 m swell that ratio is 0.2: a crest thrown a metre. Linear theory cannot do better by any ratio of
+heights: in shallow water the orbit's steepness is k A_h = H / 2h <= gamma / 2 = 0.3 whatever the
+wave does, and the cusp (k A_h = 1, the crest's water at the phase speed) and the loop (pi / 2) are
+out of its reach. A breaking wave is not linear: its face steepens because the depth cannot carry
+the wave's energy, and that energy carries the crest forward.
+
+**The law.** The share of the raw variance above the limit, 1 - 1/lipQ^2 (the clipped Rayleigh sea's
+own measure, the same family as BreakFactor), takes the crest's excursion from the sea's own, A_h,
+toward the loop's limit, pi / 2k:
+
+    A' = A_h + (pi / 2k - A_h) (1 - 1 / lipQ^2),    q1 = A' / A_h - 1
+
+on the crest's weight w as before (the orbit's amplitude grows by q1 w, the crest is carried
+forward by q1 w A_h). At lipQ = 1 nothing is added; at 1.5 the crest stands at the cusp (k A' = 1);
+past 2 it overturns; the bound is never crossed and there is no corner. On both processors
+(WaterBank.hlsl, WaveField::ProbeAt with the same Jacobian by the product rule). The spray's share is
+now the crest's excursion past the cusp, max(A' - 1/k, 0) w: a loop's water, the plunging lip's.
+
+**The reef's own breaking index.** The solver's limiter held Hs <= 0.6 h everywhere -- a beach's
+random-sea saturation, the Merrimack's. On a steep reef single waves stand to 0.8-1.0 of the depth
+before they plunge; scenes/demos/mavericks.json says `gammaHs 0.8`. A scene key, not a code change.
+
+**The beach.** Half Moon Bay's beach lies in Pillar Point's lee from the WNW swell that fires the
+reef -- the swell march says so and it is true of the place -- so `scenes/demos/mavericks_beach.json`
+brings the swell from 245 into the bay (Hs 3 m, Tp 14 s) over a solved field that spans the beach:
+a sand bar in 2-5 m of water, a beach break. (The first beach eye stood at the first field box's
+edge, where its feather fades the waves; the box was moved so the feather lies on the sand.)
+
+Measured (`out/mavericks/U_*`, `out/surf/lips/I_*`):
+
+**The set wave, the same night.** The cusp law alone still left tongues (1,401 fold texels on ring 0,
+lips 0.2 m over the face): the crest weight w saturates at the significant amplitude, so every crest
+above it was thrown alike and the set waves -- 1.5 to 2 times the significant crest, the ones that
+tube -- got an average crest's throw. The excess that folds THIS crest is the sea's times this
+crest's height over the significant amplitude, `eCr = lipQ * eta / aEnv`, and the share is
+`1 - 1/eCr^2` (1 below the significant crest's own limit, nothing in the trough). Both processors;
+the twin's Jacobian treats eCr as constant at the point.
+
+**The shore stop's twin moved into Prepare.** The hull probe crashed in `HeightPage::Texel` under
+`AtMany`'s ParallelFor (and hung an hour the time before): the stop's eight bed reads stood in
+Finish, the pure part that runs across the pool, and the page memo's map is not a thing eight
+threads may insert into. Prepare, the memoised part on one thread, now reads the dry weight at
+eight stations each way along the sea's travel (spaced to reach four throws at the crest law's
+largest excursion here), and Finish reads its mean dryness along the actual throw from that
+profile -- the same law, the twin's quadrature along the travel.
+
+| | cusp law | + the set wave |
+|---|---|---|
+| fold texels on ring 0 (the lineup) | 1,401 | 4,498 |
+| lip height over the face, p50 / p90 / max | 0.19 / 0.40 / 0.56 m | 0.51 / 1.21 / 1.65 m |
+| lip width, p50 / p90 / max | 0.9 / 1.5 / 1.8 m | 1.5 / 2.1 / 2.4 m |
+| fine column tiles at the Newburyport throat | 40 | 84 |
+| the throat's still, pixels changed | | 239,000 of 1,440,000 |
+
+Not yet a barrel: the lip's top still stands under the crest's back at the median (a thrown tongue,
+not an arch), and from the shoulder the set wave reads as a long dark wall with a slab of spray on
+its crest -- the spray's spawn now runs on the excursion past the cusp and packs the ring; its
+density and its drawing want a law of their own. The beach: Half Moon Bay's beach lies in Pillar
+Point's lee from the WNW (the swell march says so and it is true of the place);
+`scenes/demos/mavericks_beach.json` brings Hs 3 m from 245 into the bay over a field that spans
+the beach, and the bay still looked calm at frame 900 -- untested further tonight.
+
+**Recording.** The recorder is fed only on the rail path, so a plain headless run writes an empty
+mp4. A scene can now name its own rail file (`rails.file`); `scenes/rails/mavericks_lineup.json`
+holds the lineup eye for sixty seconds, and `capture.railDir` with `capture.mp4` records it.
+
+Gate: the hull probe (helm_boat, 30 records) at 9-11 cm rms, correlation 1.00 on every record that
+prints one, no crash under the watchdog; the self-test's 37 pass. The twin's bed lap grew 0.3 -> 3.8 ms
+a frame for the profile's sixteen reads (memoised after the first pass).
+
 ## 6. Next
 
 1. The face from the column (band 0), the guard deleted on both processors; `--water-probe`

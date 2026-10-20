@@ -2224,7 +2224,17 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         const double dLen = std::sqrt(sumADx * sumADx + sumADz * sumADz);
         const double dBx = dLen > 1e-9 ? sumADx / dLen : 0.0, dBz = dLen > 1e-9 ? sumADz / dLen : 0.0;
         const double aH1 = aEnv * cothBar;                 // the sea's horizontal amplitude, chop 1
-        const double q1c = (std::min)(q1, (std::max)(1.5707963267948966 / (std::max)(kBar * aH1 * chopM, 1e-4) - 1.0, 0.0));
+        // THE CREST'S STEEPNESS CLIMBS TO THE CUSP (WaterBank.hlsl, the crest law, 2026-10-19 late):
+        // the share of the raw variance above the limit, 1 - 1/lipQ^2 with lipQ = q1 + 1, takes the
+        // crest's excursion from the sea's own toward the loop's limit pi / 2k (the chopped
+        // amplitude is what the kernel bounds).
+        const double lipQ = q1 + 1.0;
+        const double aLoop = 1.5707963267948966 / (std::max)(kBar, 1e-4);
+        // the set wave (the kernel's): the crest's own excess, the sea's times eta over the
+        // significant amplitude (eta / aEnv = 2 wRaw - 1)
+        const double eCr = lipQ * (std::max)(eta / aEnv, 0.0);
+        const double excessShare = 1.0 - 1.0 / (std::max)(eCr * eCr, 1.0);
+        const double q1c = (std::max)(aLoop / (std::max)(aH1 * chopM, 1e-3) - 1.0, 0.0) * excessShare;
         const double g = 1.0 + q1c * wCr;
         const double wx = inBand ? 0.5 * sxS / aEnv : 0.0;   // grad(w) (sxS is grad(eta) so far)
         const double wz = inBand ? 0.5 * szS / aEnv : 0.0;
