@@ -2,7 +2,7 @@
 //  SweCycle - --swe-cycle N: the headless tidal-cycle validation run, moved verbatim from
 //  main.cpp (M12 step 1b). See app/Tools.h.
 //
-//  Header-only on purpose. The solver's boundary clocks (oceanAt / southAt / westAt / westQAt)
+//  Header-only on purpose. The solver's boundary clocks (oceanAt / faceAt / faceQAt)
 //  are lambdas that stay in main(), and SweSolver::Spinup / AdvanceTo take them as template
 //  parameters; so RunSweCycle (the CSV integrator, unchanged) and RunSweCycleMode (the block
 //  that ran under `if (opt.sweCycleH > 0)`) are templates too, and the lambdas bind exactly as
@@ -14,7 +14,6 @@
 #include "core/Common.h"
 #include "hal/Gpu.h"
 #include "hal/Residency.h"
-#include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/Stations.h"
 #include "sim/SweSolver.h"
@@ -130,10 +129,10 @@ inline std::vector<ThalwegCell> FindThalweg(const std::vector<float>& bed, int n
     return path;
 }
 
-// THE WEST BOUNDARY AT ONE INSTANT (the investigation of the Flather face): what goes in -- the
+// THE FIRST RIVER FACE AT ONE INSTANT (the investigation of the Flather face): what goes in -- the
 // tide, the exterior's target deviation and the transport the boundary is told to carry, with the
 // stations they are made of (`inputs`, the session's) -- the face's own terms for every pinned row
-// (SweSolver::TraceWestFace), and the profile along the deepest pinned row from the boundary into
+// (SweSolver::TraceFace), and the profile along the deepest pinned row from the boundary into
 // the channel: the kernel's bed (the bed trace), eta less the tide, and u. An instrument: it reads
 // back and waits.
 inline void LogWestBoundary(Gpu& gpu, SweSolver& swe, double hours, double tide, double westDEta,
@@ -141,8 +140,8 @@ inline void LogWestBoundary(Gpu& gpu, SweSolver& swe, double hours, double tide,
     Log("[west] +%.0f h: tide %+.3f m NAVD, target dEta %+.3f (the exterior at %+.3f), told %+.1f "
         "m^3/s | %s",
         hours, tide, westDEta, tide + westDEta, westQ, inputs.c_str());
-    std::vector<SweSolver::WestFaceRow> rows;
-    if (!swe.TraceWestFace(gpu, rows)) {
+    std::vector<SweSolver::FaceRow> rows;
+    if (!swe.TraceFace(gpu, rows)) {
         Log("[west] the face trace did not run");
         return;
     }
@@ -152,7 +151,7 @@ inline void LogWestBoundary(Gpu& gpu, SweSolver& swe, double hours, double tide,
     int pinned = 0, deepest = -1;
     float deepBed = 1e9f;
     for (size_t y = 0; y < rows.size(); ++y) {
-        const SweSolver::WestFaceRow& r = rows[y];
+        const SweSolver::FaceRow& r = rows[y];
         if (r.pinned < 0.5f) continue;
         ++pinned;
         qSum += r.q;
@@ -167,7 +166,7 @@ inline void LogWestBoundary(Gpu& gpu, SweSolver& swe, double hours, double tide,
     }
     Log("[west]   %d pinned rows; q summed %+.1f m^3/s against the told %+.1f; u_ext was divided by "
         "a live section of %.1f m^2",
-        pinned, qSum, westQ, swe.WestArea());
+        pinned, qSum, westQ, swe.FaceArea(0));
     if (deepest < 0) return;
     std::vector<float> eta, uv4;
     uint32_t ew = 0, eh = 0, uw = 0, uh = 0;
@@ -191,8 +190,8 @@ inline void LogWestBoundary(Gpu& gpu, SweSolver& swe, double hours, double tide,
 // ocean sponge (must track the analytic tide), the entrance throat AT the ACT0816 station
 // (solved current vs the CO-OPS prediction, the real gate), the Joppa Flats basin (lag +
 // attenuation must EMERGE), and the river's standing slope upstream.
-template <typename F, typename G, typename H, typename Q>
-void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q westQAt,
+template <typename F, typename G, typename Q>
+void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G faceAt, Q faceQAt,
                  const CurrentModel* currents, int ctSta, const SweToolGrid& grid,
                  double startUnix, double hours,
                  const std::function<std::string(double)>& describeWest = {},
@@ -379,7 +378,7 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
     const double endUnix = startUnix + hours * 3600.0;
     int rows = 0;
     for (double t = startUnix; t <= endUnix; t += 120.0) {
-        swe.AdvanceTo(gpu, t, tideAt, westAt, southAt, westQAt);
+        swe.AdvanceTo(gpu, t, tideAt, faceAt, faceQAt);
         // 4 named probes + a 6-point transect across the jetty gap (x = 350) whose valid-point
         // mean is the fair section current to hold against ACT0816.
         // The ocean probe at 2400: inside the full sponge of the drawn-in grid too.
@@ -409,7 +408,7 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
             }
         }
         const SweSolver::Probe& west = pr[10];
-        const double westQ = swe.WestTransport(gpu);
+        const double westQ = swe.FaceTransport(gpu, 0);
         const SweSolver::Probe &ocean = pr[0], &throat = pr[1], &basin = pr[2], &river = pr[3];
         float gapU = 0;
         int gapN = 0;
@@ -438,11 +437,11 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
         fprintf(f, "%.0f,%.4f,%.3f,%.4f,%.4f,%.3f,%.3f,%.4f,%.4f,%.4f,%.3f,%.3f,%d,%.4f,%.3f,%d,"
                    "%.2f,%.2f,%.4f,%.4f\n",
                 t, tideAt(t), act, ocean.dEta, throat.dEta, throat.u, throat.v, basin.dEta,
-                river.dEta, westAt(t), gapU, river.u, river.valid ? 1 : 0, west.dEta, west.u,
-                west.valid ? 1 : 0, westQ, westQAt(t), fLevel, fPred);
+                river.dEta, faceAt(0, t), gapU, river.u, river.valid ? 1 : 0, west.dEta, west.u,
+                west.valid ? 1 : 0, westQ, faceQAt(0, t), fLevel, fPred);
         // The west boundary at hours 0, 3, 6 and 9 (a row every 120 s).
         if (rows % 90 == 0 && rows <= 270) {
-            LogWestBoundary(gpu, swe, (t - startUnix) / 3600.0, tideAt(t), westAt(t), westQAt(t),
+            LogWestBoundary(gpu, swe, (t - startUnix) / 3600.0, tideAt(t), faceAt(0, t), faceQAt(0, t),
                             describeWest ? describeWest(t) : std::string(), bedGpu);
         }
         if (++rows % 30 == 0) {
@@ -465,20 +464,20 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
 
 // The mode: spin the solver up two hours of history, integrate opt.sweCycleH hours to
 // out/swe_cycle_<pid>.csv, tear down, exit 0.
-template <typename Ocean, typename South, typename West, typename WestQ>
+template <typename Ocean, typename Face, typename FaceQ>
 int RunSweCycleMode(const Options& opt, Gpu& gpu, const CurrentModel& currents, bool haveCurrents,
                     const SweToolGrid& grid, SweSolver& swe, ResidencyManager& resMgr,
-                    double simUnix, Ocean oceanAt, South southAt, West westAt, WestQ westQAt,
+                    double simUnix, Ocean oceanAt, Face faceAt, FaceQ faceQAt,
                     const std::function<std::string(double)>& describeWest = {},
                     const SweFocusProbe* focus = nullptr) {
     // --swe-cycle-stage M (an instrument, the net-flow measurement): the told exterior's stage
     // raised by a constant M metres; its rate, and so the told transport, is unchanged.
     const double stageM = opt.sweCycleStageM;
-    const auto westAtStage = [&westAt, stageM](double t) { return westAt(t) + stageM; };
+    const auto faceAtStage = [&faceAt, stageM](int f, double t) { return faceAt(f, t) + stageM; };
     if (stageM != 0.0) {
-        Log("[swe-cycle] the told west stage raised by %+.3f m (--swe-cycle-stage)", stageM);
+        Log("[swe-cycle] the told river faces' stage raised by %+.3f m (--swe-cycle-stage)", stageM);
     }
-    swe.Spinup(gpu, simUnix, 2.0, oceanAt, westAtStage, southAt, westQAt);
+    swe.Spinup(gpu, simUnix, 2.0, oceanAt, faceAtStage, faceQAt);
     // PHASE C3: the current station nearest the throat's search centre that the domain holds.
     int ctSta = -1;
     if (haveCurrents) {
@@ -487,7 +486,7 @@ int RunSweCycleMode(const Options& opt, Gpu& gpu, const CurrentModel& currents, 
         ctSta = NearestStation(currents, la, lo,
                                [&](double a, double b) { return swe.Domain().Holds(a, b); });
     }
-    RunSweCycle(gpu, swe, oceanAt, westAtStage, southAt, westQAt,
+    RunSweCycle(gpu, swe, oceanAt, faceAtStage, faceQAt,
                 haveCurrents ? &currents : nullptr, ctSta, grid, simUnix,
                 opt.sweCycleH, describeWest, focus);
     gpu.WaitIdle();

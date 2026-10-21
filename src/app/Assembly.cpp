@@ -55,7 +55,6 @@
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
 #include "scene/SceneReload.h"
-#include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/SeaState.h"
@@ -131,45 +130,10 @@ std::vector<RasterEntry> CompositeTiers(const scene::SourceProps& s) {
     return out;
 }
 
-// M5c: the latest discharge for the SWE's upstream boundary: the first of the scene's gauges
-// (water.swe.riverGauges, "id[*scale] ...") that reports in data.river, times its scale (the
-// drainage between the gauge and the solver's face), else the scene's fallback. The gauge-to-
-// mouth travel time is ignored -- at low flows the tidal prism dwarfs it.
-double LoadRiverDischarge(const std::string& path, const std::string& gauges, double fallback) {
-    std::ifstream f(path, std::ios::binary);
-    if (path.empty() || !f) {
-        Log("[river] no gauges file '%s'; %.1f m3/s (the scene's fallback)", path.c_str(), fallback);
-        return fallback;
-    }
-    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    std::string err;
-    const JsonValue root = JsonParser::Parse(text, &err);
-    std::istringstream want(gauges);
-    for (std::string g; want >> g;) {
-        const size_t star = g.find('*');
-        const std::string id = g.substr(0, star);
-        const double scale = star == std::string::npos ? 1.0 : atof(g.c_str() + star + 1);
-        if (const JsonValue* sites = root.Get("sites")) {
-            for (const auto& s : sites->arr) {
-                const double q = s.Str("id") == id ? s.Num("discharge_cms", -1) : -1;
-                if (q > 0) {
-                    Log("[river] discharge %.1f m3/s (USGS %s %s x %.3f)", q * scale, id.c_str(),
-                        s.Str("name").c_str(), scale);
-                    return q * scale;
-                }
-            }
-        }
-    }
-    Log("[river] no gauge of '%s' reports in %s; %.1f m3/s (the scene's fallback)", gauges.c_str(),
-        path.c_str(), fallback);
-    return fallback;
-}
-
 // M5c: the MLLW -> NAVD88 join from CO-OPS station datums instead of a hand constant. Use the
 // focus station's own NAVD link when CO-OPS publishes one; otherwise transfer via the relation
-// NAVD88 = local MSL + delta, calibrated from whichever harvested station carries both datums
-// (Boston: delta = +0.09 m) -- picking the smallest |delta| candidate, since NAVD tracks MSL on
-// the open coast while upriver stations drift.
+// NAVD88 = local MSL + delta, calibrated from the NEAREST station on the open coast that carries
+// both datums (NavdAboveMsl).
 
 // M9n: NAVD88 zero above LOCAL MSL, in metres, from published CO-OPS station datums -- the same
 // staff carries MSL and NAVD88, so their difference is data, not an assumption. Boston: MSL
@@ -177,15 +141,25 @@ double LoadRiverDischarge(const std::string& path, const std::string& gauges, do
 //
 // The bed's ETOPO layers are MSL-referenced and need the NEGATIVE of this to reach NAVD88; the
 // tide's MLLW link is a different offset from the same table. One derivation, two consumers.
-bool NavdAboveMsl(const TideModel& model, double* outM, std::string* from) {
-    double best = 1e9;
+//
+// WHICH STATION (2026-10-21, the one atlas): the link is regional -- NAVD88 departs from local MSL by
+// a few centimetres that change along a coast (Boston +0.09 m, Sewells Point -0.08) -- so it is the
+// NEAREST witness to the place that publishes both, on the open coast: a station up a river
+// (riverKm > 0) stands on a river's mean, which drifts with the discharge. The table was New
+// England's alone until the stations became one global set; "the smallest |delta|" it chose by then
+// picked Virginia's for the Merrimack.
+bool NavdAboveMsl(const TideModel& model, double latDeg, double lonDeg, double* outM, std::string* from) {
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    double bestD2 = 0.0, best = 0.0;
     bool got = false;
     for (size_t i = 0; i < model.Count(); ++i) {
         const TideStation& s = model.S(i);
-        if (s.mllwMinusNavdM <= -900.0) continue;
-        const double d = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD88 zero above local MSL
-        if (!got || std::abs(d) < std::abs(best)) {
-            best = d;
+        if (s.mllwMinusNavdM <= -900.0 || s.riverKm > 0.0) continue;
+        const double dLat = s.lat - latDeg, dLon = (s.lon - lonDeg) * std::cos(latDeg * kD2R);
+        const double d2 = dLat * dLat + dLon * dLon;
+        if (!got || d2 < bestD2) {
+            bestD2 = d2;
+            best = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD88 zero above local MSL
             got = true;
             if (from) *from = s.name;
         }
@@ -234,7 +208,7 @@ float ResolveDatum(const TideModel& model) {
     }
     double delta = 0.0;
     std::string from = "NAVD=MSL assumption";
-    NavdAboveMsl(model, &delta, &from);
+    NavdAboveMsl(model, fs.lat, fs.lon, &delta, &from);
     const float off = static_cast<float>(-(fs.meanMllwM + delta));
     Log("[datum] no NAVD link at %s; MLLW - NAVD88 = %+.3f m via NAVD=MSL%+.3f (from %s)",
         fs.name.c_str(), off, delta, from.c_str());
@@ -272,22 +246,17 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& globeModel = A->globeModel;
     auto& marsModel = A->marsModel;
     auto& globeDataOk = A->globeDataOk;
-    auto& bathyRaw = A->bathyRaw;
-    auto& haveBathyRaw = A->haveBathyRaw;
     auto& compositor = A->compositor;
     auto& navdAboveMsl = A->navdAboveMsl;
     auto& datumFrom = A->datumFrom;
     auto& haveMslLink = A->haveMslLink;
     auto& mslToNavd = A->mslToNavd;
-    auto& srcCudem = A->srcCudem;
     auto& srcEdits = A->srcEdits;
     auto& hgtCh = A->hgtCh;
     auto& waterAtlas = A->waterAtlas;
-    auto& bathy = A->bathy;
-    auto& bathySwe = A->bathySwe;
     auto& sweDomain = A->sweDomain;
     auto& swe = A->swe;
-    auto& riverQ = A->riverQ;
+    auto& rivers = A->rivers;
     auto& gulf = A->gulf;
     auto& waterScene = A->waterScene;
     auto& waterSceneMtime = A->waterSceneMtime;
@@ -510,6 +479,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     // M3: currents -- the ACT tidal clock for the sea's jet, the GoMOFS field for the gulf.
     haveCurrents = currents.Load(S.data.currents);
+    rivers.Load(S.data.river);   // the reaches meeting the sea, their gauges and their tide stations
     for (const scene::StationProps& st : S.stations) currents.Place(st.name, st.lat, st.lon);
     if (!haveCurrents) {
         Log("[main] no currents (run: py -3 harvester\\harvest_currents.py)");
@@ -526,17 +496,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         (marsMode && marsModel.Ready()) ? marsModel : globeModel;
     A->activeGlobe = &activeGlobe;   // the loop reads the same choice through the Assembly
 
-    // The raw CUDEM plane is a SOURCE (immutable after load -- its bytes are part of the tile-cache
-    // identity): the scene's data.bathy. Every other height is a file of the scene's `sources`.
-    haveBathyRaw = bathyRaw.Load(S.data.bathy);
-
     // M9n: THE HEIGHT STACK'S VERTICAL DATUM, resolved once and applied at the sources.
     // ETOPO is MSL/geoid referenced and everything above it in the stack is NAVD88; the two
     // were blended as one height for as long as the stack has existed. The link is published
     // -- CO-OPS carries MSL and NAVD88 on one station staff -- so it is derived, logged, and
     // handed to the ETOPO sources, which means the CORRECTION REACHES EVERY CONSUMER of the
     // stack rather than only the products that happen to know about it.
-    haveMslLink = NavdAboveMsl(model, &navdAboveMsl, &datumFrom);
+    haveMslLink = NavdAboveMsl(model, S.place.anchor[1], S.place.anchor[0], &navdAboveMsl, &datumFrom);
     mslToNavd = haveMslLink ? -navdAboveMsl : 0.0;
     if (haveMslLink) {
         Log("[datum] height stack: MSL -> NAVD88 = %+.3f m, from CO-OPS published datums at "
@@ -556,15 +522,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         hgtCh = compositor.AddHeightChannel("mars.height", {&srcMola});
     } else if (globeDataOk) {
         std::vector<HeightSource*> hstack{&srcEtopo};
-        if (haveBathyRaw) {
-            // PHASE C5: the survey's name is its file's (the scene's data.bathy), not a place's.
-            std::string stem = S.data.bathy;
-            stem = stem.substr(stem.find_last_of("/\\") + 1);
-            stem = stem.substr(0, stem.find('.'));
-            srcCudem = std::make_unique<CudemHeightSource>(&bathyRaw, 0.04,
-                                                           ("noaa.cudem." + stem).c_str());
-            hstack.push_back(srcCudem.get());
-        }
         // The scene's heights by file join in the default order (StackOrder: `over`, then the
         // coarser under the finer), and the hand edits, the owner's own corrections, stay on top.
         for (const auto& s : A->sceneSources) {
@@ -633,41 +590,25 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         return nullptr;
     }
 
-    // M5: the CUDEM bathymetry.
-    // M6w: the SOLVER'S grid realizes from the channel -- one bed for the solver, the
-    // renderer, and every future physics product. Fallback (no channel): raw + walls.
-    if (haveBathyRaw && bathy.Load(S.data.bathy)) {
-        if (hgtCh >= 0 && !marsMode) {
-            bathy.RealizeFromChannel(compositor, hgtCh);
-        } else {
-            if (!S.data.edits.empty()) bathy.ApplyMaskEdits(S.data.edits, 2.5f);
-        }
-        // THE SOLVER STANDS WHERE ITS SOURCES PAINT AT FULL WEIGHT (HIERARCHY 4.17). The survey
-        // fades into the layer beneath it over a band at every edge (its feather), so there the
-        // composed bed is neither the survey nor the ground beneath: measured on the west edge
-        // (finding 68), the channel's last 750 m were a ramp up to +2.03 m, and the river had not
-        // entered since the bed became the composed height. The band is asked of the source, and
-        // only the open face's side is drawn in: drawn in on every side the window lost the
-        // river's bend in the north band, and the reach behind the face became a pond.
-        bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0, S.water.swe.river == 0,
-                          S.scene.name.c_str());
-        // PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S DOMAIN -- the scene's lat/lon box
-        // (water.swe.box; zeros = the survey's window as `window` draws it), its anchor the box's
-        // centre, its cells the survey's angular cell over the box in true metres at the anchor
-        // (SweDomain: a ratio of planes about the anchor, HIERARCHY 4.4), its CPU bed the one stack
-        // at every cell. PHASE B2 (D4): ONE STANDING RANK-2 WINDOW about the anchor (rank 2: the
-        // finest whose texel is at most the solver's cell), held whole before the solver starts.
-        if (bathySwe.Ready() && hgtCh >= 0 && !marsMode) {
-            const double* bx = S.water.swe.box;
-            const bool own = bx[0] != 0.0 || bx[1] != 0.0 || bx[2] != 0.0 || bx[3] != 0.0;
-            const double lon0 = own ? bx[0] : bathySwe.Lon0();
-            const double lat0 = own ? bx[1] : bathySwe.Lat1() - bathySwe.Ny() * bathySwe.Dlat();
-            const double lon1 = own ? bx[2] : bathySwe.Lon0() + bathySwe.Nx() * bathySwe.Dlon();
-            const double lat1 = own ? bx[3] : bathySwe.Lat1();
-            const auto cx = static_cast<uint32_t>(std::lround((lon1 - lon0) / bathySwe.Dlon()));
-            const auto cy = static_cast<uint32_t>(std::lround((lat1 - lat0) / bathySwe.Dlat()));
+    // THE SOLVER'S DOMAIN (PHASE C1; 2026-10-21, Mark: "Data sets should never be specific to place,
+    // only the measurement type"). The scene's lat/lon box (water.swe.box) and the solver's cell
+    // (water.swe.cellM: one angle both ways, its north-south side in metres) -- its anchor the box's
+    // centre, its cells in true metres at the anchor (SweDomain: a ratio of planes about the anchor,
+    // HIERARCHY 4.4), its CPU bed the one height stack at every cell, whatever surveys the stack holds
+    // there. The box is the place's; the bed is the world's. Until this date the domain stood on a
+    // per-place survey file (data.bathy: the cell, the default window, and the water bank's gate), so a
+    // place no survey file named had no waves at all. No box, no solver. PHASE B2 (D4): ONE STANDING
+    // RANK-2 WINDOW about the anchor (rank 2: the finest whose texel is at most the solver's cell), held
+    // whole before the solver starts.
+    if (hgtCh >= 0 && !marsMode) {
+        const double* bx = S.water.swe.box;
+        const double lon0 = bx[0], lat0 = bx[1], lon1 = bx[2], lat1 = bx[3];
+        if (lon0 != 0.0 || lat0 != 0.0 || lon1 != 0.0 || lat1 != 0.0) {
+            constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
+            const double cellDeg = double(S.water.swe.cellM) / (planetR * kD2Rd);
+            const auto cx = static_cast<uint32_t>(std::lround((lon1 - lon0) / cellDeg));
+            const auto cy = static_cast<uint32_t>(std::lround((lat1 - lat0) / cellDeg));
             if (lon1 > lon0 && lat1 > lat0 && cx > 1 && cy > 1) {
-                constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
                 sweDomain.Place(lat0, lon0, lat1, lon1, cx, cy, planetR);
                 sweDomain.FillBed([&](double la, double lo, double resM) {
                     return compositor.SampleHeight(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
@@ -675,133 +616,43 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 surface.StandAbout(sweDomain.latC, sweDomain.lonC, 2u);
             } else {
                 Log("[swe] water.swe.box [%.5f, %.5f, %.5f, %.5f] REFUSED: not a box of at least "
-                    "two cells -- no solver", lon0, lat0, lon1, lat1);
+                    "two cells of %.2f m -- no solver", lon0, lat0, lon1, lat1, double(S.water.swe.cellM));
             }
         }
-        // PHASE C3: THE TIDE FOCUS is the station the water's point asks for: its reader is the
-        // solver (its ocean clock, its NAVD88 bed), so the point is its anchor and the stations those
-        // its domain holds (sim/Stations.h); data.tideFocus names one instead.
-        if (sweDomain.Ready()) {
-            const std::string& id = S.data.tideFocus;
-            const int fi = NearestStation(model, sweDomain.latC, sweDomain.lonC,
-                                          [&](double la, double lo) { return sweDomain.Holds(la, lo); });
-            for (size_t i = 0; i < model.Count(); ++i) {
-                if (id.empty() ? int(i) == fi : model.S(i).id == id) model.SetFocus(int(i));
-            }
-            const TideStation& f = model.S(model.Focus());
-            Log("[tide] focus %s '%s' at %.5f N %.5f E (%s)", f.id.c_str(), f.name.c_str(), f.lat, f.lon,
-                id.empty() ? "the nearest the solver's anchor in its domain" : "data.tideFocus");
-        }
-        // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
-        // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
-        // before anything binds a bed, because the consumers below now take the bank: the
-        // solver, the sea shader, the churn kernel and the water bank all read one bed and
-        // it has to exist before the first of them asks.
-        // M9ar: the bed bank is NOT built. The height megatexture (the height page tenant,
-        // the cube and the eye's windows) is the only bed on the GPU; the solver, the sea
-        // shader, the water bank and the globe all read it. The bank was a second
-        // realization of the same six layers -- proved equal at 0.0000 m in section 28,
-        // which is exactly why it can go.
-
-        if (sea) {
-            // M9n: THE BED IS NOW THE GA BANK. Proved equal to the committed texture at
-            // 0.0000 m across all 2187162 texels, through GA Load -> normalize -> Compose
-            // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. M9an:
-            // the committed texture is GONE; the bank is the bed and there is no fallback.
-            // The sea keeps the SOLVER's world frame (the eta atlas is aligned to it);
-            // 0 in the SRV slot means "a survey window exists" and is never sampled.
-            Log("[bed] the sea and the solver read the height megatexture -- the only bed");
-        }
-    } else {
-        Log("[main] no bathymetry (run: py -3 harvester\\harvest_bathy.py); open-ocean sea");
     }
+    // PHASE C3: THE TIDE FOCUS is the station the water's point asks for: its reader is the
+    // solver (its ocean clock, its NAVD88 bed), so the point is its anchor and the stations those
+    // its domain holds (sim/Stations.h); data.tideFocus names one instead.
+    if (sweDomain.Ready()) {
+        const std::string& id = S.data.tideFocus;
+        const int fi = NearestStation(model, sweDomain.latC, sweDomain.lonC,
+                                      [&](double la, double lo) { return sweDomain.Holds(la, lo); });
+        for (size_t i = 0; i < model.Count(); ++i) {
+            if (id.empty() ? int(i) == fi : model.S(i).id == id) model.SetFocus(int(i));
+        }
+        const TideStation& f = model.S(model.Focus());
+        Log("[tide] focus %s '%s' at %.5f N %.5f E (%s)", f.id.c_str(), f.name.c_str(), f.lat, f.lon,
+            id.empty() ? "the nearest the solver's anchor in its domain" : "data.tideFocus");
+    }
+    // M9ar: the height megatexture (the height page tenant, the cube and the eye's windows) is the
+    // only bed on the GPU; the solver, the sea shader, the water bank and the globe all read it.
+    if (sea) Log("[bed] the sea and the solver read the height megatexture -- the only bed");
 
     // M5c: the MLLW -> NAVD88 join, the focus station's CO-OPS link unless the scene declares one.
     datumOff = !S.sea.datum.fromStation ? S.sea.datum.mllwToNavd : ResolveDatum(model);
 
     // M5c: the sparse shallow-water solver -- the estuary's own hydrodynamics, tide-forced
     // offshore and river-forced upstream, feeding the sea's mean surface and currents.
-    if (bathy.Ready() && sea && S.water.swe.enabled && sweDomain.Ready()) {
-        // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
-        //
-        // Depth is not a dataset anyone ships. It is water level minus bed, and those two
-        // arrive in DIFFERENT VERTICAL DATUMS from different domains on different clocks --
-        // which is why it needed a tree rather than another entry in a source list. The
-        // compositor blends sources that disagree about ONE quantity; this combines two
-        // quantities into a third, so it is a different node with a different rule.
-        //
-        // The join used to be a constant in a comment in BathyModel. GaUnits made guessing
-        // it illegal, and the number it demanded turned out to already exist per station as
-        // the CO-OPS link, so the tide now carries its own frame and the graph shows it.
-        {
-            LoaderRegistry breg;
-            breg.Register("json", GeoGridLoader::Open);
-            if (auto bld = breg.Open(S.data.bathy)) {   // PHASE C5: the scene's survey
-                auto bed = Normalize(std::make_shared<RasterSource>(std::move(bld), 0),
-                                     UnitSpec::Of(Quantity::Length, "NAVD88"));
-                // The tide arrives in the frame its harmonics were fitted in, with every
-                // station. The MLLW -> NAVD88 link is then DECLARED, using the number main
-                // already resolved and logged -- an estimate for Newburyport, which has no
-                // published link, and now an estimate visible in the graph instead of buried.
-                auto tideMllw = std::make_shared<TideSource>(&model);
-                auto tideNavd = DeclareDatumLink(tideMllw, datumOff, "NAVD88",
-                                                 "main::ResolveDatum -- see [datum] above");
-                auto depth = std::make_shared<BinaryFieldSource>(
-                    "water.depth", BinaryFieldSource::Op::Subtract, tideNavd, bed);
-                PrintTree("water.depth = tide - bed", depth.get());
-
-                // The guard, demonstrated rather than asserted: the SAME subtraction with
-                // the tide left in MLLW. Both operands are lengths, both look like metres,
-                // and the answer would be wrong by the datum link at every texel forever.
-                BinaryFieldSource bad("water.depth.WRONG-DATUM",
-                                      BinaryFieldSource::Op::Subtract, tideMllw, bed);
-                Log("[tree] MLLW tide - NAVD88 bed: %s",
-                    bad.Valid() ? "accepted -- THE GUARD IS BROKEN" : "refused, as it must be");
-
-                // Equivalence against the engine's own water level. main computes
-                // oceanAt(t) = Height(focus,t) + datumOff with datumOff from ResolveDatum;
-                // the tree reaches the same number through a declared per-station link.
-                const int fs = model.Focus();
-                double worstLvl = 0.0, worstDep = 0.0;
-                uint32_t probed = 0;
-                for (int k = 0; k < 24; ++k) {
-                    const double t = model.EpochUnix() + k * 3600.0;
-                    DomainQuery q;
-                    q.lon = model.S(size_t(fs)).lon;
-                    q.lat = model.S(size_t(fs)).lat;
-                    q.unixT = t;
-                    q.groundM = 10.0;
-                    DomainValue lv;
-                    if (!tideNavd->SampleAt(q, lv) || lv.weight <= 0.0f) continue;
-                    const double engine = model.Height(size_t(fs), t) + datumOff;
-                    worstLvl = (std::max)(worstLvl, std::abs(double(lv.c[0]) - engine));
-                    DomainValue dv;
-                    if (depth->SampleAt(q, dv) && dv.weight > 0.0f) {
-                        DomainValue bv;
-                        if (bed->SampleAt(q, bv) && bv.weight > 0.0f) {
-                            worstDep = (std::max)(
-                                worstDep, std::abs(double(dv.c[0]) - (engine - bv.c[0])));
-                        }
-                    }
-                    ++probed;
-                }
-                Log("[tree] %u hourly probes at %s: worst |tree - engine| level %.4f m, "
-                    "depth %.4f m (%s)",
-                    probed, model.S(size_t(fs)).name.c_str(), worstLvl, worstDep,
-                    (worstLvl < 0.01 && worstDep < 0.01) ? "equivalent"
-                                                         : "DIVERGENT -- check the link");
-            }
-        }
+    if (sea && S.water.swe.enabled && sweDomain.Ready()) {
         SweConfig sweCfg;
         sweCfg.name = S.scene.name.c_str();
         sweCfg.spongeM = S.water.swe.sponge;
-        sweCfg.westBoundary = S.water.swe.river == 0;
+        // THE RIVERS THAT ENTER IT (sim/RiverModel.h): every reach of data.river whose mouth the box
+        // holds, a Flather face where its line leaves the box. Their clocks are the frame loop's.
+        for (const RiverModel::Crossing& c : rivers.EntersBox(sweDomain.lat0, sweDomain.lon0, sweDomain.lat1, sweDomain.lon1)) {
+            sweCfg.faces.push_back({c.side, c.lat, c.lon, rivers.R(c.reach).name});
+        }
         swe.Init(gpu, renderer.Shaders(), shaderDir, sweDomain, sweCfg);   // bed bound below
-        // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
-        // station stage still carries it into eta; the prism term dwarfs it either way).
-        riverQ = (S.water.swe.riverQ > 0) ? S.water.swe.riverQ
-                                         : LoadRiverDischarge(S.data.river, S.water.swe.riverGauges,
-                                                              S.water.swe.riverQFallback);
         sea->SetSwe(&swe);
     }
     if (haveCurrents && currents.FieldAt(S.place.anchor[0], S.place.anchor[1]).Valid()) {
@@ -843,7 +694,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // one atomic instead of paying the 0.14-0.19 ms stat through the data/ junction.
     sceneWatch.Start(kScenePath);
 
-    if (sea && bathy.Ready() && !marsMode) {
+    if (sea && !marsMode) {
         auto wbOwned = std::make_unique<WaterBankLayer>();
         waterBank = wbOwned.get();
         waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
@@ -1480,7 +1331,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->waterTileCount = opt.waterTiles;   // M13 step 0
         // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
         // SWE solver owns the bank; the bathy model owns the world mapping.
-        if (swe.Ready() && bathy.Ready()) {
+        if (swe.Ready()) {
             // The residency map and the bank's texel size ride along: the lens picks the
             // level its footprint wants and the map clamps it to what has arrived.
             // ---- M9i: CLOSE THE LOOP. The regional current becomes a GA object through
@@ -1493,7 +1344,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // grad() is taken on the composed page rather than on the source, because
             // divergence and vorticity are properties of the COMPOSITE -- taking them
             // per-source and blending afterwards would average two different derivatives.
-            if (swe.Ready() && bathy.Ready()) {
+            if (swe.Ready()) {
                 // EVERY field of the scene's currents, coarsest first, so the finer stand over the coarser
                 // where they overlap and a page no field reaches composes nothing (CurrentFieldLoader::
                 // OpenAll). A composite holds many regions' fields; one of them -- its finest anywhere, or

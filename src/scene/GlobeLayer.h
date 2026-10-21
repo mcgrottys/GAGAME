@@ -101,13 +101,6 @@ public:
     // planet->tangent rotation (east, up-at-origin, north). SetView receives the FLAT
     // (tangent-frame) camera; the sphere centre sits at flat (0, -R, 0). M12 step 4a: the
     // rows, the radius, the lattices and the tenants are the SurfaceFrame's -- SetSurface.
-    // The CUDEM window in degrees, for the foundation sink (0 span = absent).
-    void SetEstuaryWindow(double lon0, double lat1, double lonSpan, double latSpan) {
-        m_estGeo[0] = lon0;
-        m_estGeo[1] = lat1;
-        m_estGeo[2] = lonSpan;
-        m_estGeo[3] = latSpan;
-    }
     // M7: per-frame wave-bank binding (SRVs + ring origins).
     // THE COLUMN PLANE (the rolling-wave work, 2026-10-18): the first eye's bank's Eulerian
     // columns (no drawing reads them since the sheet is drawn whole, 2026-10-20). 0xFFFFFFFF = none.
@@ -662,7 +655,6 @@ private:
         float streamF[4];     // surface on, normal on, planet-is-Mars, unused
         // (M6i's composed channels + the one-world frame rows: the renderer's one surface
         // buffer, b2, since M12 step 4g -- Common.hlsli's SurfaceCb, not a row of this one.)
-        float estGeo[4];      // CUDEM window deg: lon0, lat1, 1/lonSpan, 1/latSpan (0 = none)
         // M7: the wave vertex bank (one-water mode): water geometry + params from ONE tiled
         // resource, sampled by ring (camera-anchored mip ladder).
         uint32_t bankU[4];    // disp SRV, param SRV, one-water on, ring texels
@@ -920,7 +912,6 @@ private:
     // above are its copies for the walk; the tangent frame's rows (east / up / north) and
     // the fill are read from it.
     const SurfaceFrame* m_surface = nullptr;
-    double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_colSrv = 0xFFFFFFFFu;   // the column plane (SetWaterColumn)
     uint32_t m_colRings = 0;                                       // ...and its ladder's rings under ring 0

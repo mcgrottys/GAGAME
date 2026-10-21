@@ -51,7 +51,7 @@ void WeatherManager::AddExternalWindow(const char* name, SweSolver* solver,
 void WeatherManager::AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny,
                                       const SweConfig& cfg,
                                       std::function<double(double)> oceanAt,
-                                      double spinupHours) {
+                                      double spinupHours, FaceClock faceAt, FaceClock faceQAt) {
     // PHASE C1: a dormant window's domain (and its holds-water line) is made on activation, from its
     // box and cells and the stack's bed.
     Window w;
@@ -62,6 +62,9 @@ void WeatherManager::AddDormantWindow(const char* name, const double box[4], uin
     w.cfg = cfg;
     w.cfg.name = nullptr;   // points at the caller's literal; rebound on activation
     w.oceanAt = std::move(oceanAt);
+    const FaceClock zero = [](int, double) { return 0.0; };
+    w.faceAt = faceAt ? std::move(faceAt) : zero;
+    w.faceQAt = faceQAt ? std::move(faceQAt) : zero;
     w.spinupHours = spinupHours;
     snprintf(w.levelTag, sizeof(w.levelTag), "swe.%s + stations", name);
     snprintf(w.currentTag, sizeof(w.currentTag), "swe.%s (solved)", name);
@@ -100,8 +103,7 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         LogWindowHoldsWater(w.owned->Domain(), cfg, "on activation: on the CPU bed, the stack at the cells");
         w.owned->SetBed(gpu, m_hgtArr, m_hgtRes, m_hgtMips, m_bed);   // PHASE B2: the standing window
         w.solver = w.owned.get();
-        auto zero = [](double) { return 0.0; };
-        w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, zero, zero, zero);
+        w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, w.faceAt, w.faceQAt);
         w.active = true;
         // No mirror read here: the window's mirror fills on the first RefreshMirrorsTo (the
         // probe harness calls it right after Update); the camera-rule activation in the
@@ -340,8 +342,7 @@ void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
             // Owned windows advance on their own submits; at real time this is one 64-substep
             // batch every ~13 sim-seconds -- background noise. (One with a consumer this frame
             // steps on the frame's list instead: Simulate.)
-            auto zero = [](double) { return 0.0; };
-            w.solver->AdvanceTo(gpu, simUnix, w.oceanAt, zero, zero, zero);
+            w.solver->AdvanceTo(gpu, simUnix, w.oceanAt, w.faceAt, w.faceQAt);
         }
         // The mirror used to refresh here every kMirrorDt (two readbacks, two WaitIdle
         // drains, 8.7 M half->float: 17.9-27.2 ms on every 61st frame of the storm rail)

@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <mutex>
 
 namespace ga {
 
@@ -32,7 +34,26 @@ void ResidencyManager::Init(Gpu& gpu) {
     Log("[residency] loads run on the pool's Io lane (%d at once)", Threads().IoCap());
 }
 
+namespace {
+// THE LOADS RUNNING NOW (2026-10-21, the one atlas): which tile each load job holds and since when,
+// said at Shutdown for every one still running -- a job that never returns holds an Io thread, and
+// the provider's own clock never sees it.
+std::mutex g_runningMx;
+struct RunningLoad { int tenant; TileRequest req; std::chrono::steady_clock::time_point t0; };
+std::map<const void*, RunningLoad> g_running;
+}  // namespace
+
 void ResidencyManager::Shutdown() {
+    {
+        std::lock_guard<std::mutex> lk(g_runningMx);
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& [k, r] : g_running) {
+            Log("[residency] at shutdown a load still runs: %S f%u m%u (%u,%u), for %.1f s",
+                r.tenant >= 0 && r.tenant < int(m_tenants.size()) ? m_tenants[size_t(r.tenant)].name.c_str() : L"?",
+                r.req.face, r.req.mip, r.req.x, r.req.y,
+                std::chrono::duration<double>(now - r.t0).count());
+        }
+    }
     // The jobs capture `this`. Refuse new work, then WAIT for the ones already running to
     // leave -- the pool outlives this object and would otherwise still be inside it. (The old
     // pool joined its own threads here, which had the same effect for free.)
@@ -47,6 +68,7 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         if (m_quit.load()) {
             std::lock_guard<std::mutex> lk(m_mx);
             --m_inFlight;
+            --m_tenants[job->tenant].inFlight;
             m_drainCv.notify_all();
             return;
         }
@@ -74,8 +96,16 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         g_loadTenant = job->tenant;   // whom a source that answers "not now" tells when it can
         g_loadReq = job->req;
         g_tileStop = &m_quit;   // a Shutdown mid-load: the tree stops painting and the job leaves
+        {
+            std::lock_guard<std::mutex> lkRun(g_runningMx);
+            g_running[job.get()] = {job->tenant, job->req, t0};
+        }
         const bool ok =
             m_tenants[job->tenant].provider(job->req, data, canStream ? &loc : nullptr);
+        {
+            std::lock_guard<std::mutex> lkRun(g_runningMx);
+            g_running.erase(job.get());
+        }
         g_tileStop = nullptr;
         g_loadTenant = -1;
         const bool whole = !g_tileIncomplete;
@@ -86,9 +116,13 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - t0).count());
         {
+            const auto tLock = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lk(m_mx);
             {
+                const auto tHeld = std::chrono::steady_clock::now();
                 Tenant& tn = m_tenants[job->tenant];
+                tn.lockUs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(tHeld - tLock).count());
+                tn.jobUs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(tHeld - t0).count());
                 if (us < 4000) { ++tn.loadsRead; tn.readUs += us; }
                 else           { ++tn.loadsPaint; tn.paintUs += us; }
                 tn.queueUs += qus;
@@ -148,6 +182,7 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
                 m_failedKeys.push_back({job->tenant, job->req});
             }
             --m_inFlight;
+            --m_tenants[job->tenant].inFlight;
         }
         m_drainCv.notify_all();
     }

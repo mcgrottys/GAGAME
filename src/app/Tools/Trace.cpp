@@ -10,7 +10,6 @@
 #include "scene/GlobeLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/WaterBankLayer.h"
-#include "sim/BathyModel.h"
 #include "sim/WaterTerms.h"
 #include "sim/WaveScale.h"
 #include "sim/WeatherManager.h"

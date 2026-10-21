@@ -9,7 +9,6 @@
 
 #include "compose/DomainSource.h"
 #include "compose/BuildingField.h"
-#include "sim/BathyModel.h"
 
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
@@ -2525,12 +2524,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.camAbs[0] = static_cast<float>(m_camPos[0]);
     m_cb.camAbs[1] = static_cast<float>(m_camPos[1] + m_radius);
     m_cb.camAbs[2] = static_cast<float>(m_camPos[2]);
-    m_cb.estGeo[0] = static_cast<float>(m_estGeo[0]);
-    m_cb.estGeo[1] = static_cast<float>(m_estGeo[1]);
-    m_cb.estGeo[2] =
-        m_estGeo[2] > 0.0 ? static_cast<float>(1.0 / m_estGeo[2]) : 0.0f;
-    m_cb.estGeo[3] =
-        (m_estGeo[3] > 0.0 && !m_streamMars) ? static_cast<float>(1.0 / m_estGeo[3]) : 0.0f;
     // M7: the wave vertex bank rows (one-water mode).
     m_cb.bankU[0] = m_bankSrv[0];
     m_cb.bankU[1] = m_bankSrv[1];

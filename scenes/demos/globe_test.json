@@ -24,33 +24,57 @@
     "3,000 frames); without them the same eye settles exact in 659 frames at 13.8 ms a load (CONTENT_SCALING",
     "section 4; the reader is open in its section 5)."
   ],
-  "base": "scenes/demos/composite_merrimack.json",
+  "base": "scenes/merrimack.json",
   "scene": {"name": "globe-test", "view": "orbit"},
   "time": {"start": "2026-08-28T16:00:00Z"},
-  "layers": [
-    {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
-     "lod": "D:/DataCache/OSM/buildings/planet-261012-decks.tree",
-     "laneWidth": 3.5, "defaultLanes": 2, "pathWidth": 2.0, "kerb": 0.12}
-  ],
-  "sources": [
-    {"name": "water.bed", "remove": true},
-    {"name": "osm.planet", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"},
-    {"name": "osm.roads.planet", "kind": "roads", "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"},
-    {"name": "nbi.2025", "kind": "bridges", "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"},
-    {"name": "noaa.enc", "kind": "bridges", "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"}
-  ],
   "views": [
-    {"name": "plum_marsh", "_at": "the refuge marsh behind Plum Island's dunes, the eye of Mark's dark-marsh screenshot (2026-10-18)",
-     "at": {"lat": 42.7705, "lon": -70.8045, "alt": 330, "heading": 8, "tilt": 56}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
-    {"name": "marsh_island", "_at": "the marsh island at the Merrimack's mouth, looking at Plum Island Point: the platform the survey calls water under a +0.9 m tide (CONTENT_SCALING 4, 2026-10-18)",
-     "at": {"lat": 42.800, "lon": -70.835, "alt": 350, "heading": 20, "tilt": 60}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
-    {"name": "orbit", "_at": "the planet, the east coast at its centre",
-     "at": {"lat": 36.0, "lon": -72.0, "alt": 0, "heading": 0, "tilt": 0, "range": 20000000}, "fovY": 55, "gauge": "root", "nearZ": 1000},
-    {"name": "coast", "_at": "Maine to Florida: the composite's three regions in one view",
-     "at": {"lat": 34.5, "lon": -76.0, "alt": 0, "heading": 0, "tilt": 0, "range": 3000000}, "fovY": 55, "gauge": "root", "nearZ": 100},
-    {"name": "gulf", "_at": "the Gulf of Maine from 400 km, tilted toward the coast",
-     "at": {"lat": 42.6, "lon": -70.6, "alt": 0, "heading": 300, "tilt": 45, "range": 400000}, "fovY": 55, "gauge": "root", "nearZ": 10},
-    {"name": "mouth", "_at": "the Merrimack's mouth from 8 km, looking west up the river",
-     "at": {"lat": 42.818, "lon": -70.80, "alt": 0, "heading": 270, "tilt": 60, "range": 8000}, "fovY": 55, "gauge": "root", "nearZ": 1}
+    {
+      "name": "plum_marsh",
+      "_at": "the refuge marsh behind Plum Island's dunes, the eye of Mark's dark-marsh screenshot (2026-10-18)",
+      "at": {"lat": 42.7705, "lon": -70.8045, "alt": 330, "heading": 8, "tilt": 56},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "name": "marsh_island",
+      "_at": "the marsh island at the Merrimack's mouth, looking at Plum Island Point: the platform the survey calls water under a +0.9 m tide (CONTENT_SCALING 4, 2026-10-18)",
+      "at": {"lat": 42.8, "lon": -70.835, "alt": 350, "heading": 20, "tilt": 60},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "name": "orbit",
+      "_at": "the planet, the east coast at its centre",
+      "at": {"lat": 36.0, "lon": -72.0, "alt": 0, "heading": 0, "tilt": 0, "range": 20000000},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 1000
+    },
+    {
+      "name": "coast",
+      "_at": "Maine to Florida: the composite's three regions in one view",
+      "at": {"lat": 34.5, "lon": -76.0, "alt": 0, "heading": 0, "tilt": 0, "range": 3000000},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 100
+    },
+    {
+      "name": "gulf",
+      "_at": "the Gulf of Maine from 400 km, tilted toward the coast",
+      "at": {"lat": 42.6, "lon": -70.6, "alt": 0, "heading": 300, "tilt": 45, "range": 400000},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 10
+    },
+    {
+      "name": "mouth",
+      "_at": "the Merrimack's mouth from 8 km, looking west up the river",
+      "at": {"lat": 42.818, "lon": -70.8, "alt": 0, "heading": 270, "tilt": 60, "range": 8000},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 1
+    }
   ]
 }

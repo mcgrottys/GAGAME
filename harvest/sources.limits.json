@@ -86,6 +86,15 @@
       "stated": true,
       "note": "Rate-limited per hour, higher with a free key; the number is not on the page but in each response's X-RateLimit-Limit / X-RateLimit-Remaining headers (the page's example shows 1000)."
     },
+    "usgs.api.water": {
+      "title": "USGS api.water.usgs.gov: the Network-Linked Data Index (NLDI) and the wmadata GeoServer (NHDPlus V2 flowlines, WFS)",
+      "hosts": ["api.water.usgs.gov"],
+      "minIntervalS": 1.5,
+      "perHour": 3600,
+      "documented": "https://api.water.usgs.gov/nldi/swagger-ui/index.html",
+      "stated": false,
+      "note": "No limit on a page; the host sits behind api-umbrella and every response carries X-Ratelimit-Limit: 3600 (an hour, no key; seen 2026-10-21). 1.5 s is ours, under the header's one a second. compose-river reads the NHDPlus terminals, level paths, upstream-main gauges and station flowlines here."
+    },
     "erddap.coastwatch": {
       "title": "NOAA CoastWatch West ERDDAP (NMFS SWFSC ERD) and its mirror upwell",
       "hosts": ["coastwatch.pfeg.noaa.gov", "upwell.pfeg.noaa.gov"],

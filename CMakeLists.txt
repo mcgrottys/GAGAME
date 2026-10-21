@@ -131,7 +131,7 @@ add_executable(gagame
   src/sim/TideModel.cpp
   src/sim/SeaState.cpp
   src/sim/CurrentModel.cpp
-  src/sim/BathyModel.cpp
+  src/sim/RiverModel.cpp
   src/sim/SweSolver.cpp
   src/sim/SimClockTest.cpp
   src/sim/OceanCpu.cpp

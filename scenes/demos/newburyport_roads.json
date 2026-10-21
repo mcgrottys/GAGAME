@@ -41,64 +41,6 @@
       "bridgeClearance": 5.0
     }
   ],
-  "sources": [
-    {
-      "name": "massgis.coq2023",
-      "manifest": "data/aerial/aerial.json",
-      "feather": 25
-    },
-    {
-      "name": "user.highlights",
-      "manifest": "data/overlay/overlay.json",
-      "feather": 25,
-      "over": 1
-    },
-    {
-      "name": "osm.planet",
-      "kind": "buildings",
-      "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"
-    },
-    {
-      "name": "overture.ml",
-      "kind": "buildings",
-      "over": 1,
-      "manifest": "D:/DataCache/Overture/buildings/massachusetts-microsoft_ml_buildings.buildings.json"
-    },
-    {
-      "name": "overture.unattributed",
-      "kind": "buildings",
-      "over": 2,
-      "manifest": "D:/DataCache/Overture/buildings/massachusetts-unattributed.buildings.json"
-    },
-    {
-      "name": "overture.esri",
-      "kind": "buildings",
-      "over": 3,
-      "manifest": "D:/DataCache/Overture/buildings/massachusetts-esri_community_maps.buildings.json"
-    },
-    {
-      "name": "overture.lidar",
-      "kind": "buildings",
-      "over": 4,
-      "manifest": "D:/DataCache/Overture/buildings/massachusetts-usgs_lidar.buildings.json"
-    },
-    {
-      "name": "osm.roads.ma",
-      "kind": "roads",
-      "manifest": "D:/DataCache/OSM/roads/ma-roads-loc.roads.json"
-    },
-    {
-      "name": "nbi.2025",
-      "kind": "bridges",
-      "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"
-    },
-    {
-      "name": "noaa.enc",
-      "kind": "bridges",
-      "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"
-    },
-    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif", "unit": "m", "datum": "EGM2008", "offset": -0.092}
-  ],
   "entities": [
     {
       "name": "vehicle",

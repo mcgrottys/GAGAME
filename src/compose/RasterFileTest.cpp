@@ -1947,39 +1947,6 @@ void Distribution(const char* what, std::vector<double> d) {
 bool RunRealHeightsCheck() {
     std::mt19937_64 rng(20260929);
     std::uniform_real_distribution<double> u01(0.0, 1.0);
-    // C.1 THE CUDEM TILES, both, as ONE source (a folder), against CudemHeightSource over the
-    // harvester's 13.7 m grid (data/bathy/merrimack.json): the file's own bilinear at its grain.
-    RasterEntry ce;
-    ce.folder = "cache/bathy";
-    ce.match = "ncei19_*.tif";
-    ce.name = "noaa.cudem.ninth";
-    ce.kind = "height";
-    ce.unit = "m";
-    ce.datum = "NAVD88";
-    const auto cud = LoadRasterSources({ce});
-    BathyModel bm;
-    if (cud.size() != 1 || !bm.Load("data/bathy/merrimack.json")) return false;
-    CudemHeightSource grid(&bm);
-    std::vector<double> all, sub, other;
-    struct Big { double d, lat, lon, file, harv; };
-    std::vector<Big> big;
-    for (int i = 0; i < 2000; ++i) {
-        const double lon = bm.Lon0() + u01(rng) * bm.Nx() * bm.Dlon(), lat = bm.Lat1() - u01(rng) * bm.Ny() * bm.Dlat();
-        float f = 0.0f, h = 0.0f;
-        if (cud[0]->Sample(lat * kD2R, lon * kD2R, 1e-3, f) <= 0.0f || grid.Sample(lat * kD2R, lon * kD2R, 0.0, h) <= 0.0f) continue;
-        const double d = double(f) - double(h);
-        all.push_back(d);
-        (h < -1.0f ? sub : other).push_back(d);
-        big.push_back({std::abs(d), lat, lon, f, h});
-    }
-    Distribution("C.1 CUDEM file (bilinear, its own 1/9\") - harvester grid (13.7 m), all", all);
-    Distribution("C.1   where the grid is subtidal (< -1 m NAVD88: the thalweg rule's cells)", sub);
-    Distribution("C.1   where it is not (flats, marsh, land: plain means)", other);
-    std::sort(big.begin(), big.end(), [](const Big& a, const Big& b) { return a.d > b.d; });
-    for (size_t i = 0; i < big.size() && i < 8; ++i) {
-        Log("[realheights] C.1   large: %.6f N %.6f E: file %+.2f, grid %+.2f m", big[i].lat,
-            big[i].lon, big[i].file, big[i].harv);
-    }
     // C.2 ETOPO: the 60" file against the global relief (GlobeModel's etopo_8192.i16, box-decimated
     // by the harvester), and the 15" file against the NE ring (ne_15s.i16, a crop), each read at
     // its own numbers (offset 0 declared: the comparison is of numbers, not of datums).

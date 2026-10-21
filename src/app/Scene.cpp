@@ -449,9 +449,6 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.U32("nx", s.nx);
             r.U32("ny", s.ny);
             r.Str("station", s.station);
-            std::string river = "none";
-            r.Str("river", river);
-            s.river = river == "west" ? 0 : 1;
             if (!ok) return false;
             out.solvers.push_back(std::move(s));
         }

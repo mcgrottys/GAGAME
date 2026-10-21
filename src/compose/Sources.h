@@ -12,7 +12,6 @@
 
 #include "compose/Compositor.h"
 #include "compose/Projections.h"
-#include "sim/BathyModel.h"
 
 #include <cstdint>
 #include <vector>
@@ -91,40 +90,6 @@ private:
 };
 
 // (The plane orthos and the overlays are scene sources now, compose/RasterFileSource.h.)
-
-// A CUDEM topobathy window through an already-loaded, thalweg-preserving BathyModel grid.
-// M6w: any number of focus windows (merrimack, capeann, boston...) stack as separate
-// sources -- the HQ static insets over the NE-15s / ETOPO base.
-class CudemHeightSource : public HeightSource {
-public:
-    explicit CudemHeightSource(const BathyModel* bathy, double featherFrac = 0.04,
-                               const char* name = "noaa.cudem");   // PHASE C5: callers name the survey
-    const SourceInfo& Info() const override { return m_info; }
-    float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
-    // The weight the feather gives a world point (x east, z north, metres) -- Sample's own,
-    // before the data is asked: 1 inside the band the window fades over, 0 at its edge.
-    float EdgeWeight(double lon, double lat) const;
-    // The grid's cells under the box (and the one beyond, the bilinear's), nodata skipped.
-    Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
-    // WHERE THIS SURVEY PAINTS AT FULL WEIGHT, in its own cells: the first and last column and
-    // row whose centres EdgeWeight calls 1 (HIERARCHY 4.17: a solver stands there). False when
-    // no cell does. The band follows the feather: ask again and a new feather gives a new box.
-    bool FullWeightCells(int& c0, int& r0, int& c1, int& r1) const;
-    const BathyModel* Grid() const { return m_bathy; }
-    // THE IDENTITY OF WHAT IT PAINTS (2026-10-18): the grid's bytes, its box and the feather.
-    std::string Law() const override;
-    // ITS OWN LEVEL AND BOX (HIERARCHY 4.20, 2026-10-18): the level whose texel at the grid's centre
-    // is its cell (SourceInfo::cmPerPixel), and the grid's box; folded above, magnified below.
-    int OwnMip(const Lattice& l) const override;
-    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override;
-
-private:
-    const BathyModel* m_bathy;
-    double m_feather;
-    SourceInfo m_info;
-    mutable uint64_t m_bytesFnv = 0;
-    mutable bool m_hashed = false;
-};
 
 // M6w: HAND EDITS AS A STACK SOURCE. The mask=land polygons (the OSM-seeded jetty
 // footprints) paint their crest INTO the height channel; mask=water polygons dredge. The

@@ -86,10 +86,10 @@
 #include "core/SceneConfig.h"
 #include "scene/WaterComponent.h"
 #include "scene/effects/SlicePlane.h"   // M12 step 5e: the cutaway plane as an effect node
-#include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/SeaState.h"
+#include "sim/RiverModel.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
 #include "app/Options.h"
@@ -137,8 +137,6 @@ struct Assembly {
     GlobeModel marsModel;
     bool globeDataOk = false;
     GlobeModel* activeGlobe = nullptr;   // main's `GlobeModel&`: marsModel when ready, else globeModel
-    BathyModel bathyRaw;
-    bool haveBathyRaw = false;
     Compositor compositor;
     double navdAboveMsl = 0.0;
     std::string datumFrom = "none";
@@ -146,22 +144,15 @@ struct Assembly {
     double mslToNavd = 0.0;
     std::optional<EquirectHeightSource> srcEtopo;   // emplaced once globeModel is loaded: the
     std::optional<EquirectHeightSource> srcMola;    // grid dimensions are constructor arguments
-    std::unique_ptr<CudemHeightSource> srcCudem;
     EditsHeightSource srcEdits;   // M6w: the hand edits ARE a stack layer now -- their
                                   // cache identity is the geojson content, so an operator
                                   // edit repaints exactly the touched tiles at every rung
     int hgtCh = -1;
     WaterAtlas waterAtlas;
-    BathyModel bathy;
-    // THE SOLVERS' GRIDS (HIERARCHY 4.17): the survey windows drawn in to where their sources
-    // paint at full weight (BathyModel::DrawFrom). `bathy` stays the survey's whole window for
-    // what draws or stands on the ground (the foundation sink, the camera's clamp);
-    // every reader of a solver's fields reads it by these.
-    BathyModel bathySwe;
     SweDomain sweDomain;   // PHASE C1: the solver's chart (the scene's box) and its CPU bed
     SweSolver swe;
     SweSolver::BedWindow bedWindow{};   // PHASE B2 (D4): the standing window's rows, for the weather manager
-    double riverQ = 70.0;
+    RiverModel rivers;   // data.river: the reaches meeting the sea (sim/RiverModel.h)
     GulfLayer* gulf = nullptr;
     WaterSceneConfig waterScene;
     long long waterSceneMtime = 0;

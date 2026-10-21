@@ -799,6 +799,14 @@ private:
         // slot's ground had moved under the read (its key then is not the key the read was for).
         uint32_t loadsMovedGround = 0;
         uint64_t queueUs = 0;
+        // THE LANE IS SHARED (2026-10-21): this tenant's loads issued and not yet returned. No tenant
+        // holds more than half the Io lane's threads (ResidencyOrder.cpp, the loader), so a tenant
+        // whose tile costs minutes cold -- the swell's exposure, five 50 km rays a texel over the
+        // height stack -- cannot close the lane to the reads that cost two milliseconds.
+        int inFlight = 0;
+        // THE JOB'S OWN CLOCK (2026-10-21): the load job from its first instruction to the bookkeeping,
+        // and of it the wait for m_mx after the provider returned -- what the provider's clock cannot see.
+        uint64_t jobUs = 0, lockUs = 0;
         // Step 25: the exact settle's per-tenant ledger -- the last turn's counts and the
         // drops summed over the hold, for LogSettleExact.
         uint32_t exWanted = 0, exMapped = 0, exDeficit = 0, exUnreachable = 0, exStale = 0;

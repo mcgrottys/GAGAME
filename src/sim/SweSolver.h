@@ -7,7 +7,7 @@
 //  tiles that can ever be wet. The eta bank stores the DEVIATION from the analytic tide plane,
 //  so a NULL tile means "the stateless model is exactly right here": the offshore sponge pins
 //  the deviation to zero (which IS the tidal forcing -- the basin fills and drains against a
-//  boundary riding the real CO-OPS clock), the river discharge pushes it up from the west, and
+//  boundary riding the real CO-OPS clock), the rivers push it up where they enter, and
 //  everything in between -- the throat jet, the basin's lag, the ebb/flood asymmetry -- emerges.
 //
 //  Coupling out: a dense RGBA16F surface-current texture (u east, v north, |U|, valid) derived
@@ -29,6 +29,7 @@
 #include "hal/Shader.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
+#include "sim/RiverModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -47,8 +48,16 @@ struct SweConfig {
     // there; the sponge's ramp begins spongeM metres in from an open side and is whole 700 m nearer it
     // (water.swe.sponge; 1866 m = where today's world-x ramp began, 1400 m east of the old origin).
     float spongeM = 1866.0f;
-    bool westBoundary = true;   // the Flather river face on the domain's west side (water.swe.river
-                                // = "west"); false: no river (Boston's are dammed; Haulover has none)
+    // THE RIVER FACES (2026-10-21): where a river enters the domain -- the crossing of its reach's line
+    // with the box's edge (sim/RiverModel.h EntersBox) -- a Flather open boundary on that side, over the
+    // run of wet-capable edge cells about the crossing (SweDomain::Bound). Until this date one face
+    // stood on the west side of every domain that said `river: west`, the whole column.
+    struct RiverFace {
+        int side = -1;               // 0 N, 1 S, 2 W, 3 E
+        double lat = 0.0, lon = 0.0; // where the river's line crosses the edge
+        std::string name;
+    };
+    std::vector<RiverFace> faces;    // at most kMaxRiverFaces
 };
 
 // PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S CHART. A domain is declared by a lat/lon box
@@ -70,6 +79,18 @@ struct SweDomain {
     std::vector<float> elev;      // the bed at the cell centres, m NAVD88, row 0 north (the stack's)
     uint32_t openSides = 0;       // bit 0 N, 1 S, 2 W, 3 E: the sides that are open sea (Bound)
     std::vector<uint8_t> sponge;  // per cell: 1 where the sponge acts (the flood's seeds)
+    // THE RIVER FACES' CELLS (Bound): a side and the run [c0, c1] along it (columns for N and S,
+    // rows for W and E) of wet-capable edge cells (bed under +2 m) about the river's crossing.
+    struct FaceCells {
+        int side = -1, c0 = 0, c1 = -1;
+        std::string name;
+    };
+    std::vector<FaceCells> faces;
+    size_t EdgeCell(int side, int a) const {   // the cell index of edge cell `a` along `side`
+        return side == 0 ? size_t(a) : side == 1 ? size_t(ny - 1) * nx + a : side == 2 ? size_t(a) * nx
+                                                                                      : size_t(a) * nx + (nx - 1);
+    }
+    std::vector<uint8_t> FaceMask() const;   // 1 at every face cell whose bed is under +2 m
     bool Ready() const { return nx > 0 && ny > 0; }
     void Place(double boxLat0, double boxLon0, double boxLat1, double boxLon1, uint32_t cellsX,
                uint32_t cellsY, double planetR);
@@ -93,8 +114,8 @@ struct SweDomain {
 
 // A SOLVER'S WINDOW HOLDS ITS WATER (an instrument, said once where a window is made): the grid
 // flooded 4-connected (the kernel's faces) through cells whose bed is under `level`, from its open
-// boundaries -- the sponge's cells (SweDomain::sponge) and the west face's wet-capable cells
-// (column 0, bed under 2 m, when the window has a west boundary). Water the sponge's flood does not
+// boundaries -- the sponge's cells (SweDomain::sponge) and the river faces' cells (`face`, a mask a
+// cell; SweDomain::FaceMask). Water the sponge's flood does not
 // reach is listed, largest first, with where it meets the window's edge. `plantCrossEdge` lets the
 // flood run along the outside of an edge it reaches: the selftest's plant, a cut channel made whole.
 struct WaterPiece {
@@ -106,17 +127,17 @@ struct WaterPiece {
     int id = -1;                          // its label in the flood's label map
     int cells = 0;
     int c0 = 0, r0 = 0, c1 = 0, r1 = 0;   // its box, cells
-    bool face = false;                    // the west face reaches it (so it is held by the face alone)
+    bool face = false;                    // a river face reaches it (so it is held by the face alone)
     std::vector<EdgeRun> runs;            // where it meets the window's edge
 };
 struct WaterHold {
     int joined = 0;      // cells the sponge's flood reaches
-    int faceCells = 0;   // the west face's seeds
+    int faceCells = 0;   // the river faces' seeds
     std::vector<WaterPiece> pieces;
     std::vector<WaterPiece::EdgeRun> crossings;   // the sponge's water at the edge, not a boundary
     std::vector<uint8_t> sea;                     // by label: 1 = the sponge's flood reaches it
 };
-WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, bool westFace,
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, const uint8_t* face,
                       bool plantCrossEdge = false, std::vector<int>* labels = nullptr);
 // The two beds' floods side by side: the cells the grid's joins that the kernel's does not (and
 // back), the largest piece of the kernel's water the grid's joins, and where it parts from the
@@ -130,7 +151,7 @@ struct FloodParting {
     float crestKernel = 0.0f, crestGrid = 0.0f;
 };
 FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
-                           const uint8_t* sponge, bool westFace);
+                           const uint8_t* sponge, const uint8_t* face);
 void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char* when,
                          const std::vector<float>* kernelBed = nullptr);
 bool RunWaterHoldSelfTest();
@@ -160,17 +181,17 @@ public:
     const SweDomain& Domain() const { return m_dom; }
     bool Ready() const { return m_ready; }
 
-    // Boundary targets, as DEVIATIONS from the ocean tide plane (NAVD m). West = the
-    // station-interpolated river tide (the truncated upriver prism arrives through the M1
-    // fits); south = the sound's tide where the window cuts its real Ipswich entrance (M6d).
-    // M6r: westQm3s is the TRANSPORT the Flather boundary must carry (+east; river discharge
-    // minus the upriver prism demand) -- radiation alone cannot supply a prescribed prism,
-    // it would throttle behind the standing dEta it needs to sustain the flow. Update per
-    // frame.
-    void SetBoundaries(float westDEtaM, float southDEtaM, float westQm3s = 0.0f) {
-        m_westDEta = westDEtaM;
-        m_southDEta = southDEtaM;
-        m_westQ = westQm3s;
+    // The river faces' targets, per face: the river tide as a DEVIATION from the ocean tide plane
+    // (NAVD m; the truncated upriver prism arrives through the station fits), and the TRANSPORT
+    // the Flather face must carry (m^3/s, + into the domain; discharge minus the upriver prism's
+    // demand) -- radiation alone cannot supply a prescribed prism, it would throttle behind the
+    // standing dEta it needs to sustain the flow. Update per frame.
+    int FaceCount() const { return int(m_dom.faces.size()); }
+    void SetBoundaries(const float* dEtaM, const float* qM3s) {
+        for (int f = 0; f < FaceCount(); ++f) {
+            m_faceDEta[f] = dEtaM[f];
+            m_faceQ[f] = qM3s[f];
+        }
     }
 
     // Advance toward simUnix (records compute through cmd) and leave eta + uv sampleable.
@@ -179,14 +200,15 @@ public:
 
     // Solver-only advancement (own submits; no rendering): integrate up to targetUnix in
     // batches of 64 substeps per command list. tideAt(unix) supplies the ocean boundary level,
-    // westAt/southAt the boundary deviations, westQAt the west transport (m^3/s, +east).
-    template <typename F, typename G, typename H, typename Q>
-    void AdvanceTo(Gpu& gpu, double targetUnix, F tideAt, G westAt, H southAt, Q westQAt) {
+    // faceAt(face, unix) the faces' deviations, faceQAt(face, unix) their transports (+ inward).
+    template <typename F, typename G, typename Q>
+    void AdvanceTo(Gpu& gpu, double targetUnix, F tideAt, G faceAt, Q faceQAt) {
         while (m_simTime < targetUnix - m_dt) {
             const double target = (std::min)(m_simTime + 64.0 * m_dt, targetUnix);
-            m_westDEta = static_cast<float>(westAt(m_simTime));
-            m_southDEta = static_cast<float>(southAt(m_simTime));
-            m_westQ = static_cast<float>(westQAt(m_simTime));
+            for (int f = 0; f < FaceCount(); ++f) {
+                m_faceDEta[f] = static_cast<float>(faceAt(f, m_simTime));
+                m_faceQ[f] = static_cast<float>(faceQAt(f, m_simTime));
+            }
             hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
             Record(up, gpu, target, static_cast<float>(tideAt(m_simTime)), 9999);
             gpu.EndUpload();
@@ -196,12 +218,11 @@ public:
 
     // Spin-up: reset to the analytic plane `hours` before startUnix and integrate forward, so
     // the first rendered frame carries real basin history instead of a flat start.
-    template <typename F, typename G, typename H, typename Q>
-    void Spinup(Gpu& gpu, double startUnix, double hours, F tideAt, G westAt, H southAt,
-                Q westQAt) {
+    template <typename F, typename G, typename Q>
+    void Spinup(Gpu& gpu, double startUnix, double hours, F tideAt, G faceAt, Q faceQAt) {
         m_simTime = startUnix - hours * 3600.0;
         m_pendingReset = true;
-        AdvanceTo(gpu, startUnix, tideAt, westAt, southAt, westQAt);
+        AdvanceTo(gpu, startUnix, tideAt, faceAt, faceQAt);
     }
 
     uint32_t EtaSrv() const { return m_eta.Srv(); }    // dEta from the tide plane, R32F
@@ -259,24 +280,24 @@ public:
                     std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
     // Debug: raw readback of the flux bank (padded dims, RGBA32F). outW/outH = padded texels.
     std::vector<uint8_t> ReadFluxRaw(Gpu& gpu, uint32_t* outW, uint32_t* outH, uint32_t* outPitch);
-    // The transport through the west boundary, m^3/s (+east): the Flather faces' flux summed down
-    // the exterior column -- what the river actually brings in, beside what the boundary was told
-    // to carry (SetBoundaries' westQ). A full readback of the flux bank: tools only.
-    double WestTransport(Gpu& gpu);
-    // THE WEST FACE, read back (an instrument): for each row of the exterior column, the Flather
+    // The transport through river face `f`, m^3/s (+ into the domain): its Flather faces' flux summed
+    // along it -- what the river actually brings in, beside what the face was told to carry
+    // (SetBoundaries). A full readback of the flux bank: tools only.
+    double FaceTransport(Gpu& gpu, int f);
+    // THE FIRST RIVER FACE, read back (an instrument): for each cell along its side, the Flather
     // face's terms as the flux kernel makes them for its next substep on this instant's state
-    // (CsSweFlux compiled with SWE_WEST_TRACE: its own expressions, and no flux written). One row
-    // per lattice row; `pinned` is the kernel's own test (the column is the exterior and its bed
-    // below +2 m).
-    struct WestFaceRow {
+    // (CsSweFlux compiled with SWE_FACE_TRACE: its own expressions, and no flux written). One row
+    // per cell along the side; `pinned` is the kernel's own test (the cell is the face's exterior
+    // and its bed below +2 m).
+    struct FaceRow {
         float etaX, etaI, sill, hf;      // the exterior level, the first interior surface, the
                                          // face's sill and its depth (m NAVD, m)
         float uext, rad, ub, qRaw;       // u_ext, the radiation term, ub (m/s), q before the clamp
-        float q, qLo, qHi, pinned;       // q after it (m^3/s, +east), the clamp's bounds, 1 = pinned
+        float q, qLo, qHi, pinned;       // q after it (m^3/s, + inward), the clamp's bounds, 1 = pinned
         float dEta0, hI, bed0, bed1;     // the exterior cell's eta, the interior depth, both beds
     };
-    bool TraceWestFace(Gpu& gpu, std::vector<WestFaceRow>& rows);
-    float WestArea() const { return m_westArea; }   // the live section u_ext was last divided by
+    bool TraceFace(Gpu& gpu, std::vector<FaceRow>& rows);
+    float FaceArea(int f) const { return m_faceArea[f]; }   // the live section u_ext was last divided by
     Probe ReadProbe(Gpu& gpu, float tx, float ty) {
         const float p[2] = {tx, ty};
         Probe out{};
@@ -361,10 +382,11 @@ private:
         float spongeSides;   // PHASE C1: the open sides, a bitmask (SweDomain::openSides)
         float dy;   // M6r: north-south texel size -- the CUDEM grid is EQUIANGULAR, so
                     // dy = dlat*mPerLat (13.65 m) != dx = dlon*mPerLon (10.08 m)
-        float westUext;   // M6r: Flather's u_ext (m/s, +east) = westQ / live west section area
+        float faceCount;  // the river faces (gFaceA, gFaceB)
         float dx, dt, damp, tideNavd;
-        float spongeD0, spongeRate, riverDEta, gravity;   // spongeD0: the ramp's start from an open side, m
-        float riverBox[4];
+        float spongeD0, spongeRate, padR, gravity;   // spongeD0: the ramp's start from an open side, m
+        float faceA[16];   // a face (four floats each, kMaxRiverFaces): side, c0, c1 (the run along it), 0
+        float faceB[16];   // its u_ext (m/s, + inward), its target deviation (m), 0, 0
         // M6r: d(tideNavd)/dt. The eta bank stores deviation from a MOVING plane; the plane's
         // rise is booked as debt in every wet-capable interior cell so the prism must actually
         // ARRIVE through the boundaries (without it the basin filled by construction and the
@@ -416,10 +438,10 @@ private:
 
     SweCbData m_cb{};
     double m_simTime = 0;
-    float m_westDEta = 0;
-    float m_southDEta = 0;
-    float m_westQ = 0;                 // west transport target, m^3/s (+east)
-    std::vector<float> m_westBed;      // exterior-column bed depths: the live section area
+    float m_faceDEta[kMaxRiverFaces] = {};   // the faces' target deviations (m)
+    float m_faceQ[kMaxRiverFaces] = {};      // their transport targets, m^3/s (+ inward)
+    std::vector<float> m_faceBed[kMaxRiverFaces];   // their exterior cells' beds: the live section
+    float m_faceL[kMaxRiverFaces] = {};      // a face cell's length along the side (m)
     SweConfig m_cfg;                   // as Init was given it (the holds-water line)
     bool m_bedBound = false;           // M9ar: SetBed has run
     uint32_t m_bedSlice = UINT32_MAX;  // PHASE B3: the standing window's slice (was the z14 page's)
@@ -431,12 +453,12 @@ private:
     hal::Pso m_traceK;
     hal::Table m_traceTable;   // [t1 height page, t2 its residency map, u4 the trace]
     GpuTexture m_traceTex;     // RG32F: BedAt, mip + 16 * slice
-    // The west trace's (TraceWestFace): the flux kernel under SWE_WEST_TRACE, its table and target.
-    hal::RootSignatureRef m_westRs;
-    hal::Pso m_westK;
-    hal::Table m_westTable;    // [t1, t2, u0 eta, u1 flux, u2 uv, u3 mv, u5 the trace]
-    GpuTexture m_westTex;      // RGBA32F, 4 x ny
-    float m_westArea = 0.0f;   // Record's live west section, m^2
+    // The face trace's (TraceFace): the flux kernel under SWE_FACE_TRACE, its table and target.
+    hal::RootSignatureRef m_faceRs;
+    hal::Pso m_faceK;
+    hal::Table m_faceTable;    // [t1, t2, u0 eta, u1 flux, u2 uv, u3 mv, u5 the trace]
+    GpuTexture m_faceTex;      // RGBA32F, 4 x max(nx, ny)
+    float m_faceArea[kMaxRiverFaces] = {};   // Record's live sections, m^2
     uint64_t m_cbFp = 0;               // M12 step 4b: the [kernel] swe cb fingerprint's last value
     float m_lastTideNavd = 0;          // for the tide-plane rate (prism source term)
     double m_lastTideTime = 0;

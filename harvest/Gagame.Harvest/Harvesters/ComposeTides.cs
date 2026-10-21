@@ -3,8 +3,9 @@ using static Gagame.Harvest.JsonUtil;
 
 namespace Gagame.Harvest.Harvesters;
 
-/// THE TIDES, MANY SOURCES IN, ONE FILE OUT: every CO-OPS harmonic station inside a region the
-/// fidelity map paints, fitted as `tides` fits one (Tides.Fit: the harcon frequencies, amplitude
+/// THE TIDES, MANY SOURCES IN, ONE FILE OUT: every harmonic station CO-OPS publishes (a point
+/// layer is the provider's whole set, Mark 2026-10-21: datasets by measurement, never by place;
+/// the regions say only which stations stand in which, in the coverage), fitted as `tides` fits one (Tides.Fit: the harcon frequencies, amplitude
 /// and phase least-squares fitted to a year of official hourly predictions), and where no station
 /// stands, MODEL STATIONS from the EOT20 atlas, all in the one data/tides/stations.json schema the
 /// engine reads (sim/TideModel.h): the engine picks by position, never by name.
@@ -18,11 +19,19 @@ namespace Gagame.Harvest.Harvesters;
 /// THE YEAR. One epoch a file (the schema's `epoch_unix`). The year is the EARLIEST whose
 /// predictions the cache already holds for a station of this map (the first copy, Mark
 /// 2026-10-13), else this year; every station is fitted to it.
+///
+/// THE RIVER KILOMETRE. A station on a reach of this composite's river layer (river/river.json,
+/// compose-river: so compose-water runs the river before the tides) takes that reach's km as
+/// `river_km` and appends `river_reach` (the reach id); elsewhere river_km stays null.
+///
+/// THE COST GUARD. Every station's first copies (meta, harcon, datums, the year's predictions)
+/// are counted before anything is deleted; when the ledger's request budget cannot hold the
+/// missing ones the run stops with the count and the old output stands.
 public sealed class ComposeTides : IHarvester
 {
     public string Name => "compose-tides";
     public string Title => "Tides composite (CO-OPS + EOT20)";
-    public string What => "Every harmonic station in the painted regions, fitted, and EOT20 model stations where none stands: one stations.json.";
+    public string What => "Every CO-OPS harmonic station, fitted, and EOT20 model stations in the painted regions where none stands: one stations.json.";
     public string[] Outputs => [];
     public Source[] Sources => [new("NOAA CO-OPS", "https://api.tidesandcurrents.noaa.gov/mdapi/prod/"), new("EOT20 (SEANOE, CC BY 4.0)", "https://doi.org/10.17882/79489")];
     public Insert? Insert => new(InsertKind.FileArg, "A fidelity map (.gafid) and an output folder: --fidelity FILE --out data/composite/<name>/");
@@ -38,21 +47,31 @@ public sealed class ComposeTides : IHarvester
         var tides = new Tides().UsePolite(ctx, run.Polite);
         var regions = run.Regions();
 
-        // ---- the stations inside the painted regions
-        var stations = new List<Tides.Station>();
+        // ---- every harmonic station; the regions only list which stand in them
         var regionStations = new List<List<string>>();
         foreach (var (box, _) in regions)
-        {
-            var (found, _) = tides.DiscoverPlace(box, 0.0, cacheDir, (box.CenterLon, box.CenterLat));
-            regionStations.Add(found.Select(s => s.Id).ToList());
-            foreach (var s in found) if (stations.All(x => x.Id != s.Id)) stations.Add(s);
-        }
-        stations = stations.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
+            regionStations.Add(tides.DiscoverPlace(box, 0.0, cacheDir, (box.CenterLon, box.CenterLat)).found.Select(s => s.Id).ToList());
+        var stations = tides.DiscoverPlace(new Box(-180, -90, 180, 90), 0.0, cacheDir, (0.0, 0.0)).found.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
         var year = FirstYear(stations, cacheDir) ?? DateTime.UtcNow.Year;
-        run.Log($"{stations.Count} harmonic station(s) in {regions.Count} region(s); fit year {year} (the earliest the cache holds)");
+        run.Log($"{stations.Count} harmonic station(s) published, {regionStations.Sum(r => r.Count)} inside the {regions.Count} region(s); fit year {year} (the earliest the cache holds)");
+        var need = stations.Sum(s => Missing(cacheDir, s.Id, year));
+        var (_, left) = run.Polite.Remaining();
+        run.Log($"{need} request(s) missing from the cache (one-request years assumed), {left} left in the ledger's budget");
+        if (need > left)
+            throw new HarvestStop($"[tides] {need} CO-OPS request(s) needed for {stations.Count} stations, {left} left in {run.Polite.LedgerPath}'s budget: nothing fetched, the old output stands", 3);
         if (Directory.Exists(tidesDir)) foreach (var old in Directory.GetFiles(tidesDir)) File.Delete(old);
         var rec = tides.Fit(stations, year, tidesDir, cacheDir, tolerant: true);
         foreach (var s in rec.Stations) { s["kind"] = "station"; s["source"] = "noaa.coops"; }
+        var riverPath = Path.Combine(outDir, "river", "river.json");
+        var onRiver = new Dictionary<string, (double km, string reach)>();
+        if (File.Exists(riverPath))
+            foreach (var reach in Load(riverPath).Arr("reaches"))
+                foreach (var t in reach.Arr("tides"))
+                    onRiver.TryAdd(t.Str("id")!, (t.Num("km"), reach.Str("id")!));
+        else run.Log($"no {riverPath}: river_km stays null (compose-river first)");
+        foreach (var s in rec.Stations)
+            if (onRiver.TryGetValue((string)s["id"]!, out var rk)) { s["river_km"] = rk.km; s["river_reach"] = rk.reach; }
+        run.Log($"{rec.Stations.Count(s => s.ContainsKey("river_reach"))} station(s) on a river reach");
 
         // ---- model stations where none stands
         var atlasDir = Path.Combine("data", "water");
@@ -117,6 +136,16 @@ public sealed class ComposeTides : IHarvester
         run.Save(D(("file", "tides/stations.json"), ("unit", "m"), ("datum", "MLLW per station (model stations: mean sea level; mean_mllw_m is their mean above their own lowest-low mean)"),
             ("stations", rec.Stations.Count), ("model_stations", model.Count)));
         return 0;
+    }
+
+    /// The requests a station's fit still needs: its meta, harcon and datums, and its year of
+    /// predictions (one request when CO-OPS grants the year in one, as it has so far).
+    static int Missing(string cacheDir, string sid, int year)
+    {
+        var d = Path.Combine(cacheDir, sid);
+        var n = new[] { "meta.json", "harcon_metric.json", "datums_metric.json" }.Count(f => !File.Exists(Path.Combine(d, f)));
+        if (!File.Exists(Path.Combine(d, $"pred_{year}_all.json")) && !Enumerable.Range(1, 12).All(m => File.Exists(Path.Combine(d, $"pred_{year}_{m:00}.json")))) n++;
+        return n;
     }
 
     static int? FirstYear(List<Tides.Station> stations, string cacheDir)

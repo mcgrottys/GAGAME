@@ -5,7 +5,6 @@
 #include "core/Common.h"
 #include "hal/Gpu.h"
 #include "core/Image.h"
-#include "sim/BathyModel.h"
 #include "sim/SweSolver.h"
 
 #include <algorithm>

@@ -5,6 +5,22 @@ turns what names the mouth of the Merrimack in code into keys of the scene. Noth
 changed, built or run to make it. Fable opened six of its rows against the source (a1, a5,
 c1, c3, c6, d3) and found each as written; the rest stand on the agent's reading.
 
+**2026-10-21, the one atlas (PR 104).** Mark: "Data sets should never be specific to place, only
+the measurement type." What a scene names is now a place -- its anchor, views, the solver's box
+(`water.swe.box`, `cellM`) and the wave field's window -- and every dataset is the base scene's one
+global set (`scenes/merrimack.json` `sources` and `data`: the water composite of
+`data/composite/fidelity/world.gafid`, the planet's buildings, roads and bridges). Rows this closed:
+a1 (the depth-tree demonstration and its survey file, removed), a5 and a6 (`data.bathy`,
+`BathyModel` and `CudemHeightSource` deleted: the bed is the composite's tiers), a10, b6 and d5 (the
+river's discharge is `data.river`'s gauge on the reach that crosses the box, times the drainage
+between: `sim/RiverModel.h`), d2 (the river face is the side and the cells where the reach crosses
+the box, any side, up to four), d3 (the face's kilometre is the crossing's along the reach), d4 (the
+prism is the river's surface below high water read from the bed along the reach), d7 (the Plum Island
+south strip, removed), and the solver's log probes (the anchor and each face, no longer the bar and
+throat at fixed metres). The rows that stand are tools' fixtures (the swe-cycle validation against
+ACT0816, d8; the map tools' frames, c10 and c11; the ocean probe's defaults, b7 and f8) and the GIS
+layers named `_ne` (a15, a16), whose global form is the planet's inland water.
+
 **The lines are not `main`'s.** The tree that was read is `main` at `35a9eb7` with six pieces
 applied that are not committed yet (the harvest, the prune tool, step 4a, step 1a, step 1
 and step 2's probe), so a line number in a file those pieces touch, `Assembly.cpp` and

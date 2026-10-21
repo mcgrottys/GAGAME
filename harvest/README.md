@@ -86,7 +86,7 @@ registers every implementation in the assembly and makes one by name; the demo's
 | compose-currents | <out>/currents.composite.json + currents/currents.json + fields | (new) |
 | compose-seastate | <out>/seastate.composite.json + sea/seastate.json | (new) |
 | compose-river | <out>/river.composite.json + river/river.json | (new) |
-| compose-water | all five above | (new) |
+| compose-water | all five above (order: bed, river, tides, currents, seastate) | (new) |
 | compose-check | <out>/check.json (the composites' gates) | (new) |
 | sources | lists the source configs; <out>/sources_agree_*.json (two sources against each other) | (new) |
 
@@ -101,6 +101,34 @@ stations, NDBC ADCP buoys, a surface field per region and ROMS OFS), sea state a
 (GFS-Wave points + the buoy configs' stations), rivers as one river.json (USGS gauges). No place name anywhere: a region is
 a cell of the map. Every time-varying source is read from the FIRST copy the cache holds and is
 never refetched for a newer one; each input records its valid and fetched time.
+
+POINT LAYERS ARE THE PROVIDER'S WHOLE SET (2026-10-21: datasets by measurement, never by place).
+Rasters follow the map's grain; stations are cheap, so compose-tides fits every CO-OPS harmonic
+(reference) station and compose-currents takes every CO-OPS current-prediction station, wherever
+they stand; the coverage still lists which stand in which region. Before deleting its old output
+each counts the requests its stations' missing first copies need and stops, fetching nothing, when
+the ledger's budget (sources.limits.json `budgetRequests`, per `GAGAME_LEDGER`) cannot hold them.
+
+THE RIVER REACHES (compose-river, Harvesters/RiverReaches.cs). `river/river.json` keeps `sites`
+(every field as before, each site appending `drainage_km2` from NWIS drain_area_va) and adds
+`reaches`: every river that meets the sea in a region with an active USGS stream gauge on its main
+stem, found from the data alone, no distance constant:
+1. the mouths: NHDPlus V2 network flowlines with terminalfl = 1 whose outlet lies in a region
+   (USGS wmadata WFS on api.water.usgs.gov, one request a region);
+2. the gauges: NLDI upstream-main navigation from each mouth
+   (`nldi/linked-data/comid/{T}/navigation/UM/nwissite`), kept where NWIS lists an active stream
+   gauge measuring discharge (00060) or stage (00065) (`nwis/site/?siteOutput=expanded`, 100 ids a
+   request); tributary gauges are not on the line and are not kept;
+3. the line: the terminal's NHDPlus level path (`levelpathi`), mouth first, cut after the
+   farthest flowline holding a gauge or tide station; each vertex is [lon, lat, km from the mouth
+   (chained great-circle length of the NHD geometry), the flowline's totdasqkm, tidal 0|1 (NHDPlus
+   `tidal`)]; `tidal_km` is the end of the tidal run from the mouth (the head of tide NHDPlus draws);
+4. the tides: each CO-OPS harmonic station in the stem's box asks NLDI for its own flowline
+   (`comid/position`); on the stem, its km is the projection onto that flowline's part of the line.
+Gauges carry id, km, drainage_km2, discharge (whether it reports one), off_m, comid, name; a
+main-stem gauge reporting discharge joins `sites` even inland of the regions (its own IV request,
+so the region gauges' first copies stay theirs). compose-tides then reads each station's `river_km`
+(and appends `river_reach`) from these reaches. Every response is cached under cache/river/ forever.
 
 ```bat
 harvest compose-water --fidelity harvest\testdata\coast3_3to10m.gafid --out data\composite\coast3

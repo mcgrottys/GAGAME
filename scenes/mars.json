@@ -20,8 +20,7 @@
     "shaders": "shaders",
     "tides": "data/tides/stations.json",
     "seastate": "data/sea/seastate.json",
-    "currents": "data/currents/currents.json",
-    "bathy": "data/bathy/merrimack.json"
+    "currents": "data/currents/currents.json"
   },
   "time": {"start": "now", "timeScale": 1, "paused": false, "windowDays": 7},
   "sun": {"source": "ephemeris", "az": 112, "el": 26},
@@ -34,7 +33,7 @@
     "foam": 1,
     "edgePx": 12,
     "heightScale": 1.15,
-    "swe": {"enabled": true, "westBoundary": true, "spinupH": 1, "gain": 1, "riverQ": -1},
+    "swe": {"enabled": true, "spinupH": 1, "gain": 1, "riverQ": -1, "riverTide": true},
     "bank": {"flatBed": false, "flatBedNavd": -30},
     "wavefield": {
       "enabled": true,

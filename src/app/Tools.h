@@ -25,7 +25,6 @@
 #include <vector>
 
 namespace ga {
-class BathyModel;
 class Camera;
 class ColorSource;
 class Compositor;
@@ -114,9 +113,8 @@ void RunFidelityMap(const Options& opt, Compositor& compositor, const Space::Anc
 std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu& gpu,
                                  Renderer& renderer, SweSolver& swe, ResidencyManager& resMgr,
                                  double simUnix, const std::function<double(double)>& oceanAt,
-                                 const std::function<double(double)>& southAt,
-                                 const std::function<double(double)>& westAt,
-                                 const std::function<double(double)>& westQAt,
+                                 const std::function<double(int, double)>& faceAt,
+                                 const std::function<double(int, double)>& faceQAt,
                                  WeatherManager& weather);
 // PHASE C1: THE TOOLS' GRID. The solver's cells are its own chart (SweDomain); the tools' points still
 // stand in world.flat (their keys are C4's), so a tool takes a point to its place through the flat

@@ -392,7 +392,7 @@ Options ParseArgs(int argc, char** argv) {
             }
         }
         else if (a == "--swe-off") o.sweOff = true;
-        else if (a == "--swe-west-off") o.sweWestOff = true;   // diagnostic: west strip = ocean clock
+        else if (a == "--swe-river-off") o.sweRiverOff = true;   // diagnostic: the river faces = the ocean's clock
         else if (a == "--swe-uv") o.sweUvDump = Widen(next("swe_uv.png").c_str());
         else if (a == "--swe-gain") o.sweGain = static_cast<float>(atof(next("3.2").c_str()));
         else if (a == "--swe-spinup") o.sweSpinupH = atof(next("0.25").c_str());
@@ -594,7 +594,7 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.edgePx != D.edgePx) set("water.edgePx", f32(o.edgePx));
     if (o.heightScale != D.heightScale) set("water.heightScale", f32(o.heightScale));
     if (o.sweOff) set("water.swe.enabled", JsonBool(false));
-    if (o.sweWestOff) set("water.swe.westBoundary", JsonBool(false));
+    if (o.sweRiverOff) set("water.swe.riverTide", JsonBool(false));
     if (o.sweSpinupH != D.sweSpinupH) set("water.swe.spinupH", num(o.sweSpinupH));
     if (o.sweGain != D.sweGain) set("water.swe.gain", f32(o.sweGain));
     if (o.riverQ != D.riverQ) set("water.swe.riverQ", num(o.riverQ));

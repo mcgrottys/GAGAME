@@ -22,7 +22,6 @@
 #include "compose/WaterAtlas.h"
 #include "core/Lattice.h"
 #include "hal/Tenant.h"
-#include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/SeaState.h"
@@ -73,8 +72,12 @@ public:
     void SetSeaSources(const std::vector<const SeaState*>& s) { m_seaSources = s; }
     void AddExternalWindow(const char* name, SweSolver* solver,
                            std::function<double(double)> oceanAt);
+    // A dormant window's river faces (cfg.faces) ride faceAt / faceQAt (sim/RiverModel.h
+    // RiverFaceClock: the face's deviation and its transport, per face); none given: zero.
+    using FaceClock = std::function<double(int, double)>;
     void AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny, const SweConfig& cfg,
-                          std::function<double(double)> oceanAt, double spinupHours);
+                          std::function<double(double)> oceanAt, double spinupHours, FaceClock faceAt = {},
+                          FaceClock faceQAt = {});
     // M9ar: the bed every OWNED solver binds at activation -- the height page tenant. There is
     // no per-window bed texture any more.
     // PHASE B2 (D4): the bed is the STANDING WINDOW (SurfaceFrame::StandAbout) at its slice; every
@@ -202,6 +205,7 @@ private:
             return latDeg > box[0] && latDeg < box[2] && lonDeg > box[1] && lonDeg < box[3];
         }
         std::function<double(double)> oceanAt;    // NAVD level clock for forcing + queries
+        FaceClock faceAt, faceQAt;                // the river faces' clocks (zero when not given)
         SweConfig cfg;
         double spinupHours = 0.5;
         bool active = false;

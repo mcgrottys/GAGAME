@@ -5,7 +5,6 @@
 
 #include "core/Common.h"
 #include "core/ThreadManager.h"
-#include "sim/BathyModel.h"
 #include "sim/WaterTerms.h"
 #include "sim/WaveScale.h"
 
