@@ -1015,6 +1015,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     }
     float3 nSmooth = upT;    // ring-texel band limit -> the body's diffuse
     float3 nPix = upT;       // + the bands this pixel resolves -> glint, Fresnel, both rays
+    float3 nBiv = upT;       // the sheet's own normal, uncapped (the lip's: TWO-SIDED, below)
     float lvlW = gWavesB.w;  // live water level here: the frame's waterline, plus the bank's departure where a ring texel holds one
     float dispW = 0.0f;      // the wave's own vertical displacement here; 0 where no ring reads
     {
@@ -1047,6 +1048,12 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             float sx = sRing.x;
             float sz = sRing.y;
             nSmooth = normalize(upT - east * sx - north * sz);
+            {   // the bivector's dual itself, before the slope form folds it up and caps it
+                const float3 nL = cross(float3(bDdz.x, bDdz.y, 1.0f + bDdz.z), float3(1.0f + bDdx.x, bDdx.y, bDdx.z));
+                const float3 nW = east * nL.x + upT * nL.y + north * nL.z;
+                const float lW = length(nW);
+                if (lW > 1e-6f) nBiv = nW / lW;
+            }
 
             // The bands the PIXEL resolves but the ring texel does not, read from the cascade
             // DERIVATIVE textures at full FFT resolution and weighted by the fold difference
@@ -1120,6 +1127,17 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             if (dot(nPix, ng) < 0.0f) {
                 nPix = -nPix;
                 nSmooth = -nSmooth;
+            }
+            // THE LIP'S OWN NORMAL (2026-10-20, the backlit lip read as a mirror of the sky). The
+            // slope form above is the bivector folded up (|n.y|) and capped at a slope of 1.1, so
+            // every normal stands within 48 degrees of up; a lip curling down in front of the face
+            // faces the eye sideways or below, and on the slope form it was a surface seen at grazing
+            // -- Fresnel's mirror, the sun it passes counted for nothing. On a lip's pixel the
+            // normal is the bivector's own, turned to the side the eye is on.
+            if (lipCov > 0.0f) {
+                const float3 nb = (dot(nBiv, ng) < 0.0f) ? -nBiv : nBiv;
+                nPix = normalize(lerp(nPix, nb, saturate(lipCov)));
+                nSmooth = normalize(lerp(nSmooth, nb, saturate(lipCov)));
             }
         }
     }

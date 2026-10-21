@@ -789,7 +789,21 @@ nothing measurable; this field's sea folds nearer the peak (667 fold leaves a fr
 the old field), which is the refinement's price -- it scales with the fold's area near the eye,
 floored by the pixel. Self-test 37.
 
-**Next.** The fall for the cascades' sea (its crest law has no crest weight or cusp measure yet).
+**The backlit check (Mark: "render the close pose with the sun in front of the camera").** The sun's
+time of day is `sun.earth.clock.start` (`sun.clock` is the season); at 00:30Z it stands at azimuth
+249, elevation 10, ahead of the close pose. The lip read silver-blue against a gold sea: a mirror.
+First fault, fixed: on a lip's pixel the normal was the slope form -- the bivector folded up (|n.y|)
+and capped at a slope of 1.1, within 48 degrees of up -- so a lip curling down faced the eye as a
+grazing surface; it is the bivector's own normal now, turned to the eye, and the curl shows its
+shape. Then measured (a temporary debug, lip pixels as lipCov / Fresnel / transmission): over 10,459
+lip pixels Fresnel ~0.95 at the median and the sheet's transmission ~0.95 -- from 6 m up, 100 m out,
+the falling lip is seen nearly edge-on (a mirror, physically), and 1.5 m of clear water keeps 5 %
+of the light. The backlit green-gold of a photograph is not the thrown lip: it is the sun through
+the crest's steep upper face before it pitches, which is face, not lip -- and no shading term yet
+measures how much water a ray crosses through the crest itself.
+
+**Next.** The crest's own thickness along the refracted ray (the backlit face), for every pixel of
+the sheet, not only the lip's; the fall for the cascades' sea.
 
 ## 6. Next
 
