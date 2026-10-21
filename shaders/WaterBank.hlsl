@@ -234,6 +234,7 @@ float2 ChartUv(const BankTile t, uint k, uint c, float2 exz) {
 float4 ChartRot(const BankTile t, uint k) { return t.chart[k][3]; }
 
 #define GA_PLANET_G (gPlanet.x)
+#include "GA.hlsli"
 #include "Jet.hlsli"
 
 // Bindless over the shared heap (the renderer's doctrine, compute-side): textures by SLOT,
@@ -874,6 +875,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float lipQ = max(env.y * 2.5f, 1.0f);
         float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f;
         float2 sumADir = 0.0f;
+        float2 gradEta = 0.0f;   // the sheet's slope, grad eta = -sum a k sin(phi - sigma t) d (the flight's launch)
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
             bool prev;
             const float4 t4 = WavePageSample(wuv, s, prev);
@@ -978,6 +980,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             sumAK += wFc * aW * kW;
             sumACoth += wFc * aW * cothW;
             sumADir += wFc * aW * dir2;
+            gradEta -= wFc * aW * kW * sT * dir2;
         }
         // THE CREST THROWS FORWARD, THE TROUGH STAYS (the crest law, 2026-10-19). The raw-over-
         // limited ratio lipQ applied over the whole orbit sheared every crest in the throat
@@ -1023,16 +1026,21 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float eCr = lipQ * max(dW.y / aEnv, 0.0f);
             const float excessShare = 1.0f - 1.0f / max(eCr * eCr, 1.0f);
             const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * excessShare;
-            dW.xz = dW.xz * (1.0f + q1 * wCr) + q1 * wCr * aH * dBar;
+            dW.xz *= 1.0f + q1 * wCr;   // the orbit grows; the throw is the flight's, below
             // THE LIP FALLS (2026-10-20, Mark: "we get lip but it doesn't seem to roll into the
             // wave"). The law above carries the crest forward and leaves it at its height: a shelf.
             // Water thrown past the cusp (e, the spray's own measure, 1 / k) has left the face and
             // falls (Jet.hlsli LipFall: the jet's measured fall, the crest's speed with amplitude);
             // most at the crest's water thrown farthest -- the lip's tip curls down in front of the
             // face -- and bounded where water meets water, the trough. WaveField::ProbeAt carries it.
+            // THE FLIGHT, one translator (Jet.hlsli LipFlightTau): the throw along the sheet in the
+            // free-fall frame, the fall the boost back; bounded where the water meets the trough.
             const float ePast = max(aH * (1.0f + q1 * wCr) - 1.0f / max(kBar, 1e-4f), 0.0f);
             const float fall = LipFall(ePast, kBar, cothBar, aEnv + max(dW.y, 0.0f), depth);
-            dW.y = max(dW.y - fall, min(dW.y, -aEnv));
+            const float3 tau = LipFlightTau(dBar, gradEta, q1 * wCr * aH, fall);
+            const float yWas = dW.y;
+            dW = MotorPoint(float4(1.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.5f * tau), dW);
+            dW.y = max(dW.y, min(yWas, -aEnv));
             // THE SPRAY's quantities (the spawn stands after the shore stop below): the crest's
             // excursion past the CUSP (1 / k) is a loop's water, the plunging lip's -- that is what
             // leaves the sheet as spray, at a crest texel (w > 3/4); the summed k and travel for

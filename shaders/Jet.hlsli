@@ -93,3 +93,21 @@ float2 WaveCurrentAmp(float2 U, float2 waveDir, float c0) {
 }
 
 #endif  // GA_JET_HLSLI
+
+// THE LIP'S FLIGHT AS A MOTOR (2026-10-20, Mark: "the lip's flight as a GA motor (the free-fall frame
+// as a boost, the flight a CGA translator)"). In the free-fall frame -- Longuet-Higgins' frame for the
+// plunging jet -- the thrown water moves on a straight line, and it leaves ALONG THE SHEET: the launch
+// direction is the travel d projected into the sheet's tangent plane, (d . T) T^-1 for the tangent
+// bivector T, which for the height field is d + (d . grad eta) up, normalised. The boost back to the
+// planet's frame is the fall along -up (LipFall). Both are translators and translators commute, so the
+// flight is ONE translator, tau = s u - fall up, applied to the label's point by the motor sandwich
+// (GA.hlsli MotorPoint; Pga.h's Motor::Translation on the CPU). Where the sheet is level -- the crest's
+// top -- u is the travel and this is the law of before; on the front face u turns down and the water
+// is thrown along the face, on the back it turns up and the crest rises as it is thrown, as a crest
+// does before it pitches. (du / dx is not carried into the twins' Jacobian, as dq1 / deta is not.)
+// x east, y up, z north (the bank's displacement's axes). s: the throw; gradEta: the sheet's slope.
+float3 LipFlightTau(float2 dBar, float2 gradEta, float s, float fall) {
+    const float m = dot(dBar, gradEta);   // the sheet's rise along the travel
+    const float3 u = float3(dBar.x, m, dBar.y) * rsqrt(1.0f + m * m);
+    return u * s - float3(0.0f, fall, 0.0f);
+}

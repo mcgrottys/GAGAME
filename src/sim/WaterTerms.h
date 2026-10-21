@@ -200,6 +200,26 @@ inline constexpr double kJetFallRatio = 0.7;   // a / g, measured (0.6 - 0.8)
 inline double LipFall(double ePast, double k, double coth, double H, double h) {
     return kJetFallRatio * 0.5 * k * coth * ePast * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));
 }
+// THE LIP'S FLIGHT AS A MOTOR (2026-10-20, Mark: "the lip's flight as a GA motor (the free-fall frame
+// as a boost, the flight a CGA translator)"). In the free-fall frame -- Longuet-Higgins' frame for the
+// plunging jet -- the thrown water moves on a straight line, and it leaves ALONG THE SHEET: the launch
+// direction is the travel d projected into the sheet's tangent plane, (d . T) T^-1 for the tangent
+// bivector T, which for the height field is d + (d . grad eta) up, normalised. The boost back to the
+// planet's frame is the fall along -up (LipFall). Both are translators and translators commute, so the
+// flight is ONE translator, tau = s u - fall up, applied to the label's point by the motor sandwich
+// (GA.hlsli MotorPoint; Pga.h's Motor::Translation on the CPU). Where the sheet is level -- the crest's
+// top -- u is the travel and this is the law of before; on the front face u turns down and the water
+// is thrown along the face, on the back it turns up and the crest rises as it is thrown, as a crest
+// does before it pitches. (du / dx is not carried into the twins' Jacobian, as dq1 / deta is not.)
+// The flight's translator tau (x east, y up, z north): s the throw along the sheet, (dBx, dBz) the
+// travel, (gx, gz) the sheet's slope, fall the boost. Applied as Pga.h's Motor::Translation(tau).
+inline void LipFlightTau(double dBx, double dBz, double gx, double gz, double s, double fall, double tau[3]) {
+    const double m = dBx * gx + dBz * gz;
+    const double r = 1.0 / std::sqrt(1.0 + m * m);
+    tau[0] = dBx * r * s;
+    tau[1] = m * r * s - fall;
+    tau[2] = dBz * r * s;
+}
 // d(LipFall)/d(ePast), H held
 inline double LipFallDe(double ePast, double k, double coth, double H, double h) {
     return kJetFallRatio * k * coth * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));

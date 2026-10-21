@@ -843,9 +843,26 @@ poles; the latitude term is the next refinement. Measured: hull probe 3 cm rms, 
 (a warm cache; the run that re-solved under the new key read 0.99 mid-handover); Mars boots;
 Mavericks' curl stands; self-test 37.
 
-**Next.** The crest's own thickness along the refracted ray (the backlit face); the lip's flight as
-a motor (the free-fall frame is a Galilean boost, the flight a CGA translator: Mark's "our GA ...
-might allow us to do some cool things"); gravity's latitude term.
+**The lip's flight as a motor (the same night, Mark: "the lip's flight as a GA motor (the free-fall
+frame as a boost, the flight a CGA translator)").** Stated honestly first: written as a motor, the
+flight as it stood -- a horizontal throw at c and a vertical fall -- is a pure translator, and
+translators commute, so the motor alone would have changed nothing. The algebra changed the answer
+where the law ignored a direction: a jet leaves ALONG THE SHEET (Longuet-Higgins' free-fall frame,
+where the jet is a straight line). The launch direction is the travel projected into the sheet's
+tangent plane, (d . T) T^-1 for the tangent bivector T -- d + (d . grad eta) up, normalised -- and
+the boost back to the planet's frame is the fall; one translator, tau = s u - fall up, applied by
+the motor sandwich (GA.hlsli MotorPoint on the GPU, Pga.h Motor::Translation in WaveField::ProbeAt;
+the shared law at Jet.hlsli / WaterTerms.h LipFlightTau). At the crest's top u is the travel (the
+law of before); on the front face the water is thrown down along the face, on the back the crest
+rises as it is thrown. The kernel's solved loop sums the sheet's slope beside its other sums
+(grad eta = -sum a k sin(phi - sigma t) d); the twin carries the rise and the fall through w in its
+slope (du/dx not carried, as dq1/deta is not). The cascades have no throw of their own, so their
+flight is the fall alone (as before). Measured: at the close pose the lip is a thinner sheet thrown
+down along the face and a hollow opens between it and the face -- the first tube's opening; its
+rim is ragged at the pixel. Hull probe 3 cm rms, corr 1.00 both bands; self-test 37.
+
+**Next.** The lip's ragged rim; the crest's own thickness along the refracted ray (the backlit
+face); gravity's latitude term.
 
 ## 6. Next
 

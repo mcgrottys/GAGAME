@@ -50,6 +50,7 @@
 
 #include "sim/WaveField.h"
 #include "core/Planet.h"
+#include "core/Pga.h"
 #include "sim/WaterTerms.h"   // F7: BreakFactor, the clipped Rayleigh sea
 #include "core/ThreadManager.h"
 
@@ -2245,34 +2246,41 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         const double g = 1.0 + q1c * wCr;
         const double wx = inBand ? 0.5 * sxS / aEnv : 0.0;   // grad(w) (sxS is grad(eta) so far)
         const double wz = inBand ? 0.5 * szS / aEnv : 0.0;
-        const double shX = q1c * aH1 * dBx, shZ = q1c * aH1 * dBz;   // the throw per unit of w
+        // THE FLIGHT (WaterBank.hlsl's solved loop; the law at WaterTerms.h LipFlightTau): the throw
+        // along the sheet, the fall the boost back, one translator; bounded by the trough. Per unit
+        // of w the throw is q1c aH u (u the launch direction along the sheet): its horizontal part
+        // rides the lateral channels at chop 1 (the caller's lq carries the chop), its vertical part
+        // the elevation at the chop (the kernel throws aH at its chop).
+        const double m = dBx * sxS + dBz * szS;
+        const double r = 1.0 / std::sqrt(1.0 + m * m);
+        const double shX = q1c * aH1 * dBx * r, shZ = q1c * aH1 * dBz * r;   // the throw per unit of w
+        const double shY = q1c * aH1 * chopM * m * r;
         const double tx = q1c * dxS + shX, tz = q1c * dzS + shZ;     // d(D_new)/d(w)
         jxxS = jxxS * g + tx * wx;
         jzzS = jzzS * g + tz * wz;
         jxzS = jxzS * g + 0.5 * (tx * wz + tz * wx);
-        dxS = dxS * g + shX * wCr;
-        dzS = dzS * g + shZ * wCr;
-        // THE LIP FALLS (WaterBank.hlsl's solved loop; the law, its sources and its limits at
-        // WaterTerms.h LipFall): bounded by the trough; its slope by the chain rule through w where
-        // it falls freely, flat where it lies on the trough. With no depth given (a probe tool's
-        // read) the water is taken as deep: the flight's linear speed.
         const double aHc = aH1 * chopM;
         const double ePast = (std::max)(aHc * g - 1.0 / (std::max)(kBar, 1e-4), 0.0);
         const double hF = depthM > 0.0 ? depthM : 1.0e9;
         const double HF = aEnv + (std::max)(eta, 0.0);
         const double fall = LipFall(ePast, kBar, cothBar, HF, hF);
-        if (fall > 0.0) {
-            const double free = eta - fall, floorY = (std::min)(eta, -aEnv);
-            if (free >= floorY) {
-                const double dd = LipFallDe(ePast, kBar, cothBar, HF, hF) * aHc * q1c;   // d(fall)/d(w)
-                sxS -= dd * wx;
-                szS -= dd * wz;
-                eta = free;
-            } else {
-                sxS = szS = 0.0;
-                eta = floorY;
-            }
+        // the flight's translator on the label's point (x: the lateral at chop 1, y: the elevation)
+        const double tau[3] = {shX * wCr, shY * wCr - fall, shZ * wCr};
+        double px = dxS * g, py = eta, pz = dzS * g;
+        Motor::Translation(tau[0], tau[1], tau[2]).TransformPoint(px, py, pz);
+        const double floorY = (std::min)(eta, -aEnv);
+        if (py >= floorY) {
+            // the slope through w: the rise along the sheet up, the fall down (d(fall)/d(w))
+            const double dd = shY - LipFallDe(ePast, kBar, cothBar, HF, hF) * aHc * q1c;
+            sxS += dd * wx;
+            szS += dd * wz;
+            eta = py;
+        } else {
+            sxS = szS = 0.0;
+            eta = floorY;
         }
+        dxS = px;
+        dzS = pz;
     }
     p.eta = float(eta);
     p.dx = float(dxS);
