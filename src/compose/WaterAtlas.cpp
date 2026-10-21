@@ -570,17 +570,23 @@ bool RunWaterSelfTest() {
     return ok;
 }
 
-double WaveAtlasNavdDelta(const TideModel* tides) {
-    // The regional NAVD-MSL offset, calibrated at the nearest station carrying a
-    // published link (the main.cpp ResolveDatum recipe: delta = -mllwMinusNavd -
-    // meanMllw; smallest |delta| wins -- Boston gives +0.092 m here).
-    double best = 0.0;
+double WaveAtlasNavdDelta(const TideModel* tides, double latDeg, double lonDeg) {
+    // The regional NAVD-MSL offset at a place: the NEAREST station on the open coast carrying a
+    // published link (Assembly.cpp NavdAboveMsl's law, 2026-10-21: delta = -mllwMinusNavd - meanMllw;
+    // a station up a river stands on a river's mean). The smallest |delta| anywhere was this rule
+    // while the stations were New England's alone; over a wider set it picks another coast's.
+    double best = 0.0, bestD2 = 0.0;
     bool found = false;
+    const double cl = std::cos(latDeg * kD2R);
     for (size_t i = 0; i < tides->Count(); ++i) {
         const TideStation& s = tides->S(i);
-        if (s.mllwMinusNavdM < -900.0) continue;
-        const double delta = -s.mllwMinusNavdM - s.meanMllwM;
-        if (!found || std::abs(delta) < std::abs(best)) best = delta;
+        if (s.mllwMinusNavdM < -900.0 || s.riverKm > 0.0) continue;
+        const double dLat = s.lat - latDeg, dLon = (s.lon - lonDeg) * cl;
+        const double d2 = dLat * dLat + dLon * dLon;
+        if (!found || d2 < bestD2) {
+            bestD2 = d2;
+            best = -s.mllwMinusNavdM - s.meanMllwM;
+        }
         found = true;
     }
     return best;
@@ -593,7 +599,7 @@ double WaterAtlas::MslNavd(double latDeg, double lonDeg) const {
     // msl +0.43 from river slope) dominate the entrance by distance and bias the
     // solver's level +0.46 m. With the transfer, the entrance's own station answers
     // for the entrance. Beyond the survey the geoid stands in for MSL (0).
-    const double delta = WaveAtlasNavdDelta(m_tides);
+    const double delta = WaveAtlasNavdDelta(m_tides, latDeg, lonDeg);
     double acc = 0, wsum = 0, dmin = 1e18;
     const double kx = 111320.0 * std::cos(latDeg * kD2R), ky = 110574.0;
     for (size_t i = 0; i < m_tides->Count(); ++i) {
