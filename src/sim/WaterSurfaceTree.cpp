@@ -472,6 +472,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         const int nCh = p.nCh;
         const WaveChart::Chart* ch = p.ch;
         const double norm = p.norm;
+        const double y0 = dispY, sx0 = slopeX, sz0 = slopeZ;   // the solved part: the fall is the cascades'
         for (int i = 0; i < nCh; ++i) {
             if (ch[i].w < WaveChart::kSkip) continue;   // the law's own skip; the norm keeps it
             OceanSample o;
@@ -499,6 +500,39 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             jacXX += w * (a * R[0] + b * R[1]);
             jacXZ += w * (a * R[2] + b * R[3]);
             jacZZ += w * (c2 * R[2] + d2 * R[3]);
+        }
+        // THE LIP FALLS on the cascades' sea (the kernel's, after its lateral bound; the law at
+        // WaterTerms.h LipFall): the crest's water past the cusp, w the sea's crest weight, bounded
+        // by the trough. The kernel's d and envelope are the drawn sea's (gRmsRef carries the
+        // exaggeration); here the sum is physical and the drawn sea is it times m_heightScale.
+        {
+            const double hs = std::max(m_heightScale, 1e-3);
+            const double yC = (dispY - y0) * hs, sxC = (slopeX - sx0) * hs, szC = (slopeZ - sz0) * hs;
+            const double aEnvC = std::max(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
+            const double cothE = OrbitCoth(kEff, depth);
+            const double reach = std::min(aH, 1.5707963267948966 / std::max(kSh, 1e-4));
+            const double wRaw = 0.5 + 0.5 * yC / aEnvC;
+            const double wCr = std::min(std::max(wRaw, 0.0), 1.0);
+            const double eUnit = std::max(reach - 1.0 / std::max(kSh, 1e-4), 0.0);
+            const double ePast = eUnit * wCr;
+            const double HC = aEnvC + std::max(yC, 0.0);
+            const double fall = LipFall(ePast, kSh, cothE, HC, hB);
+            if (fall > 0.0) {
+                const double free = yC - fall, floorY = std::min(yC, -aEnvC);
+                double yN = free, sxN = sxC, szN = szC;
+                if (free >= floorY) {
+                    const bool inBand = wRaw > 0.0 && wRaw < 1.0;
+                    const double dd = inBand ? LipFallDe(ePast, kSh, cothE, HC, hB) * eUnit * 0.5 / aEnvC : 0.0;
+                    sxN = sxC - dd * sxC;
+                    szN = szC - dd * szC;
+                } else {
+                    yN = floorY;
+                    sxN = szN = 0.0;
+                }
+                dispY = y0 + yN / hs;
+                slopeX = sx0 + sxN / hs;
+                slopeZ = sz0 + szN / hs;
+            }
         }
     }
     lap(s_cycCascade);

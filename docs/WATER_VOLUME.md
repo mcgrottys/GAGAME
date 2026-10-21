@@ -802,8 +802,32 @@ of the light. The backlit green-gold of a photograph is not the thrown lip: it i
 the crest's steep upper face before it pitches, which is face, not lip -- and no shading term yet
 measures how much water a ray crosses through the crest itself.
 
-**Next.** The crest's own thickness along the refracted ray (the backlit face), for every pixel of
-the sheet, not only the lip's; the fall for the cascades' sea.
+**The fall for every sea, and its math reviewed against the literature (Mark: "so every place
+rolls" and "review your math with online documentation").** The law moved into one function on both
+processors (`LipFall`, Jet.hlsli and WaterTerms.h) with two corrections from the sources:
+the jet tip's measured fall is 0.6 - 0.8 g, not g (Shakeri, Tavakolinejad, Maxeiner and Duncan, APS
+DFD 2007: a = 0.7 g taken), and the crest flies faster than linear theory says at breaking -- ~20 %
+in the surf zone, where amplitude dispersion dominates (coastalwiki, "Nonlinear wave dispersion
+relations"): c^2 = (g / k) tanh(kh) (1 + H / h), the cnoidal form with alpha ~ 1, linear again as
+H / h -> 0. So fall = (a / g) k coth(kh) e^2 / (2 (1 + H / h)): g cancels, only a measured ratio
+remains. Stated limits: the jet's launch speed is disputed (below c, Melville & Rapp; to 1.3 c,
+Duncan) and taken as the crest's; the loop the throw is bounded by is the trochoid's kinematic
+device -- Gerstner's waves are deep-water, rotational and unstable past steepness 1/3, and the
+physical limit is Stokes's 120-degree crest -- so the overturn is a drawn bound, not a solution of the
+Euler equations. The cascades' sea now falls by the same law after its lateral bound: the crest's
+water past the cusp (w the sea's crest weight), bounded by the trough; `TreeWater::Finish` carries
+it on the cascades' own sum. Measured: the hull probe at the helm 3 cm rms, corr 1.00 both bands;
+at Newburyport's tube 17 % of the frame changes, the near crest lowering and its edge drooping
+where it stood as a shelf; Mavericks' curl holds, gentler; self-test 37.
+
+Mark also caught a smell: GRAVITY IS A FIXED NUMBER in ~27 places of the wave code (9.81 in
+Jet.hlsli's dispersion, the solver's kGrav, the spray, WaterTerms.h's kGWave) -- wrong on Mars, which
+the engine draws. The fall carries none; the rest should take one surface gravity from the planet's
+own model (GM / R^2), handed to every kernel and solver (and into the wave cache's key).
+
+**Next.** Gravity from the planet; the crest's own thickness along the refracted ray (the backlit
+face); the lip's flight as a motor (the free-fall frame is a Galilean boost, the flight a CGA
+translator: Mark's "our GA ... might allow us to do some cool things").
 
 ## 6. Next
 

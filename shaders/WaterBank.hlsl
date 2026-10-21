@@ -833,6 +833,20 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float kSh = ShoaledKh(kEff, hB) / hB;
         const float aH = 1.4142136f * envRmsRaw * OrbitCoth(kEff, depth) / max(brk, 1e-3f);
         d.xz *= min(1.0f, 1.5707963f / max(kSh * aH, 1e-4f));
+        // THE LIP FALLS on the cascades' sea too (2026-10-20, Mark: "so every place rolls"). The
+        // cascades' lateral term is the raw orbit at every phase, held to the loop's bound; a
+        // crest's water reaches that far, and past the cusp (1 / k) it has left the face. The crest
+        // is the sea's, as the solved law has it: w = 1/2 + eta / (2 A_env), 1 at the crest and 0 in
+        // the trough, so the excursion past the cusp is the crest's alone. The fall is Jet.hlsli's
+        // LipFall, bounded by the trough. (d and the envelope are commensurate here: gRmsRef carries
+        // the exaggeration. TreeWater::Finish carries the same.)
+        const float aEnvC = max(1.4142136f * envRmsRaw * brk, 1e-3f);
+        const float cothE = OrbitCoth(kEff, depth);
+        const float reach = min(aH, 1.5707963f / max(kSh, 1e-4f));
+        const float wCrC = saturate(0.5f + 0.5f * d.y / aEnvC);
+        const float ePastC = max(reach - 1.0f / max(kSh, 1e-4f), 0.0f) * wCrC;
+        const float fallC = LipFall(ePastC, kSh, cothE, aEnvC + max(d.y, 0.0f), hB);
+        d.y = max(d.y - fallC, min(d.y, -aEnvC));
     }
 
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield): per-cell a, k, and the
@@ -1009,14 +1023,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             dW.xz = dW.xz * (1.0f + q1 * wCr) + q1 * wCr * aH * dBar;
             // THE LIP FALLS (2026-10-20, Mark: "we get lip but it doesn't seem to roll into the
             // wave"). The law above carries the crest forward and leaves it at its height: a shelf.
-            // Water thrown past the cusp has left the face; it flies at the phase speed c and falls
-            // as anything thrown does, g t^2 / 2 after a flight of t = e / c, and c^2 = g tanh(kh) / k,
-            // so the fall is k coth(kh) e^2 / 2 for e the excursion past the cusp (the spray's own
-            // measure, 1 / k). Nothing at the cusp, growing with the throw, most at the crest's
-            // water thrown farthest -- the lip's tip curls down in front of the face -- and bounded
-            // where water meets water, the trough. WaveField::ProbeAt carries the same.
+            // Water thrown past the cusp (e, the spray's own measure, 1 / k) has left the face and
+            // falls (Jet.hlsli LipFall: the jet's measured fall, the crest's speed with amplitude);
+            // most at the crest's water thrown farthest -- the lip's tip curls down in front of the
+            // face -- and bounded where water meets water, the trough. WaveField::ProbeAt carries it.
             const float ePast = max(aH * (1.0f + q1 * wCr) - 1.0f / max(kBar, 1e-4f), 0.0f);
-            const float fall = 0.5f * kBar * cothBar * ePast * ePast;
+            const float fall = LipFall(ePast, kBar, cothBar, aEnv + max(dW.y, 0.0f), depth);
             dW.y = max(dW.y - fall, min(dW.y, -aEnv));
             // THE SPRAY's quantities (the spawn stands after the shore stop below): the crest's
             // excursion past the CUSP (1 / k) is a loop's water, the plunging lip's -- that is what

@@ -28,6 +28,25 @@ float OrbitCoth(float kDeep, float depth) {
     return 1.0f / tanh(ShoaledKh(kDeep, max(depth, 0.3f)));
 }
 
+// THE LIP'S FALL (2026-10-20; docs/WATER_VOLUME.md 15). Water thrown e metres past the cusp has left
+// the face at the crest's speed c and falls for t = e / c, a t^2 / 2. Two corrections from the
+// literature (Mark: "review your math with online documentation"):
+//   - c WITH AMPLITUDE: linear dispersion runs ~20 % slow at breaking and in the surf zone, where
+//     amplitude dispersion dominates (coastalwiki, "Nonlinear wave dispersion relations"); the
+//     cnoidal form c^2 = g h (1 + alpha H / h), alpha ~ 1, carried onto the full dispersion as
+//     c^2 = (g / k) tanh(kh) (1 + H / h): linear theory again as H / h -> 0 in deep water;
+//   - a, THE JET TIP'S MEASURED FALL: 0.6 - 0.8 g, not g (Shakeri, Tavakolinejad, Maxeiner and
+//     Duncan, APS DFD 2007, plunging jets in a wave tank).
+// So   fall = (a / g) k coth(kh) e^2 / (2 (1 + H / h)),   and g cancels: no planet's gravity in it,
+// only the ratio, which is any planet's. Its limits: nothing at the cusp (e = 0); the launch speed
+// is the crest's, which the literature disputes (below c, Melville & Rapp; to 1.3 c, Duncan); the
+// loop the throw is bounded by is the trochoid's kinematic device, not a surface the Euler equations
+// allow (Gerstner's waves are deep-water, rotational, and unstable past steepness 1/3).
+static const float kJetFallRatio = 0.7f;   // a / g, measured (0.6 - 0.8)
+float LipFall(float ePast, float k, float coth, float H, float h) {
+    return kJetFallRatio * 0.5f * k * coth * ePast * ePast / (1.0f + max(H, 0.0f) / max(h, 0.3f));
+}
+
 // Green's-law-style shoaling: amplitude grows as the group speed drops entering shallow water.
 float ShoalFactor(float kBand, float depth) {
     const float kh = kBand * max(depth, 0.15f);

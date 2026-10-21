@@ -2251,17 +2251,19 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         jxzS = jxzS * g + 0.5 * (tx * wz + tz * wx);
         dxS = dxS * g + shX * wCr;
         dzS = dzS * g + shZ * wCr;
-        // THE LIP FALLS (WaterBank.hlsl's solved loop, the law and its reasons there): water thrown
-        // past the cusp falls k coth(kh) e^2 / 2, bounded by the trough; its slope by the chain rule
-        // through w where it falls freely, flat where it lies on the trough.
+        // THE LIP FALLS (WaterBank.hlsl's solved loop; the law, its sources and its limits at
+        // WaterTerms.h LipFall): bounded by the trough; its slope by the chain rule through w where
+        // it falls freely, flat where it lies on the trough. With no depth given (a probe tool's
+        // read) the water is taken as deep: the flight's linear speed.
         const double aHc = aH1 * chopM;
         const double ePast = (std::max)(aHc * g - 1.0 / (std::max)(kBar, 1e-4), 0.0);
-        const double kG = kBar * cothBar;
-        const double fall = 0.5 * kG * ePast * ePast;
+        const double hF = depthM > 0.0 ? depthM : 1.0e9;
+        const double HF = aEnv + (std::max)(eta, 0.0);
+        const double fall = LipFall(ePast, kBar, cothBar, HF, hF);
         if (fall > 0.0) {
             const double free = eta - fall, floorY = (std::min)(eta, -aEnv);
             if (free >= floorY) {
-                const double dd = kG * ePast * aHc * q1c;   // d(fall)/d(w)
+                const double dd = LipFallDe(ePast, kBar, cothBar, HF, hF) * aHc * q1c;   // d(fall)/d(w)
                 sxS -= dd * wx;
                 szS -= dd * wz;
                 eta = free;
