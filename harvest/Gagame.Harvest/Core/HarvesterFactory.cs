@@ -25,9 +25,9 @@ public static class HarvesterFactory
     /// The names, in the order the README's milestones brought each in.
     public static readonly string[] Order =
     [
-        "tides", "waves", "currents", "river", "bathy", "hqbathy", "refbathy", "globe", "gis",
+        "tides", "waves", "currents", "river", "hqbathy", "globe", "gis",
         "survey", "vectors", "aerial", "overlay", "water", "aton", "route", "buildings",
-        "planet-buildings", "overture", "land-polygons", "place",
+        "planet-buildings", "overture", "land-polygons",
     ];
 
     public static IEnumerable<string> Names =>

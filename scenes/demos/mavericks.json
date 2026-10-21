@@ -4,7 +4,7 @@
     "work; Mark: a place known for big barrel waves, with public data to pull from). The scene is a",
     "PLACE and names no data of its own (2026-10-21, Mark: \"Data sets should never be specific to place,",
     "only the measurement type\"): it takes the one atlas of scenes/merrimack.json -- the water composite",
-    "of data/composite/fidelity/world.gafid, which paints the reef's box at 3 m from NOAA's ninth-arc",
+    "of harvest/fidelity/world.gafid, which paints the reef's box at 3 m from NOAA's ninth-arc",
     "CUDEM, its tide stations (Pillar Point Harbor, 9414131, is the focus below), currents and sea state,",
     "and the planet's buildings and roads. Fly from here to the Merrimack and its data is there.",
     "The solver's domain is the box below; no river of data.river enters it. The swell is set below: Hs",

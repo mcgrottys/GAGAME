@@ -4,7 +4,7 @@ using System.Net.Http.Headers;
 namespace Gagame.Harvest;
 
 /// The harvesters' own small fetch (every one carried a copy): cache-first, spaced requests
-/// to be gentle, a few retries with backoff, the project's User-Agent. A place harvest routes
+/// to be gentle, a few retries with backoff, the project's User-Agent. A composite routes
 /// through Polite instead (budgeted, ledgered); `Fetcher` is the abstraction both satisfy.
 public abstract class Fetcher
 {

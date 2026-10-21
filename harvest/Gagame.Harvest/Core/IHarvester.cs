@@ -4,7 +4,8 @@ namespace Gagame.Harvest;
 public enum InsertKind
 {
     None,
-    /// `--place NAME --box lon0,lat0,lon1,lat1` plus the extras named.
+    /// `--place NAME --box lon0,lat0,lon1,lat1` plus the extras named. No harvester offers it since
+    /// the per-place modes were retired (2026-10-21); kept because the demo's insert dialog knows it.
     PlaceBox,
     /// Files dropped into a cache folder the harvester sweeps on its next run.
     DropFolder,

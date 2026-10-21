@@ -50,8 +50,8 @@ public sealed class ComposeTides : IHarvester
         // ---- every harmonic station; the regions only list which stand in them
         var regionStations = new List<List<string>>();
         foreach (var (box, _) in regions)
-            regionStations.Add(tides.DiscoverPlace(box, 0.0, cacheDir, (box.CenterLon, box.CenterLat)).found.Select(s => s.Id).ToList());
-        var stations = tides.DiscoverPlace(new Box(-180, -90, 180, 90), 0.0, cacheDir, (0.0, 0.0)).found.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
+            regionStations.Add(tides.Discover(box, 0.0, cacheDir, (box.CenterLon, box.CenterLat)).found.Select(s => s.Id).ToList());
+        var stations = tides.Discover(new Box(-180, -90, 180, 90), 0.0, cacheDir, (0.0, 0.0)).found.OrderBy(s => s.Id, StringComparer.Ordinal).ToList();
         var year = FirstYear(stations, cacheDir) ?? DateTime.UtcNow.Year;
         run.Log($"{stations.Count} harmonic station(s) published, {regionStations.Sum(r => r.Count)} inside the {regions.Count} region(s); fit year {year} (the earliest the cache holds)");
         var need = stations.Sum(s => Missing(cacheDir, s.Id, year));

@@ -19,7 +19,7 @@ public sealed class HqBathy : IHarvester
     public string[] Outputs => ["data/bathy/inlethq.f32"];
     public Source[] Sources => [new("NOAA BlueTopo", "https://registry.opendata.aws/noaa-ocs-nationalbathymetry/"), new("USACE eHydro", "https://navigation.usace.army.mil/Survey/Hydro")];
     public Insert? Insert => null;
-    public string? Note => "Needs data/bathy/merrimack.* (Bathymetry) for its datum cross-check.";
+    public string? Note => "Needs data/bathy/merrimack.* for its datum cross-check: the CUDEM plane the retired `bathy` window harvester wrote (kept on disk; no harvester writes it now).";
 
     const string S3 = "https://noaa-ocs-nationalbathymetry-pds.s3.amazonaws.com/";
     const string SchemePrefix = "BlueTopo/_BlueTopo_Tile_Scheme/";

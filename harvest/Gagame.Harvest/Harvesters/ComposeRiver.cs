@@ -104,7 +104,7 @@ public sealed class ComposeRiver : IHarvester
         // the tide stations: every CO-OPS harmonic (reference) station, the set compose-tides fits
         // (its listing, cached once); the tides layer then reads each one's river km from here
         var coops = Path.Combine("cache", "coops");
-        new Tides().UsePolite(ctx, run.Polite).DiscoverPlace(new Box(-180, -90, 180, 90), 0.0, coops, (0.0, 0.0));
+        new Tides().UsePolite(ctx, run.Polite).Discover(new Box(-180, -90, 180, 90), 0.0, coops, (0.0, 0.0));
         var tideStations = Load(Path.Combine(coops, "_lists", "tidepredictions.json")).Arr("stations").Where(t => t.Str("type") == "R" && t.Str("id") is not null)
             .Select(t => (t.Str("id")!, t.Num("lat"), t.Num("lng"))).ToList();
         var reaches = new List<Dictionary<string, object?>>();

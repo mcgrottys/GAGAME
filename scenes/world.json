@@ -3,7 +3,7 @@
     "THE WORLD (2026-10-21): the one atlas every scene stands on. Mark: \"Data sets should never be",
     "specific to place, only the measurement type\", and \"make sure you wrap up making everything part",
     "of a global model\". This file holds each measurement's global set -- the water composite of",
-    "data/composite/fidelity/world.gafid (bed, tides, currents, sea state, rivers), the ETOPO 15\" folder,",
+    "harvest/fidelity/world.gafid (bed, tides, currents, sea state, rivers), the ETOPO 15\" folder,",
     "the planet's buildings, roads and bridges, the OSM coast and inland water -- and the laws, layers and",
     "closures, and NO place. A place is a scene on top of it (scenes/merrimack.json, demos/mavericks.json,",
     "demos/tokyo.json): its anchor, its views, its solver's box and its wave field's window. Where a river",
@@ -22,7 +22,7 @@
     "currents": "data/composite/world/currents/currents.json",
     "river": "data/composite/world/river/river.json",
     "edits": "data/gis/edits.geojson",
-    "_atlas": "ONE ATLAS (2026-10-21, Mark: \"Data sets should never be specific to place, only the measurement type\"): every dataset here is a measurement's global set -- the water composite of data/composite/fidelity/world.gafid (bed, tides, currents, sea state, river gauges), the planet's buildings, roads and bridges -- and every scene that inherits this one flies the same world. A scene chooses a place (place.anchor, views, the solver's box, the wave field's window); it names no data of its own."
+    "_atlas": "ONE ATLAS (2026-10-21, Mark: \"Data sets should never be specific to place, only the measurement type\"): every dataset here is a measurement's global set -- the water composite of harvest/fidelity/world.gafid (bed, tides, currents, sea state, river gauges), the planet's buildings, roads and bridges -- and every scene that inherits this one flies the same world. A scene chooses a place (place.anchor, views, the solver's box, the wave field's window); it names no data of its own."
   },
   "time": {"start": "now", "timeScale": 1, "paused": false, "windowDays": 7},
   "sun": {"source": "ephemeris", "az": 112, "el": 26},

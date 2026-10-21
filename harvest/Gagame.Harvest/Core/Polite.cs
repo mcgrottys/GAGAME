@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 
 namespace Gagame.Harvest;
 
-/// The polite fetcher for PLACE harvests (harvester/polite.py): cache first forever, one
+/// The polite fetcher of every composite harvest: cache first forever, one
 /// request in flight across processes (a lock file), the least gap between requests to a
 /// SOURCE (all its hosts paced as one) and the bans from the sources' limits file
 /// (harvest/sources.limits.json, docs/FIDELITY.md section 2: 1.1 s by default, 2.5 s on NCEP's
@@ -31,7 +31,6 @@ public sealed class Polite : Fetcher
 
     readonly HarvestContext _ctx;
     public string LedgerPath { get; }
-    public string? Place { get; set; }
     readonly Ledger _ledger;
 
     public Polite(HarvestContext ctx)
@@ -274,7 +273,7 @@ public sealed class Polite : Fetcher
                 ["t"] = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'+00:00'", CultureInfo.InvariantCulture),
                 ["t_end"] = Now(), ["host"] = host, ["method"] = method, ["url"] = url,
                 ["status"] = status, ["bytes"] = got, ["range"] = headers?.GetValueOrDefault("Range"),
-                ["place"] = Place, ["note"] = note, ["dest"] = dest,
+                ["note"] = note, ["dest"] = dest,
                 ["error"] = err is null ? null : Truncate($"{err.GetType().Name}: {err.Message}", 300),
             });
         }

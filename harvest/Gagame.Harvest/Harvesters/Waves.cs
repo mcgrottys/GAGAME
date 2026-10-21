@@ -15,7 +15,7 @@ public sealed class Waves : IHarvester
     public string What => "GFS-Wave Hs/Tp/direction for the Gulf of Maine through the NOMADS grib filter, with NDBC buoy ground truth.";
     public string[] Outputs => ["data/sea/seastate.json"];
     public Source[] Sources => [new("NOMADS GFS-Wave", "https://nomads.ncep.noaa.gov/"), new("NDBC realtime2", "https://www.ndbc.noaa.gov/data/realtime2/")];
-    public Insert? Insert => new(InsertKind.PlaceBox, "A place's sea: the wave box, with the open-sea point the buoys are matched at.", Extras: ["--sea"]);
+    public Insert? Insert => null;
 
     static readonly string[] Filters = ["https://nomads.ncep.noaa.gov/cgi-bin/filter_gfswave.pl", "https://nomads.ncep.noaa.gov/gribfilter.php"];
     const string Ndbc = "https://www.ndbc.noaa.gov/data/realtime2";
@@ -40,13 +40,6 @@ public sealed class Waves : IHarvester
         _ctx = ctx;
         _fetch = new SimpleFetcher(ctx, 0.6, 4);
         var a = new Args(argv);
-        if (a.Has("--place"))
-        {
-            var sea = a.LonLat("--sea") ?? throw new HarvestStop("--place needs --sea lon,lat");
-            var buoys = (a.Opt("--buoys", "") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
-            HarvestPlace(ctx, new Polite(ctx) { Place = a.Opt("--place") }, a.Opt("--place")!, sea, buoys);
-            return 0;
-        }
         var outDir = Path.Combine("data", "sea");
         var cacheDir = Path.Combine("cache", "gfswave");
         var ndbcCache = Path.Combine("cache", "ndbc");
@@ -297,53 +290,7 @@ public sealed class Waves : IHarvester
         return null;
     }
 
-    // ------------------------------------------------------------------ a place
-
-    static (int r, int c, double lat, double lonE) NearestWaveNode(Grib2Message msg, double lat, double lonE)
-    {
-        (double d, int r, int c, double la, double lo)? best = null;
-        for (var r = 0; r < msg.Nj; r++)
-        {
-            var la = msg.Lat1 + r * ((msg.Scan & 0x40) != 0 ? msg.Dlat : -msg.Dlat);
-            for (var c = 0; c < msg.Ni; c++)
-            {
-                if (double.IsNaN(msg.Values[r * msg.Ni + c])) continue;
-                var lo = Grib2Message.Mod360(msg.Lon1 + c * ((msg.Scan & 0x80) != 0 ? -msg.Dlon : msg.Dlon));
-                var d = Math.Sqrt(Sq((lo - lonE) * Math.Cos(lat * Geo.DegToRad)) + Sq(la - lat));
-                if (best is null || d < best.Value.d) best = (d, r, c, la, lo);
-            }
-        }
-        if (best is null) throw new InvalidOperationException("every node of the subregion is masked (land)");
-        return (best.Value.r, best.Value.c, best.Value.la, best.Value.lo);
-    }
-
-    static double Sq(double x) => x * x;
-
-    (List<Dictionary<string, object?>> hours, (int r, int c, double lat, double lonE) node) PointHours(string ymd, int cyc, string cacheDir, Dictionary<(int, int, int, int, long), string> keyToVar, (double lon, double lat) sea)
-    {
-        var hours = new List<Dictionary<string, object?>>();
-        (int r, int c, double lat, double lonE)? node = null;
-        foreach (var fh in Fhs)
-        {
-            var data = FetchGrib(ymd, cyc, fh, Vars, cacheDir, "all");
-            var msgs = Grib2.ReadMessages(data).Select(m => (v: keyToVar.GetValueOrDefault(m.Key), m)).ToList();
-            if (node is null)
-            {
-                var hs = msgs.First(x => x.v == "HTSGW").m;
-                node = NearestWaveNode(hs, sea.lat, Grib2Message.Mod360(sea.lon));
-            }
-            var (r, c, _, _) = node.Value;
-            var point = new Dictionary<string, double?>();
-            foreach (var (v, m) in msgs)
-            {
-                if (v is null) continue;
-                var name = v is "SWELL" or "SWPER" or "SWDIR" ? $"{v}_{m.LevelValue}" : v;
-                point[name] = NaNToNull(m.Values[r * m.Ni + c]);
-            }
-            hours.Add(HourEntry(fh, point));
-        }
-        return (hours, node!.Value);
-    }
+    // ------------------------------------------------------------------ for the composite
 
     public static IReadOnlyList<int> ForecastHours => Fhs;
 
@@ -371,70 +318,5 @@ public sealed class Waves : IHarvester
             hours.Add((fh, msgs));
         }
         return (cycDt, ymd, c, hours);
-    }
-
-    public sealed class PlaceRecord
-    {
-        public List<(string path, long bytes)> Files = new();
-        public (double lat, double lon) Node;
-        public string Cycle = "";
-        public double CycleUnix;
-        public Dictionary<string, double?> Buoys = new();
-    }
-
-    /// data/sea/<place>/seastate.json for the node nearest `sea` (lon, lat) and the given NDBC buoys. Never overwrites.
-    public PlaceRecord HarvestPlace(HarvestContext ctx, Polite polite, string place, (double lon, double lat) sea, List<string> buoys, string? outRoot = null)
-    {
-        _ctx = ctx;
-        _fetch ??= new SimpleFetcher(ctx, 0.6, 4);
-        _polite = polite;
-        var outDir = Path.Combine(outRoot ?? Path.Combine("data", "sea"), place);
-        var path = Path.Combine(outDir, "seastate.json");
-        if (File.Exists(path)) throw new HarvestStop($"refusing to overwrite {path} (places only add)");
-        var lonE = Grib2Message.Mod360(sea.lon);
-        var x0 = Math.Floor((lonE - 0.5) * 4) / 4;
-        var y0 = Math.Floor((sea.lat - 0.375) * 4) / 4;
-        _box = new GribBox(x0, x0 + 1.0, y0 + 0.75, y0);
-        var cacheDir = Path.Combine("cache", "gfswave", place);
-        var (cycDt, ymd, cyc) = FindCycle(cacheDir);
-        ctx.Log($"[{place}] cycle gfswave {ymd} {cyc:00}z, box {_box}");
-        var varmap = Calibrate(ymd, cyc, Path.Combine("cache", "gfswave"));
-        var (hours, node) = PointHours(ymd, cyc, cacheDir, KeyToVar(varmap), sea);
-        var c0 = (Dictionary<string, object?>)hours[0]["combined"]!;
-        ctx.Log($"[{place}] node ({node.lat:0.000}, {node.lonE - 360.0:0.000}) nearest the seaward point ({Fmt(sea.lon)}, {Fmt(sea.lat)}); f000 Hs {Py(c0["hs"])} m, {((List<Dictionary<string, object?>>)hours[0]["partitions"]!).Count} partitions");
-
-        var ndbcCache = Path.Combine("cache", "ndbc");
-        var stamp = DateTime.UtcNow.ToString("yyyyMMddHH", CultureInfo.InvariantCulture);
-        var outBuoys = new Dictionary<string, Dictionary<string, object?>>();
-        foreach (var bid in buoys)
-        {
-            var (met, _) = polite.Get($"{Ndbc}/{bid}.txt", Path.Combine(ndbcCache, $"{bid}_{stamp}.txt"));
-            var b = ParseNdbcMet(System.Text.Encoding.UTF8.GetString(met)) ?? new();
-            try
-            {
-                var (spec, _) = polite.Get($"{Ndbc}/{bid}.data_spec", Path.Combine(ndbcCache, $"{bid}_{stamp}.data_spec"));
-                var sp = ParseNdbcSpec(System.Text.Encoding.UTF8.GetString(spec));
-                if (sp is not null) b["spectrum"] = sp;
-            }
-            catch (Polite.StopException) { throw; }
-            catch (Exception e) { ctx.Log($"    {bid}.data_spec unavailable ({e.Message})"); }
-            outBuoys[bid] = b;
-            LogBuoy(bid, b);
-        }
-        var out_ = D(("generated_utc", NowIso()),
-            ("source", "GFS-Wave via NOMADS grib filter (S3 mirror grids are JPEG 2000) + NDBC realtime2"),
-            ("cycle_unix", Unix(cycDt)), ("cycle_label", $"gfswave {ymd} {cyc:00}z"),
-            ("point_lat", node.lat), ("point_lon", node.lonE - 360.0),
-            ("place", place), ("sea_point", new List<double> { sea.lon, sea.lat }), ("box", _box.ToJson()),
-            ("hours", hours), ("buoys", outBuoys));
-        Directory.CreateDirectory(outDir);
-        Save(path, out_, exclusive: true);
-        ctx.Log($"wrote {path}");
-        return new PlaceRecord
-        {
-            Files = { (path, new FileInfo(path).Length) }, Node = (node.lat, node.lonE - 360.0),
-            Cycle = $"gfswave {ymd} {cyc:00}z", CycleUnix = Unix(cycDt),
-            Buoys = outBuoys.ToDictionary(kv => kv.Key, kv => kv.Value.GetValueOrDefault("obs_unix") as double?),
-        };
     }
 }

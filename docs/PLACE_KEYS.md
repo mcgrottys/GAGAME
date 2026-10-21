@@ -9,7 +9,7 @@ c1, c3, c6, d3) and found each as written; the rest stand on the agent's reading
 the measurement type." What a scene names is now a place -- its anchor, views, the solver's box
 (`water.swe.box`, `cellM`) and the wave field's window -- and every dataset is the base scene's one
 global set (`scenes/merrimack.json` `sources` and `data`: the water composite of
-`data/composite/fidelity/world.gafid`, the planet's buildings, roads and bridges). Rows this closed:
+`harvest/fidelity/world.gafid`, the planet's buildings, roads and bridges). Rows this closed:
 a1 (the depth-tree demonstration and its survey file, removed), a5 and a6 (`data.bathy`,
 `BathyModel` and `CudemHeightSource` deleted: the bed is the composite's tiers), a10, b6 and d5 (the
 river's discharge is `data.river`'s gauge on the reach that crosses the box, times the drainage
