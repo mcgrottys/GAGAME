@@ -1050,7 +1050,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // it already has -- the global cube is not repainted for this.
                 const size_t bedIdx = bedLayer;
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
-                    gisMask.Load("data/gis/", S.streaming.gisLand, S.data.edits)) {
+                    gisMask.Load("data/gis/", S.streaming.gisLand, S.streaming.gisWater, S.data.edits)) {
                     // A river reach is the sea's where the solver stands (GisMask.h SetTidalBox): the
                     // carve's FCode says river, the solver's domain says tidal. Before Refresh (the box
                     // joins the mask's fingerprint).

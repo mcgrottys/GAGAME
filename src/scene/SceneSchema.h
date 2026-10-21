@@ -221,6 +221,7 @@ struct StreamingSection {
     // THE GLOBAL COAST: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py);
     // "" = the New England survey alone (compose/GisMask.h).
     std::string gisLand;
+    std::string gisWater;   // the planet's inland water, GAWATR01 ("" = New England's NHD carve)
     // F16 (HIERARCHY 4.20, the third clause): THE SURVEY'S GRAIN, metres -- the finest level the
     // land/sea mask has anything of its own for. A mask tile finer than it is its parent,
     // magnified: never painted, stored or loaded. The survey's shoreline (NOAA CUSP, NAD83 against

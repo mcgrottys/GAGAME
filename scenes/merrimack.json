@@ -96,6 +96,8 @@
     "seafloor": false,
     "_gisLand": "THE GLOBAL COAST, every scene that inherits this one: OSM's land polygons of 2026-10-11 (harvester/harvest_land_polygons.py). Without it a place outside New England had no survey and its shore was a coarse height test.",
     "gisLand": "D:/DataCache/OSM/coastline/land-261011.galand",
+    "_gisWater": "THE PLANET'S INLAND WATER (2026-10-21): OSM's water polygons classed sea, impounded and reach (harvester/harvest_osm_water.py), in place of New England's NHD carve -- rivers, lakes and marsh channels everywhere a scene flies.",
+    "gisWater": "D:/DataCache/OSM/water/planet-261005-water.gawatr",
     "exposure": true
   },
   "capture": {

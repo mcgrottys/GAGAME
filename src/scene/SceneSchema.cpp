@@ -332,6 +332,8 @@ const Schema& StreamingSchema() {
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
+            .BindPath("gisWater", p.gisWater,
+                      "the planet's inland water as GAWATR01 (harvester/harvest_osm_water.py: OSM water polygons classed sea, impounded, reach), read by 1-degree cell -- in place of the New England NHD carve (\"\" = that carve)", R)
             .BindPath("gisLand", p.gisLand,
                       "the global coast: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py); "
                       "\"\" = the New England survey alone", R)
