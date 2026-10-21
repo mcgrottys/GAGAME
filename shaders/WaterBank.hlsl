@@ -836,7 +836,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float hB = max(depth, 0.3f);
         const float kSh = ShoaledKh(kEff, hB) / hB;
         const float aH = 1.4142136f * envRmsRaw * OrbitCoth(kEff, depth) / max(brk, 1e-3f);
-        d.xz *= min(1.0f, 1.5707963f / max(kSh * aH, 1e-4f));
+        // the bound is the landing (Jet.hlsli LipReach), on the sea's significant crest-to-trough
+        const float aEnvC = max(1.4142136f * envRmsRaw * brk, 1e-3f);
+        const float cothE = OrbitCoth(kEff, depth);
+        const float aReach = LipReach(kSh, cothE, 2.0f * aEnvC, hB);
+        d.xz *= min(1.0f, aReach / max(aH, 1e-4f));
         // THE LIP FALLS on the cascades' sea too (2026-10-20, Mark: "so every place rolls"). The
         // cascades' lateral term is the raw orbit at every phase, held to the loop's bound; a
         // crest's water reaches that far, and past the cusp (1 / k) it has left the face. The crest
@@ -844,9 +848,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // the trough, so the excursion past the cusp is the crest's alone. The fall is Jet.hlsli's
         // LipFall, bounded by the trough. (d and the envelope are commensurate here: gRmsRef carries
         // the exaggeration. TreeWater::Finish carries the same.)
-        const float aEnvC = max(1.4142136f * envRmsRaw * brk, 1e-3f);
-        const float cothE = OrbitCoth(kEff, depth);
-        const float reach = min(aH, 1.5707963f / max(kSh, 1e-4f));
+        const float reach = min(aH, aReach);
         const float wCrC = saturate(0.5f + 0.5f * d.y / aEnvC);
         const float ePastC = max(reach - 1.0f / max(kSh, 1e-4f), 0.0f) * wCrC;
         const float fallC = LipFall(ePastC, kSh, cothE, aEnvC + max(d.y, 0.0f), hB);
@@ -1022,7 +1024,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             // height over the significant amplitude: a crest twice the significant one stands at
             // twice the sea's excess against the depth. Below the significant crest the share falls
             // with it; in the trough it is nothing (w is too).
-            const float aLoop = 1.5707963f / max(kBar, 1e-4f);
+            // the reach is the landing (Jet.hlsli LipReach): the cusp plus the flight to the trough,
+            // on THIS crest's height over it
+            const float aLoop = LipReach(kBar, cothBar, aEnv + max(dW.y, 0.0f), depth);
             const float eCr = lipQ * max(dW.y / aEnv, 0.0f);
             const float excessShare = 1.0f - 1.0f / max(eCr * eCr, 1.0f);
             const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * excessShare;

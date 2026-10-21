@@ -2237,7 +2237,8 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         // crest's excursion from the sea's own toward the loop's limit pi / 2k (the chopped
         // amplitude is what the kernel bounds).
         const double lipQ = q1 + 1.0;
-        const double aLoop = 1.5707963267948966 / (std::max)(kBar, 1e-4);
+        // the reach is the landing (WaterTerms.h LipReach), on this crest's height over the trough
+        const double aLoop = LipReach(kBar, cothBar, aEnv + (std::max)(eta, 0.0), depthM > 0.0 ? depthM : 1.0e9);
         // the set wave (the kernel's): the crest's own excess, the sea's times eta over the
         // significant amplitude (eta / aEnv = 2 wRaw - 1)
         const double eCr = lipQ * (std::max)(eta / aEnv, 0.0);

@@ -407,9 +407,16 @@ bool ColumnLip(float2 xz, out float face, out float top, out float under, out fl
             fS += bw * ColH(rawF);
             cS += bw * cw;
             if (cw > 0.0f && ColPresent(rawT)) {
+                // THE TWO CROSSINGS ABOVE THE FACE, whichever branch made them (2026-10-20): the column
+                // keeps the overturned branch in band 1 and the upright max in band 2, and which is the
+                // higher depends on the overturn -- the trochoid's loop puts the inverted crest on top,
+                // a falling lip curls its inverted water UNDER (measured: band 1 below band 2 at the
+                // median of the curl's texels, a lip -1.5 m thick to the old reader). The lip's top is
+                // the higher of the two, its underside the lower.
+                const float hA = ColH(rawT), hB = ColUnderH(rawF, rawT, rawU);
                 const float w = bw * cw;
-                tS += w * ColH(rawT);
-                uS += w * ColUnderH(rawF, rawT, rawU);
+                tS += w * max(hA, hB);
+                uS += w * min(hA, hB);
                 wL += w;
             }
         }

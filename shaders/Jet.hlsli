@@ -53,6 +53,23 @@ float LipFall(float ePast, float k, float coth, float H, float h) {
     return kJetFallRatio * 0.5f * k * coth * ePast * ePast / (1.0f + max(H, 0.0f) / max(h, 0.3f));
 }
 
+// THE THROW'S BOUND IS THE LANDING (2026-10-20, Mark: "I see the lip but the waves don't seem to
+// barrel correctly"). Measured at Mavericks' close pose: the lip's lowest point stood at -1.79 m over a
+// trough at -3.61 m -- it hung at most 79 % of the wave's height (67 % at the median), so no tube
+// closed. The throw was bounded by the trochoid's loop, pi / 2k, a kinematic device. The physical bound
+// is the fall's own: the jet flies until it lands in the trough. LipFall(e*) = Hc, the crest's height
+// over the trough, gives the flight
+//     e* = sqrt(2 Hc (1 + Hc / h) / ((a / g) k coth(kh))),
+// and the crest's reach is the cusp plus that flight, 1 / k + e*. No new constant: a set wave (more
+// Hc) throws farther and lands, as it does. Tubes are measured by their vortex ratio, the length over
+// the width of the tube's section (Mead & Black 2001, J. Coastal Research 29: ~1 a round tube, the
+// most intense, ~3 an almond), which this law does not fix: the reef's slope and the swell set it.
+float LipReach(float k, float coth, float Hc, float h) {
+    const float H = max(Hc, 0.0f);
+    const float eLand = sqrt(2.0f * H * (1.0f + H / max(h, 0.3f)) / max(kJetFallRatio * k * coth, 1e-6f));
+    return 1.0f / max(k, 1e-4f) + eLand;
+}
+
 // Green's-law-style shoaling: amplitude grows as the group speed drops entering shallow water.
 float ShoalFactor(float kBand, float depth) {
     const float kh = kBand * max(depth, 0.15f);

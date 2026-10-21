@@ -349,7 +349,10 @@ void TreeWater::Prepare(double wx, double wz, double simUnix, Prep& p) const {
             double g[OceanCpu::kCascades];
             double brk = 1.0, rmsRaw = 0.0, kEff = 0.0;
             BandLaw(q, depth, p.hsScale, p.expo, g, &brk, &rmsRaw, &kEff);
-            const double aLoop = 1.5707963267948966 / (std::max)(kEff, 1e-4);
+            const double hB0 = (std::max)(depth, 0.3);
+            const double kSh0 = ShoaledKh(kEff, hB0) / hB0;
+            const double aEnv0 = (std::max)(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
+            const double aLoop = LipReach(kSh0, OrbitCoth(kEff, depth), 2.0 * aEnv0, hB0);   // the landing
             const double aH0 = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / (std::max)(brk, 1e-3);
             aMax = (std::min)((std::max)(3.0 * aH0, 2.0), aLoop);
         }
@@ -459,7 +462,10 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         const double hB = std::max(depth, 0.3);
         const double kSh = ShoaledKh(kEff, hB) / hB;
         const double aH = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / std::max(brk, 1e-3);
-        const double fB = std::min(1.0, 1.5707963267948966 / std::max(kSh * aH, 1e-4));
+        // the bound is the landing (the kernel's; WaterTerms.h LipReach), on the significant crest-to-trough
+        const double aEnvB = std::max(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
+        const double aReach = LipReach(kSh, OrbitCoth(kEff, depth), 2.0 * aEnvB, hB);
+        const double fB = std::min(1.0, aReach / std::max(aH, 1e-4));
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             latGain[c] = fB * (1.0 / std::max(brk, 1e-3)) * OrbitCoth(m_ocean->BandK(c), depth);
         }
@@ -510,7 +516,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             const double yC = (dispY - y0) * hs, sxC = (slopeX - sx0) * hs, szC = (slopeZ - sz0) * hs;
             const double aEnvC = std::max(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
             const double cothE = OrbitCoth(kEff, depth);
-            const double reach = std::min(aH, 1.5707963267948966 / std::max(kSh, 1e-4));
+            const double reach = std::min(aH, aReach);
             const double wRaw = 0.5 + 0.5 * yC / aEnvC;
             const double wCr = std::min(std::max(wRaw, 0.0), 1.0);
             const double eUnit = std::max(reach - 1.0 / std::max(kSh, 1e-4), 0.0);

@@ -220,6 +220,22 @@ inline void LipFlightTau(double dBx, double dBz, double gx, double gz, double s,
     tau[1] = m * r * s - fall;
     tau[2] = dBz * r * s;
 }
+// THE THROW'S BOUND IS THE LANDING (2026-10-20, Mark: "I see the lip but the waves don't seem to
+// barrel correctly"). Measured at Mavericks' close pose: the lip's lowest point stood at -1.79 m over a
+// trough at -3.61 m -- it hung at most 79 % of the wave's height (67 % at the median), so no tube
+// closed. The throw was bounded by the trochoid's loop, pi / 2k, a kinematic device. The physical bound
+// is the fall's own: the jet flies until it lands in the trough. LipFall(e*) = Hc, the crest's height
+// over the trough, gives the flight
+//     e* = sqrt(2 Hc (1 + Hc / h) / ((a / g) k coth(kh))),
+// and the crest's reach is the cusp plus that flight, 1 / k + e*. No new constant: a set wave (more
+// Hc) throws farther and lands, as it does. Tubes are measured by their vortex ratio, the length over
+// the width of the tube's section (Mead & Black 2001, J. Coastal Research 29: ~1 a round tube, the
+// most intense, ~3 an almond), which this law does not fix: the reef's slope and the swell set it.
+inline double LipReach(double k, double coth, double Hc, double h) {
+    const double H = wt::Max(Hc, 0.0);
+    const double eLand = std::sqrt(2.0 * H * (1.0 + H / wt::Max(h, 0.3)) / wt::Max(kJetFallRatio * k * coth, 1e-6));
+    return 1.0 / wt::Max(k, 1e-4) + eLand;
+}
 // d(LipFall)/d(ePast), H held
 inline double LipFallDe(double ePast, double k, double coth, double H, double h) {
     return kJetFallRatio * k * coth * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));

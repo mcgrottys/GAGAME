@@ -900,8 +900,26 @@ the normal turned edge-on to the eye. No derivative, no face. Measured: in the m
 a translucent green sheet under a sky-lit top; with the sun ahead its top takes the light and its
 underside its own shade; a few dark dashes remain on the rim with the sun ahead. Self-test 37.
 
-**Next.** A pose with the sun behind the crest (the glow's own test); the rim's dashes with the sun
-ahead; gravity's latitude term.
+**The barrel (the same night, Mark: "I see the lip but the waves don't seem to barrel correctly").**
+Measured from the column at the close pose: the lip's lowest point stood at -1.79 m over a trough at
+-3.61 m -- it hung at most 79 % of the wave's 7.7 m (67 % at the median), so no tube closed; and the
+column's lip bands had turned over: the trochoid's loop put the inverted branch on top, a falling lip
+curls its inverted water UNDER, and the shading's reader (top - underside) read a lip -1.5 m thick.
+Two changes. THE THROW'S BOUND IS THE LANDING: the loop's pi / 2k was a kinematic device; the jet flies
+until it lands in the trough, LipFall(e*) = Hc, so the reach is 1 / k + e*, e* = sqrt(2 Hc (1 + Hc / h)
+/ ((a/g) k coth kh)) (Jet.hlsli / WaterTerms.h LipReach) -- the solved crest law on this crest's Hc,
+the cascades' lateral bound on the significant crest-to-trough (their twin sets its gains before it
+knows the local elevation), both processors. And the lip reader is orientation-free: of the two
+crossings above the face the higher is the top, the lower the underside. Measured: the lip's lowest
+p1 -1.79 -> -2.34 m, its largest hang 79 -> 83 %; the curl now has thickness (a teal sheet, not a
+hairline). Still no tube: what stops the throw now is the share the crest law grants of the reach,
+1 - 1/e^2 for e the crest's excess over the depth's limit -- 75 % for a set wave at e = 2. Tubes are
+measured by the vortex ratio (Mead & Black 2001, J. Coastal Research 29: length over width of the
+tube's section, ~1 round, ~3 almond), set by the reef's slope across the break. Hull probe 2.7 cm rms,
+corr 1.00 (warm); self-test 37.
+
+**Next.** The crest law's share of the reach (what makes a crest plunge whole); a pose with the sun
+behind the crest; the rim's dashes with the sun ahead; gravity's latitude term.
 
 ## 6. Next
 
