@@ -8,6 +8,7 @@
 //  std::optional sources (emplaced). The three helpers in the anonymous namespace moved with the
 //  span because only this code calls them. Comments stayed with the code they describe.
 // ================================================================================================
+#include "core/Planet.h"
 #include "app/Assembly.h"
 
 #include <filesystem>
@@ -357,7 +358,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // tree folds the rest, on every lattice the colour binds below, before the first frame -- or
     // alone, and out, as the `ingest` tool. (PHASE A1: the windows are the eye's, not the
     // sources'; nothing here chooses one.)
-    planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
+    // THE PLANET (core/Planet.h): its radius and its gravity from its own body, set once for every solver
+    SetThePlanet(PlanetByName(S.scene.planet));
+    planetR = ThePlanet().R;
     surface = SurfaceFrame::About(planetR, opt.stencil, S.place.anchor[1], S.place.anchor[0]);
     // PHASE B2 (D1): THE WINDOWS' STEP, a whole tile at the floor of every tenant that shares them --
     // the colour, the mask and the height (128 x 128), the exposure (256 x 128): 2048 x 1024.

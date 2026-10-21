@@ -1,3 +1,4 @@
+#include "core/Planet.h"
 #include "sim/SweSolver.h"
 
 #include "hal/PixEvents.h"
@@ -406,7 +407,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         if (e > -9000.0f) deepest = (std::min)(deepest, e);
     }
     const float hmax = -deepest + 3.0f;
-    m_dt = 0.45f * (std::min)(dx, dyM) / std::sqrt(9.81f * (std::max)(hmax, 5.0f));
+    m_dt = 0.45f * (std::min)(dx, dyM) / std::sqrt(static_cast<float>(PlanetGWave()) * (std::max)(hmax, 5.0f));
 
     m_cb.nx = nx;
     m_cb.ny = ny;
@@ -423,7 +424,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.damp = 0.99995f;   // background linear part only; the real friction is quadratic drag
     m_cb.spongeD0 = cfg.spongeM;          // ramp start from an open side: past the bar, before the open sea
     m_cb.spongeRate = m_dt / 10.0f;       // full-strength deviations die in ~10 s
-    m_cb.gravity = 9.81f;
+    m_cb.gravity = static_cast<float>(PlanetGWave());   // the planet's (core/Planet.h)
     // M6r: the west boundary is FLATHER now -- one exterior column pinned to the river-tide
     // data, its east face radiating at the gravity-wave speed (Swe.hlsl). The 24-texel
     // Dirichlet strip is retired: it was a soft wall (transients reflected off the pinned

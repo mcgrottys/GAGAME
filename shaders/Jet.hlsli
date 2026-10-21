@@ -1,6 +1,12 @@
 // The wave-current amplification, as PURE FUNCTIONS of their parameters -- shared by the water
 // bank and SeaChurn.hlsl, which must agree exactly about where the water is breaking. PHASE C3b:
 // the analytic entrance jet is deleted; the current is the solver's own (sim/WaterTerms.h twins these).
+// THE PLANET'S GRAVITY (2026-10-20, core/Planet.h): GM / R^2, from the includer's constant buffer --
+// WaterBank.hlsl's gPlanet.x, SeaChurn.hlsl's gMiscC.w. No default: a kernel that forgets it fails to
+// compile rather than run on Earth's.
+#ifndef GA_PLANET_G
+#error "Jet.hlsli: define GA_PLANET_G (the planet's surface gravity, from the constant buffer) before including"
+#endif
 #ifndef GA_JET_HLSLI
 #define GA_JET_HLSLI
 
@@ -10,7 +16,7 @@
 // right where the bar is shallow -- which is exactly where the entrance stands up and breaks.
 float BandPhaseSpeed(float kBand, float depth) {
     const float kh = kBand * max(depth, 0.15f);
-    return sqrt(9.81f / kBand * tanh(kh));
+    return sqrt(GA_PLANET_G / kBand * tanh(kh));
 }
 
 // THE WAVENUMBER IN THIS DEPTH (the crest law, 2026-10-19): a band's frequency is its deep-water
@@ -51,9 +57,9 @@ float LipFall(float ePast, float k, float coth, float H, float h) {
 float ShoalFactor(float kBand, float depth) {
     const float kh = kBand * max(depth, 0.15f);
     const float th = tanh(kh);
-    const float c = sqrt(9.81f / kBand * th);
+    const float c = sqrt(GA_PLANET_G / kBand * th);
     const float cg = 0.5f * c * (1.0f + 2.0f * kh / max(sinh(2.0f * kh), 1e-3f));
-    const float cgDeep = 0.5f * sqrt(9.81f / kBand);
+    const float cgDeep = 0.5f * sqrt(GA_PLANET_G / kBand);
     return clamp(sqrt(cgDeep / max(cg, 0.05f)), 0.75f, 1.7f);
 }
 

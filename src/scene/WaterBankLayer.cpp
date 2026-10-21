@@ -1,4 +1,5 @@
 #include "scene/WaterBankLayer.h"
+#include "core/Planet.h"
 
 #include "compose/GisMask.h"
 #include "core/ThreadManager.h"
@@ -1346,6 +1347,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
             cb.colMap[bit >> 5] |= 1u << (bit & 31u);
         }
     }
+    cb.planet[0] = static_cast<float>(PlanetGWave());   // the planet's gravity (core/Planet.h)
+    cb.planet[1] = cb.planet[2] = cb.planet[3] = 0.0f;
     cb.colN[0] = m_ringsUnder;
     cb.colN[1] = (column && m_ringsUnder) ? 1u : 0u;
     cb.colN[2] = (column && m_foldUav) ? m_foldUav : 0u;

@@ -825,9 +825,27 @@ Jet.hlsli's dispersion, the solver's kGrav, the spray, WaterTerms.h's kGWave) --
 the engine draws. The fall carries none; the rest should take one surface gravity from the planet's
 own model (GM / R^2), handed to every kernel and solver (and into the wave cache's key).
 
-**Next.** Gravity from the planet; the crest's own thickness along the refracted ray (the backlit
-face); the lip's flight as a motor (the free-fall frame is a Galilean boost, the flight a CGA
-translator: Mark's "our GA ... might allow us to do some cool things").
+**Gravity is the planet's (the same night, Mark: "take surface gravity from the planet's model
+(GM/R^2) into every wave kernel and solver, and into the wave cache's key").** `core/Planet.h`: a
+planet is its mean radius and its GM (Earth IERS/WGS 84 3.986004418e14, Mars NASA 4.282837e13 m^3/s^2),
+its surface gravity GM / R^2 (Earth 9.820, Mars 3.728 m/s^2); the scene's planet is set once at
+assembly and its radius comes from the same body. Every site that wrote 9.81 or 9.80665 reads it:
+Jet.hlsli's dispersion (through a macro its includers define from their constant buffers -- the
+bank's new gPlanet, the churn's gMiscC.w -- with no default, so a kernel that forgets fails to
+compile), the ocean FFT (fPad.x) and its twin, the bank's wakes and spray, WaterTerms.h, the wave
+solver (and its BucketKey: a field solved under one gravity never answers for another), the SWE
+solver, SeaLayer and SeaState, and the hulls' forces (Medium.h's kG is gone: a hull on Mars weighs
+what it weighs there). The waves' twins compute with the float the kernels receive (PlanetGWave),
+so the two processors agree to the bit as they did on 9.81. The self-test's proof pins stay at the
+proofs' own 9.81 (their parameter, not the engine's gravity). Stated limit: GM / R^2 is the sphere's
+-- Earth's spin and figure take the effective value from 9.780 at the equator to 9.832 at the
+poles; the latitude term is the next refinement. Measured: hull probe 3 cm rms, corr 1.00 both bands
+(a warm cache; the run that re-solved under the new key read 0.99 mid-handover); Mars boots;
+Mavericks' curl stands; self-test 37.
+
+**Next.** The crest's own thickness along the refracted ray (the backlit face); the lip's flight as
+a motor (the free-fall frame is a Galilean boost, the flight a CGA translator: Mark's "our GA ...
+might allow us to do some cool things"); gravity's latitude term.
 
 ## 6. Next
 

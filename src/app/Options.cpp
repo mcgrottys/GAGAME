@@ -1,4 +1,5 @@
 // Options - the parser, moved verbatim from main.cpp (M12 step 1a). See Options.h.
+#include "core/Planet.h"
 #include "app/Options.h"
 
 #include "core/Common.h"
@@ -639,7 +640,7 @@ SceneArgs Options::ToSets(const Options& o) {
     // outright over one. A named file keeps its own orbit view.
     const bool gcamSaid = o.gcamLat < 1e8f;   // --globe-cam names all three
     if (gcamSaid || o.scenePath.empty()) {
-        const double planetR = (o.planet == "mars") ? 3389500.0 : GlobeModel::kR;
+        const double planetR = PlanetByName(o.planet).R;
         JsonValue at = JsonObj();
         JsonSet(at, "lat", gcamSaid ? wide(o.gcamLat) : num(34.0));
         JsonSet(at, "lon", gcamSaid ? wide(o.gcamLon) : num(-52.0));

@@ -39,7 +39,7 @@ cbuffer FftCb : register(b1) {
     float fFoamScale;
     float fFoamBias;     // Jacobian threshold
     uint  uPad0;
-    float4 fPad;
+    float4 fPad;         // x = the planet's surface gravity (m/s^2)
 };
 
 RWTexture2D<float4> gU0 : register(u0);
@@ -48,7 +48,8 @@ RWTexture2D<float4> gU2 : register(u2);
 RWTexture2D<float4> gU3 : register(u3);
 
 static const float PI = 3.14159265f;
-static const float G = 9.81f;
+// the planet's gravity, GM / R^2 (core/Planet.h), in the FFT's constant buffer
+#define G (fPad.x)
 
 float2 cmul(float2 a, float2 b) { return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 

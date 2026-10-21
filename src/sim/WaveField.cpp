@@ -49,6 +49,7 @@
 #include "sim/CurrentModel.h"
 
 #include "sim/WaveField.h"
+#include "core/Planet.h"
 #include "sim/WaterTerms.h"   // F7: BreakFactor, the clipped Rayleigh sea
 #include "core/ThreadManager.h"
 
@@ -71,7 +72,6 @@ namespace ga {
 namespace {
 
 constexpr double kPiW = 3.14159265358979323846;
-constexpr double kGrav = 9.81;
 constexpr int kBracketN = 96;        // log-spaced dispersion candidates (proof: nsamp=96)
 constexpr int kBisectN = 48;         // bisections -> bracket width ~4e-16 * k
 constexpr double kDepthFloor = 0.15; // m; the proof's np.maximum(h, 0.15)
@@ -119,7 +119,7 @@ double SolveDispersion(double sig, double hf, double uopp, bool& blocked) {
     const double* kk = BracketGrid();
     auto f = [&](double k) {
         const double s = sig + k * uopp;
-        return s * s - (kGrav * k) * std::tanh(k * hf);
+        return s * s - (PlanetGWave() * k) * std::tanh(k * hf);
     };
     double fPrev = f(kk[0]);
     double lo = 0.0, hi = 0.0;
@@ -595,7 +595,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         const double sig = 2.0 * kPiW / T;
         const double prop = Wrap360(dirs[ic] + 180.0) * (kPiW / 180.0);   // travel TOWARD
         const double d0 = std::sin(prop), d1 = std::cos(prop);            // (east, north)
-        const double c0 = kGrav * T / (2.0 * kPiW);
+        const double c0 = PlanetGWave() * T / (2.0 * kPiW);
         const double cg0 = 0.5 * c0;
         // Snell vs the fixed bar-normal frame, PER-COMPONENT incidence -- the mean direction
         // gets 15 of 16 components wrong (ALGEBRA.md `wavefield`, fidelity-verified).
@@ -676,7 +676,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         table.dirX[ic] = float(d0);
         table.dirZ[ic] = float(d1);
 
-        const double lambdaDeep = 2.0 * kPiW * kGrav / (sig * sig);
+        const double lambdaDeep = 2.0 * kPiW * PlanetGWave() / (sig * sig);
         if (lambdaDeep < cfg.minSamplesPerLambda * cfg.cellM) continue;   // the fold gate
         uploaded[ic] = true;
         ++nUp;
@@ -782,7 +782,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             //
             // Re-applied after every sweep so it stays a boundary condition rather than an
             // initial guess the sweep is free to undercut.
-            const int rounds = EikonalSweep(nx, ny, dxm, (sig * sig) / kGrav, d0, d1, feik, phibuf);
+            const int rounds = EikonalSweep(nx, ny, dxm, (sig * sig) / PlanetGWave(), d0, d1, feik, phibuf);
             for (int cur = roundsMin.load(); rounds < cur && !roundsMin.compare_exchange_weak(cur, rounds);) {}
             for (int cur = roundsMax.load(); rounds > cur && !roundsMax.compare_exchange_weak(cur, rounds);) {}
         }
@@ -1067,6 +1067,7 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
     auto mixD = [&](double v) { mixBytes(&v, sizeof(v)); };
     auto mixU = [&](uint32_t v) { mixBytes(&v, sizeof(v)); };
     mixU(kSolverVersion);
+    mixD(PlanetGWave());   // the planet's gravity: a field solved under one never answers for another
     mixD(m_cfg.orgX);
     mixD(m_cfg.orgZ);
     mixU(uint32_t(m_cfg.nx));
@@ -1452,11 +1453,11 @@ bool WaveField::ConvergeCache(const std::string& arg) {
                 feik[idx] = (h[idx] > 0.0) ? kp[idx] : kShore;
                 phi[idx] = 1e30;
             }
-            EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / kGrav, d0, d1, feik, phi);   // the solve's (F28: until still)
+            EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, feik, phi);   // the solve's (F28: until still)
             std::vector<double> phi8 = phi;
             for (int round = 0; round < kMaxRounds; ++round) {
                 prev = phi;
-                EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / kGrav, d0, d1, feik, phi, 4);
+                EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, feik, phi, 4);
                 size_t moved = 0; double mx = 0.0;
                 for (size_t idx = 0; idx < cells; ++idx) {
                     if (phi[idx] != prev[idx]) { ++moved; mx = (std::max)(mx, std::abs(prev[idx] - phi[idx])); }
@@ -2299,7 +2300,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
 bool RunWaveFieldSelfTest() {
     const int nx = 160, ny = 120;
     const double cellM = 10.0, T = 8.0, sig = 2.0 * 3.14159265358979 / T;
-    const double kInfC = sig * sig / 9.81;
+    const double kInfC = sig * sig / PlanetGWave();
     const double prop = 0.9;   // travel direction, radians from north through east
     const double d0 = std::sin(prop), d1 = std::cos(prop);
     const size_t cells = size_t(nx) * size_t(ny);

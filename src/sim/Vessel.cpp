@@ -158,7 +158,7 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
 
         // The force: rho g V along the LOCAL SURFACE NORMAL (Vessel.h explains why that, and
         // not world up), applied at the centre of buoyancy of the immersed section.
-        const double mag = med.rho * kG * vol;
+        const double mag = med.rho * PlanetG() * vol;
         const double fWorld[3] = {med.nx * mag, med.ny * mag, med.nz * mag};
         const double atBody[3] = {cx, cy, st.z};
         w += m_body.BodyWrench(fWorld, atBody);
@@ -653,7 +653,7 @@ void Vessel::ApplyFormNumbers(const Form& f) {
         if (keelPts > 0) {
             m_mContact = m_body.mp.mass / keelPts;
             m_settleContact = by->contactSettle.v;
-            m_kContact = m_mContact * kG / by->contactSettle.v;
+            m_kContact = m_mContact * PlanetG() / by->contactSettle.v;
             // 0.4 OF CRITICAL PER POINT, not 1.0. The points act TOGETHER about the roll axis
             // (a lever of the keel's depth under the CG), where their summed damping reached 1.6x
             // critical at omega dt = 0.67 and the explicit 60 Hz step crossed its limit
@@ -670,7 +670,7 @@ void Vessel::ApplyFormNumbers(const Form& f) {
     // element's contactSettle, 0.4 of critical as the hull's.
     m_mWheel = (nWheels > 0) ? m_body.mp.mass / double(nWheels) : m_body.mp.mass;
     if (wheel && nWheels > 0 && wheel->contactSettle.v > 0.0) {
-        m_kGrip = m_mWheel * kG / wheel->contactSettle.v;
+        m_kGrip = m_mWheel * PlanetG() / wheel->contactSettle.v;
         m_cGrip = 0.8 * std::sqrt(m_kGrip * m_mWheel);
         Log("[vessel] %s: %zu wheels, the braked tyre's grip %.3g N/m and %.3g N s/m each (settle %.3f m)",
             m_spec.kind.c_str(), nWheels, m_kGrip, m_cGrip, wheel->contactSettle.v);
@@ -837,7 +837,7 @@ Bivector Vessel::Collar(const Element& e, const WaterSurface& sea, double simUni
         // Buoyancy along the free surface's NORMAL -- the surface is an equipotential of the
         // effective gravity, so that direction IS the first-order law; world up would be the
         // approximation.
-        const double mag = med.rho * kG * vol;
+        const double mag = med.rho * PlanetG() * vol;
         double f[3] = {med.nx * mag, med.ny * mag, med.nz * mag};
 
         // The membrane. Relative velocity along the same normal, scaled by how much of the tube
@@ -962,7 +962,7 @@ Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUn
     if (rel[2] <= 0.1 || spd < 1e-6) return Bivector::Zero();   // astern or stopped
 
     const double tauDeg = std::asin(std::clamp(alpha0, -1.0, 1.0)) * 57.2957795;
-    const double cv = spd / std::sqrt(kG * b);
+    const double cv = spd / std::sqrt(PlanetG() * b);
     if (tauDeg <= 0.05 || cv < 0.3) return Bivector::Zero();
 
     const double lam = m_lambda;
@@ -1135,7 +1135,7 @@ Bivector Vessel::Hover(const Element& e, const VesselControls& c) {
     double v[3];
     m_body.VelocityAtBody(cg, v);
     const double m = m_body.mp.mass;
-    const double f[3] = {m * (vCmd[0] - v[0]) / tau, m * (kG + (vCmd[1] - v[1]) / tau),
+    const double f[3] = {m * (vCmd[0] - v[0]) / tau, m * (PlanetG() + (vCmd[1] - v[1]) / tau),
                          m * (vCmd[2] - v[2]) / tau};
     Bivector w = m_body.BodyWrench(f, cg);
 
@@ -1437,7 +1437,7 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
     }
 
     if (applyGravity) {
-        const double fW[3] = {0.0, -m_body.mp.mass * kG, 0.0};
+        const double fW[3] = {0.0, -m_body.mp.mass * PlanetG(), 0.0};
         const double cg[3] = {0.0, 0.0, 0.0};          // the body origin IS the CG
         w += m_body.BodyWrench(fW, cg);
     }

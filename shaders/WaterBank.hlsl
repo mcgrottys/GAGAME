@@ -135,6 +135,8 @@ cbuffer BankCb : register(b0) {
     uint4  gColMap[32];
     uint4  gSprayU;
     float4 gSprayA;
+    // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2. Appended at the END on both sides.
+    float4 gPlanet;
 };
 
 // The ladder's ring under k: its texel over ring 0's, its mapped set.
@@ -231,6 +233,7 @@ float2 ChartUv(const BankTile t, uint k, uint c, float2 exz) {
 }
 float4 ChartRot(const BankTile t, uint k) { return t.chart[k][3]; }
 
+#define GA_PLANET_G (gPlanet.x)
 #include "Jet.hlsli"
 
 // Bindless over the shared heap (the renderer's doctrine, compute-side): textures by SLOT,
@@ -461,7 +464,7 @@ void WakeOne(float4 A, float4 B, float2 posM, float sampleM, inout float eta,
     if (disc <= 0.0f) return;                    // outside the wedge: no stationary phase
     const float sq = sqrt(disc);
     const float U = A.w;
-    const float K0 = 9.81f / (U * U);
+    const float K0 = gPlanet.x / (U * U);
     const float dist = max(length(r), 1.0f);
     const float dRel = dist / halfLen;
     const float cuspFar = 1.0f + 1.8f * pow(saturate(1.0f - sq / max(xi, 1e-3f)), 3.0f);
@@ -1107,7 +1110,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             InterlockedAdd(gUu[gSprayU.y][uint2(2u, 0u)], 1u, n);   // the running total
             InterlockedAdd(gUu[gSprayU.y][uint2(0u, 0u)], 1u);      // spawned this frame
             const uint slot = (n % gSprayU.z) * 2u;
-            const float cPh = sqrt(9.81f * tanh(sprayK * max(depth, 0.3f)) / max(sprayK, 1e-4f));
+            const float cPh = sqrt(gPlanet.x * tanh(sprayK * max(depth, 0.3f)) / max(sprayK, 1e-4f));
             const float j1 = SprayHash(tex + uint2(7u, 11u), gOrg.w + 1.0f);
             const float j2 = SprayHash(tex + uint2(13u, 3u), gOrg.w + 2.0f);
             const float j3 = SprayHash(tex + uint2(5u, 17u), gOrg.w + 3.0f);
@@ -1492,7 +1495,7 @@ void CsSprayStep(uint3 id : SV_DispatchThreadID) {
         return;
     }
     float3 v = V.xyz;
-    const float g = 9.81f;
+    const float g = gPlanet.x;   // the planet's (core/Planet.h)
     const float vT = max(gSprayA.y, 0.5f);
     v.y -= g * dt;
     v -= (g / (vT * vT)) * length(v) * v * dt;

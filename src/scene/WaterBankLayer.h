@@ -352,6 +352,9 @@ private:
         // size, on; dt (s), the drop's terminal speed (m/s), its life (s), the spawn gain.
         uint32_t sprayU[4];
         float sprayA[4];
+        // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (Jet.hlsli, the spray, the
+        // wakes). Appended at the END on both sides.
+        float planet[4];
     };
     struct BankTile {
         float orgXZ[2];

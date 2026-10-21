@@ -1,3 +1,4 @@
+#include "core/Planet.h"
 #include "core/OceanFft.h"
 
 #include "hal/PixEvents.h"
@@ -284,6 +285,7 @@ void OceanFft::Dispatch(hal::CommandContext& cmd, Gpu& gpu, hal::PsoPtr pso,
     // moderate threshold gives foam on storm crests and a clean surface at Hs 0.4 m.
     c.foamScale = 4.0f;
     c.foamBias = 0.80f;
+    c.pad[0] = static_cast<float>(PlanetGWave());   // the planet's gravity (OceanCompute.hlsl fPad.x)
     cmd.Native()->SetComputeRoot32BitConstants(0, sizeof(c) / 4, &c, 0);
     cmd.ComputeConstants(1, m_parts);
     cmd.ComputeTable(2, block);

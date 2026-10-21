@@ -46,21 +46,16 @@
 // ================================================================================================
 #pragma once
 
+#include "core/Planet.h"
+
 #include <cmath>
 
 namespace ga {
 
-// Gravity, exactly the value every shader in this engine writes as 9.81f.  It is a CONSTANT OF
-// THE PORT, not a physical measurement to be refined: if this and the HLSL literal ever differ,
-// the CPU's dispersion relation is not the GPU's and every wavelength drifts.
-//
-// IT IS DELIBERATELY NOT sim/Medium.h's kG (9.80665, standard gravity), and the two must not be
-// merged. That one is PHYSICS -- it weighs hulls, and the vessel gates pin draughts and periods
-// against it. This one is PARITY -- it reproduces a shader literal. They differ by 0.03%, which
-// is nothing next to the wake's own engineering closures and everything next to a silent
-// divergence between the sea the hull feels and the sea the GPU draws. Use ga::kG when computing
-// a force; use kGWave when reproducing a kernel.  (proofs/water_terms.py pins them APART.)
-inline constexpr double kGWave = 9.81;
+// Gravity is the PLANET'S (core/Planet.h, 2026-10-20): PlanetGWave() is GM / R^2 as the kernels receive
+// it (a float through their constant buffers), so a twin of a kernel computes with exactly the value
+// the kernel does. (It was the literal 9.81 here and in every shader, kept apart from the hulls'
+// standard gravity 9.80665; both are the planet's now, the waves' rounded as the GPU rounds it.)
 
 // The last-resort depth floor, 0.15 m.  Both depth laws below divide by tanh(k*h) or by a group
 // speed built from it, and both go singular as h -> 0; the shoreline is a place where h really
@@ -142,7 +137,7 @@ inline double Lerp(double a, double b, double t) {
 // ================================================================================================
 inline double BandPhaseSpeed(double kBand, double depth) {
     const double kh = kBand * wt::Max(depth, kDepthFloorM);
-    return std::sqrt(kGWave / kBand * std::tanh(kh));
+    return std::sqrt(PlanetGWave() / kBand * std::tanh(kh));
 }
 
 // ================================================================================================
@@ -213,9 +208,9 @@ inline double LipFallDe(double ePast, double k, double coth, double H, double h)
 inline double ShoalFactor(double kBand, double depth) {
     const double kh = kBand * wt::Max(depth, kDepthFloorM);
     const double th = std::tanh(kh);
-    const double c = std::sqrt(kGWave / kBand * th);
+    const double c = std::sqrt(PlanetGWave() / kBand * th);
     const double cg = 0.5 * c * (1.0 + 2.0 * kh / wt::Max(std::sinh(2.0 * kh), 1e-3));
-    const double cgDeep = 0.5 * std::sqrt(kGWave / kBand);
+    const double cgDeep = 0.5 * std::sqrt(PlanetGWave() / kBand);
     return wt::Clamp(std::sqrt(cgDeep / wt::Max(cg, 0.05)), 0.75, 1.7);
 }
 
@@ -545,7 +540,7 @@ inline void WakeOne(const WakeVessel& v, double px, double pz, double sampleM, W
     const double disc = xi * xi - 8.0 * zeta * zeta;
     if (disc <= 0.0) return;                            // outside the wedge: no stationary phase
     const double sq = std::sqrt(disc);
-    const double K0 = kGWave / (v.speed * v.speed);     // the ONE scale: lambda_t = 2 pi / K0
+    const double K0 = PlanetGWave() / (v.speed * v.speed);     // the ONE scale: lambda_t = 2 pi / K0
     const double dist = wt::Max(std::sqrt(rX * rX + rZ * rZ), 1.0);
     const double dRel = dist / halfLen;                 // distance in hull half-lengths
     // Airy caustic at the wedge edge, where sq -> 0 and the two branches merge (1.8 and the

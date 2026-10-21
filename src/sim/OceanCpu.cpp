@@ -1,6 +1,7 @@
 #include "sim/OceanCpu.h"
 
 #include "core/Common.h"
+#include "core/Planet.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,12 +11,12 @@ namespace ga {
 
 namespace {
 
-// The shader's constants. They are FLOAT literals in HLSL (PI = 3.14159265f, G = 9.81f); carried
+// The shader's constants. PI is a FLOAT literal in HLSL (3.14159265f) and G the planet's gravity as a
+// float through the FFT's constant buffer (core/Planet.h PlanetGWave); carried
 // here in double on purpose -- house law, the GPU's floats are the approximation and not the
 // reference. The resulting phase disagreement with the shader is ~2e-8 relative, i.e. micrometres
 // on a 200 m wave, and is swamped by the fp32 w*fTime the shader computes at forecast-hour times.
 constexpr double kPi = 3.14159265358979323846;
-constexpr double kG = 9.81;
 
 // ------------------------------------------------------------------- deterministic per-texel draw
 // shaders/OceanCompute.hlsl:56. EVERY operation is uint32 wraparound -- that is not incidental, it
@@ -117,9 +118,9 @@ struct Band {
 double BinVariance(double kx, double kz, const Band& b) {
     const double kLen = std::sqrt(kx * kx + kz * kz);
     if (kLen < 1e-5 || kLen < b.kLo || kLen >= b.kHi) return 0.0;
-    const double w = std::sqrt(kG * kLen);
+    const double w = std::sqrt(PlanetGWave() * kLen);
     const double f = w / (2.0 * kPi);
-    const double dfdk = kG / (4.0 * kPi * w);
+    const double dfdk = PlanetGWave() / (4.0 * kPi * w);
     const double dk = 2.0 * kPi / b.patchL;
 
     double acc = 0.0;
@@ -236,7 +237,7 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
                 b.kx = kx;
                 b.kz = kz;
                 const double kLen = std::sqrt(kx * kx + kz * kz);
-                b.w = std::sqrt(kG * kLen);
+                b.w = std::sqrt(PlanetGWave() * kLen);
                 b.invK = 1.0 / kLen;
                 b.ar = ap * gpx;
                 b.ai = ap * gpy;

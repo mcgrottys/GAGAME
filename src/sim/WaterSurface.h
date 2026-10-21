@@ -210,7 +210,7 @@ public:
 
     const char* Name() const override { return "airy (declared analytic)"; }
 
-    double Omega() const { return std::sqrt(kG * k); }
+    double Omega() const { return std::sqrt(PlanetGWave() * k); }
 
     SurfaceSample At(double wx, double wz, double simUnix) const override {
         const double w = Omega();
