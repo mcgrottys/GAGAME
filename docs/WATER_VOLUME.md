@@ -861,8 +861,19 @@ flight is the fall alone (as before). Measured: at the close pose the lip is a t
 down along the face and a hollow opens between it and the face -- the first tube's opening; its
 rim is ragged at the pixel. Hull probe 3 cm rms, corr 1.00 both bands; self-test 37.
 
-**Next.** The lip's ragged rim; the crest's own thickness along the refracted ray (the backlit
-face); gravity's latitude term.
+**The ragged rim (the same night, Mark: "find out why the lip's rim is ragged at the pixel").**
+At native pixels the rim was speckle -- single pixels flipping between blue and near-black. The
+two-sided rule took the eye's side from cross(ddx(rel), ddy(rel)), a screen derivative over a 2x2
+quad, and where a quad straddled two triangles of the folded sheet (slivers at the rim) it was
+garbage and the normal flipped pixel by pixel. The side is the triangle's now: SV_IsFrontFace (MsMain
+winds every triangle so its front is the sheet's outward side, seen from above where it is
+unfolded) times the sheet's own smooth normal nBiv (the tangent bivector's dual, from the same
+labels, so it turns with the winding through a fold). Measured: the speckle is gone -- the rim is
+the lip's band and the hollow under it, continuous; self-test 37 (a shader change; the twins are
+untouched).
+
+**Next.** The crest's own thickness along the refracted ray (the backlit face); gravity's
+latitude term.
 
 ## 6. Next
 

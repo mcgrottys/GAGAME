@@ -976,14 +976,14 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // another level's bed has only its direction -- for the Mercator height. PHASE A2: the colour's
 // windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
 // pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
-// nGeo: the drawn triangle's own normal (PsSurface: the cross of rel's screen derivatives, either
-// sign): the side of the sheet the eye is on (TWO-SIDED, below). lipThick / lipCov: where the pixel
+// faceSide: +1 where the eye sees the drawn triangle's front, -1 its back (SV_IsFrontFace): the side
+// of the sheet the eye is on (TWO-SIDED, below). lipThick / lipCov: where the pixel
 // is a lip's (its top or its underside, PsSurface from the column), the sheet's thickness there and
 // how much of the pixel is that lip -- the THIN SHEET's light (below).
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
                        float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
-                       float3 nGeo, float lipThick, float lipCov) {
+                       float faceSide, float lipThick, float lipCov) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -1118,12 +1118,16 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // normal (the surface's slope, always turned up) is the far side's. The drawn triangle says
     // which side the eye is on; the normal is turned to it. Over an unfolded sea both point up and
     // nothing changes.
+    // THE SIDE IS THE TRIANGLE'S (2026-10-20, the lip's ragged rim): it was the cross of rel's
+    // screen derivatives, which a 2x2 quad takes across two triangles wherever slivers meet -- the
+    // folded sheet's rim -- and the normal flipped pixel by pixel (blue against near-black). The
+    // rasterizer knows the side per primitive (SV_IsFrontFace; MsMain winds every triangle so its
+    // front is the sheet's outward side, seen from above where it is unfolded), and the sheet's own
+    // normal nBiv -- the tangent bivector's dual, from the same labels, smooth -- turns with the
+    // winding through a fold: the eye's side is faceSide nBiv.
     {
-        float3 ng = nGeo;
-        const float lg = length(ng);
-        if (lg > 0.0f) {
-            ng /= lg;
-            if (dot(ng, v) < 0.0f) ng = -ng;
+        float3 ng = faceSide * nBiv;
+        {
             if (dot(nPix, ng) < 0.0f) {
                 nPix = -nPix;
                 nSmooth = -nSmooth;
@@ -1438,10 +1442,9 @@ float CloudMarch(float3 rel, float2 pix, out float3 scat) {
 
 // THE SURFACE's shading, one pixel: the colour, and whether the pixel is land whole (`land`, for
 // the kept frame's cache; GlobeLayer.h Keep). PsMain and PsMainKeep below are its two entries.
-float4 PsSurface(VsOut i, out float land) {
+float4 PsSurface(VsOut i, bool front, out float land) {
     land = 1.0f;
-    // the drawn triangle's own normal, in uniform flow (the water's two sides: WaterPixelColor)
-    const float3 nGeo = cross(ddx(i.rel), ddy(i.rel));
+    const float faceSide = front ? 1.0f : -1.0f;   // the side of the triangle the eye sees (WaterPixelColor)
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
     LoadLevel(i.lvl);
@@ -1885,7 +1888,7 @@ float4 PsSurface(VsOut i, out float land) {
             }
         }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, nGeo, lipThick, lipCov);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, faceSide, lipThick, lipCov);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
@@ -1986,9 +1989,9 @@ float4 PsSurface(VsOut i, out float land) {
     return float4(col, 1.0f);
 }
 
-float4 PsMain(VsOut i) : SV_Target {
+float4 PsMain(VsOut i, bool front : SV_IsFrontFace) : SV_Target {
     float land;
-    return PsSurface(i, land);
+    return PsSurface(i, front, land);
 }
 
 // THE KEPT FRAME's entry (GlobeLayer.h Keep): the frame's colour as PsMain's, and beside it the
@@ -1999,9 +2002,9 @@ struct GlobeKeepOut {
     float4 k : SV_Target1;
     uint m : SV_Target2;
 };
-GlobeKeepOut PsMainKeep(VsOut i) {
+GlobeKeepOut PsMainKeep(VsOut i, bool front : SV_IsFrontFace) {
     float land;
-    const float4 c = PsSurface(i, land);
+    const float4 c = PsSurface(i, front, land);
     GlobeKeepOut o;
     o.c = c;
     o.k = float4(c.rgb, land >= 1.0f ? 1.0f : 0.5f);
