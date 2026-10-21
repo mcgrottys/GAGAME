@@ -772,10 +772,24 @@ Measured: the crest at the close pose curls down in front of the face as a dark 
 probe at the helm 6-8 cm rms, corr 1.00 every band (9-11 cm before); self-test 37. The cascades'
 crest law has no crest weight or cusp measure yet, so the fall is the solved field's alone.
 
-**Next.** The falling sheet is lit as the bottom of the sea (near black): the thin sheet's light --
-what a lip passes, backlit green -- went with the lip shading, and comes back on the sheet's own
-two-sided normal and its thickness. Then the fall for the cascades' sea, and what the column ladder
-is for now (the fold grid is all the renderer reads of it).
+**The thin sheet's light, back on the sheet drawn whole (the same night, Mark: "bring back the thin
+sheet's light on the falling lip").** The column ladder has its reader again: `ColumnLip` reads, at
+the DRAWN point's own ground (`BankXZ(rel)`: Eulerian, the sheet's point, not its label's), the
+finest ring under's face, lip top, underside (closed onto the top at a fold line) and coverage. The
+pixel is the lip's -- its top or its underside -- by where the drawn point stands between the face
+and the underside (its height from the chart: `ChartPointRel` at the ground, along the chart's up);
+the face beneath a tube stays the face. The thickness top - underside is what the thin sheet's
+radiometry looks through (the 2026-10-19 block, restored: the refracted ray crosses lipThick /
+|t . n| of water and sees the face below or the sky behind; the sheet scatters in its own colour,
+lit by the sun it transmits), on the normal turned to the eye. The read is gated by the folds'
+distance (a lip stands only where the sheet turned over). Measured at the close pose: the falling
+lip passes the sky -- a translucent band where it was black; no backlit green there because at
+10:00 PDT the sun stands behind that eye. The globe pass at the peak 18.0 ms: the shading costs
+nothing measurable; this field's sea folds nearer the peak (667 fold leaves a frame against 313 on
+the old field), which is the refinement's price -- it scales with the fold's area near the eye,
+floored by the pixel. Self-test 37.
+
+**Next.** The fall for the cascades' sea (its crest law has no crest weight or cusp measure yet).
 
 ## 6. Next
 

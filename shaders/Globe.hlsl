@@ -136,7 +136,7 @@ cbuffer GlobeCb : register(b1) {
     // THE COLUMN PLANE (WaterBank.hlsl CsBankScatter; the rolling-wave work, 2026-10-18) --
     // appended at the END on both sides (priors 22): x = its SRV (R32_UINT, three bands of 512
     // rows: face, lip underside, lip top), y = on; gColA.x = the fixed point's scale (per metre),
-    // .y = its bias (m); set A's rings only.
+    // .y = its bias (m); set A's rings only. Read by ColumnLip (the thin sheet's thickness).
     // ...z = THE RINGS UNDER ring 0 (the column ladder, WaterBankLayer.h), w unused; gColR[k] is
     // ring -(k+1): x its SRV, y its texels a side, z its tiles a side, w on.
     uint4  gColU;
@@ -359,6 +359,66 @@ float FoldDist(float2 xz) {
     const float d00 = gTex[gColU.w][t0].x, d10 = gTex[gColU.w][t0 + int2(1, 0)].x;
     const float d01 = gTex[gColU.w][t0 + int2(0, 1)].x, d11 = gTex[gColU.w][t0 + int2(1, 1)].x;
     return lerp(lerp(d00, d10, f.x), lerp(d01, d11, f.x), f.y) * B;
+}
+// THE COLUMN AS THE SHADING'S READER (2026-10-20, the thin sheet's light). The sheet is drawn
+// whole (GlobeMesh.hlsl); what a pixel of a lip cannot know from the sheet alone is how much water
+// stands under it before the next crossing -- the lip's THICKNESS, the light it passes. The column
+// plane holds exactly that (WaterBank.hlsl CsBankScatter): at a point of the rings' chart, from the
+// finest ring under that holds it, the face (band 0), the lip's top (band 1) and its underside
+// (band 2), and the lip's coverage (band 3), metres about the waterline, bilinear; the lip bands
+// weighted by their coverage. At a fold line the texel's centre stands under no upright arm and
+// band 2 is the face: there the underside is the top (the sheet closes, its thickness goes to 0).
+bool ColPresent(uint v) { return v != 0u && v != 0xFFFFFFFFu; }
+float ColH(uint v) { return float(v >> 18) / gColA.x - gColA.y; }
+float ColUnderH(uint rawF, uint rawT, uint rawU) {
+    const float hU = ColH(rawU);
+    return (ColPresent(rawU) && ColPresent(rawF) && hU > ColH(rawF) + 0.02f) ? hU : ColH(rawT);
+}
+bool ColumnLip(float2 xz, out float face, out float top, out float under, out float cover) {
+    face = 0.0f;
+    top = 0.0f;
+    under = 0.0f;
+    cover = 0.0f;
+    if (gColU.y == 0u || sLvlBank != 0) return false;
+    const float2 org = BankRingOrg(0u);
+    for (int kk = int(gColU.z) - 1; kk >= 0; --kk) {
+        const uint k = uint(kk);
+        if (gColR[k].w == 0u) continue;
+        const uint srv = gColR[k].x, nF = gColR[k].y;
+        const float texelF = gBankA.x / float(2u << k);
+        const float2 tf = (xz - org) / texelF - 0.5f;
+        const int2 t0 = int2(floor(tf));
+        const float2 fr = tf - float2(t0);
+        if (!(all(t0 >= 0) && all(t0 < int(nF) - 1))) continue;
+        float fS = 0.0f, cS = 0.0f, tS = 0.0f, uS = 0.0f, wL = 0.0f;
+        bool okAll = true;
+        [unroll] for (int q = 0; q < 4; ++q) {
+            const int2 tc = t0 + int2(q & 1, q >> 1);
+            const float bw = ((q & 1) ? fr.x : 1.0f - fr.x) * ((q >> 1) ? fr.y : 1.0f - fr.y);
+            const uint rawF = gTexU[srv].Load(int3(tc.x, tc.y, 0)).x;
+            const uint rawT = gTexU[srv].Load(int3(tc.x, int(nF) + tc.y, 0)).x;
+            const uint rawU = gTexU[srv].Load(int3(tc.x, int(2u * nF) + tc.y, 0)).x;
+            const float cw = saturate(float(gTexU[srv].Load(int3(tc.x, int(3u * nF) + tc.y, 0)).x) * (1.0f / 16.0f));
+            okAll = okAll && ColPresent(rawF);
+            fS += bw * ColH(rawF);
+            cS += bw * cw;
+            if (cw > 0.0f && ColPresent(rawT)) {
+                const float w = bw * cw;
+                tS += w * ColH(rawT);
+                uS += w * ColUnderH(rawF, rawT, rawU);
+                wL += w;
+            }
+        }
+        if (!okAll) continue;   // a NULL tile reads absent: the ring above is asked
+        face = fS;
+        cover = cS;
+        if (wL > 0.0f) {
+            top = tS / wL;
+            under = uS / wL;
+        }
+        return true;
+    }
+    return false;
 }
 float3 ChartPointRel(float2 c, float alt) {
     const float4 e = BankChartRow(0u), n = BankChartRow(1u), u = BankChartRow(2u), r3 = BankChartRow(3u);
@@ -917,11 +977,13 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
 // pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
 // nGeo: the drawn triangle's own normal (PsSurface: the cross of rel's screen derivatives, either
-// sign): the side of the sheet the eye is on (TWO-SIDED, below).
+// sign): the side of the sheet the eye is on (TWO-SIDED, below). lipThick / lipCov: where the pixel
+// is a lip's (its top or its underside, PsSurface from the column), the sheet's thickness there and
+// how much of the pixel is that lip -- the THIN SHEET's light (below).
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
                        float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
-                       float3 nGeo) {
+                       float3 nGeo, float lipThick, float lipCov) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -1197,6 +1259,27 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
     const half3 sunHere = half3(SunAt(upT, hp));
     half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
+    // THE THIN SHEET (a lip's pixel, 2026-10-20 on the sheet drawn whole). The body above is the
+    // water under this point, lit as ever. A lip is a sheet lipThick metres thick with air on both
+    // sides: the refracted ray crosses it on the path lipThick / |t . n| and comes out the other side,
+    // where it sees the face below (a ray going down) or the sky behind (a ray going up) -- one weight,
+    // continuous through the horizontal. What the sheet keeps of the ray scatters in its own colour,
+    // lit by the sky and by the sun it transmits (the backlit green of a real lip: the sun on the far
+    // side, through the sheet). With no thickness the sheet is transparent and the body stands. The
+    // normal is the one turned to the eye (TWO-SIDED, above), so the tube's ceiling seen from inside
+    // passes the sky over it.
+    if (lipCov > 0.0f) {
+        const float path = lipThick / max(abs(dot(tDir, nPix)), 0.25f);
+        const half3 TwS = exp(-half3(wq.kd * path));
+        const float tUp = dot(tDir, upT);
+        const float3 tSky = normalize(tDir + max(0.02f - tUp, 0.0f) * upT);
+        const half wSky = half(saturate(0.5f + 2.0f * tUp));
+        const half3 behind = lerp(bodyLit, half3(SkyRadianceDirDiscless(tSky, upT)), wSky);
+        const half sunThrough = half(saturate(dot(GA_SUN_DIR, -nPix)) * sunSph);
+        const half3 sheetLit = cScatter * (half3(SkyAmbient(nPix, upT, hp)) +
+                                           (half(ndl * 1.15f) + sunThrough * half(0.8f)) * sunHere);
+        bodyLit = lerp(bodyLit, lerp(sheetLit, behind, TwS), half(saturate(lipCov)));
+    }
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1766,8 +1849,25 @@ float4 PsSurface(VsOut i, out float land) {
     // of a shoreline pixel is untouched by the choice.
     float3 wcol = i.wcol;
     if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
+        // THE LIP UNDER THIS PIXEL, from the column at the DRAWN point's own ground (Eulerian: the
+        // sheet's point, not its label's), and whether the pixel is that lip -- its height up at
+        // the lip's bands -- or the face beneath it: the share by where the drawn point stands
+        // between the face and the underside.
+        float lipThick = 0.0f, lipCov = 0.0f;
+        {
+            const float2 xzD = BankXZ(i.rel);
+            float cF, cT, cU, cC;
+            // a lip stands only where the sheet turned over: the folds' distance (four loads) says
+            // where to ask the column at all -- within a fold block of one
+            if (FoldDist(xzD) < 8.0f * gBankA.x && ColumnLip(xzD, cF, cT, cU, cC) && cC > 0.0f && cT > cF) {
+                const float aD = dot(i.rel - ChartPointRel(xzD, 0.0f), BankChartRow(2u).xyz) - gWavesB.w;
+                const float gap = max(cU - cF, 0.05f);
+                lipCov = saturate(cC) * smoothstep(0.25f, 0.75f, (aD - cF) / gap);
+                lipThick = max(cT - cU, 0.0f);
+            }
+        }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, nGeo);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, nGeo, lipThick, lipCov);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
