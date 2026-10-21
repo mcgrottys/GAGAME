@@ -421,8 +421,33 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     tideOwned = std::make_unique<TideLayer>();
     tide = tideOwned.get();
+    // THE PLACE'S RIVER (2026-10-21): data.river's reach whose mouth is nearest the place gives the tide
+    // profile -- its own stations at their kilometres -- for the ribbon and the chart.
+    rivers.Load(S.data.river);   // the reaches meeting the sea, their gauges and their tide stations
+    {
+        int best = -1;
+        double bestD2 = 0.0;
+        const double cl = std::cos(S.place.anchor[1] * 3.14159265358979 / 180.0);
+        for (size_t r = 0; r < rivers.Reaches().size(); ++r) {
+            const RiverModel::Vertex& m0 = rivers.Reaches()[r].line.front();
+            const double dLat = m0.lat - S.place.anchor[1], dLon = (m0.lon - S.place.anchor[0]) * cl;
+            const double d2 = dLat * dLat + dLon * dLon;
+            if (best < 0 || d2 < bestD2) { best = int(r); bestD2 = d2; }
+        }
+        std::vector<TideModel::ProfileStation> prof;
+        if (best >= 0) {
+            for (const RiverModel::Tide& t : rivers.R(best).tides) {
+                for (size_t i = 0; i < model.Count(); ++i) {
+                    if (model.S(i).id == t.id) prof.push_back({int(i), t.km});
+                }
+            }
+            Log("[tide] the place's river: %s, its mouth %.1f km from the place, %zu of its stations in the tides",
+                rivers.R(best).name.c_str(), std::sqrt(bestD2) * 111.19, prof.size());
+        }
+        model.SetProfile(std::move(prof));
+    }
     tide->Configure(shaderDir, &model,
-                    S.Layer("tide") ? S.Layer("tide")->exaggeration : 60.0f);
+                    S.Layer("tide") ? S.Layer("tide")->exaggeration : 60.0f, S.place.anchor[1], S.place.anchor[0]);
     tide->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
     renderer.AddLayer(std::move(tideOwned));
 
@@ -479,7 +504,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     // M3: currents -- the ACT tidal clock for the sea's jet, the GoMOFS field for the gulf.
     haveCurrents = currents.Load(S.data.currents);
-    rivers.Load(S.data.river);   // the reaches meeting the sea, their gauges and their tide stations
     for (const scene::StationProps& st : S.stations) currents.Place(st.name, st.lat, st.lon);
     if (!haveCurrents) {
         Log("[main] no currents (run: py -3 harvester\\harvest_currents.py)");

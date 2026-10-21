@@ -32,7 +32,10 @@ public:
     static constexpr uint32_t kQuadsX = 384, kQuadsZ = 24;
     static constexpr uint32_t kCurveVerts = 384;
 
-    void Configure(const std::wstring& shaderDir, const TideModel* model, float exaggeration);
+    // `latDeg`, `lonDeg`: the place. The layer shows the place's river profile (TideModel::Profile) and,
+    // up to kMaxStations, the stations nearest the place -- never the file's first eight of the world's.
+    void Configure(const std::wstring& shaderDir, const TideModel* model, float exaggeration, double latDeg = 0.0,
+                   double lonDeg = 0.0);
 
     const char* Name() const override { return "tide"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -78,8 +81,11 @@ private:
 
     RibbonCb m_ribbon{};
     CurvesCb m_curves{};
-    uint32_t m_nRibbon = 0;    // stations with river_km >= 0, in river order
-    uint32_t m_ribbonIdx[kMaxStations] = {};
+    uint32_t m_nRibbon = 0;    // the river profile's stations, in river order (TideModel::Profile)
+    uint32_t m_ribbonIdx[kMaxStations] = {};   // into m_view
+    uint32_t m_nView = 0;      // the stations the layer shows: the profile's, then the nearest the place
+    int m_view[kMaxStations] = {};             // model indexes
+    double m_lat = 0.0, m_lon = 0.0;
     bool m_haveData = false;
     float m_yMin = -0.5f, m_yMax = 4.0f;
 };

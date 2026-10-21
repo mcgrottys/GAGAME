@@ -1,5 +1,8 @@
 #include "sim/TideModel.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "core/Common.h"
 #include "core/FileText.h"
 #include "core/Json.h"
@@ -80,13 +83,42 @@ bool TideModel::Load(const std::string& jsonPath) {
     }
 
     m_totalKm = 0;
+    m_profile.clear();
     m_focus = 0;
-    for (size_t i = 0; i < m_stations.size(); ++i) {
-        if (m_stations[i].riverKm > m_totalKm) m_totalKm = m_stations[i].riverKm;
-    }
-    Log("[tide] %zu stations, epoch %.0f, river profile %.1f km", m_stations.size(), m_epochUnix,
-        m_totalKm);
+    Log("[tide] %zu stations, epoch %.0f", m_stations.size(), m_epochUnix);
     return !m_stations.empty();
+}
+
+void TideModel::SetProfile(std::vector<ProfileStation> p) {
+    std::sort(p.begin(), p.end(), [](const ProfileStation& a, const ProfileStation& b) { return a.km < b.km; });
+    m_profile = std::move(p);
+    m_totalKm = m_profile.empty() ? 0.0 : m_profile.back().km;
+}
+
+double TideModel::ProfileKm(int index) const {
+    for (const ProfileStation& p : m_profile) {
+        if (p.index == index) return p.km;
+    }
+    return -1.0;
+}
+
+std::vector<int> TideModel::Nearest(double latDeg, double lonDeg, size_t k) const {
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    const double cp = std::cos(latDeg * kD2R);
+    const double pt[3] = {cp * std::cos(lonDeg * kD2R), std::sin(latDeg * kD2R), cp * std::sin(lonDeg * kD2R)};
+    std::vector<std::pair<double, int>> d;
+    d.reserve(m_stations.size());
+    for (size_t i = 0; i < m_stations.size(); ++i) {
+        const TideStation& s = m_stations[i];
+        const double cs = std::cos(s.lat * kD2R);
+        d.push_back({-(pt[0] * cs * std::cos(s.lon * kD2R) + pt[1] * std::sin(s.lat * kD2R) + pt[2] * cs * std::sin(s.lon * kD2R)),
+                     int(i)});
+    }
+    const size_t n = (std::min)(k, d.size());
+    std::partial_sort(d.begin(), d.begin() + std::ptrdiff_t(n), d.end());
+    std::vector<int> out;
+    for (size_t i = 0; i < n; ++i) out.push_back(d[i].second);
+    return out;
 }
 
 double TideModel::Height(size_t i, double unixT) const {

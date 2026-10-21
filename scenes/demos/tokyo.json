@@ -5,12 +5,9 @@
     "ground under the eye (WaterBankLayer::Chart), so the same scene can fly on to anywhere.",
     "",
     "Launch from the repo root:  build/bin/gagame.exe scenes/demos/tokyo.json",
-    "FLY: W A S D move, Q / E down / up, hold the right mouse button to look.",
-    "",
-    "Still inherited from the base until they float too: the tide station, the sea-state box and",
-    "the solver's domain (all the Merrimack's)."
+    "FLY: W A S D move, Q / E down / up, hold the right mouse button to look."
   ],
-  "base": "scenes/merrimack.json",
+  "base": "scenes/world.json",
   "scene": {"name": "tokyo", "mode": "world", "view": "city"},
   "hud": {"fps": true},
   "streaming": {"gisLand": "D:/DataCache/OSM/coastline/land-261011.galand"},

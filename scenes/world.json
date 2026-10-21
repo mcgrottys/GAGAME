@@ -1,0 +1,226 @@
+{
+  "_readme": [
+    "THE WORLD (2026-10-21): the one atlas every scene stands on. Mark: \"Data sets should never be",
+    "specific to place, only the measurement type\", and \"make sure you wrap up making everything part",
+    "of a global model\". This file holds each measurement's global set -- the water composite of",
+    "data/composite/fidelity/world.gafid (bed, tides, currents, sea state, rivers), the ETOPO 15\" folder,",
+    "the planet's buildings, roads and bridges, the OSM coast and inland water -- and the laws, layers and",
+    "closures, and NO place. A place is a scene on top of it (scenes/merrimack.json, demos/mavericks.json,",
+    "demos/tokyo.json): its anchor, its views, its solver's box and its wave field's window. Where a river",
+    "meets a place's solver, where its tide and its datum link come from, which buildings stand there: the",
+    "data says, by measurement, for any box anywhere.",
+    "Sections, keys and units: src/scene/SceneSchema.h. Resolution: defaults < this file < includes",
+    "< a scene that names this one as base < --set; objects by key, named arrays by name, placements",
+    "replaced whole (SceneBuilder.h). data/wave_scene.json overlays `water` (the M8 water scene's closures)."
+  ],
+  "scene": {"name": "world", "mode": "world", "planet": "earth", "view": "orbit"},
+  "include": [{"file": "data/wave_scene.json", "at": "water", "optional": true}],
+  "data": {
+    "shaders": "shaders",
+    "tides": "data/composite/world/tides/stations.json",
+    "seastate": "data/composite/world/sea/seastate.json",
+    "currents": "data/composite/world/currents/currents.json",
+    "river": "data/composite/world/river/river.json",
+    "edits": "data/gis/edits.geojson",
+    "_atlas": "ONE ATLAS (2026-10-21, Mark: \"Data sets should never be specific to place, only the measurement type\"): every dataset here is a measurement's global set -- the water composite of data/composite/fidelity/world.gafid (bed, tides, currents, sea state, river gauges), the planet's buildings, roads and bridges -- and every scene that inherits this one flies the same world. A scene chooses a place (place.anchor, views, the solver's box, the wave field's window); it names no data of its own."
+  },
+  "time": {"start": "now", "timeScale": 1, "paused": false, "windowDays": 7},
+  "sun": {"source": "ephemeris", "az": 112, "el": 26},
+  "sea": {"storm": {"hs": 0, "tp": 10, "dir": 90}, "datum": {"fromStation": true}},
+  "water": {
+    "pixelWater": true,
+    "foam": 1,
+    "edgePx": 12,
+    "heightScale": 1.15,
+    "swe": {"enabled": true, "spinupH": 1, "gain": 1, "riverQ": -1, "riverTide": true},
+    "bank": {"flatBed": false, "flatBedNavd": -30},
+    "wavefield": {
+      "enabled": true,
+      "comps": 32,
+      "spreadDeg": 26,
+      "gammaHs": 0.6,
+      "minSamplesPerLambda": 8,
+      "tideBucketM": 0.25,
+      "currentBucketMs": 0.1,
+      "featherM": 120,
+      "chop": 1.1,
+      "exag": 1.15,
+      "bankTexelM": 1.2
+    },
+    "closures": {
+      "shedSteepCap": 0.44,
+      "shedMssCeil": 0.09,
+      "churnGain": 0.12,
+      "crestLo": 0.28,
+      "crestHi": 0.8,
+      "depthLo": 1.05,
+      "depthHi": 1.95,
+      "foamOpacity": 0.72,
+      "ringBlendTexels": 48,
+      "bandFoldWeight": 1,
+      "windSeaFill": 1,
+      "buoyAssimAgeH": 6,
+      "buoyAssimGainMax": 1.8,
+      "causticStrength": 0.6,
+      "waterOptics": true,
+      "jettyCrestNavd": -99
+    },
+    "fleet": {"enabled": false, "boats": []}
+  },
+  "streaming": {
+    "tileBudget": 1000,
+    "predictEvery": 3,
+    "directStorage": true,
+    "colorTrees": true,
+    "gisGate": true,
+    "_seafloor": "Off (Mark, 2026-10-11): the seafloor relief paints a made-up sediment ramp, and at a coarse tile it stair-stepped sand over the coast. No fake colours for now.",
+    "seafloor": false,
+    "_gisLand": "THE GLOBAL COAST, every scene that inherits this one: OSM's land polygons of 2026-10-11 (harvester/harvest_land_polygons.py). Without it a place outside New England had no survey and its shore was a coarse height test.",
+    "gisLand": "D:/DataCache/OSM/coastline/land-261011.galand",
+    "_gisWater": "THE PLANET'S INLAND WATER (2026-10-21): OSM's water polygons classed sea, impounded and reach (harvester/harvest_osm_water.py), in place of New England's NHD carve -- rivers, lakes and marsh channels everywhere a scene flies.",
+    "gisWater": "D:/DataCache/OSM/water/planet-261005-water.gawatr",
+    "exposure": true
+  },
+  "capture": {
+    "headless": false,
+    "width": 1600,
+    "height": 900,
+    "frames": 0,
+    "dump": "",
+    "hdr": "",
+    "mp4": "",
+    "railDir": "",
+    "settle": {"sync": false, "hold": 0, "exact": false, "clearChurn": false}
+  },
+  "views": [
+    {
+      "name": "orbit",
+      "_at": "the globe start: over the North Atlantic at 2.1 planet radii, aimed at the centre",
+      "at": {"lat": 34, "lon": -52, "alt": 13379100},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "effects": [],
+  "layers": [
+    {"name": "sky", "enabled": true},
+    {"name": "tide", "enabled": true, "exaggeration": 60},
+    {"name": "sea", "enabled": true},
+    {"name": "terrain", "enabled": true},
+    {"name": "gulf", "enabled": true},
+    {"name": "waterbank", "enabled": true},
+    {"name": "globe", "enabled": true},
+    {"name": "gis", "enabled": true},
+    {"name": "vessels", "enabled": true},
+    {"name": "markers", "enabled": true},
+    {
+      "name": "buildings",
+      "enabled": true,
+      "levelHeight": 3.0,
+      "defaultHeight": 7.0,
+      "radius": 9000,
+      "lod": "D:/DataCache/OSM/buildings/planet-261012-decks.tree",
+      "laneWidth": 3.5,
+      "defaultLanes": 2,
+      "pathWidth": 2.0,
+      "kerb": 0.12
+    }
+  ],
+  "nodes": [],
+  "tools": [],
+  "sources": [
+    {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
+    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1},
+    {
+      "name": "water.bed",
+      "kind": "composite",
+      "file": "data/composite/world/water.bed.composite.json"
+    },
+    {
+      "name": "noaa.etopo15s",
+      "kind": "height",
+      "folder": "D:/DataCache/ETOPO/15s",
+      "match": "*_surface.tif",
+      "unit": "m",
+      "datum": "EGM2008",
+      "offset": -0.092
+    },
+    {
+      "name": "noaa.inlethq",
+      "kind": "height",
+      "file": "D:/DataCache/GAGAME/refbathy/inlethq_navd88_2026-10-17.tif",
+      "unit": "m",
+      "datum": "NAVD88",
+      "over": 1,
+      "feather": 10,
+      "_over": "the hydrographic survey stands OVER the 2018 lidar where both have a bottom: in the turbid channel a laser return can be the water's surface, a 2025 sounding is the better witness; the lidar keeps the beach and the bars the survey never saw. The survey itself stood +3 m too high until 2026-10-17 evening (eHydro depths taken as heights). Its `feather` fades its weight from every nodata edge (the land BlueTopo never covered) as from its box."
+    },
+    {
+      "name": "usace.ncmp2018",
+      "kind": "height",
+      "folder": "D:/DataCache/GAGAME/lidar/ncmp2018_ma",
+      "match": "*.tif",
+      "feather": 10
+    },
+    {
+      "name": "noaa.iocm2011.mllw",
+      "folder": "D:/DataCache/GAGAME/iocm/2011_mllw_rgb",
+      "match": "*.tif",
+      "feather": 10,
+      "captureDatum": "MLLW"
+    },
+    {
+      "name": "usgs.tnb2025.ortho",
+      "file": "D:/DataCache/GAGAME/uas/tnb_2025/2025015FA_TNB_MAP61_SfM_Ortho_5cm_rgba.tif",
+      "feather": 2
+    },
+    {
+      "name": "usgs.tnb2025.dsm",
+      "kind": "height",
+      "file": "D:/DataCache/GAGAME/uas/tnb_2025/2025015FA_TNB_WLDR_DSM_25cm_classic.tif",
+      "unit": "m",
+      "datum": "NAVD88"
+    },
+    {
+      "name": "osm.planet",
+      "kind": "buildings",
+      "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"
+    },
+    {
+      "name": "overture.ml",
+      "kind": "buildings",
+      "over": 1,
+      "manifest": "D:/DataCache/Overture/buildings/massachusetts-microsoft_ml_buildings.buildings.json"
+    },
+    {
+      "name": "overture.unattributed",
+      "kind": "buildings",
+      "over": 2,
+      "manifest": "D:/DataCache/Overture/buildings/massachusetts-unattributed.buildings.json"
+    },
+    {
+      "name": "overture.esri",
+      "kind": "buildings",
+      "over": 3,
+      "manifest": "D:/DataCache/Overture/buildings/massachusetts-esri_community_maps.buildings.json"
+    },
+    {
+      "name": "overture.lidar",
+      "kind": "buildings",
+      "over": 4,
+      "manifest": "D:/DataCache/Overture/buildings/massachusetts-usgs_lidar.buildings.json"
+    },
+    {
+      "name": "osm.roads.planet",
+      "kind": "roads",
+      "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"
+    },
+    {"name": "nbi.2025", "kind": "bridges", "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"},
+    {
+      "name": "noaa.enc",
+      "kind": "bridges",
+      "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"
+    }
+  ]
+}

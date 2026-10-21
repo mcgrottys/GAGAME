@@ -20,7 +20,7 @@
     "",
     "Launch from the repo root:  build/bin/gagame.exe scenes/demos/mavericks.json"
   ],
-  "base": "scenes/merrimack.json",
+  "base": "scenes/world.json",
   "scene": {
     "name": "mavericks",
     "mode": "world",
@@ -70,23 +70,6 @@
       "_box": "3.2 x 2 km: the reef, the lineup and the swell's approach from the WNW. The solver's cell is the z16 page texel whatever cellM says (1.9 m here, WaveFieldSource::Align), so the box's metres are its cost: the 5.95 x 3.5 km box that also held Half Moon Bay's beach (2026-10-19) was 6.1 M cells, and its re-solve held 12.9 GB and ran a 2,700-frame session out of memory (2026-10-20). The beach is mavericks_beach.json's own field."
     }
   },
-  "stations": [
-    {
-      "name": "9414131",
-      "lat": 37.5025,
-      "lon": -122.4822
-    },
-    {
-      "name": "46012",
-      "lat": 37.363,
-      "lon": -122.881
-    },
-    {
-      "name": "46237",
-      "lat": 37.786,
-      "lon": -122.634
-    }
-  ],
   "views": [
     {
       "name": "bowl",

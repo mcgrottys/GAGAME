@@ -1506,17 +1506,16 @@ std::optional<int> FrameLoop::Session() {
                 fopen_s(&sf, sp, "w");
                 if (sf) {
                     fprintf(sf, "unix");
-                    for (size_t i = 0; i < model.Count(); ++i) {
-                        if (model.S(i).riverKm < 0) continue;
-                        std::string nm = model.S(i).name;
+                    for (const TideModel::ProfileStation& p : model.Profile()) {   // the place's river
+                        std::string nm = model.S(size_t(p.index)).name;
                         std::replace(nm.begin(), nm.end(), ',', ' ');
-                        fprintf(sf, ",%s@%.2f", nm.c_str(), model.S(i).riverKm);
+                        fprintf(sf, ",%s@%.2f", nm.c_str(), p.km);
                     }
                     fprintf(sf, "\n");
                     for (double t = simUnix; t <= simUnix + opt.sweCycleH * 3600.0 + 1.0; t += 120.0) {
                         fprintf(sf, "%.0f", t);
-                        for (size_t i = 0; i < model.Count(); ++i) {
-                            if (model.S(i).riverKm < 0) continue;
+                        for (const TideModel::ProfileStation& p : model.Profile()) {
+                            const size_t i = size_t(p.index);
                             fprintf(sf, ",%.4f", model.Height(i, t) - model.S(i).meanMllwM);
                         }
                         fprintf(sf, "\n");
