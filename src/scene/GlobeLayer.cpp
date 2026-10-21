@@ -2551,6 +2551,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.sprayU[1] = m_sprayN;
     m_cb.sprayU[2] = (m_cb.colU[1] != 0u && m_spraySrv != 0xFFFFFFFFu && m_sprayN != 0u) ? 1u : 0u;
     m_cb.sprayU[3] = 0u;
+    m_cb.farSea[0] = m_farHsRef > 1e-6 ? static_cast<float>(1.0 / m_farHsRef) : 0.0f;
+    m_cb.farSea[1] = m_farStorm ? 1.0f : 0.0f;
+    m_cb.farSea[2] = m_cb.farSea[3] = 0.0f;
     m_cb.colA[0] = m_colScale;
     m_cb.colA[1] = m_colBias;
     m_cb.colA[2] = m_cb.colA[3] = 0.0f;

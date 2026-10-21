@@ -111,6 +111,12 @@ public:
     // M7: per-frame wave-bank binding (SRVs + ring origins).
     // THE COLUMN PLANE (the rolling-wave work, 2026-10-18): the first eye's bank's Eulerian
     // columns (no drawing reads them since the sheet is drawn whole, 2026-10-20). 0xFFFFFFFF = none.
+    // THE SEA PAST THE RINGS (Globe.hlsl FarSeaScale): the Hs the cascades were synthesised for and
+    // whether a declared storm stands (sim/WaveScale.h), so the pixel's bands carry the grid's sea.
+    void SetFarSea(double hsRef, bool storm) {
+        m_farHsRef = hsRef;
+        m_farStorm = storm;
+    }
     void SetWaterSpray(uint32_t srv, uint32_t n) {
         m_spraySrv = srv;
         m_sprayN = n;
@@ -724,6 +730,7 @@ private:
         float colA[4];
         uint32_t colR[12];   // the column ladder's rings under: SRV, texels, tiles, on
         uint32_t sprayU[4];   // THE SPRAY (gSprayU): the droplets' SRV, the ring's size, on
+        float farSea[4];      // THE SEA PAST THE RINGS (gFarSea): 1 / hsRef, storm
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -920,6 +927,8 @@ private:
     uint32_t m_colRingSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_colRingTexels[3] = {0, 0, 0}, m_colRingTiles[3] = {0, 0, 0};
     uint32_t m_foldDistSrv = 0xFFFFFFFFu;   // SetWaterFolds
+    double m_farHsRef = 0.0;                // SetFarSea (0: no reference, scale 1)
+    bool m_farStorm = false;
     const std::vector<uint16_t>* m_foldCells = nullptr;
     double m_foldOrg[2] = {}, m_foldB = 0.0, m_foldE[3] = {}, m_foldN[3] = {};
     uint32_t m_foldUnder = 0;

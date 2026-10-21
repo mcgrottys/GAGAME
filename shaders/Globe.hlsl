@@ -145,6 +145,10 @@ cbuffer GlobeCb : register(b1) {
     // THE SPRAY (WaterBankLayer.h): x = the droplets' SRV (gBufU, eight uints a droplet: x, h, z,
     // age, vx, vy, vz, size), y = the ring's size, z = on. Appended at the END (priors 22).
     uint4  gSprayU;
+    // THE SEA PAST THE RINGS (FarSeaScale): x = 1 / the Hs the cascades were synthesised for
+    // (SeaLayer's WaveScale::hsRef), y = 1 while a declared storm stands (the scale is 1). Appended
+    // at the END on both sides (priors 22).
+    float4 gFarSea;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -446,6 +450,18 @@ float WaterPathThrough(float3 at, float3 tDirT) {
         if (!ColPresent(raw) || at.z + d.y * sM > ColH(raw)) return sM - 0.5f * stepM;
     }
     return -1.0f;
+}
+// THE SEA'S SCALE PAST THE RINGS (2026-10-20, Mark: "we don't see waves going to the horizon"): the
+// local Hs over the Hs the cascades were synthesised for, clamped as the bank's tile corners have it
+// (sim/WaveScale.h GridAt, the global gfswave grid, gTexIdx.y), and 1 under a declared storm or
+// where the grid has no opinion. The bank's sources (a buoy's box over the grid) are the CPU's only:
+// past the rings a source box's own sea gives way to the grid's -- its feather is a quarter degree.
+float FarSeaScale(float latDeg, float lonDeg) {
+    if (gFarSea.y != 0.0f || gTexIdx.y == 0xFFFFFFFFu || gFarSea.x <= 0.0f) return 1.0f;
+    const float2 uv = float2(frac((lonDeg - gWavesA.y) * gWavesA.w / gWavesB.x),
+                             saturate(((gWavesA.x - latDeg) * gWavesA.z + 0.5f) / gWavesB.y));
+    const float h = gTex[gTexIdx.y].SampleLevel(sLinearClamp, uv, 0).x;
+    return (h >= 0.0f) ? clamp(h * gFarSea.x, 0.15f, 3.0f) : 1.0f;
 }
 float3 ChartPointRel(float2 c, float alt) {
     const float4 e = BankChartRow(0u), n = BankChartRow(1u), u = BankChartRow(2u), r3 = BankChartRow(3u);
@@ -1049,7 +1065,24 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         float4 bD, bP, bDet;
         float bT;
         float3 bDdx, bDdz;
-        if (BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz)) {
+        const bool inRing = BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz);
+        if (!inRing) {
+            // THE SEA PAST THE RINGS (2026-10-20, Mark: "we don't see waves going to the horizon").
+            // The rings reach 256 of their coarsest texels from the eye (~10 km); past them the sea
+            // drew Cox-Munk's sigma^2 alone, and the outermost ring's square edge read as a tile of
+            // lower resolution in the open ocean. The geometry there is the waterline's -- a mesh
+            // cell is hundreds of metres -- but a pixel still resolves the swell to the horizon: the
+            // bands below run here too, every band the pixel's footprint resolves (no ring resolves
+            // any: bT past every wavelength), at the deep sea's scale (FarSeaScale: no shoaling, no
+            // shelter, the dry weight 1), and their slope variance leaves the whole sea's sigma^2
+            // as it does inside a ring. Each band folds back into sigma^2 as its footprint grows
+            // (wPix), so the waves fade into the glint's statistics at the horizon and never end at
+            // an edge. bD, bP and the tangents stay BankSampleT's zeros: the waterline, flat.
+            bT = 1.0e9f;
+            const float hsF = FarSeaScale(latDeg, lonDeg);
+            bDet = float4(hsF, 1.0f, hsF, hsF);
+        }
+        {
             // ONE SEA, ONE SLOPE VARIANCE (Mark, 2026-10-11: the dark square under the eye). The
             // far field's s2 above is the WHOLE sea's mean-square slope. The bank models only its
             // cascades (each band's gain^2 times its unit mss -- the gains are the amplitudes
@@ -1063,7 +1096,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             const float mssModel = max(bDet.z * bDet.z * 0.0004f + bDet.x * bDet.x * 0.0018f +
                                            bDet.w * bDet.w * 0.0060f,
                                        bP.y);
-            s2 = max(bP.y + max(s2 - mssModel, 0.0f), 0.0015f);
+            if (inRing) s2 = max(bP.y + max(s2 - mssModel, 0.0f), 0.0015f);   // past the rings s2 stays the whole sea's
             lvlW = gWavesB.w + bP.x;   // the bank holds the DEPARTURE from the waterline (WaterBank.hlsl); a NULL tile's 0 is the waterline
             dispW = bD.y;
             // The wave normal: the tangent bivector's dual, analytic from the reconstruction
@@ -1071,7 +1104,19 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             // the kernel's 4x4 support IS that grain; what changed is that it is now
             // continuous across a texel border instead of stepping at it). The two extra ring
             // probes are gone, and the 1.1 cap rides inside BankSlope.
-            const float2 sRing = BankSlope(bDdx, bDdz);
+            const float2 sRing0 = BankSlope(bDdx, bDdz);
+            // THE RING'S SLOPE FOLDS BY THE PIXEL (2026-10-20, Mark's "low res tile" in the open
+            // ocean: the outermost ring's square edge). The ring's slope is the bands its texel holds,
+            // and it was shaded whole whatever the pixel's footprint: far out in ring 5 a pixel two
+            // hundred metres across still drew the 38 m texel's swell as resolved, and one step past
+            // the ring the folded sea was smooth -- an edge. Every rung folds where it cannot be
+            // resolved (the bands below do, by wPix): as the footprint outgrows the ring's texel --
+            // from two texels, the shortest band it holds, to eight -- its slope fades and its
+            // variance joins sigma^2, so the glint carries what the pixel cannot draw, and at the
+            // ring's edge the ring has already become the statistics the sea past it is.
+            const float wRingPx = 1.0f - smoothstep(2.0f * bT, 8.0f * bT, footPx);
+            const float2 sRing = sRing0 * wRingPx;
+            s2 += (1.0f - wRingPx * wRingPx) * 0.5f * dot(sRing0, sRing0);
             float sx = sRing.x;
             float sz = sRing.y;
             nSmooth = normalize(upT - east * sx - north * sz);

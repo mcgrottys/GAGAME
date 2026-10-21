@@ -3780,6 +3780,7 @@ bool FrameLoop::Frame() {
                                       WaterBankLayer::kColBias, waterBank->ColumnRingsUnder(), rs, rt, rl);
             }
             globe->SetWaterSpray(waterBank->SpraySrv(), WaterBankLayer::kSprayMax);
+            if (sea) globe->SetFarSea(sea->Scale().hsRef, sea->Scale().storm);   // the sea past the rings
             {   // THE SEA'S FOLDS: the morph's distance and the walk's blocks, about ring 0's origin
                 float ox = 0.0f, oz = 0.0f;
                 waterBank->RingOrigin(0, ox, oz);
