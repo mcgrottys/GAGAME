@@ -420,6 +420,33 @@ bool ColumnLip(float2 xz, out float face, out float top, out float under, out fl
     }
     return false;
 }
+// THE WATER A REFRACTED RAY CROSSES (2026-10-20, Mark: "shade the sun through the crest's own thickness
+// along the refracted ray (the backlit face)"). From the drawn point (chart x, chart z, its height about
+// the waterline) along the refracted direction (tangent frame), marched through the EULERIAN surface the
+// column holds (ring 0's face band, its own texel, one load a step) until the ray stands above it: the
+// metres of water it crosses before it leaves the sheet -- through the back of a crest, or into a tube's
+// air. -1 where it does not leave within the march (it meets the depths: the body's colour stands). A
+// ray going down more steeply than a flat sea's refraction ever sends one (the critical angle's 48
+// degrees) cannot leave through a crest, and is not marched; a flat sea's every ray is such a ray.
+float WaterPathThrough(float3 at, float3 tDirT) {
+    if (gColU.y == 0u || sLvlBank != 0) return -1.0f;
+    const float3 d = float3(dot(tDirT, BankChartRow(0u).xyz), dot(tDirT, BankChartRow(2u).xyz),
+                            dot(tDirT, BankChartRow(1u).xyz));   // chart x, up, chart z
+    if (d.y < -0.66f) return -1.0f;
+    const float texel = gBankA.x;
+    const float2 org = BankRingOrg(0u);
+    const float stepM = 0.5f * texel;
+    [loop] for (int i = 1; i <= 32; ++i) {
+        const float sM = stepM * float(i);
+        const float2 xz = at.xy + d.xz * sM;
+        const int2 tc = int2(floor((xz - org) / texel));
+        if (any(tc < 2) || any(tc > 509)) return -1.0f;
+        const uint raw = gTexU[gColU.x].Load(int3(tc.x, tc.y, 0)).x;
+        // above the face -- or where the column holds no water at all (the land, a NULL tile): out
+        if (!ColPresent(raw) || at.z + d.y * sM > ColH(raw)) return sM - 0.5f * stepM;
+    }
+    return -1.0f;
+}
 float3 ChartPointRel(float2 c, float alt) {
     const float4 e = BankChartRow(0u), n = BankChartRow(1u), u = BankChartRow(2u), r3 = BankChartRow(3u);
     const float R = gGlo.x;
@@ -976,14 +1003,14 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // another level's bed has only its direction -- for the Mercator height. PHASE A2: the colour's
 // windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
 // pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
-// faceSide: +1 where the eye sees the drawn triangle's front, -1 its back (SV_IsFrontFace): the side
-// of the sheet the eye is on (TWO-SIDED, below). lipThick / lipCov: where the pixel
+// lipThick / lipCov: where the pixel
 // is a lip's (its top or its underside, PsSurface from the column), the sheet's thickness there and
-// how much of the pixel is that lip -- the THIN SHEET's light (below).
+// how much of the pixel is that lip; drawnAt: the drawn point (chart x, chart z, its height about the
+// waterline) -- THE LIGHT THROUGH THE WATER (below).
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
                        float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
-                       float faceSide, float lipThick, float lipCov) {
+                       float lipThick, float lipCov, float3 drawnAt) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -1118,31 +1145,40 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // normal (the surface's slope, always turned up) is the far side's. The drawn triangle says
     // which side the eye is on; the normal is turned to it. Over an unfolded sea both point up and
     // nothing changes.
-    // THE SIDE IS THE TRIANGLE'S (2026-10-20, the lip's ragged rim): it was the cross of rel's
-    // screen derivatives, which a 2x2 quad takes across two triangles wherever slivers meet -- the
-    // folded sheet's rim -- and the normal flipped pixel by pixel (blue against near-black). The
-    // rasterizer knows the side per primitive (SV_IsFrontFace; MsMain winds every triangle so its
-    // front is the sheet's outward side, seen from above where it is unfolded), and the sheet's own
-    // normal nBiv -- the tangent bivector's dual, from the same labels, smooth -- turns with the
-    // winding through a fold: the eye's side is faceSide nBiv.
+    // THE FOLD DECIDES, THE EYE PICKS THE SIDE (2026-10-20). The side was first the cross of rel's
+    // screen derivatives -- garbage where a 2x2 quad straddles two slivers at the folded rim (the
+    // speckle) -- then the triangle's face times the sheet's normal, measured wrong on the curl
+    // (Mark: "the order of drawing the vertices is putting back faces towards the camera"): with the
+    // atmosphere held off, NO back face is visible at the close pose, but on 10,358 front-facing
+    // pixels the sheet's own normal points down and away -- the field folded finer than the
+    // triangle, or a triangle across the fold's hinge -- and face times normal turned the lip's
+    // normal away from the eye. The law now: where the sheet is folded (its own normal nBiv, the
+    // tangent bivector's dual, points down) the eye picks the side -- +-nBiv, whichever faces it;
+    // where it is not, nothing turns (the 81,778 grazing pixels of open sea whose field normal faces
+    // away from the facet that faces the eye keep the slope form, as before the sheet was two-sided).
+    // No derivative, no face: one smooth normal and the eye.
     {
-        float3 ng = faceSide * nBiv;
-        {
-            if (dot(nPix, ng) < 0.0f) {
-                nPix = -nPix;
-                nSmooth = -nSmooth;
-            }
-            // THE LIP'S OWN NORMAL (2026-10-20, the backlit lip read as a mirror of the sky). The
-            // slope form above is the bivector folded up (|n.y|) and capped at a slope of 1.1, so
-            // every normal stands within 48 degrees of up; a lip curling down in front of the face
-            // faces the eye sideways or below, and on the slope form it was a surface seen at grazing
-            // -- Fresnel's mirror, the sun it passes counted for nothing. On a lip's pixel the
-            // normal is the bivector's own, turned to the side the eye is on.
-            if (lipCov > 0.0f) {
-                const float3 nb = (dot(nBiv, ng) < 0.0f) ? -nBiv : nBiv;
-                nPix = normalize(lerp(nPix, nb, saturate(lipCov)));
-                nSmooth = normalize(lerp(nSmooth, nb, saturate(lipCov)));
-            }
+        // Continuous, both hinges (the black lines with the sun ahead: where the sheet's normal turns
+        // edge-on to the eye, n . v ~ 0, a hard choice of +-n flipped the shading between a mirror and
+        // the dark side). The turned normal is trusted by how folded the sheet is (-n . up) and how
+        // plainly it faces one side of the eye (|n . v|), each over a fifth of the turn; at either
+        // hinge the slope form stands, as over the unfolded sea.
+        const float cV = dot(nBiv, v);
+        const float3 nEye = (cV >= 0.0f) ? nBiv : -nBiv;   // the sheet's normal on the eye's side
+        const float wSide = saturate(abs(cV) * 5.0f);
+        const float wFold = saturate(-dot(nBiv, upT) * 5.0f) * wSide;
+        nPix = normalize(lerp(nPix, nEye, wFold));
+        nSmooth = normalize(lerp(nSmooth, nEye, wFold));
+        // THE LIP'S OWN NORMAL (2026-10-20, the backlit lip read as a mirror of the sky). The slope
+        // form is the bivector folded up (|n.y|) and capped at a slope of 1.1, so every normal stands
+        // within 48 degrees of up; a lip curling down in front of the face faces the eye sideways or
+        // below, and on the slope form it was a surface seen at grazing -- Fresnel's mirror, the sun it
+        // passes counted for nothing. On a lip's pixel the normal is the bivector's own, turned to the
+        // eye's side, by the same hinge weight.
+        if (lipCov > 0.0f) {
+            const float wL = saturate(lipCov) * wSide;
+            nPix = normalize(lerp(nPix, nEye, wL));
+            nSmooth = normalize(lerp(nSmooth, nEye, wL));
         }
     }
 
@@ -1281,26 +1317,42 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
     const half3 sunHere = half3(SunAt(upT, hp));
     half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
-    // THE THIN SHEET (a lip's pixel, 2026-10-20 on the sheet drawn whole). The body above is the
-    // water under this point, lit as ever. A lip is a sheet lipThick metres thick with air on both
-    // sides: the refracted ray crosses it on the path lipThick / |t . n| and comes out the other side,
-    // where it sees the face below (a ray going down) or the sky behind (a ray going up) -- one weight,
-    // continuous through the horizontal. What the sheet keeps of the ray scatters in its own colour,
-    // lit by the sky and by the sun it transmits (the backlit green of a real lip: the sun on the far
-    // side, through the sheet). With no thickness the sheet is transparent and the body stands. The
-    // normal is the one turned to the eye (TWO-SIDED, above), so the tube's ceiling seen from inside
-    // passes the sky over it.
-    if (lipCov > 0.0f) {
-        const float path = lipThick / max(abs(dot(tDir, nPix)), 0.25f);
-        const half3 TwS = exp(-half3(wq.kd * path));
-        const float tUp = dot(tDir, upT);
-        const float3 tSky = normalize(tDir + max(0.02f - tUp, 0.0f) * upT);
-        const half wSky = half(saturate(0.5f + 2.0f * tUp));
-        const half3 behind = lerp(bodyLit, half3(SkyRadianceDirDiscless(tSky, upT)), wSky);
-        const half sunThrough = half(saturate(dot(GA_SUN_DIR, -nPix)) * sunSph);
-        const half3 sheetLit = cScatter * (half3(SkyAmbient(nPix, upT, hp)) +
-                                           (half(ndl * 1.15f) + sunThrough * half(0.8f)) * sunHere);
-        bodyLit = lerp(bodyLit, lerp(sheetLit, behind, TwS), half(saturate(lipCov)));
+    // THE LIGHT THROUGH THE WATER (2026-10-20, Mark: "shade the sun through the crest's own thickness
+    // along the refracted ray (the backlit face)"). The body above is the water under this point. Where
+    // the refracted ray LEAVES the water -- through a lip (its thickness from the column, lipThick /
+    // |t . n|), through the back of a crest or into a tube's air (WaterPathThrough, marched) -- it
+    // crosses `path` metres of water and comes out the other side: it sees what is there, the sky (a
+    // ray going up) or the face below (going down), through T = exp(-K_d path); and on the way the
+    // sun's beam, entering the far side of so thin a water, scatters once toward the eye:
+    //     L_sun = c_scatter E_sun p(mu) T (1 - T),
+    // p the water's phase function at the angle mu between the ray and the sun -- Henyey-Greenstein at
+    // g = 0.924, the mean cosine of Petzold's average-particle phase function (Mobley, Ocean Optics
+    // Book), strongly forward: the glow of a crest with the sun behind it. T (1 - T): the sun reaching
+    // the scattering water through the same thin crest, and the share of the path that scatters. Its
+    // limits, stated: Henyey-Greenstein matches Petzold's mean cosine and is much too small within a
+    // few degrees of forward (Fournier-Forand is the realistic form); one scattering only; the sun's
+    // path taken as the ray's. A ray that does not leave keeps the body as ever.
+    {
+        float pathW = -1.0f, wPath = 0.0f;
+        if (lipCov > 0.0f) {
+            pathW = lipThick / max(abs(dot(tDir, nPix)), 0.25f);
+            wPath = saturate(lipCov);
+        } else {
+            pathW = WaterPathThrough(drawnAt, tDir);
+            wPath = (pathW >= 0.0f) ? 1.0f : 0.0f;
+        }
+        if (wPath > 0.0f) {
+            const half3 Tp = exp(-half3(wq.kd * pathW));
+            const float tUp = dot(tDir, upT);
+            const float3 tSky = normalize(tDir + max(0.02f - tUp, 0.0f) * upT);
+            const half wSky = half(saturate(0.5f + 2.0f * tUp));
+            const half3 behind = lerp(bodyLit, half3(SkyRadianceDirDiscless(tSky, upT)), wSky);
+            const float gP = 0.924f;
+            const float mu = dot(tDir, GA_SUN_DIR);
+            const float hg = (1.0f - gP * gP) / (12.566371f * pow(max(1.0f + gP * gP - 2.0f * gP * mu, 1e-4f), 1.5f));
+            const half3 glow = cScatter * sunHere * half(3.14159265f * hg * sunSph) * Tp * (1.0h - Tp);
+            bodyLit = lerp(bodyLit, lerp(bodyLit, behind, Tp) + glow, half(wPath));
+        }
     }
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
@@ -1442,9 +1494,8 @@ float CloudMarch(float3 rel, float2 pix, out float3 scat) {
 
 // THE SURFACE's shading, one pixel: the colour, and whether the pixel is land whole (`land`, for
 // the kept frame's cache; GlobeLayer.h Keep). PsMain and PsMainKeep below are its two entries.
-float4 PsSurface(VsOut i, bool front, out float land) {
+float4 PsSurface(VsOut i, out float land) {
     land = 1.0f;
-    const float faceSide = front ? 1.0f : -1.0f;   // the side of the triangle the eye sees (WaterPixelColor)
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
     LoadLevel(i.lvl);
@@ -1875,20 +1926,20 @@ float4 PsSurface(VsOut i, bool front, out float land) {
         // the lip's bands -- or the face beneath it: the share by where the drawn point stands
         // between the face and the underside.
         float lipThick = 0.0f, lipCov = 0.0f;
+        const float2 xzD = BankXZ(i.rel);
+        const float aD = dot(i.rel - ChartPointRel(xzD, 0.0f), BankChartRow(2u).xyz) - gWavesB.w;
         {
-            const float2 xzD = BankXZ(i.rel);
             float cF, cT, cU, cC;
             // a lip stands only where the sheet turned over: the folds' distance (four loads) says
             // where to ask the column at all -- within a fold block of one
             if (FoldDist(xzD) < 8.0f * gBankA.x && ColumnLip(xzD, cF, cT, cU, cC) && cC > 0.0f && cT > cF) {
-                const float aD = dot(i.rel - ChartPointRel(xzD, 0.0f), BankChartRow(2u).xyz) - gWavesB.w;
                 const float gap = max(cU - cF, 0.05f);
                 lipCov = saturate(cC) * smoothstep(0.25f, 0.75f, (aD - cF) / gap);
                 lipThick = max(cT - cU, 0.0f);
             }
         }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, faceSide, lipThick, lipCov);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipThick, lipCov, float3(xzD, aD));
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
@@ -1989,9 +2040,9 @@ float4 PsSurface(VsOut i, bool front, out float land) {
     return float4(col, 1.0f);
 }
 
-float4 PsMain(VsOut i, bool front : SV_IsFrontFace) : SV_Target {
+float4 PsMain(VsOut i) : SV_Target {
     float land;
-    return PsSurface(i, front, land);
+    return PsSurface(i, land);
 }
 
 // THE KEPT FRAME's entry (GlobeLayer.h Keep): the frame's colour as PsMain's, and beside it the
@@ -2002,9 +2053,9 @@ struct GlobeKeepOut {
     float4 k : SV_Target1;
     uint m : SV_Target2;
 };
-GlobeKeepOut PsMainKeep(VsOut i, bool front : SV_IsFrontFace) {
+GlobeKeepOut PsMainKeep(VsOut i) {
     float land;
-    const float4 c = PsSurface(i, front, land);
+    const float4 c = PsSurface(i, land);
     GlobeKeepOut o;
     o.c = c;
     o.k = float4(c.rgb, land >= 1.0f ? 1.0f : 0.5f);

@@ -872,8 +872,36 @@ labels, so it turns with the winding through a fold). Measured: the speckle is g
 the lip's band and the hollow under it, continuous; self-test 37 (a shader change; the twins are
 untouched).
 
-**Next.** The crest's own thickness along the refracted ray (the backlit face); gravity's
-latitude term.
+**The light through the water, and the side the eye sees (the same night, Mark: "shade the sun
+through the crest's own thickness along the refracted ray" and "something's up once the lip curls
+inward, like the order of drawing the vertices is putting back faces towards the camera").** One
+block replaces the lip's thin sheet: where the refracted ray LEAVES the water -- through a lip
+(lipThick / |t . n| from the column) or through the back of a crest or into a tube's air
+(`WaterPathThrough`: marched through ring 0's Eulerian face, a load a half texel, 32 steps; a ray
+steeper than a flat sea's refraction ever sends, past the critical 48 degrees, is not marched) -- it
+sees what is behind through T = exp(-K_d path), and the sun's beam scatters once toward the eye on
+the way: c_scatter E_sun p(mu) T (1 - T), p Henyey-Greenstein at g = 0.924 (the mean cosine of
+Petzold's average-particle phase function, Mobley's Ocean Optics Book). Stated limits: HG matches
+that mean cosine and is much too small within a few degrees of forward (Fournier-Forand is the
+realistic form); one scattering; the sun's path taken as the ray's. Measured at the close pose with
+the sun ahead: the sun stands ~50 degrees off the view and the lip is 1.5 m of clear water (T ~0.95),
+so the glow is small there -- physics, not a miss; it waits for a pose with the sun behind the crest
+within ~20 degrees, and for the surf zone's turbidity.
+
+Mark's hunch, measured (a debug with the atmosphere held off): NO back face is visible at the close
+pose -- but on 10,358 front-facing pixels the sheet's own normal points down and away (the field
+folded finer than the triangle, or a triangle across the fold's hinge), and the rule face x normal
+turned the lip's normal away from the eye. The rule now: where the sheet is folded (its normal nBiv
+points down) the eye picks the side, +-nBiv, whichever faces it; where it is not, nothing turns (81,778
+grazing pixels of open sea whose field normal faces away from the facet that faces the eye keep the
+slope form). Continuous at both hinges -- the turned normal weighted by how folded (-n . up) and how
+plainly facing (|n . v|), each over a fifth of the turn -- after a hard choice drew black lines where
+the normal turned edge-on to the eye. No derivative, no face. Measured: in the morning the lip reads as
+a translucent green sheet under a sky-lit top; with the sun ahead its top takes the light and its
+underside its own shade; a few dark dashes remain on the rim with the sun ahead. Self-test 37.
+
+**Next.** A pose with the sun behind the crest (the glow's own test); the rim's dashes with the sun
+ahead; gravity's latitude term.
 
 ## 6. Next
 
