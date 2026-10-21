@@ -1,7 +1,7 @@
 {
   "_readme": [
     "A still minute over the Mavericks lineup (2026-10-19): the `lineup_high` eye of",
-    "scenes/demos/mavericks.json held for 60 s, so the recorder sees the sets stand up on the reef",
+    "scenes/demos/mavericks.json held for 75 s, so the recorder sees the sets stand up on the reef",
     "and fold. Flown by rails.file; poses are about the scene's place (x east, z north, metres)."
   ],
   "name": "mavericks_lineup",
@@ -28,7 +28,7 @@
           "pose": ""
         },
         {
-          "t": 60,
+          "t": 75,
           "at": {
             "x": -150,
             "alt": 60,
