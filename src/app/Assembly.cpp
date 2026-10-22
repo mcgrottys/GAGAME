@@ -468,6 +468,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if (seaPoint < 0 || d2 < seaBestD2) { seaPoint = int(i); seaBestD2 = d2; }
     }
     if (seaState.Load(S.data.seastate, seaPoint)) {
+        // THE GLOBE'S SEA STATE (sim/SeaGrid.h, 2026-10-21): the composite's grid beside its points, when
+        // it carries one. Then the synthesis is the eye's own sea and the field is the grid's; the other
+        // points are not sources over it (the grid is their measurement, every node of it).
+        const bool seaGridOn = A->seaGrid.Load(S.data.seastate);
         // PHASE C2: THE SEA STATE IS A FIELD OF SOURCES. data.seastate's file stands where it says,
         // or where sea.box places a file that says nothing; every `sources` entry of kind "seastate"
         // is one more, a source by being a file.
@@ -489,7 +493,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             sea->AddSource(src.get());
             A->seaSources.push_back(std::move(src));
         }
-        for (int i = 0; i < int(seaPoints.size()); ++i) {
+        for (int i = 0; i < int(seaPoints.size()) && !seaGridOn; ++i) {
             if (i == seaPoint) continue;
             auto src = std::make_unique<SeaState>();
             if (!src->Load(S.data.seastate, i)) continue;
@@ -497,6 +501,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             A->seaSources.push_back(std::move(src));
         }
         sea->SetSurface(&surface);   // the world.flat chart, for the churn's tangent rows (PHASE C5)
+        sea->SetGrid(seaGridOn ? &A->seaGrid : nullptr);
         sea->sweCurrentGain = S.water.swe.gain;
         sea->heightScale = S.water.heightScale;
         sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());

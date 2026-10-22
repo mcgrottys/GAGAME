@@ -116,48 +116,7 @@ int SeaLayer::PartsOf(const SeaState& src, double simUnix, bool storm, PartParam
     // declared storm replaces (data.seastate's), the storm. The synthesis takes data.seastate's; the
     // field (WaveScale) takes every source's Hs from the same function, so where data.seastate's own
     // box holds a texel its scale is 1 by construction.
-    int activeParts = 0;
-    const int hour = src.HourIndex(simUnix);
-    if (storm) {
-            // Sandbox storm: the named swell carries 85% of the energy, a fresher wind sea 25%
-            // of the height on a slightly shorter period, 30 degrees off.
-            parts[0] = SeaState::MakePartition(m_stormHs * 0.92, m_stormTp, m_stormDir, false);
-            parts[1] = SeaState::MakePartition(m_stormHs * 0.40, m_stormTp * 0.55,
-                                               m_stormDir + 30.0, true);
-            activeParts = 2;
-    } else {
-            activeParts = src.BuildParams(hour, parts);
-            // M9a: THE MISSING WIND SEA. On light-wind hours GFS-Wave's partitioning hands
-            // back swell trains ONLY -- and a swell partition is a Gaussian of
-            // sigF = clamp(0.10/Tp^2, 0.004, 0.02) Hz: ~4 mHz wide, with no tail at all. So
-            // every last joule lands in cascade 0 and cascades 1-2 realize NUMERICALLY ZERO
-            // (measured at 12z f004: band Hs 0.357 / 1e-12 / 0.000 m, mss 3.0e-5 / 1.6e-25
-            // / 0). The water then renders as poured glass -- no short faces to carry
-            // normals, and the only sub-cascade roughness left is bandSig[3], which widens
-            // the glint lobe and never moves a normal (priors 8: normals sell amplitude).
-            // But the wind that raises those ripples is already sitting in the same file.
-            // So synthesise the fully-developed sea for it and let it ride the partition
-            // list like any other train -- the shapes, the spreading, the plot, the buoy
-            // assimilation and the GPU all pick it up unchanged. Capped at the forecast's
-            // own combined Hs: PM is the fetch-UNLIMITED answer and no coastal hour is that.
-            bool hasWindSea = false;
-            for (int i = 0; i < activeParts; ++i) hasWindSea |= parts[i].gamma > 0.0f;
-            const SeaHour& hr = src.Hour(hour);
-            double pmHs = 0.0, pmTp = 0.0;
-            if (!hasWindSea && activeParts < 4 && windSeaFill > 0.0f &&
-                SeaState::WindSeaPm(hr.windMs, &pmHs, &pmTp)) {
-                pmHs *= windSeaFill;
-                if (hr.combinedHs > 0.02) pmHs = std::min(pmHs, hr.combinedHs);
-                if (pmHs > 0.02) {
-                    parts[activeParts++] =
-                        SeaState::MakePartition(pmHs, pmTp, hr.windFromDeg, true);
-                    if (log) Log("[sea] f%03d has no wind-sea partition (wind %.1f m/s): filled with "
-                        "Pierson-Moskowitz Hs %.2f m Tp %.1f s (lambda %.1f m) -- cascades "
-                        "1-2 were exactly zero",
-                        static_cast<int>(hr.fh), hr.windMs, pmHs, pmTp, 1.56 * pmTp * pmTp);
-                }
-            }
-        }
+    int activeParts = PartsOfHour(src.Hour(src.HourIndex(simUnix)), storm, parts, log);
     // M8 BUOY ASSIMILATION (the user's call: the single-point measurements should STEER the model,
     // not just grade it). One scalar on every partition's energy BEFORE synthesis: the measured Hs
     // over the forecast's, clamped [1/gmax, gmax]; never under a storm; only fresh observations.
@@ -183,15 +142,167 @@ int SeaLayer::PartsOf(const SeaState& src, double simUnix, bool storm, PartParam
     return activeParts;
 }
 
+int SeaLayer::PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], bool log) const {
+    int activeParts = 0;
+    if (storm) {
+            // Sandbox storm: the named swell carries 85% of the energy, a fresher wind sea 25%
+            // of the height on a slightly shorter period, 30 degrees off.
+            parts[0] = SeaState::MakePartition(m_stormHs * 0.92, m_stormTp, m_stormDir, false);
+            parts[1] = SeaState::MakePartition(m_stormHs * 0.40, m_stormTp * 0.55,
+                                               m_stormDir + 30.0, true);
+            activeParts = 2;
+    } else {
+            activeParts = SeaState::BuildParamsOf(hr, parts);
+            // M9a: THE MISSING WIND SEA. On light-wind hours GFS-Wave's partitioning hands
+            // back swell trains ONLY -- and a swell partition is a Gaussian of
+            // sigF = clamp(0.10/Tp^2, 0.004, 0.02) Hz: ~4 mHz wide, with no tail at all. So
+            // every last joule lands in cascade 0 and cascades 1-2 realize NUMERICALLY ZERO
+            // (measured at 12z f004: band Hs 0.357 / 1e-12 / 0.000 m, mss 3.0e-5 / 1.6e-25
+            // / 0). The water then renders as poured glass -- no short faces to carry
+            // normals, and the only sub-cascade roughness left is bandSig[3], which widens
+            // the glint lobe and never moves a normal (priors 8: normals sell amplitude).
+            // But the wind that raises those ripples is already sitting in the same file.
+            // So synthesise the fully-developed sea for it and let it ride the partition
+            // list like any other train -- the shapes, the spreading, the plot, the buoy
+            // assimilation and the GPU all pick it up unchanged. Capped at the forecast's
+            // own combined Hs: PM is the fetch-UNLIMITED answer and no coastal hour is that.
+            bool hasWindSea = false;
+            for (int i = 0; i < activeParts; ++i) hasWindSea |= parts[i].gamma > 0.0f;
+            double pmHs = 0.0, pmTp = 0.0;
+            if (!hasWindSea && activeParts < 4 && windSeaFill > 0.0f &&
+                SeaState::WindSeaPm(hr.windMs, &pmHs, &pmTp)) {
+                pmHs *= windSeaFill;
+                if (hr.combinedHs > 0.02) pmHs = std::min(pmHs, hr.combinedHs);
+                if (pmHs > 0.02) {
+                    parts[activeParts++] =
+                        SeaState::MakePartition(pmHs, pmTp, hr.windFromDeg, true);
+                    if (log) Log("[sea] f%03d has no wind-sea partition (wind %.1f m/s): filled with "
+                        "Pierson-Moskowitz Hs %.2f m Tp %.1f s (lambda %.1f m) -- cascades "
+                        "1-2 were exactly zero",
+                        static_cast<int>(hr.fh), hr.windMs, pmHs, pmTp, 1.56 * pmTp * pmTp);
+                }
+            }
+        }
+    return activeParts;
+}
+
+namespace {
+// A BUOY REACHES ONLY SO FAR -- the tide stations' law (compose/WaterAtlas.cpp StationWeight): 1 / d^2,
+// tapered to nought by smoothstep from 90 km to 270 km; and the share it may claim at all, by the
+// nearest one, the same taper. One open-ocean buoy speaks for a basin's sea, not a planet's.
+double BuoyTaper(double dM) {
+    const double t = std::clamp((dM - 90000.0) / 180000.0, 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+double GreatCircleM(double la0, double lo0, double la1, double lo1) {
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    const double a = std::sin(0.5 * (la1 - la0) * kD2R), b = std::sin(0.5 * (lo1 - lo0) * kD2R);
+    const double h = a * a + std::cos(la0 * kD2R) * std::cos(la1 * kD2R) * b * b;
+    return 2.0 * 6371000.0 * std::asin(std::sqrt(std::clamp(h, 0.0, 1.0)));
+}
+}  // namespace
+
+double SeaLayer::BuoyGainAt(double latDeg, double lonDeg, double simUnix, int hour, int* n) const {
+    // THE BUOYS BY THEIR OWN RATIO (2026-10-21). They were the file's mean -- every buoy of a composite
+    // that holds Florida's and Virginia's, against one place's forecast. Each buoy now says how far the
+    // forecast WHERE IT STANDS is off (its measured Hs over the grid's there), and that ratio reaches
+    // the place by the tide stations' law, in log (a ratio of 2 and one of 1/2 cancel).
+    int k = 0;
+    double sw = 0.0, slr = 0.0, dmin = 1e30;
+    if (m_grid && m_sea) {
+        for (const BuoyObs& b : m_sea->Buoys()) {
+            if (!b.placed || !b.valid || !(b.hs > 0.05) || !(std::abs(simUnix - b.obsUnix) < buoyAssimAgeH * 3600.0)) continue;
+            SeaHour at;
+            if (!m_grid->HourAt(b.lat, b.lon, hour, at) || !(at.combinedHs > 0.05)) continue;
+            const double d = GreatCircleM(latDeg, lonDeg, b.lat, b.lon);
+            const double w = BuoyTaper(d) / (d * d + 1.0);
+            if (w <= 0.0) continue;
+            const double r = std::clamp(b.hs / at.combinedHs, 1.0 / buoyAssimGainMax, double(buoyAssimGainMax));
+            sw += w;
+            slr += w * std::log(r);
+            dmin = (std::min)(dmin, d);
+            ++k;
+        }
+    }
+    if (n) *n = k;
+    return sw > 0.0 ? std::exp(BuoyTaper(dmin) * slr / sw) : 1.0;
+}
+
+int SeaLayer::PartsAt(double latDeg, double lonDeg, double simUnix, PartParam parts[4], bool log,
+                      SeaHour* hrOut) const {
+    if (!m_grid) return -1;
+    const int hour = m_grid->HourIndex(simUnix);
+    SeaHour hr;
+    double la = latDeg, lo = lonDeg;
+    if (!m_grid->HourAt(la, lo, hour, hr) && !(m_grid->NearestSea(la, lo) && m_grid->HourAt(la, lo, hour, hr))) return -1;
+    if (hrOut) *hrOut = hr;
+    int n = PartsOfHour(hr, StormOn(), parts, log);
+    if (!StormOn() && n > 0) {
+        int nb = 0;
+        const double g = BuoyGainAt(la, lo, simUnix, hour, &nb);
+        for (int i = 0; i < n; ++i) parts[i].specScale *= static_cast<float>(g * g);   // energy ~ Hs^2
+        if (log && nb > 0) Log("[sea] the grid's sea at %.3f, %.3f: %d buoy(s) within reach -> gain %.2f", la, lo, nb, g);
+    }
+    return n;
+}
+
+int64_t SeaLayer::EyeKey(double latDeg, double lonDeg, int hour) const {
+    SeaHour hr;
+    double la = latDeg, lo = lonDeg;
+    if (!m_grid || (!m_grid->HourAt(la, lo, hour, hr) && !(m_grid->NearestSea(la, lo) && m_grid->HourAt(la, lo, hour, hr)))) {
+        return int64_t(hour);
+    }
+    // The peak: the most energetic partition (M7j's choice), the combined sea where there is none.
+    double hs = -1.0, tp = hr.combinedTp, from = hr.combinedFromDeg;
+    for (const SeaPartition& p : hr.parts) {
+        if (p.hs > hs) {
+            hs = p.hs;
+            tp = p.tp;
+            from = p.fromDeg;
+        }
+    }
+    const int64_t tb = int64_t(std::floor(std::log((std::max)(tp, 0.5)) / std::log(1.05)));
+    const int64_t db = int64_t(std::floor(from / 5.0)) % 72;
+    return int64_t(hour) | (tb & 0xFFFF) << 16 | (db & 0xFF) << 32;
+}
+
 void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double camZ) {
     if (!m_sea || !m_sea->Ready()) return;
 
-    const int hour = m_sea->HourIndex(simUnix);
-    if (hour != m_lastHour) {
+    // THE SYNTHESIS'S SEA (2026-10-21): with the globe's grid, the sea at the eye's own ground point,
+    // made again when the forecast hour moves or the eye's sea leaves its bucket (EyeKey: the peak's
+    // period and direction -- the scale field carries its Hs); without, data.seastate's point by the hour.
+    int hour = 0;
+    bool newHour = false, respectrum = false;
+    double eLat = 0.0, eLon = 0.0;
+    if (m_grid) {
+        hour = m_grid->HourIndex(simUnix);
+        if (m_surface) m_surface->flat.LatLonOf(camX, camZ, eLat, eLon);
+        const int64_t key = EyeKey(eLat, eLon, hour);
+        newHour = hour != m_lastHour;
+        respectrum = newHour || key != m_eyeKey;
+        m_eyeKey = key;
+    } else {
+        hour = m_sea->HourIndex(simUnix);
+        newHour = respectrum = hour != m_lastHour;
+    }
+    if (respectrum) {
         m_lastHour = hour;
+        if (!newHour) ++m_eyeSpectra;
+        // The hour's change says everything; the eye's, the first and then one in 32 (they come as fast
+        // as the eye crosses buckets).
+        const bool logIt = newHour || m_eyeSpectra == 1u || (m_eyeSpectra & 31u) == 0u;
         PartParam parts[4];
-        activeParts = PartsOf(*m_sea, simUnix, StormOn(), parts, true);
-        const uint32_t seed = static_cast<uint32_t>(m_sea->CycleUnix() / 3600.0) * 2654435761u;
+        SeaHour eyeHr;
+        const int nGrid = m_grid ? PartsAt(eLat, eLon, simUnix, parts, logIt, &eyeHr) : -1;
+        m_fromGrid = nGrid >= 0;
+        activeParts = m_fromGrid ? nGrid : PartsOf(*m_sea, simUnix, StormOn(), parts, logIt);
+        if (m_grid && newHour) m_gridHourNew = hour;
+        if (m_grid && m_fieldPlaced && newHour) {
+            m_fieldActive = (std::max)(0, PartsAt(m_fieldLat, m_fieldLon, simUnix, m_fieldParts, logIt, nullptr));
+        }
+        const double cycle = m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix();
+        const uint32_t seed = static_cast<uint32_t>(cycle / 3600.0) * 2654435761u;
         m_fft.SetSeaState(parts, activeParts, seed);
         // M9bq: THE CPU TWIN IS FED FROM THE SAME CALL SITE, with the same partitions and the
         // same seed, so the two processors cannot come to disagree about what sea this is. A
@@ -208,18 +319,23 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         // PHASE C2: THE SEA STATE AS A FIELD (sim/WaveScale.h). The reference is the Hs the cascades
         // were synthesised for; every source with a place (its file's box, or sea.box for
         // data.seastate's) carries its own Hs by the same law (PartsOf), at its own clock.
-        m_scale.hsRef = hsModel > 1e-3 ? hsModel : 1.0;
+        // With the grid the field is the grid's Hs (GlobeModel's waves, moved to this hour by the frame
+        // loop) and the reference is the grid's own Hs at the eye, read as the field reads it: the
+        // scale is 1 at the eye and the grid's relative sea everywhere else.
+        const double gridRef = m_fromGrid ? m_grid->HsBilinear(eLat, eLon, hour) : -1.0;
+        m_scale.hsRef = gridRef > 1e-3 ? gridRef : (hsModel > 1e-3 ? hsModel : 1.0);
         m_scale.storm = StormOn();   // a declared storm is the planet's sea (WaveScale.h)
         m_scale.sources.clear();
         for (const SeaState* src : m_sources) {
             if (!src || !src->Ready() || !src->HasBox()) continue;
+            if (m_fromGrid && src == m_sea) continue;   // the grid IS data.seastate's measurement now
             PartParam sp[4];
             const int n = PartsOf(*src, simUnix, src == m_sea && StormOn(), sp, false);
             WaveScale::Source fs;
             src->Box(fs.box);
             fs.hs = SeaState::SignificantHeight(sp, n);
             m_scale.sources.push_back(fs);
-            Log("[sea] field source %s: box %.3f..%.3f N x %.3f..%.3f E, Hs %.3f m (scale %.3f over "
+            if (logIt) Log("[sea] field source %s: box %.3f..%.3f N x %.3f..%.3f E, Hs %.3f m (scale %.3f over "
                 "the reference %.3f m)%s",
                 src->Label().c_str(), fs.box[0], fs.box[2], fs.box[1], fs.box[3], fs.hs,
                 fs.hs / m_scale.hsRef, m_scale.hsRef, src == m_sea && StormOn() ? " -- the storm" : "");
@@ -250,7 +366,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         if (m_stormHs > 0.01f) {
             snprintf(note, sizeof(note), "STORM %.1fm/%.0fs", m_stormHs, m_stormTp);
         } else {
-            snprintf(note, sizeof(note), "f%03d", static_cast<int>(m_sea->Hour(hour).fh));
+            snprintf(note, sizeof(note), "f%03d", static_cast<int>(m_fromGrid ? m_grid->HourFh(hour) : m_sea->Hour(hour).fh));
         }
         statusNote = note;
 
@@ -258,7 +374,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         // decides WHERE foam sits. Without this gate, the 2-second chop that a 4 m/s breeze
         // raises micro-breaks all over the render at full brightness -- geometrically true,
         // visually absurd (real coverage at 4 m/s is ~0.01%).
-        double windMs = m_sea->Hour(hour).windMs;
+        double windMs = m_fromGrid ? eyeHr.windMs : m_sea->Hour(hour).windMs;
         if (m_stormHs > 0.01f) {
             // M9e: THE IMPLIED WIND for the sandbox storm. This drives the whitecap gate AND
             // -- through Cox-Munk sigma^2 = 0.003 + 0.00512 U -- the width of the glint lobe,
@@ -369,10 +485,10 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                 m_bandKSpread[c] = static_cast<float>(
                     std::clamp((var > 1e-12) ? std::sqrt(var) : cutW, 0.05, 2.0));
             }
-            Log("[sea] fold log-width per band: %.2f / %.2f / %.2f (energy-weighted sigma "
+            if (logIt) Log("[sea] fold log-width per band: %.2f / %.2f / %.2f (energy-weighted sigma "
                 "of ln k -- the fraction of each band Nyquist still admits)",
                 m_bandKSpread[0], m_bandKSpread[1], m_bandKSpread[2]);
-            Log("[sea] fold wavelength per band: %.1f / %.1f / %.2f m (cut means "
+            if (logIt) Log("[sea] fold wavelength per band: %.1f / %.1f / %.2f m (cut means "
                 "%.1f / %.1f / %.2f, weight %.2f)",
                 6.283185307 / m_bandKFold[0], 6.283185307 / m_bandKFold[1],
                 6.283185307 / m_bandKFold[2],
@@ -397,17 +513,24 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                 sum += mss[c] * ex2;
             }
             bandSig[3] = static_cast<float>(std::max(coxMunk - sum, 0.0015));
-            Log("[sea] slope variance: bands %.4f/%.4f/%.4f + floor %.4f (Cox-Munk %.4f at "
+            if (logIt) Log("[sea] slope variance: bands %.4f/%.4f/%.4f + floor %.4f (Cox-Munk %.4f at "
                 "%.1f m/s -- the far field is the same pixel the globe draws)",
                 bandSig[0], bandSig[1], bandSig[2], bandSig[3],
                 coxMunk, windMs);
         }
 
-        Log("[sea] %s %s: %d partitions, model Hs %.2f m (its buoys %.2f m)",
-            m_sea->CycleLabel().c_str(), statusNote.c_str(), activeParts, hsModel, hsBuoy);
+        if (logIt && m_fromGrid) {
+            Log("[sea] %s %s: the sea at the eye (%.3f, %.3f): %d partitions, model Hs %.2f m, the grid's %.2f m "
+                "(the scale's reference); %u re-made for the eye's sea so far",
+                m_grid->CycleLabel().c_str(), statusNote.c_str(), eLat, eLon, activeParts, hsModel, m_scale.hsRef,
+                m_eyeSpectra);
+        } else if (logIt) {
+            Log("[sea] %s %s: %d partitions, model Hs %.2f m (its buoys %.2f m)",
+                m_sea->CycleLabel().c_str(), statusNote.c_str(), activeParts, hsModel, hsBuoy);
+        }
     }
 
-    m_tSec = static_cast<float>(simUnix - m_sea->CycleUnix());
+    m_tSec = static_cast<float>(simUnix - (m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix()));
 
     m_seaLevel = static_cast<float>(seaLevelM);
 

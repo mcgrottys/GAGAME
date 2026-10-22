@@ -115,6 +115,11 @@ bool SeaState::Load(const std::string& jsonPath, int point) {
             b.apd = kv.second.Num("apd", 0);
             b.mwd = kv.second.Num("mwd", 0);
             b.wspd = kv.second.Num("wspd", 0);
+            if (const JsonValue* la = kv.second.Get("lat"); la && la->type == JsonValue::Type::Number) {
+                b.lat = la->number;
+                b.lon = kv.second.Num("lon", 0);
+                b.placed = true;
+            }
             if (const JsonValue* spec = kv.second.Get("spectrum")) {
                 const JsonValue* fq = spec->Get("freq_hz");
                 const JsonValue* dn = spec->Get("dens_m2_hz");
@@ -221,8 +226,9 @@ bool SeaState::WindSeaPm(double wind10Ms, double* hsOut, double* tpOut) {
     return true;
 }
 
-int SeaState::BuildParams(int hourIdx, PartParam out[4]) const {
-    const SeaHour& h = m_hours[hourIdx];
+int SeaState::BuildParams(int hourIdx, PartParam out[4]) const { return BuildParamsOf(m_hours[hourIdx], out); }
+
+int SeaState::BuildParamsOf(const SeaHour& h, PartParam out[4]) {
     int n = 0;
     auto addPartition = [&](double hs, double tp, double fromDeg, bool windsea) {
         if (n >= 4 || hs < 0.02 || tp < 0.5) return;

@@ -53,6 +53,8 @@ struct BuoyObs {
     std::string id;
     double obsUnix = 0;
     double hs = 0, dpd = 0, apd = 0, mwd = 0, wspd = 0;
+    double lat = 0, lon = 0;            // where it stands (the composite's buoys carry it)
+    bool placed = false;
     std::vector<float> specFreqHz;      // measured spectral density, when the buoy provides it
     std::vector<float> specDens;        // m^2/Hz
     bool valid = false;
@@ -86,6 +88,9 @@ public:
 
     // The partition parameterization the GPU consumes, for a given hour. Returns count (<= 4).
     int BuildParams(int hourIdx, PartParam out[4]) const;
+    // ...of any forecast hour, wherever it came from (a file's point, or SeaGrid::HourAt at a place).
+    static int BuildParamsOf(const SeaHour& h, PartParam out[4]);
+    const std::vector<BuoyObs>& Buoys() const { return m_buoys; }
 
     // One partition from (Hs, Tp, direction-from): the normalisation lives here so forecast
     // partitions and sandbox overrides (--storm) go through identical math.

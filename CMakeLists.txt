@@ -129,6 +129,7 @@ add_executable(gagame
   src/scene/MeshFile.cpp
   src/scene/BuildingLayer.cpp
   src/sim/TideModel.cpp
+  src/sim/SeaGrid.cpp
   src/sim/SeaState.cpp
   src/sim/CurrentModel.cpp
   src/sim/RiverModel.cpp

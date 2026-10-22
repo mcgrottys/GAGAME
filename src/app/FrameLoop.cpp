@@ -537,6 +537,11 @@ void FrameLoop::ReconfigureWaveField(const WaterSceneConfig& cfg) {
     if (!m_waveField || !m_sceneToWaveCfg) return;
     WaveFieldConfig wcfg2 = m_sceneToWaveCfg(cfg);
     m_waveFrame = WaveFieldSource::Align(wcfg2, m_A.surface.flat);   // M9bc: the page grid
+    if (m_A.sea) {
+        double wla = 0.0, wlo = 0.0;
+        wcfg2.PlaceOfCell(0.5 * wcfg2.nx, 0.5 * wcfg2.ny, wla, wlo);
+        m_A.sea->SetFieldPlace(wla, wlo);   // the field's sea is its window's (sim/SeaGrid.h)
+    }
     m_waveField->Configure(wcfg2, &m_A.compositor, m_A.hgtCh, &m_A.waterAtlas, &m_A.model,
                            m_entSta, m_A.haveCurrents ? &m_A.currents : nullptr, m_wfCtSta);
 }
@@ -1324,6 +1329,7 @@ std::optional<int> FrameLoop::Session() {
         // solver's domain holds (sim/Stations.h); none, no station current.
         double wla = 0.0, wlo = 0.0;
         wcfg.PlaceOfCell(0.5 * wcfg.nx, 0.5 * wcfg.ny, wla, wlo);
+        if (sea) sea->SetFieldPlace(wla, wlo);   // the field's sea is its window's (sim/SeaGrid.h)
         wfCtSta = NearestStation(currents, wla, wlo, [&](double a, double b) { return swe.Ready() && swe.Domain().Holds(a, b); });
         Log("[wave] grid aligned to the z16 page: cell %.3f m, %d x %d cells, window px "
             "(%lld, %lld), frame org (%lld, %lld)",
@@ -3500,7 +3506,7 @@ bool FrameLoop::Frame() {
                                         !S.capture.mp4.empty() || !S.capture.railDir.empty() ||
                                         S.capture.settle.sync || S.capture.settle.hold ||
                                         S.capture.settle.exact);
-                waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts, waveBlock, waveReader);
+                waveField->Update(gpu, simUnix, sea->FieldParts(), sea->FieldActive(), waveBlock, waveReader);
                 PROF_END(2);
                 // No pages on the GPU for this field (no tenant): nothing to wait for, live at once.
                 if (!(waveSrc && waveT >= 0)) waveField->Publish();
@@ -4182,6 +4188,17 @@ bool FrameLoop::Frame() {
     if (sea) sea->SetChurnWindows(m_A.surface.SlotRows(0), m_A.surface.slotEye[0].data());
     if (sea) sea->SetTime(simUnix, waterNavd,
                           cam.px, cam.pz);
+    // THE GLOBE'S SEA STATE (sim/SeaGrid.h): the forecast hour moved, so the globe's waves -- the Hs the
+    // scale field and the far sea read, and the wind -- are that hour's, read as the synthesis reads.
+    if (int gridHour = 0; sea && sea->Grid() && sea->TakeGridHour(gridHour)) {
+        std::vector<float> hsP, windP;
+        sea->Grid()->HsPlane(gridHour, hsP);
+        sea->Grid()->WindPlane(gridHour, windP);
+        char lbl[64];
+        snprintf(lbl, sizeof(lbl), "%s f%03d", sea->Grid()->CycleLabel().c_str(), int(sea->Grid()->HourFh(gridHour)));
+        m_A.globeModel.SetWaves(std::move(hsP), std::move(windP), lbl);
+        if (globe) globe->RefreshWaves(gpu);
+    }
     PROF_END(5);
     // M9ba: the exposure node's inputs; a bucket roll re-keys the tree and drops the
     // tenant's tiles. Then demand the page at mip 3 over +-20 km around the camera --

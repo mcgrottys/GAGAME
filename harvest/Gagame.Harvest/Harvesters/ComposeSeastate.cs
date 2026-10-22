@@ -120,6 +120,7 @@ public sealed class ComposeSeastate : IHarvester
         }
         run.ReadBytes(bytesIn);
         run.Log($"{points.Count} forecast point(s) in {clusters.Count} subregion(s)");
+        var grid = WriteGrid(ctx, polite, run, dir);
 
         // ---- the buoys: every observation source (harvest/sources/buoys, or --sources), ranked;
         // a station a better-ranked source answered is not asked of the next
@@ -186,11 +187,103 @@ public sealed class ComposeSeastate : IHarvester
         var doc = D(("generated_utc", NowIso()), ("source", $"GFS-Wave via NOMADS grib filter at the fidelity map's points + {string.Join(" + ", answered)} in its regions"),
             ("cycle_unix", head?["cycle_unix"]), ("cycle_label", head?["cycle_label"]), ("point_lat", head?["lat"]), ("point_lon", head?["lon"]), ("box", head?["box"]),
             ("hours", head?["hours"] ?? new List<object?>()), ("points", ordered), ("buoys", buoys));
+        if (grid is not null) doc["grid"] = grid;
         var path = Path.Combine(dir, "seastate.json");
         Save(path, doc);
         run.WroteBytes(new FileInfo(path).Length);
-        run.Save(D(("file", "sea/seastate.json"), ("unit", "m, s, degrees true (from), m/s"), ("datum", "n/a"), ("points", ordered.Count), ("buoys", buoys.Count), ("subregions", clusters.Count)));
+        run.Save(D(("file", "sea/seastate.json"), ("unit", "m, s, degrees true (from), m/s"), ("datum", "n/a"), ("points", ordered.Count), ("buoys", buoys.Count), ("subregions", clusters.Count),
+            ("grid", grid is null ? null : "sea/grid.f16")));
         return 0;
+    }
+
+    // ---- THE GLOBE'S SEA STATE (2026-10-21, Mark: "harvest the global GFS-Wave partitions"). The points
+    // above stand where the fidelity map paints; a coast it does not paint borrowed the nearest point's sea,
+    // a Gulf of Maine swell on the Outer Banks. The same model's every node is the measurement: all its
+    // partitions (the combined sea, the wind sea, three swell trains) and the wind, at the same 13 forecast
+    // hours, through the same polite door (Waves.CycleOver, the whole globe as its box), under the same
+    // first-copy rule (a cycle already cached is read, the earliest first). Written as half floats, one plane
+    // after another: [hour][plane][row][col], row 0 at 90 N, column 0 at 0 E, the nodes' own (node-centred),
+    // NaN where the model has no value -- the engine's sim/SeaGrid.h reads it in place.
+    static readonly string[] GridPlanes = ["HTSGW", "PERPW", "DIRPW", "WVHGT", "WVPER", "WVDIR",
+        "SWELL_1", "SWPER_1", "SWDIR_1", "SWELL_2", "SWPER_2", "SWDIR_2", "SWELL_3", "SWPER_3", "SWDIR_3", "WIND", "WDIR"];
+
+    static Dictionary<string, object?>? WriteGrid(HarvestContext ctx, Polite polite, CompositeRun run, string dir)
+    {
+        var gb = new Waves.GribBox(0.0, 360.0, 90.0, -90.0);
+        var first = FirstCycle(gb);
+        var cacheDir = first?.cacheDir ?? Path.Combine("cache", "gfswave", "box_globe");
+        var path = Path.Combine(dir, "grid.f16");
+        var tmp = path + ".part";
+        var missing = new SortedSet<string>(StringComparer.Ordinal);
+        var fhs = new List<object?>();
+        int nx = 0, ny = 0;
+        double top = 0, lon1 = 0, dlat = 0, dlon = 0;
+        ushort[]? plane = null;
+        byte[]? bytes = null;
+        DateTime cycDt;
+        string ymd;
+        int cyc;
+        try
+        {
+            using var f = File.Create(tmp);
+            (cycDt, ymd, cyc) = new Waves().CycleEach(ctx, polite, gb, cacheDir, (fh, msgs) =>
+            {
+                if (plane is null)
+                {
+                    var hs0 = msgs.First(x => x.name == "HTSGW").m;
+                    nx = hs0.Ni;
+                    ny = hs0.Nj;
+                    top = (hs0.Scan & 0x40) != 0 ? hs0.Lat1 + (ny - 1) * hs0.Dlat : hs0.Lat1;
+                    lon1 = Grib2Message.Mod360(hs0.Lon1);
+                    dlat = hs0.Dlat;
+                    dlon = hs0.Dlon;
+                    plane = new ushort[nx * ny];
+                    bytes = new byte[nx * ny * 2];
+                }
+                fhs.Add(fh);
+                foreach (var name in GridPlanes)
+                {
+                    var m = msgs.FirstOrDefault(x => x.name == name).m;
+                    if (m is null || m.Ni != nx || m.Nj != ny)
+                    {
+                        missing.Add(name);
+                        Array.Fill(plane, BitConverter.HalfToUInt16Bits(Half.NaN));
+                    }
+                    else
+                    {
+                        // Row 0 at the north, as the globe's other grids (Globe.cs Values): a scan that
+                        // runs south to north is turned over.
+                        var flip = (m.Scan & 0x40) != 0;
+                        for (var r = 0; r < ny; r++)
+                        {
+                            var src = (flip ? ny - 1 - r : r) * nx;
+                            for (var c = 0; c < nx; c++) plane[r * nx + c] = BitConverter.HalfToUInt16Bits((Half)m.Values[src + c]);
+                        }
+                    }
+                    Buffer.BlockCopy(plane, 0, bytes!, 0, bytes!.Length);
+                    f.Write(bytes);
+                }
+            }, first?.ymd, first?.cyc);
+        }
+        catch (Polite.StopException) { throw; }
+        catch (Exception e)
+        {
+            run.Log($"the globe's grid: no cycle ({e.Message}); the points stand alone");
+            File.Delete(tmp);
+            return null;
+        }
+        File.Move(tmp, path, true);
+        var label = $"gfswave {ymd} {cyc:00}z";
+        run.WroteBytes(new FileInfo(path).Length);
+        if (missing.Count > 0) run.Log($"the globe's grid: {string.Join(", ", missing)} missing in some hour (NaN there)");
+        run.Log($"the globe's grid: {label}, {nx} x {ny} nodes, {fhs.Count} hours x {GridPlanes.Length} planes -> sea/grid.f16 ({new FileInfo(path).Length / 1048576} MB)");
+        run.Input("noaa.gfswave.globe", "NCEP GFS-Wave 0.25 deg global, every node, through the NOMADS grib filter", Round(NodeM, 1),
+            "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfswave.pl", "public domain (NOAA NWS)", "NOAA NCEP GFS-Wave (WAVEWATCH III)", "n/a", "none",
+            validUtc: label, fetchedUtc: CompositeRun.FileUtc(Directory.GetFiles(Path.Combine(cacheDir, ymd), $"{cyc:00}z_f000_all.grib2")[0]));
+        return D(("file", "grid.f16"), ("format", "f16"), ("order", "hour plane row col"), ("nx", nx), ("ny", ny),
+            ("lat1", top), ("lon1", lon1), ("dlat", dlat), ("dlon", dlon), ("centers", false),
+            ("hours", fhs), ("planes", GridPlanes.Select(p => (object?)p).ToList()),
+            ("cycle_unix", Unix(cycDt)), ("cycle_label", label));
     }
 
     /// The earliest cycle cached anywhere under cache/gfswave with all forecast hours whose f000

@@ -73,6 +73,10 @@ public:
     }
 
     const char* Name() const override { return "globe"; }
+    // THE GLOBE'S SEA STATE at its forecast hour (sim/SeaGrid.h): when GlobeModel's waves moved
+    // (WavesVersion), the Hs and wind planes the far sea reads are built again. The queue drains first
+    // (the old planes may be in flight); it happens when the forecast hour moves, four sim hours apart.
+    void RefreshWaves(Gpu& gpu);
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
               hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
@@ -813,6 +817,8 @@ private:
         bool Valid() const { return srv != UINT32_MAX; }
     };
     PlaneBank m_hsB, m_windB, m_oceanB, m_iceB, m_windSrcB;
+    uint32_t m_wavesVersion = 0;   // GlobeModel::WavesVersion the Hs and wind planes were built from
+    void BuildWaveBanks(Gpu& gpu);
 
 private:
 
