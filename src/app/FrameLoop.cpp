@@ -3506,7 +3506,10 @@ bool FrameLoop::Frame() {
                                         !S.capture.mp4.empty() || !S.capture.railDir.empty() ||
                                         S.capture.settle.sync || S.capture.settle.hold ||
                                         S.capture.settle.exact);
-                waveField->Update(gpu, simUnix, sea->FieldParts(), sea->FieldActive(), waveBlock, waveReader);
+                // B4: the field's sea waits on its fetch's walk (the Io lane); solved once it is known.
+                if (!sea->FieldPending()) {
+                    waveField->Update(gpu, simUnix, sea->FieldParts(), sea->FieldActive(), waveBlock, waveReader);
+                }
                 PROF_END(2);
                 // No pages on the GPU for this field (no tenant): nothing to wait for, live at once.
                 if (!(waveSrc && waveT >= 0)) waveField->Publish();

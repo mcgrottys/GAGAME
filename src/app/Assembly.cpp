@@ -633,6 +633,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // place no survey file named had no waves at all. No box, no solver. PHASE B2 (D4): ONE STANDING
     // RANK-2 WINDOW about the anchor (rank 2: the finest whose texel is at most the solver's cell), held
     // whole before the solver starts.
+    // B4: the wind sea's fetch is walked over the same height tree (SeaLayer::FetchAt).
+    if (sea && hgtCh >= 0) sea->SetHeightRead(&compositor, hgtCh);
     if (hgtCh >= 0 && !marsMode) {
         const double* bx = S.water.swe.box;
         const double lon0 = bx[0], lat0 = bx[1], lon1 = bx[2], lat1 = bx[3];

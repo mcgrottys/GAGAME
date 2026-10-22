@@ -26,7 +26,14 @@
 #include <functional>
 #include "sim/WaveScale.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ga {
@@ -61,7 +68,18 @@ public:
         m_fieldPlaced = true;
         m_lastHour = -1;
     }
+    // B4: the height tree the wind sea's fetch is walked over (the compositor's height channel); the walk
+    // runs on the Io lane (SeaLayer::FetchAt). A walk's answer: the fetch and the water's mean depth (m).
+    struct FetchMemo {
+        double fetchM = 0.0, depthM = -1.0;
+    };
+    void SetHeightRead(const Compositor* comp, int heightChannel) {
+        m_comp = comp;
+        m_hgtCh = heightChannel;
+    }
     const PartParam* FieldParts() const { return (m_grid && m_fieldPlaced) ? m_fieldParts : m_parts; }
+    // B4: the field's sea waits on its fetch's walk; a field is solved for a sea that is known.
+    bool FieldPending() const { return m_grid && m_fieldPlaced && m_fieldPending; }
     int FieldActive() const { return (m_grid && m_fieldPlaced) ? m_fieldActive : activeParts; }
     // The grid's forecast hour, handed once each time it moves (the frame loop moves the globe's
     // waves -- GlobeModel's Hs and wind, the scale field's and the far sea's -- to it).
@@ -272,12 +290,31 @@ private:
     std::vector<const SeaState*> m_sources;   // PHASE C2: m_sea first
     WaveScale m_scale;
     int PartsOf(const SeaState& src, double simUnix, bool storm, PartParam parts[4], bool log) const;
-    // One forecast hour's partitions by the one law (the storm where declared, the wind sea filled
-    // where the forecast has none); the caller assimilates its buoys.
-    int PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], bool log) const;
+    // One forecast hour's partitions by the one law (the storm where declared, the wind sea grown over
+    // `fetchM` in `depthM` where the forecast has none -- B4); the caller assimilates its buoys.
+    int PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], bool log, double fetchM,
+                    double depthM) const;
+    // B4: THE FETCH. From a place toward where the wind comes from, to the first ground above the live
+    // water (HeightTree::Fetch, the swell shadow's exact walk): its length (m), and the water's mean depth
+    // along it (m). The walk paints what it crosses, so it runs on the Io lane and is remembered by place,
+    // wind and water: -2 while it is out (no wind sea is raised before its fetch is known), -1 with no
+    // height tree (the open sea's limit).
+    double FetchAt(double latDeg, double lonDeg, double windFromDeg, double* depthM) const;
+    struct FetchShared {
+        std::mutex mx;
+        std::unordered_map<uint64_t, FetchMemo> memo;
+        std::unordered_set<uint64_t> asked;
+        std::atomic<uint32_t> landed{0};   // walks finished: the frame re-reads the seas that waited on one
+    };
+    std::shared_ptr<FetchShared> m_fetch = std::make_shared<FetchShared>();
+    uint32_t m_fetchLanded = 0;
+    bool m_fieldPending = false;   // the solved field's fetch is still out: its sea is not known yet
+    const Compositor* m_comp = nullptr;
+    int m_hgtCh = -1;
     // The grid's sea at a place (its nearest sea when it has none within reach), its buoys by their
     // own ratio where they stand; `hrOut` the forecast hour read.
-    int PartsAt(double latDeg, double lonDeg, double simUnix, PartParam parts[4], bool log, SeaHour* hrOut) const;
+    int PartsAt(double latDeg, double lonDeg, double simUnix, PartParam parts[4], bool log, SeaHour* hrOut,
+                bool* fetchPending = nullptr) const;
     double BuoyGainAt(double latDeg, double lonDeg, double simUnix, int hour, int* n) const;
     // The eye's sea's bucket: its forecast hour, its peak's period (5 % steps in log) and its peak's
     // direction (5 degrees, the exposure's own bucket). What the scale field cannot carry -- it carries Hs.

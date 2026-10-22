@@ -1,5 +1,8 @@
 #include "scene/SeaLayer.h"
 #include "core/Planet.h"
+#include "compose/HeightTree.h"
+#include "core/Lattice.h"
+#include "core/ThreadManager.h"
 
 #include "hal/GpuProfiler.h"
 
@@ -10,6 +13,7 @@
 #include "scene/FieldSet.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace ga {
@@ -116,7 +120,8 @@ int SeaLayer::PartsOf(const SeaState& src, double simUnix, bool storm, PartParam
     // declared storm replaces (data.seastate's), the storm. The synthesis takes data.seastate's; the
     // field (WaveScale) takes every source's Hs from the same function, so where data.seastate's own
     // box holds a texel its scale is 1 by construction.
-    int activeParts = PartsOfHour(src.Hour(src.HourIndex(simUnix)), storm, parts, log);
+    // A file's point carries no fetch here: its wind sea is the law's open-sea limit (B4 is the grid's).
+    int activeParts = PartsOfHour(src.Hour(src.HourIndex(simUnix)), storm, parts, log, -1.0, -1.0);
     // M8 BUOY ASSIMILATION (the user's call: the single-point measurements should STEER the model,
     // not just grade it). One scalar on every partition's energy BEFORE synthesis: the measured Hs
     // over the forecast's, clamped [1/gmax, gmax]; never under a storm; only fresh observations.
@@ -142,7 +147,8 @@ int SeaLayer::PartsOf(const SeaState& src, double simUnix, bool storm, PartParam
     return activeParts;
 }
 
-int SeaLayer::PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], bool log) const {
+int SeaLayer::PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], bool log, double fetchM,
+                          double depthM) const {
     int activeParts = 0;
     if (storm) {
             // Sandbox storm: the named swell carries 85% of the energy, a fresher wind sea 25%
@@ -162,24 +168,32 @@ int SeaLayer::PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], boo
             // normals, and the only sub-cascade roughness left is bandSig[3], which widens
             // the glint lobe and never moves a normal (priors 8: normals sell amplitude).
             // But the wind that raises those ripples is already sitting in the same file.
-            // So synthesise the fully-developed sea for it and let it ride the partition
-            // list like any other train -- the shapes, the spreading, the plot, the buoy
-            // assimilation and the GPU all pick it up unchanged. Capped at the forecast's
-            // own combined Hs: PM is the fetch-UNLIMITED answer and no coastal hour is that.
+            // So synthesise its sea and let it ride the partition list like any other train --
+            // the shapes, the spreading, the plot, the buoy assimilation and the GPU all pick it
+            // up unchanged. Capped at the forecast's own combined Hs.
+            // B4 (REVIEW 2026-10-21, Mark: "I see waves going south not into the inlet"): that sea
+            // was Pierson-Moskowitz, the fetch-UNLIMITED answer. At the Merrimack, 10-22 16z, an
+            // 8.5 m/s northerly raised 2.04 m at 6.7 s running south beside the grid's 2.10 m swell
+            // from the east -- the model's Hs 2.10 drawn as 2.97, the larger share a sea the coast
+            // to the north does not allow. Now it is grown over its fetch, in its depth (Young &
+            // Verhagen 1996, SeaState::WindSeaGrown), whose long-fetch deep-water limit is PM.
             bool hasWindSea = false;
             for (int i = 0; i < activeParts; ++i) hasWindSea |= parts[i].gamma > 0.0f;
-            double pmHs = 0.0, pmTp = 0.0;
+            double wsHs = 0.0, wsTp = 0.0;
+            const double fetch = fetchM >= 0.0 ? fetchM : 1e12;   // no place to march from: the open sea
             if (!hasWindSea && activeParts < 4 && windSeaFill > 0.0f &&
-                SeaState::WindSeaPm(hr.windMs, &pmHs, &pmTp)) {
-                pmHs *= windSeaFill;
-                if (hr.combinedHs > 0.02) pmHs = std::min(pmHs, hr.combinedHs);
-                if (pmHs > 0.02) {
+                SeaState::WindSeaGrown(hr.windMs, fetch, depthM, &wsHs, &wsTp)) {
+                wsHs *= windSeaFill;
+                if (hr.combinedHs > 0.02) wsHs = std::min(wsHs, hr.combinedHs);
+                if (wsHs > 0.02) {
                     parts[activeParts++] =
-                        SeaState::MakePartition(pmHs, pmTp, hr.windFromDeg, true);
-                    if (log) Log("[sea] f%03d has no wind-sea partition (wind %.1f m/s): filled with "
-                        "Pierson-Moskowitz Hs %.2f m Tp %.1f s (lambda %.1f m) -- cascades "
-                        "1-2 were exactly zero",
-                        static_cast<int>(hr.fh), hr.windMs, pmHs, pmTp, 1.56 * pmTp * pmTp);
+                        SeaState::MakePartition(wsHs, wsTp, hr.windFromDeg, true);
+                    if (log) Log("[sea] f%03d has no wind-sea partition (wind %.1f m/s from %.0f deg): grown over "
+                        "its fetch %s in %s of water (Young & Verhagen 1996): Hs %.2f m Tp %.1f s (lambda %.1f m)",
+                        static_cast<int>(hr.fh), hr.windMs, hr.windFromDeg,
+                        fetchM >= 0.0 ? (std::to_string(int(std::lround(fetchM))) + " m").c_str() : "unbounded",
+                        depthM > 0.0 ? (std::to_string(int(std::lround(depthM))) + " m").c_str() : "deep",
+                        wsHs, wsTp, 1.56 * wsTp * wsTp);
                 }
             }
         }
@@ -229,14 +243,23 @@ double SeaLayer::BuoyGainAt(double latDeg, double lonDeg, double simUnix, int ho
 }
 
 int SeaLayer::PartsAt(double latDeg, double lonDeg, double simUnix, PartParam parts[4], bool log,
-                      SeaHour* hrOut) const {
+                      SeaHour* hrOut, bool* fetchPending) const {
+    if (fetchPending) *fetchPending = false;
     if (!m_grid) return -1;
     const int hour = m_grid->HourIndex(simUnix);
     SeaHour hr;
     double la = latDeg, lo = lonDeg;
     if (!m_grid->HourAt(la, lo, hour, hr) && !(m_grid->NearestSea(la, lo) && m_grid->HourAt(la, lo, hour, hr))) return -1;
     if (hrOut) *hrOut = hr;
-    int n = PartsOfHour(hr, StormOn(), parts, log);
+    double depth = -1.0, fetch = -1.0;
+    bool hasWindSea = false;
+    for (const SeaPartition& p : hr.parts) hasWindSea |= p.windsea;
+    if (!hasWindSea && hr.windMs > 0.9) fetch = FetchAt(la, lo, hr.windFromDeg, &depth);
+    if (fetch == -2.0) {   // its walk is out: no wind sea raised before its fetch is known
+        if (fetchPending) *fetchPending = true;
+        fetch = 0.0;
+    }
+    int n = PartsOfHour(hr, StormOn(), parts, log, fetch, depth);
     if (!StormOn() && n > 0) {
         int nb = 0;
         const double g = BuoyGainAt(la, lo, simUnix, hour, &nb);
@@ -246,11 +269,142 @@ int SeaLayer::PartsAt(double latDeg, double lonDeg, double simUnix, PartParam pa
     return n;
 }
 
+namespace {
+// B4: THE WALK, on a loader thread. HeightTree::Fetch is the swell shadow's exact walk (every texel the
+// great circle crosses; --tool fetch-probe holds it against a brute march) at one grain, so the ray goes
+// in three legs, each ten times the last at ten times the grain: 20 km at 10 m (a barrier beach, a jetty),
+// on to 200 km at 100 m, on to 2,000 km at 1 km, where the growth law is at its open-sea limit for any
+// wind the grid carries. One great circle throughout: each leg starts where the last ended, in the
+// direction the circle has there. GROUND UNDER THE START IS NOT A SHORE: an eye over a marsh or a beach
+// reads the water upwind of it, from the first water the ray meets within 20 km. The depth is the water's
+// mean along the fetch, the tree read at 24 points on it.
+SeaLayer::FetchMemo WalkFetch(HeightTree& tree, double latDeg, double lonDeg, double windFromDeg, float level) {
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const double r = Lattice::kMercCirc / (2.0 * 3.14159265358979323846);   // the walk's own sphere
+    const double la = latDeg * kD2R, lo = lonDeg * kD2R, th = windFromDeg * kD2R;
+    const double cl = std::cos(la), sl = std::sin(la), co = std::cos(lo), so = std::sin(lo);
+    double p[3] = {cl * co, sl, cl * so}, t[3];
+    {
+        const double e0[3] = {-so, 0.0, co}, n0[3] = {-sl * co, cl, -sl * so};
+        for (int k = 0; k < 3; ++k) t[k] = std::sin(th) * e0[k] + std::cos(th) * n0[k];
+    }
+    const auto along = [&](double a, double q[3], double u[3]) {   // the circle's point and direction at arc a
+        for (int k = 0; k < 3; ++k) {
+            q[k] = p[k] * std::cos(a) + t[k] * std::sin(a);
+            if (u) u[k] = -p[k] * std::sin(a) + t[k] * std::cos(a);
+        }
+    };
+    const auto latLon = [](const double q[3], double& qla, double& qlo) {
+        qla = std::asin((std::clamp)(q[1], -1.0, 1.0));
+        qlo = std::atan2(q[2], q[0]);
+    };
+    SeaLayer::FetchMemo m;
+    double skipped = 0.0;
+    if (tree.Sample(la, lo, 10.0) > level) {
+        bool wet = false;
+        for (double d = 10.0; d < 2.0e4 && !wet; d *= 1.25) {
+            double q[3], u[3], qla, qlo;
+            along(d / r, q, u);
+            latLon(q, qla, qlo);
+            if (tree.Sample(qla, qlo, (std::max)(10.0, 0.25 * d)) <= level) {
+                for (int k = 0; k < 3; ++k) { p[k] = q[k]; t[k] = u[k]; }
+                skipped = d;
+                wet = true;
+            }
+        }
+        if (!wet) {
+            Log("[sea] fetch from %.4f, %.4f toward the wind's %.0f deg: land for 20 km -- no fetch", latDeg, lonDeg,
+                windFromDeg);
+            return m;
+        }
+    }
+    const double ps[3] = {p[0], p[1], p[2]}, ts[3] = {t[0], t[1], t[2]};   // where the water begins
+    const double legs[3][2] = {{2.0e4, 10.0}, {1.8e5, 100.0}, {1.8e6, 1000.0}};
+    double fetch = 0.0;
+    for (const auto& leg : legs) {
+        double pla, plo;
+        latLon(p, pla, plo);
+        const double pc = std::cos(pla), pn = std::sin(pla), oc = std::cos(plo), os = std::sin(plo);
+        const double e[3] = {-os, 0.0, oc}, n[3] = {-pn * oc, pc, -pn * os};
+        const double tE = t[0] * e[0] + t[1] * e[1] + t[2] * e[2], tN = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+        const double f = tree.Fetch(pla, plo, tE, tN, leg[0], leg[1], level);
+        fetch += f;
+        if (f < leg[0]) break;   // the shore
+        double q[3], u[3];
+        along(leg[0] / r, q, u);
+        for (int k = 0; k < 3; ++k) { p[k] = q[k]; t[k] = u[k]; }
+    }
+    m.fetchM = fetch;
+    if (fetch > 0.0) {
+        double sumD = 0.0;
+        int wet = 0;
+        for (int i = 0; i < 24; ++i) {
+            const double a = (i + 0.5) / 24.0 * fetch / r;
+            double q[3], qla, qlo;
+            for (int k = 0; k < 3; ++k) q[k] = ps[k] * std::cos(a) + ts[k] * std::sin(a);
+            latLon(q, qla, qlo);
+            const float h = tree.Sample(qla, qlo, (std::max)(10.0, fetch / 24.0));
+            if (h < level) {
+                sumD += double(level) - double(h);
+                ++wet;
+            }
+        }
+        m.depthM = wet > 0 ? sumD / wet : -1.0;
+    }
+    Log("[sea] fetch from %.4f, %.4f toward the wind's %.0f deg: %.2f km of water%s, mean depth %.1f m (%.0f ms)",
+        latDeg, lonDeg, windFromDeg, fetch / 1000.0,
+        skipped > 0.0 ? (" past " + std::to_string(int(std::lround(skipped))) + " m of ground").c_str() : "",
+        m.depthM, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    return m;
+}
+}  // namespace
+
+double SeaLayer::FetchAt(double latDeg, double lonDeg, double windFromDeg, double* depthM) const {
+    if (depthM) *depthM = -1.0;
+    HeightTree* tree = (m_comp && m_hgtCh >= 0) ? m_comp->HeightTreeOf(m_hgtCh) : nullptr;
+    if (!tree) return -1.0;   // no height to walk over: the open sea's limit
+    // The memo: the place to 0.005 deg (~500 m), the wind to 5 deg, the water to 0.25 m.
+    const int64_t qa = std::llround(latDeg / 0.005), qo = std::llround(lonDeg / 0.005);
+    const int64_t qd = ((std::llround(windFromDeg / 5.0) % 72) + 72) % 72, ql = std::llround(m_seaLevel / 0.25);
+    const uint64_t key = (uint64_t(qa & 0xFFFFF) << 44) | (uint64_t(qo & 0x1FFFFF) << 23) | (uint64_t(qd) << 16) |
+                         uint64_t(ql & 0xFFFF);
+    {
+        std::lock_guard<std::mutex> lk(m_fetch->mx);
+        if (auto it = m_fetch->memo.find(key); it != m_fetch->memo.end()) {
+            if (depthM) *depthM = it->second.depthM;
+            return it->second.fetchM;
+        }
+        if (!m_fetch->asked.insert(key).second) return -2.0;   // out already
+        if (m_fetch->memo.size() > 4096) m_fetch->memo.clear();   // a long flight's places: start again
+    }
+    const float level = m_seaLevel;
+    const double la = double(qa) * 0.005, lo = double(qo) * 0.005, from = double(qd) * 5.0;   // the bucket's own
+    Threads().Submit(Lane::Io, "sea.fetch", [shared = m_fetch, tree, la, lo, from, level, key] {
+        const FetchMemo m = WalkFetch(*tree, la, lo, from, level);
+        {
+            std::lock_guard<std::mutex> lk(shared->mx);
+            shared->memo[key] = m;
+            shared->asked.erase(key);
+        }
+        shared->landed.fetch_add(1, std::memory_order_acq_rel);
+    });
+    return -2.0;
+}
+
 int64_t SeaLayer::EyeKey(double latDeg, double lonDeg, int hour) const {
     SeaHour hr;
     double la = latDeg, lo = lonDeg;
     if (!m_grid || (!m_grid->HourAt(la, lo, hour, hr) && !(m_grid->NearestSea(la, lo) && m_grid->HourAt(la, lo, hour, hr)))) {
         return int64_t(hour);
+    }
+    // B4: where the forecast has no wind sea, the eye's grown one moves with its fetch -- 25 % steps in log.
+    int64_t fb = 0;
+    bool hasWindSea = false;
+    for (const SeaPartition& p : hr.parts) hasWindSea |= p.windsea;
+    if (!hasWindSea && hr.windMs > 0.9) {
+        const double f = FetchAt(la, lo, hr.windFromDeg, nullptr);
+        fb = f == -2.0 ? 0xFF : f > 0.0 ? 1 + int64_t(std::floor(std::log((std::max)(f, 20.0) / 20.0) / std::log(1.25))) : 0;
     }
     // The peak: the most energetic partition (M7j's choice), the combined sea where there is none.
     double hs = -1.0, tp = hr.combinedTp, from = hr.combinedFromDeg;
@@ -263,11 +417,12 @@ int64_t SeaLayer::EyeKey(double latDeg, double lonDeg, int hour) const {
     }
     const int64_t tb = int64_t(std::floor(std::log((std::max)(tp, 0.5)) / std::log(1.05)));
     const int64_t db = int64_t(std::floor(from / 5.0)) % 72;
-    return int64_t(hour) | (tb & 0xFFFF) << 16 | (db & 0xFF) << 32;
+    return int64_t(hour) | (tb & 0xFFFF) << 16 | (db & 0xFF) << 32 | (fb & 0xFF) << 40;
 }
 
 void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double camZ) {
     if (!m_sea || !m_sea->Ready()) return;
+    m_seaLevel = static_cast<float>(seaLevelM);   // first: the fetch's walk (B4) ends at ground above it
 
     // THE SYNTHESIS'S SEA (2026-10-21): with the globe's grid, the sea at the eye's own ground point,
     // made again when the forecast hour moves or the eye's sea leaves its bucket (EyeKey: the peak's
@@ -280,7 +435,11 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         if (m_surface) m_surface->flat.LatLonOf(camX, camZ, eLat, eLon);
         const int64_t key = EyeKey(eLat, eLon, hour);
         newHour = hour != m_lastHour;
-        respectrum = newHour || key != m_eyeKey;
+        // B4: a fetch's walk landed while the field's sea waited on one -- read the field's sea again.
+        const uint32_t landed = m_fetch->landed.load(std::memory_order_acquire);
+        const bool fieldAgain = m_fieldPending && landed != m_fetchLanded;
+        m_fetchLanded = landed;
+        respectrum = newHour || key != m_eyeKey || fieldAgain;
         m_eyeKey = key;
     } else {
         hour = m_sea->HourIndex(simUnix);
@@ -298,8 +457,9 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         m_fromGrid = nGrid >= 0;
         activeParts = m_fromGrid ? nGrid : PartsOf(*m_sea, simUnix, StormOn(), parts, logIt);
         if (m_grid && newHour) m_gridHourNew = hour;
-        if (m_grid && m_fieldPlaced && newHour) {
-            m_fieldActive = (std::max)(0, PartsAt(m_fieldLat, m_fieldLon, simUnix, m_fieldParts, logIt, nullptr));
+        if (m_grid && m_fieldPlaced && (newHour || m_fieldPending)) {
+            m_fieldActive = (std::max)(0, PartsAt(m_fieldLat, m_fieldLon, simUnix, m_fieldParts, logIt, nullptr,
+                                                  &m_fieldPending));
         }
         const double cycle = m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix();
         const uint32_t seed = static_cast<uint32_t>(cycle / 3600.0) * 2654435761u;
@@ -531,8 +691,6 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     }
 
     m_tSec = static_cast<float>(simUnix - (m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix()));
-
-    m_seaLevel = static_cast<float>(seaLevelM);
 
     // Representative wavenumber per cascade band (geometric mid of the same 60 m / 12 m cuts
     // OceanFft uses). The SHADER turns these into phase speeds at the local depth -- in deep

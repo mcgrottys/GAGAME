@@ -226,6 +226,33 @@ bool SeaState::WindSeaPm(double wind10Ms, double* hsOut, double* tpOut) {
     return true;
 }
 
+// B4: GROWN BY ITS FETCH, IN ITS DEPTH (Young & Verhagen 1996, Coastal Engineering 29, eq. 11a/11b as
+// restated by the Journal of Coastal Research's estuary studies), every quantity on U10:
+//
+//     E^  = 0.00364 [ tanh(A1) tanh(0.00313 F^^0.57  / tanh(A1)) ]^1.74     A1 = 0.493 h^^0.75
+//     fp^ = 0.133   [ tanh(A2) tanh(0.0005215 F^^0.73 / tanh(A2)) ]^-0.37   A2 = 0.331 h^^1.01
+//
+// E^ = g^2 E / U^4, fp^ = fp U / g, F^ = g F / U^2, h^ = g d / U^2. Its limits are the physics: a long
+// fetch in deep water is Pierson-Moskowitz (E^ 0.00364: Hs = 0.241 U^2 / g; fp^ 0.133), a short one
+// JONSWAP's growth (E^ ~ 1.6e-7 F^), and shallow water caps both by its depth. Hs = 4 sqrt(E).
+bool SeaState::WindSeaGrown(double wind10Ms, double fetchM, double depthM, double* hsOut, double* tpOut) {
+    if (!(wind10Ms > 0.9) || !(fetchM > 0.0)) return false;
+    const double g = PlanetGWave(), u2 = wind10Ms * wind10Ms;
+    const double fHat = g * fetchM / u2;
+    const double hHat = depthM > 0.0 ? g * depthM / u2 : 1e9;   // deep: both tanh(A) are 1
+    const double a1 = std::tanh(0.493 * std::pow(hHat, 0.75));
+    const double a2 = std::tanh(0.331 * std::pow(hHat, 1.01));
+    if (!(a1 > 0.0) || !(a2 > 0.0)) return false;
+    const double eHat = 0.00364 * std::pow(a1 * std::tanh(0.00313 * std::pow(fHat, 0.57) / a1), 1.74);
+    const double nuHat = 0.133 * std::pow(a2 * std::tanh(0.0005215 * std::pow(fHat, 0.73) / a2), -0.37);
+    const double energy = eHat * u2 * u2 / (g * g);
+    const double fp = nuHat * g / wind10Ms;
+    if (!(energy > 0.0) || !(fp > 1e-4)) return false;
+    if (hsOut) *hsOut = 4.0 * std::sqrt(energy);
+    if (tpOut) *tpOut = 1.0 / fp;
+    return true;
+}
+
 int SeaState::BuildParams(int hourIdx, PartParam out[4]) const { return BuildParamsOf(m_hours[hourIdx], out); }
 
 int SeaState::BuildParamsOf(const SeaHour& h, PartParam out[4]) {
