@@ -85,6 +85,10 @@ int RunHeightTreeProbe(Compositor& comp, int ch, double anchorLonDeg, double anc
             snprintf(b, sizeof(b), "[height-tree] %4.0f m (%.6f, %.6f): stack %+8.3f |", f * lenM, la / kD2R, lo / kD2R,
                      comp.SampleHeightStack(ch, la, lo, g));
             row = b;
+            if (HeightTree* t = comp.HeightTreeOf(ch)) {   // the tree the GPU reads, at the same grain
+                snprintf(b, sizeof(b), " tree %+8.3f (level %u) |", t->Sample(la, lo, g), t->LevelFor(g));
+                row += b;
+            }
             for (HeightSource* h : chan.height) {
                 float m = 0.0f;
                 const float w = h ? h->Sample(la, lo, g, m) : 0.0f;

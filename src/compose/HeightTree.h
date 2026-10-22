@@ -106,8 +106,11 @@ public:
 
     // THE FRAME'S READ: never waits on a paint. The answer is the finest level HELD at or coarser than
     // the one `groundResM` asks for -- the GPU's own rule, the finest resident mip -- and a level not
-    // held is asked of a loader thread (Lane::Io) and answered next time. The coarsest level is read
-    // in place when it is not held (one tile a face, once a run), so an answer always exists.
+    // held is asked of a loader thread (Lane::Io) and answered next time. Where no level is held, not
+    // even a face's coarsest, the answer is the sea's level (0 m) and provisional: that tile is asked
+    // as every other is. (Until 2026-10-21 the coarsest level was read in place, "one tile a face, once
+    // a run": cold, that tile is the fold of the whole face, and Mark's eye, spinning the globe from
+    // 7,300 km into a face no run had read, held the frame thread about two minutes while it painted.)
     // MEASURED (2026-10-14, flood rail on the composite Merrimack): the water bank's land test and
     // corners read through Sample() on the frame thread waited 69.8 s on 1,024 cold tiles (68 ms a
     // tile, a coarse tile is the fold of its children), 55 ms a frame. Landed() counts the loads
@@ -126,13 +129,12 @@ public:
             const double dmax = double(dim) - 1.0;
             const auto clampI = [&](double t) { return uint32_t((std::min)((std::max)(t, 0.0), dmax)); };
             const uint32_t xs[2] = {clampI(fx0), clampI(fx0 + 1.0)}, ys[2] = {clampI(fy0), clampI(fy0 + 1.0)};
-            const bool last = mip + 1 == m_mips;
             float v[4];
             bool held = true;
             for (int k = 0; k < 4 && held; ++k) {
                 const uint32_t ix = xs[k & 1], iy = ys[k >> 1];
                 const TileRequest r{face, mip, ix / m_lat.texW, iy / m_lat.texH};
-                const Cached* t = last ? &TileOf(r) : HeldOf(r);
+                const Cached* t = HeldOf(r);
                 if (!t) {
                     Request(r);
                     held = false;
@@ -148,7 +150,8 @@ public:
                              (double(v[2]) * (1.0 - frx) + double(v[3]) * frx) * fry);
             }
         }
-        return 0.0f;   // unreachable: the coarsest level is read in place
+        if (provisional) *provisional = true;   // nothing held here yet: the sea's level, asked again
+        return 0.0f;
     }
     uint64_t Landed() const { return m_landed.load(std::memory_order_acquire); }
 

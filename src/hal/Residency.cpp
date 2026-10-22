@@ -68,7 +68,6 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         if (m_quit.load()) {
             std::lock_guard<std::mutex> lk(m_mx);
             --m_inFlight;
-            --m_tenants[job->tenant].inFlight;
             m_drainCv.notify_all();
             return;
         }
@@ -96,6 +95,9 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         g_loadTenant = job->tenant;   // whom a source that answers "not now" tells when it can
         g_loadReq = job->req;
         g_tileStop = &m_quit;   // a Shutdown mid-load: the tree stops painting and the job leaves
+        // THE LANE'S PAINT PERMIT (core/TileAddress.h): taken at the load's first paint, given back here.
+        PaintPermit permit{&m_painting[size_t(job->tenant)], m_paintShare.load(std::memory_order_relaxed)};
+        g_paintPermit = &permit;
         {
             std::lock_guard<std::mutex> lkRun(g_runningMx);
             g_running[job.get()] = {job->tenant, job->req, t0};
@@ -106,6 +108,8 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
             std::lock_guard<std::mutex> lkRun(g_runningMx);
             g_running.erase(job.get());
         }
+        g_paintPermit = nullptr;
+        if (permit.held) m_painting[size_t(job->tenant)].fetch_sub(1, std::memory_order_relaxed);
         g_tileStop = nullptr;
         g_loadTenant = -1;
         const bool whole = !g_tileIncomplete;
@@ -126,7 +130,9 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
                 if (us < 4000) { ++tn.loadsRead; tn.readUs += us; }
                 else           { ++tn.loadsPaint; tn.paintUs += us; }
                 tn.queueUs += qus;
-                if (ok && magnified) ++tn.loadsMagnified;
+                tn.painted = tn.painted || permit.held || permit.refused;
+                if (permit.refused) ++tn.paintWaits;
+                else if (ok && magnified) ++tn.loadsMagnified;
                 else if (!ok || !whole) ++tn.loadsFailed;
             }
             // M7w: a failed load must NEVER fabricate a zero tile -- mapping zeros makes the
@@ -134,7 +140,12 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
             // step-11 MISMATCH). Retry a few times; then leave the tile honestly UNMAPPED so
             // consumers fall back to the coarser REAL mip (Tier-2 nulls never reach them,
             // because the claim is only ever written on a true map).
-            if (job->refresh && (!ok || !whole || magnified)) {
+            if (permit.refused) {
+                // THE LANE'S PAINT PERMIT: "not now" was its tenant's paints', not the tile's. Seen
+                // again, no retry counted; the loader asks it once its tenant has a permit.
+                job->state = TileState::Seen;
+                job->paintWait = true;
+            } else if (job->refresh && (!ok || !whole || magnified)) {
                 // THE VERSION LAW: a replacement that is not whole, magnified or failed is a refusal
                 // of this attempt -- the held tile keeps its bytes; no mark on the address, no retry
                 // until the tree changes for it again.
@@ -182,7 +193,6 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
                 m_failedKeys.push_back({job->tenant, job->req});
             }
             --m_inFlight;
-            --m_tenants[job->tenant].inFlight;
         }
         m_drainCv.notify_all();
     }
@@ -372,6 +382,10 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
 
     const int id = static_cast<int>(m_tenants.size());
     m_tenants.push_back(std::move(t));
+    if (m_tenants.size() > kMaxPaintTenants) {   // the paint permits are counted per tenant (m_painting)
+        Log("[residency] FATAL: tenant %d of at most %zu: raise kMaxPaintTenants", id, kMaxPaintTenants);
+        std::abort();
+    }
 
     // M7w: THE CLAIM IS MADE TRUE AT BIRTH. The residency map was constructed already
     // claiming "coarsest mip resident" while the seed tiles streamed asynchronously --

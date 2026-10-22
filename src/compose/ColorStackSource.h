@@ -76,7 +76,8 @@ public:
     bool MayCover(double lon0, double lat0, double lon1, double lat1) const override {
         if (!m_src) return false;
         const SourceInfo& si = m_src->Info();
-        return !(si.lon1 < lon0 || si.lon0 > lon1 || si.lat1 < lat0 || si.lat0 > lat1);
+        return !(si.lon1 < lon0 || si.lon0 > lon1 || si.lat1 < lat0 || si.lat0 > lat1) &&
+               m_src->MayCover(lon0, lat0, lon1, lat1);
     }
     bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override {
         if (!m_src) return false;

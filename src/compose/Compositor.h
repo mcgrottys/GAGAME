@@ -110,6 +110,9 @@ public:
     virtual int FinestMip(const Lattice& l, double, double, double, double) const { return OwnMip(l); }
     // Its levels are its own (DomainSource::LevelsOwn): a coarser tile is not the mean of its four.
     virtual bool LevelsOwn() const { return false; }
+    // Might it have anything in the box (degrees; DomainSource::MayCover)? A set of files, only where
+    // a file is: its Info box spans the gaps between them.
+    virtual bool MayCover(double, double, double, double) const { return true; }
     // A source that fetches: true, with the distinct source tiles it refused this run because
     // its fetch budget was spent -- the fetches it WOULD have made. False for every source that
     // never fetches, which is all of them but one.
@@ -131,6 +134,8 @@ public:
     // layers declare none, so their trees keep the key they were painted under.
     virtual int OwnMip(const Lattice&) const { return -1; }
     virtual bool Footprint(double&, double&, double&, double&) const { return false; }
+    // Might it have anything in the box (degrees)? As ColorSource::MayCover.
+    virtual bool MayCover(double, double, double, double) const { return true; }
     // THE LAW A LAYER PAINTS BY, when it is more than its bytes (2026-10-18): empty for a layer whose
     // name is its identity; a layer whose weight depends on OTHER layers names them here (the hand
     // edits yield to the finer witnesses), so the tree's cached tiles of it follow those layers too.

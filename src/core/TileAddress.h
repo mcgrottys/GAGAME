@@ -42,10 +42,33 @@ inline thread_local bool g_tileHeldOnly = false;
 // job -- leaves at once instead of holding the loader's Shutdown / Close (the helm bench's exit sat
 // there). What the load already wrote stands: a tile on disk is whole, the next run resumes there.
 inline thread_local const std::atomic<bool>* g_tileStop = nullptr;
-// May a tree paint now? Not under the boot's question, not for a loader that is leaving.
-inline bool TreeMayPaint() {
-    return !g_tileHeldOnly && !(g_tileStop && g_tileStop->load(std::memory_order_relaxed));
+// THE LANE'S PAINT PERMIT (2026-10-21): set by the residency manager around its provider call
+// (ResidencyManager::RunLoad). A load that paints, composes or folds holds one of its tenant's
+// permits from its first such step to its end; a tenant has `share` of them -- the Io lane's
+// threads over the tenants painting and one more -- so a tenant whose tiles cost minutes cold
+// (the swell's exposure) never holds the lane, and a load that only reads (milliseconds) needs
+// none. A load refused one answers "not now", and its tile waits in the order for a permit.
+struct PaintPermit {
+    std::atomic<int>* painting = nullptr;   // the tenant's loads holding a permit now
+    int share = 1;
+    bool held = false, refused = false;
+    bool Take() {
+        if (held) return true;
+        if (painting->fetch_add(1, std::memory_order_relaxed) < share) return held = true;
+        painting->fetch_sub(1, std::memory_order_relaxed);
+        refused = true;
+        return false;
+    }
+};
+inline thread_local PaintPermit* g_paintPermit = nullptr;
+// Is the tree to answer only what it holds? Under the boot's question, and for a loader that is leaving.
+inline bool TreeStopped() {
+    return g_tileHeldOnly || (g_tileStop && g_tileStop->load(std::memory_order_relaxed));
 }
+// May a tree paint now? Not when stopped; under a loader's permit, only with one taken.
+inline bool TreeMayPaint() { return !TreeStopped() && (!g_paintPermit || g_paintPermit->Take()); }
+// Was this load refused a permit? Its "not now" is the permit's, not the tile's.
+inline bool TreePaintRefused() { return g_paintPermit && g_paintPermit->refused; }
 
 // A provider fills one 64KB tile's worth of LINEAR data for a texture tenant. Runs on a worker
 // thread; must be self-contained and cache-first (HTTP providers throttle themselves and honor

@@ -29,7 +29,9 @@
 #include <fstream>
 #include <iterator>
 #include <random>
+#include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace ga {
@@ -600,6 +602,35 @@ public:
         m = 0.0f;
         return 1.0f;
     }
+};
+
+// THE ROW PROBE (2026-10-21): a scalar source 0.04 degrees about a point, its own level fixed -- the
+// least a pass can be asked to reach at a place of the test's choosing.
+class RowProbe : public DomainSource {
+public:
+    RowProbe(double latDeg, double lonDeg, int own)
+        : m_lat(latDeg), m_lon(lonDeg), m_own(own), m_unit(UnitSpec::Parse("m")) {}
+    const char* Name() const override { return "rastertest.rowprobe"; }
+    SourceDomain Domain() const override { return SourceDomain::Raster; }
+    uint8_t GradeSig() const override { return 1u; }
+    uint32_t Channels() const override { return 1; }
+    const UnitSpec& Unit() const override { return m_unit; }
+    int OwnMip(const Lattice&) const override { return m_own; }
+    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override {
+        lon0 = m_lon - 0.04; lat0 = m_lat - 0.04; lon1 = m_lon + 0.04; lat1 = m_lat + 0.04;
+        return true;
+    }
+    bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
+        if (std::abs(q.lat - m_lat) > 0.04 || std::abs(q.lon - m_lon) > 0.04) return false;
+        out.c[0] = 7.0f;
+        out.weight = 1.0f;
+        return true;
+    }
+
+private:
+    double m_lat, m_lon;
+    int m_own;
+    UnitSpec m_unit;
 };
 
 }  // namespace
@@ -1527,6 +1558,37 @@ bool RunRasterFileSelfTest() {
             if (k == 2) {   // the cube: the own mip alone, as the boot's pass takes it
                 Check(om == 0 && (std::max)(a0, b0) > 2.0, "the own mip on %s: %d, its texel %.1f x %.1f m, "
                       "coarser than the grain, so the level is the area mean", names[k], om, a0, b0);
+                // THE PASS REACHES EVERY ROW (2026-10-21): a 256 x 128 tile makes a face twice as many
+                // rows as columns, and the pass bounded the rows by the columns' count and began from
+                // the top level's upper tile: no height's pass reached the lower half of a face. A
+                // source a few kilometres across at the centre of a tile in a face's lower half: the
+                // pass paints that tile. And THE PLANT: the hill's tree on the 128 x 128 cube, a frame
+                // whose tile is not a FloatW tile (TileTree::Fits: the boot painted the heights there,
+                // into the folder the 256 x 128 reads share -- rectangles of another place's ground),
+                // is refused, and writes nothing.
+                constexpr uint32_t kRowMip = 0;   // 610 m texels: the probe spans many (the compositor's rule)
+                TileRequest low{0, kRowMip, 0, 0};
+                for (uint32_t f = 0; f < 6 && low.y == 0; ++f) {   // a face's first tile in its lower half
+                    low = TileRequest{f, kRowMip, 0, (L.faceDim >> kRowMip) / L.texW};
+                }
+                double cl = 0.0, co = 0.0;
+                L.Texel(low, L.texW / 2, L.texH / 2, cl, co);
+                RowProbe probe(cl / kD2R, co / kD2R, kRowMip);
+                TileTree tr(&probe, TileTree::Fmt::FloatW, nullptr, trees + "/row_probe");
+                const IngestStats sr = Ingest(tr, L);
+                std::vector<uint8_t> lowBytes;
+                const bool painted =
+                    tree_detail::ReadTile(tr.Folder() + "\\" + tg + "\\f" + std::to_string(low.face) + "_m" +
+                                              std::to_string(low.mip) + "_x0_y" + std::to_string(low.y) + ".bin",
+                                          lowBytes, tr.TileBytes());
+                TileTree tp(&layer, TileTree::Fmt::FloatW, nullptr, trees + "/hill_cube_square");
+                const IngestStats sp = Ingest(tp, Lattice::Cube(Lattice::kFaceDim, 128, 128));
+                Check(sr.own == int(kRowMip) && painted && sp.own < 0 && sp.tiles == 0 &&
+                          TilesIn(tp.Folder() + "\\" + tg).empty(),
+                      "the pass on %s reaches a face's lower half: f%u m%u (0,%u) at %.2f, %.2f %s (own mip %d, %u tiles on %u levels); the "
+                      "PLANT, the hill on the 128 x 128 cube: refused, %u tiles",
+                      names[k], low.face, low.mip, low.y, cl / kD2R, co / kD2R, painted ? "painted" : "NOT PAINTED",
+                      sr.own, sr.tiles, sr.levels, sp.tiles);
                 continue;
             }
             TileTree ta(&layer, TileTree::Fmt::FloatW, nullptr, trees + "/hill_fine_" + std::to_string(k));

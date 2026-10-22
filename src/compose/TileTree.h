@@ -642,6 +642,22 @@ public:
     std::function<void(const std::string& tag, const TileRequest& r)> onChanged;
     Fmt Format() const { return m_fmt; }
     size_t TileBytes() const { return m_fmt == Fmt::FloatW ? 262144u : 65536u; }
+    // A FLOAT ROOT's children answer on its lattice twice as wide a tile (KidFrame): the frame a
+    // FloatW leaf under a Float root is painted, folded and ingested in.
+    static ColorFrame FloatKidFrame(ColorFrame f) {
+        f.texW *= 2;
+        return f;
+    }
+    // Does a tile of `f` fill this tree's tile exactly? A cube's tag names its face and not its tile
+    // (Lattice::Tag: "cube16k" for 128 x 128 and 256 x 128 alike), so two frames of one cube share a
+    // folder, and a tile painted in the one is read in the other: 2026-10-21, the boot's pass painted
+    // the FloatW heights on the 128 x 128 cube, and the Float root read those bytes as its children's
+    // 256 x 128 tiles -- another place's ground in half the rows, and none in the rest: rectangles of
+    // sunken land over the ETOPO 15" files, seen only from the cube's altitudes.
+    bool Fits(const ColorFrame& f) const {
+        const size_t texel = m_fmt == Fmt::FloatW ? 8u : m_fmt == Fmt::Half ? 2u : 4u;
+        return size_t(f.texW) * f.texH * texel == TileBytes();
+    }
     // A root the GPU reads as it is: composed at its own mip, never folded or referenced.
     bool GpuRoot() const { return m_fmt == Fmt::Half || m_fmt == Fmt::Float; }
     const char* Name() const { return m_node->Name(); }
@@ -794,7 +810,7 @@ public:
                 return true;
             }
             const Status st = Tile(frame, tag, r, out, loc);
-            if (st == Status::Transient && !TreeMayPaint()) return false;   // not now: a later load
+            if (st == Status::Transient && (TreeStopped() || TreePaintRefused())) return false;   // not now: a later load
             if (st != Status::Content) {
                 out.assign(65536, 0);
                 if (loc) *loc = TileLoc{};
@@ -1030,23 +1046,12 @@ private:
     }
 
     // The SAME membership test the incumbent uses -- a declared footprint must span ~2 texels of
-    // this tile to be in its subset; an undeclared one is in where it may cover.
-    bool KidIn(size_t i, const Compositor::TileBox& box) const {
-        constexpr double kR2D = 180.0 / 3.14159265358979;
-        double fl0, fb0, fl1, fb1;
-        return m_kids[i]->m_node->Footprint(fl0, fb0, fl1, fb1)
-                   ? Compositor::Touches(fl0, fb0, fl1, fb1, box)
-                   : m_kids[i]->m_node->MayCover(box.lonMin * kR2D, box.latMin * kR2D,
-                                                 box.lonMax * kR2D, box.latMax * kR2D);
-    }
+    // this tile to be in its subset -- and the child's own: in only where it may cover (Touching).
+    bool KidIn(size_t i, const Compositor::TileBox& box) const { return m_kids[i]->Touching(box); }
     // Which children can touch this tile, and what each holds. False if any is still Absent.
     // A FLOAT ROOT's children answer in their own 256 x 128 tiles: the same lattice twice as wide a
     // tile, asked at x / 2. Every other node asks its children what it was asked.
-    ColorFrame KidFrame(const ColorFrame& f) const {
-        ColorFrame k = f;
-        if (m_fmt == Fmt::Float) k.texW *= 2;
-        return k;
-    }
+    ColorFrame KidFrame(const ColorFrame& f) const { return m_fmt == Fmt::Float ? FloatKidFrame(f) : f; }
     TileRequest KidReq(const TileRequest& r) const {
         return m_fmt == Fmt::Float ? TileRequest{r.face, r.mip, r.x / 2, r.y} : r;
     }
@@ -1307,10 +1312,13 @@ private:
         return Status::Content;
     }
     // The compositor's membership rule (Compositor::Touches) against the node's footprint; a node
-    // that declares none touches every tile.
+    // that declares none touches every tile. And where its footprint spans gaps (a set of files),
+    // only where it may cover (DomainSource::MayCover).
     bool Touching(const Compositor::TileBox& b) const {
+        constexpr double kR2D = 180.0 / 3.14159265358979;
         double l0, b0, l1, b1;
-        return !m_node->Footprint(l0, b0, l1, b1) || Compositor::Touches(l0, b0, l1, b1, b);
+        return (!m_node->Footprint(l0, b0, l1, b1) || Compositor::Touches(l0, b0, l1, b1, b)) &&
+               m_node->MayCover(b.lonMin * kR2D, b.latMin * kR2D, b.lonMax * kR2D, b.latMax * kR2D);
     }
 
     // ---- M9bb: THE PYRAMID, IN THE COMPOSITOR. A leaf's freshly painted tile is folded into
