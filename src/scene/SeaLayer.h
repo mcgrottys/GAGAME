@@ -19,13 +19,21 @@
 #include "scene/Layer.h"
 #include "sim/CurrentModel.h"
 #include "sim/OceanCpu.h"
+#include "sim/SeaGrid.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 
 #include <functional>
 #include "sim/WaveScale.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ga {
@@ -43,6 +51,44 @@ public:
     void AddSource(const SeaState* s) { m_sources.push_back(s); }
     const std::vector<const SeaState*>& Sources() const { return m_sources; }
     const WaveScale& Scale() const { return m_scale; }
+    // THE GLOBE'S SEA STATE (sim/SeaGrid.h, 2026-10-21). With a grid the synthesis is the sea at the
+    // eye's own ground point, the solved field's is its window's, and the scale field's reference is
+    // the grid's Hs at the eye -- one measurement at one forecast hour, read the same way everywhere.
+    // Without one (a composite harvested before the grid), data.seastate's point, as before.
+    void SetGrid(const SeaGrid* g) {
+        m_grid = (g && g->Ready()) ? g : nullptr;
+        m_lastHour = -1;
+    }
+    const SeaGrid* Grid() const { return m_grid; }
+    // The solved wave field's place (its window's centre): its sea by the same law, at the same hour,
+    // so the field re-solves when the forecast hour moves and not when the eye does.
+    void SetFieldPlace(double latDeg, double lonDeg) {
+        m_fieldLat = latDeg;
+        m_fieldLon = lonDeg;
+        m_fieldPlaced = true;
+        m_lastHour = -1;
+    }
+    // B4: the height tree the wind sea's fetch is walked over (the compositor's height channel); the walk
+    // runs on the Io lane (SeaLayer::FetchAt). A walk's answer: the fetch and the water's mean depth (m).
+    struct FetchMemo {
+        double fetchM = 0.0, depthM = -1.0;
+    };
+    void SetHeightRead(const Compositor* comp, int heightChannel) {
+        m_comp = comp;
+        m_hgtCh = heightChannel;
+    }
+    const PartParam* FieldParts() const { return (m_grid && m_fieldPlaced) ? m_fieldParts : m_parts; }
+    // B4: the field's sea waits on its fetch's walk; a field is solved for a sea that is known.
+    bool FieldPending() const { return m_grid && m_fieldPlaced && m_fieldPending; }
+    int FieldActive() const { return (m_grid && m_fieldPlaced) ? m_fieldActive : activeParts; }
+    // The grid's forecast hour, handed once each time it moves (the frame loop moves the globe's
+    // waves -- GlobeModel's Hs and wind, the scale field's and the far sea's -- to it).
+    bool TakeGridHour(int& hour) {
+        if (m_gridHourNew < 0) return false;
+        hour = m_gridHourNew;
+        m_gridHourNew = -1;
+        return true;
+    }
 
 
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
@@ -156,6 +202,12 @@ public:
     double hsBuoy = 0;       // the mean of the sea-state file's own buoys
     int activeParts = 0;
     std::string statusNote;  // "f012" style label for the title bar
+    // The cycle statusNote's hour belongs to: the grid's while the synthesis reads it, else the
+    // point series' (the title read the series' beside the grid's hour: "20261013 18z f008").
+    const std::string& CycleLabel() const {
+        static const std::string kNone;
+        return (m_fromGrid && m_grid) ? m_grid->CycleLabel() : m_sea ? m_sea->CycleLabel() : kNone;
+    }
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
     // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
     // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak
@@ -238,6 +290,44 @@ private:
     std::vector<const SeaState*> m_sources;   // PHASE C2: m_sea first
     WaveScale m_scale;
     int PartsOf(const SeaState& src, double simUnix, bool storm, PartParam parts[4], bool log) const;
+    // One forecast hour's partitions by the one law (the storm where declared, the wind sea grown over
+    // `fetchM` in `depthM` where the forecast has none -- B4); the caller assimilates its buoys.
+    int PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], bool log, double fetchM,
+                    double depthM) const;
+    // B4: THE FETCH. From a place toward where the wind comes from, to the first ground above the live
+    // water (HeightTree::Fetch, the swell shadow's exact walk): its length (m), and the water's mean depth
+    // along it (m). The walk paints what it crosses, so it runs on the Io lane and is remembered by place,
+    // wind and water: -2 while it is out (no wind sea is raised before its fetch is known), -1 with no
+    // height tree (the open sea's limit).
+    double FetchAt(double latDeg, double lonDeg, double windFromDeg, double* depthM) const;
+    struct FetchShared {
+        std::mutex mx;
+        std::unordered_map<uint64_t, FetchMemo> memo;
+        std::unordered_set<uint64_t> asked;
+        std::atomic<uint32_t> landed{0};   // walks finished: the frame re-reads the seas that waited on one
+    };
+    std::shared_ptr<FetchShared> m_fetch = std::make_shared<FetchShared>();
+    uint32_t m_fetchLanded = 0;
+    bool m_fieldPending = false;   // the solved field's fetch is still out: its sea is not known yet
+    const Compositor* m_comp = nullptr;
+    int m_hgtCh = -1;
+    // The grid's sea at a place (its nearest sea when it has none within reach), its buoys by their
+    // own ratio where they stand; `hrOut` the forecast hour read.
+    int PartsAt(double latDeg, double lonDeg, double simUnix, PartParam parts[4], bool log, SeaHour* hrOut,
+                bool* fetchPending = nullptr) const;
+    double BuoyGainAt(double latDeg, double lonDeg, double simUnix, int hour, int* n) const;
+    // The eye's sea's bucket: its forecast hour, its peak's period (5 % steps in log) and its peak's
+    // direction (5 degrees, the exposure's own bucket). What the scale field cannot carry -- it carries Hs.
+    int64_t EyeKey(double latDeg, double lonDeg, int hour) const;
+    const SeaGrid* m_grid = nullptr;
+    double m_fieldLat = 0.0, m_fieldLon = 0.0;
+    bool m_fieldPlaced = false;
+    PartParam m_fieldParts[4] = {};
+    int m_fieldActive = 0;
+    int m_gridHourNew = -1;
+    int64_t m_eyeKey = -1;
+    uint32_t m_eyeSpectra = 0;   // the synthesis re-made for the eye's sea (not the hour), this run
+    bool m_fromGrid = false;     // the live synthesis is the grid's (its cycle is the time origin)
     OceanFft m_fft;
     OceanCpu m_oceanCpu;   // M9bq: the hull's copy of the same three cascades
 

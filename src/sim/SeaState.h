@@ -53,6 +53,8 @@ struct BuoyObs {
     std::string id;
     double obsUnix = 0;
     double hs = 0, dpd = 0, apd = 0, mwd = 0, wspd = 0;
+    double lat = 0, lon = 0;            // where it stands (the composite's buoys carry it)
+    bool placed = false;
     std::vector<float> specFreqHz;      // measured spectral density, when the buoy provides it
     std::vector<float> specDens;        // m^2/Hz
     bool valid = false;
@@ -86,6 +88,9 @@ public:
 
     // The partition parameterization the GPU consumes, for a given hour. Returns count (<= 4).
     int BuildParams(int hourIdx, PartParam out[4]) const;
+    // ...of any forecast hour, wherever it came from (a file's point, or SeaGrid::HourAt at a place).
+    static int BuildParamsOf(const SeaHour& h, PartParam out[4]);
+    const std::vector<BuoyObs>& Buoys() const { return m_buoys; }
 
     // One partition from (Hs, Tp, direction-from): the normalisation lives here so forecast
     // partitions and sandbox overrides (--storm) go through identical math.
@@ -95,6 +100,11 @@ public:
     // where the forecast's partitioning reports no wind sea at all -- see SeaLayer::SetTime.
     // False when the wind is too light to raise anything above the 0.02 m partition floor.
     static bool WindSeaPm(double wind10Ms, double* hsOut, double* tpOut);
+    // B4 (docs/REVIEW_2026-10-21.md): the wind sea a wind raises over its FETCH (m, upwind to land) in
+    // water of a DEPTH (m; <= 0 or huge = deep), Young & Verhagen 1996: one law whose limits are
+    // JONSWAP's growth at short fetch, the depth's ceiling in shallow water, and Pierson-Moskowitz's
+    // fully developed sea when both are long. False when there is no wind or no fetch to raise it.
+    static bool WindSeaGrown(double wind10Ms, double fetchM, double depthM, double* hsOut, double* tpOut);
 
     // CPU-side S(f) from the same parameters (plot overlay + Hs readout).
     static double SpectrumAt(const PartParam* parts, int n, double fHz);

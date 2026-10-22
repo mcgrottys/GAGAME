@@ -41,6 +41,38 @@ namespace ga {
 //  the committed texture was uploaded from, and print the worst disagreement. A conversion that
 //  cannot say it matches is not a conversion, it is a rewrite.
 // ================================================================================================
+void GlobeLayer::BuildWaveBanks(Gpu& gpu) {
+    m_wavesVersion = m_globe->WavesVersion();
+    if (m_globe->WavesNx() <= 0 || m_globe->Hs().empty()) return;
+    const int wn = m_globe->WavesNx(), wm = m_globe->WavesNy();
+    // The GFS grids are NODE-centred on 0..360 -- stated here rather than assumed, because
+    // ocean colour below is cell-centred on -180..180 and the two differ by half a texel.
+    // gfswave writes -1 for land, which is a real answer and rides through as the nodata
+    // fill so Globe.hlsl's `hsS >= 0` test keeps working unchanged.
+    GeoRef wref = GeoRef::Declared(4326, CrsKind::Geographic, m_globe->WavesLon1(),
+                                   m_globe->WavesLat1(), m_globe->WavesDLon(),
+                                   -m_globe->WavesDLat(), uint32_t(wn), uint32_t(wm));
+    wref.centers = false;
+    wref.hasNoData = true;
+    wref.noData = -1.0f;
+    wref.valueUnit = "m";
+    BuildPlaneBank(gpu, m_hsB, "globe.hs (gfswave)", "equirect float32 global", wref,
+                   {{&m_globe->Hs(), -0.5f, -1.0f}}, DXGI_FORMAT_R32_FLOAT, -1.0f);
+    if (!m_globe->Wind().empty()) {
+        GeoRef uref = wref;
+        uref.valueUnit = "m/s";
+        BuildPlaneBank(gpu, m_windB, "globe.wind (gfswave)", "equirect float32 global", uref,
+                       {{&m_globe->Wind(), -0.5f, -1.0f}}, DXGI_FORMAT_R32_FLOAT, -1.0f);
+    }
+}
+
+void GlobeLayer::RefreshWaves(Gpu& gpu) {
+    if (!m_globe || m_globe->WavesVersion() == m_wavesVersion) return;
+    gpu.WaitIdle();
+    BuildWaveBanks(gpu);
+    Log("[globe] the far sea's Hs and wind planes are %s now", m_globe->WavesCycle().c_str());
+}
+
 bool GlobeLayer::BuildPlaneBank(Gpu& gpu, PlaneBank& out, const char* name,
                                 const char* structure, const GeoRef& ref,
                                 std::vector<MemGridLoader::Plane> planes, DXGI_FORMAT fmt,
@@ -223,28 +255,7 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignatur
     // CUDEM, or MOLA) streams the same data through the residency manager, painted once and
     // cached. The CPU-side equirect grid stays in GlobeModel for picking and camera clamps.
     const int nx = m_globe->Nx(), ny = m_globe->Ny();
-    if (m_globe->WavesNx() > 0 && !m_globe->Hs().empty()) {
-        const int wn = m_globe->WavesNx(), wm = m_globe->WavesNy();
-        // The GFS grids are NODE-centred on 0..360 -- stated here rather than assumed, because
-        // ocean colour below is cell-centred on -180..180 and the two differ by half a texel.
-        // gfswave writes -1 for land, which is a real answer and rides through as the nodata
-        // fill so Globe.hlsl's `hsS >= 0` test keeps working unchanged.
-        GeoRef wref = GeoRef::Declared(4326, CrsKind::Geographic, m_globe->WavesLon1(),
-                                       m_globe->WavesLat1(), m_globe->WavesDLon(),
-                                       -m_globe->WavesDLat(), uint32_t(wn), uint32_t(wm));
-        wref.centers = false;
-        wref.hasNoData = true;
-        wref.noData = -1.0f;
-        wref.valueUnit = "m";
-        BuildPlaneBank(gpu, m_hsB, "globe.hs (gfswave)", "equirect float32 global", wref,
-                       {{&m_globe->Hs(), -0.5f, -1.0f}}, DXGI_FORMAT_R32_FLOAT, -1.0f);
-        if (!m_globe->Wind().empty()) {
-            GeoRef uref = wref;
-            uref.valueUnit = "m/s";
-            BuildPlaneBank(gpu, m_windB, "globe.wind (gfswave)", "equirect float32 global", uref,
-                           {{&m_globe->Wind(), -0.5f, -1.0f}}, DXGI_FORMAT_R32_FLOAT, -1.0f);
-        }
-    }
+    BuildWaveBanks(gpu);
     // M9 (docs/ALGEBRA.md "optics"): the water-quality plane. Three retrievals ride up as ONE
     // RGBA texture -- (log10 chl, Kd490, log10 SPM, retrieved?) -- because the optics model
     // consumes them together and one fetch beats three. The log encoding is NOT about fp16

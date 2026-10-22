@@ -1,4 +1,5 @@
 #include "sim/GlobeModel.h"
+#include "sim/SeaGrid.h"
 
 #include "core/Common.h"
 #include "core/Json.h"
@@ -50,6 +51,15 @@ bool GlobeModel::LoadMars(const std::string& jsonPath) {
     return true;
 }
 
+void GlobeModel::SetWaves(std::vector<float> hs, std::vector<float> wind, const std::string& cycle) {
+    const size_t n = size_t(m_wnx) * size_t(m_wny);
+    if (hs.size() != n) return;   // the gfswave grid globe.json declared, and only it
+    m_hs = std::move(hs);
+    if (wind.size() == n) m_wind = std::move(wind);
+    m_cycle = cycle;
+    ++m_wavesVersion;
+}
+
 bool GlobeModel::Load(const std::string& jsonPath) {
     std::string text;
     if (!ReadAll(jsonPath, &text)) return false;
@@ -83,6 +93,20 @@ bool GlobeModel::Load(const std::string& jsonPath) {
         if (!ReadBin(dir + js.Str("hs_file", "hs.f32"), n, &m_hs)) m_hs.clear();
         const std::string wf = js.Str("wind_file");
         if (!wf.empty() && !ReadBin(dir + wf, n, &m_wind)) m_wind.clear();
+        // B2 (sim/SeaGrid.h): a node gfswave masks reads its nearest sea within reach, by the grid's walk.
+        if (m_hs.size() == n) {
+            std::vector<uint8_t> wet(n, 0);
+            for (size_t i = 0; i < n; ++i) wet[i] = m_hs[i] >= 0.0f ? 1 : 0;
+            size_t filled = 0;
+            const std::vector<int32_t> src = SeaGrid::NearestWet(wet, m_wnx, m_wny, SeaGrid::kReachNodes, &filled);
+            for (size_t i = 0; i < n; ++i) {
+                if (wet[i] || src[i] < 0) continue;
+                m_hs[i] = m_hs[size_t(src[i])];
+                if (m_wind.size() == n) m_wind[i] = m_wind[size_t(src[i])];
+            }
+            Log("[globe] gfswave %s: %zu masked nodes read their nearest sea within %d nodes", m_cycle.c_str(), filled,
+                SeaGrid::kReachNodes);
+        }
     }
 
     // M6c: the live 3D sky.
