@@ -1,107 +1,27 @@
 {
   "_readme": [
-    "The default shipped scene (M12 step 5a): the Merrimack estuary in the one world frame, from",
-    "the north jetty tip -- what `gagame --sea` has always meant. Every value is the legacy flag's",
-    "default, so a scene that says nothing means what the flags meant; scenes/recipes/*.json are",
-    "this file with a few keys overridden, each carrying the flag line that made it in _recipe.",
-    "Sections, keys and units: src/scene/SceneSchema.h. Overlays (stronger than this file):",
-    "scenes/views/builtin.json (the kept views) and data/wave_scene.json (the M8 water scene, at",
-    "`water`; authored if absent, never clobbered). Resolution: defaults < this file < includes",
-    "< --set, objects by key, named arrays by name, placements replaced whole (SceneBuilder.h)."
+    "THE MERRIMACK (M12 step 5a; a place since 2026-10-21): the estuary in the one world frame, from the",
+    "north jetty tip -- what `gagame --sea` has always meant. It stands on scenes/world.json, the atlas,",
+    "and says only what is the place's: its anchor (the ACT0816 current station at the mouth), its views",
+    "(scenes/views/builtin.json and below), the solver's box, the wave field's window and the bar's",
+    "normal, the sea state's fallback box, the AIS lane the fleet rides, and its rails, portals and",
+    "entities. Its bed, tides, currents, river (the Merrimack's face, discharge and prism come from",
+    "data.river's reach), buildings and roads are the world's.",
+    "scenes/recipes/*.json are this file with a few keys overridden, each carrying the flag line that made",
+    "it in _recipe."
   ],
+  "base": "scenes/world.json",
   "scene": {"name": "merrimack", "mode": "world", "planet": "earth", "view": "sea"},
-  "include": [
-    {"file": "scenes/views/builtin.json", "at": "", "optional": false},
-    {"file": "data/wave_scene.json", "at": "water", "optional": true}
-  ],
+  "include": [{"file": "scenes/views/builtin.json", "at": "", "optional": false}],
   "place": {"anchor": [-70.81, 42.81833]},
-  "data": {
-    "route": "data/gis/route_merrimack.json",
-    "shaders": "shaders",
-    "tides": "data/tides/stations.json",
-    "seastate": "data/sea/seastate.json",
-    "currents": "data/currents/currents.json",
-    "bathy": "data/bathy/merrimack.json",
-    "river": "data/river/river.json",
-    "edits": "data/gis/edits.geojson"
-  },
-  "time": {"start": "now", "timeScale": 1, "paused": false, "windowDays": 7},
-  "sun": {"source": "ephemeris", "az": 112, "el": 26},
-  "sea": {
-    "storm": {"hs": 0, "tp": 10, "dir": 90},
-    "datum": {"fromStation": true, "mllwToNavd": -1.3},
-    "box": [-71.2, 41.5, -68.5, 44.5]
-  },
+  "data": {"route": "data/gis/route_merrimack.json"},
+  "sea": {"box": [-71.2, 41.5, -68.5, 44.5], "datum": {"mllwToNavd": -1.3}},
   "water": {
-    "pixelWater": true,
-    "foam": 1,
-    "edgePx": 12,
-    "heightScale": 1.15,
-    "swe": {"enabled": true, "westBoundary": true, "spinupH": 1, "gain": 1, "riverQ": -1,
-            "riverGauges": "01100500 01100000*1.08", "riverQFallback": 70,
-            "upriverAreaM2": 3.9e6},
-    "bank": {"flatBed": false, "flatBedNavd": -30},
-    "wavefield": {
-      "enabled": true,
-      "orgX": -1400,
-      "orgZ": -800,
-      "nx": 1600,
-      "ny": 1000,
-      "cellM": 2,
-      "comps": 32,
-      "spreadDeg": 26,
-      "barNormalDeg": 285,
-      "gammaHs": 0.6,
-      "minSamplesPerLambda": 8,
-      "tideBucketM": 0.25,
-      "currentBucketMs": 0.1,
-      "featherM": 120,
-      "chop": 1.1,
-      "exag": 1.15,
-      "bankTexelM": 1.2
+    "swe": {
+      "box": [-70.99074074074073, 42.70006172839506, -70.77, 42.845],
+      "_box": "The Merrimack's solver: the estuary from the river's entry, where the 1/9\" CUDEM survey once painted at full weight, to the sea, and Plum Island Sound's north end to Salisbury -- 1788 x 1174 cells of cellM (the default 13.728 m, 4/9 arc-second): the window the per-place survey file drew until 2026-10-21."
     },
-    "closures": {
-      "shedSteepCap": 0.44,
-      "shedMssCeil": 0.09,
-      "churnGain": 0.12,
-      "crestLo": 0.28,
-      "crestHi": 0.8,
-      "depthLo": 1.05,
-      "depthHi": 1.95,
-      "foamOpacity": 0.72,
-      "ringBlendTexels": 48,
-      "bandFoldWeight": 1,
-      "windSeaFill": 1,
-      "buoyAssimAgeH": 6,
-      "buoyAssimGainMax": 1.8,
-      "causticStrength": 0.6,
-      "waterOptics": true,
-      "jettyCrestNavd": -99
-    },
-    "fleet": {"enabled": false, "boats": []}
-  },
-  "streaming": {
-    "tileBudget": 1000,
-    "predictEvery": 3,
-    "directStorage": true,
-    "colorTrees": true,
-    "gisGate": true,
-    "_seafloor": "Off (Mark, 2026-10-11): the seafloor relief paints a made-up sediment ramp, and at a coarse tile it stair-stepped sand over the coast. No fake colours for now.",
-    "seafloor": false,
-    "_gisLand": "THE GLOBAL COAST, every scene that inherits this one: OSM's land polygons of 2026-10-11 (harvester/harvest_land_polygons.py). Without it a place outside New England had no survey and its shore was a coarse height test.",
-    "gisLand": "D:/DataCache/OSM/coastline/land-261011.galand",
-    "exposure": true
-  },
-  "capture": {
-    "headless": false,
-    "width": 1600,
-    "height": 900,
-    "frames": 0,
-    "dump": "",
-    "hdr": "",
-    "mp4": "",
-    "railDir": "",
-    "settle": {"sync": false, "hold": 0, "exact": false, "clearChurn": false}
+    "wavefield": {"orgX": -1400, "orgZ": -800, "nx": 1600, "ny": 1000, "cellM": 2, "barNormalDeg": 285}
   },
   "views": [
     {
@@ -118,44 +38,9 @@
       "fovY": 55,
       "gauge": "root",
       "nearZ": 0.25
-    },
-    {
-      "name": "orbit",
-      "_at": "the globe start: over the North Atlantic at 2.1 planet radii, aimed at the centre",
-      "at": {"lat": 34, "lon": -52, "alt": 13379100},
-      "fovY": 55,
-      "gauge": "root",
-      "nearZ": 0.25
     }
   ],
   "rails": {"active": "none", "keys": [], "droste": {"levelSec": 16, "levels": 3}},
   "portals": [],
-  "entities": [],
-  "effects": [],
-  "layers": [
-    {"name": "sky", "enabled": true},
-    {"name": "tide", "enabled": true, "exaggeration": 60},
-    {"name": "sea", "enabled": true},
-    {"name": "terrain", "enabled": true},
-    {"name": "gulf", "enabled": true},
-    {"name": "waterbank", "enabled": true},
-    {"name": "globe", "enabled": true},
-    {"name": "gis", "enabled": true},
-    {"name": "vessels", "enabled": true},
-    {"name": "markers", "enabled": true}
-  ],
-  "nodes": [],
-  "tools": [],
-  "sources": [
-    {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
-    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1},
-    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif",
-     "unit": "m", "datum": "EGM2008", "offset": -0.092}
-  ],
-  "stations": [
-    {"name": "ACT0816", "lat": 42.81833, "lon": -70.81},
-    {"name": "ACT0821", "lat": 42.81333, "lon": -70.86833},
-    {"name": "ACT0826", "lat": 42.705, "lon": -70.78833},
-    {"name": "44029", "lat": 42.523, "lon": -70.566}
-  ]
+  "entities": []
 }

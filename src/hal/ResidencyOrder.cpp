@@ -10,6 +10,7 @@
 // a DirectStorage batch whose fence signalled -- the manager's own claim rule, and the audit's.
 #include "hal/Residency.h"
 #include "hal/MaxLane.h"
+#include "core/ThreadManager.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1577,6 +1578,8 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     ++loader.turns;
     loader.inFlightAtTurn += static_cast<uint64_t>((std::max)(m_inFlight.load(), 0));
     const auto issuedAt = std::chrono::steady_clock::now();
+    // THE LANE IS SHARED (Residency.h Tenant::inFlight): half its threads to a tenant at most.
+    const int laneShare = (std::max)(1, Threads().IoCap() / 2);
     for (size_t ni = 0; ni < m_need.size(); ++ni) {
         if (ni >= m_needSorted) SortNeedTo(ni + kNeedChunk);
         const OrderEntry& e = m_need[ni];
@@ -1594,11 +1597,13 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
                 continue;
             }
             if (tr->refill && tr->refill->state == TileState::Seen) {
+                if (m_tenants[tr->tenant].inFlight >= laneShare) continue;   // its half of the lane is busy
                 tr->refill->state = TileState::Loading;
                 tr->refill->issuedTurn = m_frame;
                 tr->refill->issuedAt = issuedAt;
                 toLoad.push_back(tr->refill);
                 ++m_inFlight;
+                ++m_tenants[tr->tenant].inFlight;
                 ++L.refills;
             }
             continue;
@@ -1635,6 +1640,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         }
         if (tr->state != TileState::Seen || tr->pos == UINT32_MAX) continue;
         if (gate == Gate::Wait) continue;   // its parent first
+        if (m_tenants[tr->tenant].inFlight >= laneShare) continue;   // its half of the lane is busy: the next tenant's
         if (starvePlant != 0 && tr->req.face == starvePlant) continue;   // the watchdog's plant
         if (!m_letGoAt.empty()) {   // the livelock's instrument: read and let go within the glance
             const auto it = m_letGoAt.find(e.key);
@@ -1682,6 +1688,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         m_loading.push_back(sp);
         toLoad.push_back(sp);
         ++m_inFlight;
+        ++m_tenants[tr->tenant].inFlight;
         ++L.issued;
     }
     m_orderPending = pending;
@@ -2047,11 +2054,13 @@ void ResidencyManager::LogLoader() const {
         if (!n && !t.magnifiedKnown) continue;
         Log("[loader]   %S: %llu loads -- %u read (%.2f ms each), %u painted (%.1f ms each); of them %u "
             "answered magnified, %u failed or not whole, %u refused (the slot's ground moved under the read) | "
-            "queue wait %.2f ms a load | %u known magnified, no load",
+            "queue wait %.2f ms a load | the job %.2f ms a load, of it waiting for the manager's lock %.2f | %u known magnified, no load",
             t.name.c_str(), static_cast<unsigned long long>(n), t.loadsRead,
             t.loadsRead ? double(t.readUs) / (1000.0 * t.loadsRead) : 0.0, t.loadsPaint,
             t.loadsPaint ? double(t.paintUs) / (1000.0 * t.loadsPaint) : 0.0, t.loadsMagnified,
-            t.loadsFailed, t.loadsMovedGround, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0, t.magnifiedKnown);
+            t.loadsFailed, t.loadsMovedGround, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0,
+            n ? double(t.jobUs) / (1000.0 * double(n)) : 0.0, n ? double(t.lockUs) / (1000.0 * double(n)) : 0.0,
+            t.magnifiedKnown);
     }
 }
 

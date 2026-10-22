@@ -3,7 +3,7 @@ using System.IO.Compression;
 
 namespace Gagame.Harvest;
 
-/// 8-bit grayscale PNG, no library (the harvest_bathy / refbathy / hqbathy previews).
+/// 8-bit grayscale PNG, no library (the hqbathy previews).
 public static class Png
 {
     public static void WriteGray(string path, ReadOnlySpan<byte> pix, int w, int h, bool exclusive = false)

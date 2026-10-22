@@ -282,7 +282,10 @@ Harvesters (python, repo root; all cache-first and polite): `harvest_globe.py`
 (NE15/ETOPO relief, GFS-Wave Hs/wind, cloud volume, and — M9 — the gap-filled ocean-colour
 trio `oc_chl/oc_kd490/oc_spm.f32` plus sea ice `ice.f32`; per-section `--skip-*` flags, so
 `--skip-etopo --skip-mars --skip-ne --skip-windvec --skip-clouds` refreshes just the water's
-quality in ~15 s), `harvest_bathy.py --window merrimack|capeann|boston` (CUDEM),
+quality in ~15 s), THE WATER, ALL OF IT (2026-10-21): `harvest compose-water` over `harvest/fidelity/world.gafid` into
+`data/composite/world/` -- the bed (CUDEM where the map asks for it, ETOPO under it), the rivers (NHDPlus
+reaches, NWIS gauges), every CO-OPS tide and current station, the sea state -- which `scenes/world.json`
+reads (the per-place `harvest_bathy.py` windows are retired),
 `harvest_tides.py` (constituent fits incl. the 20-station set), `harvest_water.py`
 (+`--eot20` for the 2.3 GB EOT20 grids), `harvest_waves.py` / `harvest_currents.py` /
 `harvest_gis.py` / `harvest_vectors.py` / `harvest_aerial.py` (MassGIS orthos) /

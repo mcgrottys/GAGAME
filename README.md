@@ -174,6 +174,11 @@ GeoTIFF reader -- deflate + floating-point predictor -- windowed to the mouth):
 py -3 harvester\harvest_bathy.py
 ```
 
+(Since 2026-10-21 there is no per-place bed: the shipped scenes stand on `scenes/world.json`, whose
+bed, tides, currents, rivers and sea state are the world composite --
+`dotnet run --project harvest\harvest -- compose-water`, over `harvest/fidelity/world.gafid` into
+`data/composite/world/`. `harvest_bathy.py` is retired.)
+
 The sea view then becomes the actual place: the CUDEM topobathy drawn at true scale
 (TerrainLayer; jetties, bar, dunes, marsh -- materials keyed to the LIVE water level), the sea
 georeferenced onto it (world origin = the ACT0816 entrance station, as always), waves

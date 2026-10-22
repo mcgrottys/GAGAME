@@ -59,7 +59,6 @@ cbuffer GlobeCb : register(b1) {
     // M6i: the composed channels (color cube + window, height cube) + the M6g one-world frame
     // rows, shared VERBATIM with every other layer that samples this planet's surface, are
     // Common.hlsli's SurfaceCb (b2) since M12 step 4g -- one buffer, not a copy in this one.
-    float4 gEstGeo;     // estuary CUDEM window (deg): lon0, lat1, 1/lonSpan, 1/latSpan
                         // (w also gates: 0 = absent). The globe FOUNDATION-SINKS a few metres
                         // inside it so the sharp CUDEM surface owns the depth buffer there.
     // M7: THE WAVE VERTEX BANK -- water geometry + params from ONE tiled resource: a camera-
@@ -858,20 +857,6 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // The address: this path has no double-precision anchor, so its point is the direction's
     // (CsPointOfDir, about the camera's eye: the camera's level's windows).
     float h = ComposedHeightAt(dir, CsPointOfDir(dir), vlod, 0u);
-
-    // M6g foundation sink: inside the CUDEM window the ESTUARY mesh is this same surface at
-    // 13.7 m; the globe dips a few metres under it (feathered -- continuous) so the sharp data
-    // owns the depth buffer and there is no z-fight between two descriptions of one earth.
-    if (gEstGeo.w > 0.5f) {
-        const float latDegV = degrees(asin(clamp(dir.y, -1.0f, 1.0f)));
-        const float lonDegV = degrees(atan2(dir.z, dir.x));
-        const float2 wuv = float2((lonDegV - gEstGeo.x) * gEstGeo.z,
-                                  (gEstGeo.y - latDegV) * abs(gEstGeo.w));
-        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-            const float2 fe = smoothstep(0.0f, 0.12f, wuv) * smoothstep(1.0f, 0.88f, wuv);
-            h -= 14.0f * fe.x * fe.y;
-        }
-    }
 
     VsOut o;
     o.mid = inst;

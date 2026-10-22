@@ -114,7 +114,7 @@ public sealed class Overture : IHarvester
         else if (bi >= 0 && bi + 4 < argv.Length && !argv[bi + 1].Contains(',')) bbox = argv.Skip(bi + 1).Take(4).Select(s => double.Parse(s, CultureInfo.InvariantCulture)).ToArray();
         else if (bi >= 0) bbox = Args.Pair(argv[bi + 1]);
         else throw new HarvestStop("overture needs --bbox lon0,lat0,lon1,lat1 and --stem NAME");
-        var stem = a.Opt("--stem") ?? a.Opt("--place") ?? throw new HarvestStop("overture needs --stem NAME");
+        var stem = a.Opt("--stem") ?? throw new HarvestStop("overture needs --stem NAME");
         var releaseArg = a.Opt("--release", "latest")!;
         var outDir = a.Opt("--out") ?? Path.Combine(Path.GetDirectoryName(ctx.DataCache.TrimEnd('\\', '/')) ?? ctx.DataCache, "Overture", "buildings");
         var qgisEnv = a.Opt("--qgis-env", QgisEnv)!;

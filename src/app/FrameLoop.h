@@ -24,15 +24,15 @@
 //  lambda captures by reference, is a std::function member with the lambda's own signature,
 //  ASSIGNED at the line that used to declare it: applyMode, altOf, poseMotor, motorPose,
 //  railPose, diveFrom, diveAt, legU, diveU, keyedPose, gravityUp, drosteRailPose, oceanAt,
-//  southAt, westAt, westQAt, sceneToWaveCfg, groundClear, pixelRay, pickGround, pickGlobe,
+//  faceAt, faceQAt, sceneToWaveCfg, groundClear, pixelRay, pickGround, pickGlobe,
 //  pickAny, stepBoat. A `[&]` inside Session() captures the aliases, which are the members
 //  (CWG 2011), and every other block-level local it captures is itself a member, so nothing
 //  dangles. Four lambdas only Session() calls stay its locals: planetToFlatPose,
 //  flatToPlanetPose, orbPose, orbKey (oceanAtBoston and the wave.field page provider were
 //  nested-block locals and stay so). A `const` local whose initialiser was code (lenM,
-//  diveFromAbove, startUnix, kWestKm, wT, kPredictEvery) and the two `auto` clocks (last,
+//  diveFromAbove, startUnix, kPredictEvery) and the two `auto` clocks (last,
 //  lastTitle) are plain members assigned at that line; a `const` local with a literal
-//  initialiser (kDiveT0, hasSound, kUpriverAreaM2) is a const member with that initialiser;
+//  initialiser (kDiveT0) is a const member with that initialiser;
 //  the `constexpr` locals (kProfN, kInPhases..kInN, kSettleQuietFrames, kSettleCapFrames,
 //  kSettleExactFrames) and the kProfName table are static constexpr members under their own
 //  names; `using Clock` is the class's alias. The three function-local statics -- stepBoat's
@@ -514,15 +514,13 @@ private:
     bool m_sunLogged = false;   // M9bi: log the placed sun once, with its numbers
     bool m_winSkyLogged = false;   // M13: the gate window's sky, once -- its up and its sun
     double m_startUnix = 0.0;
-    int m_entSta = 0, m_westA = 0, m_westB = 0;
-    double m_kWestKm = 0.0;
-    double m_wT = 0.0;
+    int m_entSta = 0;   // the open water's station: the river's mouth's, else the focus
     std::function<double(double)> m_oceanAt;
-    const bool m_hasSound = false;   // retired with the solver's south strip (see SweSolver)
-    std::function<double(double)> m_southAt;
-    std::function<double(double)> m_westAt;
-    const double m_kUpriverAreaM2 = m_S.water.swe.upriverAreaM2;   // the scene's (SweProps)
-    std::function<double(double)> m_westQAt;
+    // THE RIVER FACES' CLOCKS (sim/RiverModel.h): the scene solver's, per face -- the deviation
+    // and the transport (+ inward) its Flather face is held to.
+    RiverFaceClock m_rivers;
+    std::function<double(int, double)> m_faceAt;
+    std::function<double(int, double)> m_faceQAt;
     WeatherManager m_weather;
     std::function<WaveFieldConfig(const WaterSceneConfig&)> m_sceneToWaveCfg;
     std::unique_ptr<WaveField> m_waveField;

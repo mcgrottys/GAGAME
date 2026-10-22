@@ -5,7 +5,6 @@
 #include "core/Common.h"
 #include "hal/Gpu.h"
 #include "scene/SeaLayer.h"
-#include "sim/BathyModel.h"
 #include "sim/WeatherManager.h"
 
 #include <cstdio>

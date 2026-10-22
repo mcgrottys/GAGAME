@@ -6,15 +6,24 @@ data on a machine harvested by the Python is the data this writes.
 
 ```bat
 dotnet run --project harvest\harvest -- --list
-dotnet run --project harvest\harvest -- tides
-dotnet run --project harvest\harvest -- bathy --window capeann
-dotnet run --project harvest\harvest -- place --place haulover --final
+dotnet run --project harvest\harvest -- compose-water --fidelity data\composite\fidelity\world.gafid --out data\composite\world
 ```
+
+THE WORLD COMPOSITE IS THE PATH (Mark, 2026-10-21: "Data sets should never be specific to place,
+only the measurement type"). `compose-water` and its layers over one fidelity map are the only
+water data the engine reads; it no longer reads data/bathy/*, data/places/* or any
+data/{tides,currents,sea}/<place>/. The per-place model is retired: the `place` orchestrator,
+the `--place` modes of tides / currents / waves / bathy, the `bathy` window harvester and
+`refbathy` are gone, with their Python twins (harvest_place.py, harvest_bathy.py,
+harvest_refbathy.py, polite.py). `hqbathy` (and harvest_hqbathy.py) stays: it made
+data/bathy/inlethq.f32, whose GeoTIFF (D:\DataCache\GAGAME\refbathy\inlethq_navd88_2026-10-17.tif)
+is a scene source; its datum cross-check still reads the CUDEM plane data/bathy/merrimack.*,
+kept on disk, which no harvester writes now.
 
 `harvest <name> [args]` runs from the checkout it sits inside (or `--root DIR`); the big-data
 drive is `GAGAME_DATACACHE` or `--datacache DIR` (default `D:\DataCache\GAGAME`). Every
-harvester's own flags are the Python's (`--place --box --anchor --sea --radius-km`,
-`--window`, `--skip-*`, `--eot20`, `--offline`, `--out`, ...).
+harvester's own flags are the Python's (`--skip-*`, `--eot20`, `--offline`, `--out`, ...); a
+composite takes `--fidelity FILE --out DIR`.
 
 ## The fidelity map and the sources' limits (docs/FIDELITY.md)
 
@@ -53,8 +62,7 @@ requests, 8 GB, 30 s, 50 MB, the Google fragments) over every host a harvester n
 ## The factory
 
 `IHarvester` is one product: its `Name` (the command), `Title`, `What`, the `Outputs` whose
-presence says it is there, its `Sources`, the `Insert` it takes (a place and box, a named window,
-files dropped in a folder, a file argument, flags) and `Run(ctx, args)`. `HarvesterFactory`
+presence says it is there, its `Sources`, the `Insert` it takes (files dropped in a folder, a file argument, flags) and `Run(ctx, args)`. `HarvesterFactory`
 registers every implementation in the assembly and makes one by name; the demo's data list and
 `harvest --list --json` both read it, so there is one catalog.
 
@@ -64,9 +72,7 @@ registers every implementation in the assembly and makes one by name; the demo's
 | waves | data/sea/seastate.json | harvest_waves.py |
 | currents | data/currents/currents.json (+ gomofs_uv.f32) | harvest_currents.py |
 | river | data/river/river.json | harvest_river.py |
-| bathy | data/bathy/<window>.json/.f32/preview | harvest_bathy.py |
-| hqbathy | data/bathy/inlethq.* | harvest_hqbathy.py |
-| refbathy | data/bathy/inlet15.* | harvest_refbathy.py |
+| hqbathy | data/bathy/inlethq.* (a scene source; kept) | harvest_hqbathy.py |
 | globe | data/globe/globe.json + the grids | harvest_globe.py |
 | gis | data/gis/gis.json, the GSHHG bins, the land masks | harvest_gis.py |
 | survey | data/gis/survey.json, cusp/nhd bins, the carved mask | harvest_survey.py |
@@ -80,13 +86,12 @@ registers every implementation in the assembly and makes one by name; the demo's
 | planet-buildings | <stem>.buildings.bin/.json/.idx | harvest_planet_buildings.py |
 | overture | <stem>-<dataset>.buildings.* | harvest_overture.py |
 | land-polygons | <out>.galand | harvest_land_polygons.py |
-| place | data/{tides,currents,sea,bathy}/<place>/, data/places/<place>.json | harvest_place.py |
 | compose-bed | <out>/water.bed.composite.json + bed/<tier>/*.tif | (new) |
 | compose-tides | <out>/tides.composite.json + tides/stations.json | (new) |
 | compose-currents | <out>/currents.composite.json + currents/currents.json + fields | (new) |
 | compose-seastate | <out>/seastate.composite.json + sea/seastate.json | (new) |
 | compose-river | <out>/river.composite.json + river/river.json | (new) |
-| compose-water | all five above | (new) |
+| compose-water | all five above (order: bed, river, tides, currents, seastate) | (new) |
 | compose-check | <out>/check.json (the composites' gates) | (new) |
 | sources | lists the source configs; <out>/sources_agree_*.json (two sources against each other) | (new) |
 
@@ -101,6 +106,34 @@ stations, NDBC ADCP buoys, a surface field per region and ROMS OFS), sea state a
 (GFS-Wave points + the buoy configs' stations), rivers as one river.json (USGS gauges). No place name anywhere: a region is
 a cell of the map. Every time-varying source is read from the FIRST copy the cache holds and is
 never refetched for a newer one; each input records its valid and fetched time.
+
+POINT LAYERS ARE THE PROVIDER'S WHOLE SET (2026-10-21: datasets by measurement, never by place).
+Rasters follow the map's grain; stations are cheap, so compose-tides fits every CO-OPS harmonic
+(reference) station and compose-currents takes every CO-OPS current-prediction station, wherever
+they stand; the coverage still lists which stand in which region. Before deleting its old output
+each counts the requests its stations' missing first copies need and stops, fetching nothing, when
+the ledger's budget (sources.limits.json `budgetRequests`, per `GAGAME_LEDGER`) cannot hold them.
+
+THE RIVER REACHES (compose-river, Harvesters/RiverReaches.cs). `river/river.json` keeps `sites`
+(every field as before, each site appending `drainage_km2` from NWIS drain_area_va) and adds
+`reaches`: every river that meets the sea in a region with an active USGS stream gauge on its main
+stem, found from the data alone, no distance constant:
+1. the mouths: NHDPlus V2 network flowlines with terminalfl = 1 whose outlet lies in a region
+   (USGS wmadata WFS on api.water.usgs.gov, one request a region);
+2. the gauges: NLDI upstream-main navigation from each mouth
+   (`nldi/linked-data/comid/{T}/navigation/UM/nwissite`), kept where NWIS lists an active stream
+   gauge measuring discharge (00060) or stage (00065) (`nwis/site/?siteOutput=expanded`, 100 ids a
+   request); tributary gauges are not on the line and are not kept;
+3. the line: the terminal's NHDPlus level path (`levelpathi`), mouth first, cut after the
+   farthest flowline holding a gauge or tide station; each vertex is [lon, lat, km from the mouth
+   (chained great-circle length of the NHD geometry), the flowline's totdasqkm, tidal 0|1 (NHDPlus
+   `tidal`)]; `tidal_km` is the end of the tidal run from the mouth (the head of tide NHDPlus draws);
+4. the tides: each CO-OPS harmonic station in the stem's box asks NLDI for its own flowline
+   (`comid/position`); on the stem, its km is the projection onto that flowline's part of the line.
+Gauges carry id, km, drainage_km2, discharge (whether it reports one), off_m, comid, name; a
+main-stem gauge reporting discharge joins `sites` even inland of the regions (its own IV request,
+so the region gauges' first copies stay theirs). compose-tides then reads each station's `river_km`
+(and appends `river_reach`) from these reaches. Every response is cached under cache/river/ forever.
 
 ```bat
 harvest compose-water --fidelity harvest\testdata\coast3_3to10m.gafid --out data\composite\coast3
@@ -136,7 +169,7 @@ one instrument to equality at the same station and moment (half the last digit N
 against its own sources at a grid of points (equal to the bit where pixels are copied), no
 unanswered point in a painted region, a gap planted in a copy of a finest tile filled by the next
 tier with its own source's value, and stations, buoys and forecast points against older per-place
-files, entry for entry.
+files, entry for entry, where such files are still on disk (`--against-*`; nothing writes them now).
 
 ## Packages and ports
 
@@ -147,7 +180,7 @@ the GeoPackages (in place of sqlite3). The small stdlib decoders stay faithful p
 `Readers/`: GeoTIFF float windows with the TechNote-3 floating-point predictor (LibTiff.NET is
 libtiff 3.9 and lacks it), GRIB2 complex packing with the bitmap as NaN (NGrib would change the
 decoded values), classic netCDF, OSM PBF with LocationsOnWays (OsmSharp drops those fields),
-shapefile and DBF. `Core/Polite.cs` is the budgeted, ledgered fetcher of a place harvest;
+shapefile and DBF. `Core/Polite.cs` is the budgeted, ledgered fetcher of every composite;
 `Core/Fetch.cs` the simple cache-first one every other harvester carried.
 
 Two harvesters still shell out, as the Python did: `overture` to QGIS's `ogr2ogr`, and
@@ -157,7 +190,7 @@ Two harvesters still shell out, as the Python did: `overture` to QGIS's `ogr2ogr
 
 Run on the owner's cache against the Python's own fresh output, byte for byte: the tide fits
 (every coefficient and sidecar, 20 stations), the GSHHG bins and both land masks, the vpack,
-the Merrimack CUDEM grid, the ETOPO 8192 and New England 15" grids, the water registry.
+the Merrimack CUDEM grid (its harvester, `bathy`, retired 2026-10-21), the ETOPO 8192 and New England 15" grids, the water registry.
 Two traps made the difference between "close" and "identical", and both are now in the code:
 
 - `math.radians(x)` is ONE multiply by a precomputed constant; `x * Math.PI / 180` rounds twice

@@ -77,7 +77,6 @@
 #include "core/Pga.h"
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
-#include "sim/BathyModel.h"
 #include "sim/Ephemeris.h"   // M9bi: the sun as a place, in Cl(4,1)
 #include "sim/GlobeModel.h"
 #include "sim/OceanCpu.h"
@@ -182,6 +181,34 @@ void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool 
 }  // namespace
 
 namespace ga::app {
+
+namespace {
+// THE SOLVER'S SPOT PROBES for the log: the place's anchor and, a cell inside each river face, the
+// river where it enters -- dEta pathologies show at once. (Until 2026-10-21 three of the Merrimack's
+// own places, its bar, its throat and its ocean, at fixed metres from its anchor, whatever the scene.)
+std::string SweProbes(Gpu& gpu, SweSolver& swe, const tools::SweToolGrid& grid) {
+    const SweDomain& d = swe.Domain();
+    std::vector<float> pts = {0.0f, 0.0f};
+    grid.CellsOfFlat(pts.data(), 1);
+    for (const SweDomain::FaceCells& F : d.faces) {
+        const float a = 0.5f * float(F.c0 + F.c1) + 0.5f;
+        pts.push_back(F.side == 2 ? 1.5f : F.side == 3 ? float(d.nx) - 1.5f : a);
+        pts.push_back(F.side == 0 ? 1.5f : F.side == 1 ? float(d.ny) - 1.5f : a);
+    }
+    const int n = int(pts.size() / 2);
+    std::vector<SweSolver::Probe> pr(static_cast<size_t>(n));
+    swe.ReadProbes(gpu, pts.data(), n, pr.data());
+    std::string s;
+    for (int k = 0; k < n; ++k) {
+        char b[200];
+        snprintf(b, sizeof(b), "%s%s: dEta %+.3f u %+.2f,%+.2f v%d", k ? " | " : "",
+                 k == 0 ? "anchor" : (d.faces[size_t(k - 1)].name + " face").c_str(), pr[size_t(k)].dEta,
+                 pr[size_t(k)].u, pr[size_t(k)].v, pr[size_t(k)].valid ? 1 : 0);
+        s += b;
+    }
+    return s;
+}
+}  // namespace
 
 // The two brackets stepBoat (Session) and Frame() time themselves with. They reach the members
 // through the aliases (profT0, profOn, profMs, profHelm, profHelmMs) and the class's Clock, so
@@ -577,13 +604,10 @@ std::optional<int> FrameLoop::Session() {
     auto& marsMode = m_A.marsMode;
     auto& globeModel = m_A.globeModel;
     GlobeModel& activeGlobe = *m_A.activeGlobe;
-    auto& bathySwe = m_A.bathySwe;
     auto& compositor = m_A.compositor;
     auto& hgtCh = m_A.hgtCh;
     auto& waterAtlas = m_A.waterAtlas;
-    auto& bathy = m_A.bathy;
     auto& swe = m_A.swe;
-    auto& riverQ = m_A.riverQ;
     auto& gulf = m_A.gulf;
     auto& waterScene = m_A.waterScene;
     auto& waterBank = m_A.waterBank;
@@ -618,16 +642,9 @@ std::optional<int> FrameLoop::Session() {
     auto& vesselReg = m_vesselReg;
     auto& startUnix = m_startUnix;
     auto& entSta = m_entSta;
-    auto& westA = m_westA;
-    auto& westB = m_westB;
-    auto& kWestKm = m_kWestKm;
-    auto& wT = m_wT;
     auto& oceanAt = m_oceanAt;
-    auto& hasSound = m_hasSound;
-    auto& southAt = m_southAt;
-    auto& westAt = m_westAt;
-    auto& kUpriverAreaM2 = m_kUpriverAreaM2;
-    auto& westQAt = m_westQAt;
+    auto& faceAt = m_faceAt;
+    auto& faceQAt = m_faceQAt;
     auto& weather = m_weather;
     auto& sceneToWaveCfg = m_sceneToWaveCfg;
     auto& waveField = m_waveField;
@@ -822,13 +839,6 @@ std::optional<int> FrameLoop::Session() {
     } else if (mode == 1 && S.scene.view == "orbit") {
         cam = camGlobe;   // an `orbit` view that declares no eye: the engine's North Atlantic default
     }
-    if (globe) {
-        // (M12 step 4a: the rows above went into the surface the globe reads -- SetSurface.)
-        if (bathy.Ready()) {   // the survey's own lat/lon extent (PHASE C1: no world.flat)
-            globe->SetEstuaryWindow(bathy.Lon0(), bathy.Lat1(), bathy.Nx() * bathy.Dlon(),
-                                    bathy.Ny() * bathy.Dlat());
-        }
-    }
     // ---- M10: THE DROSTE LINK (src/core/Droste.h). The root's ADDRESS, hung as a leaf:
     // the quadtree leaf at (drosteLat, drosteLon, drosteLevel) gets the root as its child.
     // What that means in space follows from the address alone -- the globe's diameter is
@@ -1007,12 +1017,12 @@ std::optional<int> FrameLoop::Session() {
                                (S.rails.active == Scene::kRailDrosteOut);
         const char* railName =
             (globe && marsMode)                                                    ? "mars"
-            : (globe && (S.rails.active == Scene::kRailFlood) && bathy.Ready())    ? "flood"
-            : (globe && (S.rails.active == Scene::kRailJetty) && bathy.Ready())    ? "jetty"
-            : (globe && (S.rails.active == Scene::kRailZoom) && bathy.Ready())     ? "zoom"
-            : (globe && towerRail && bathy.Ready())
+            : (globe && (S.rails.active == Scene::kRailFlood))                     ? "flood"
+            : (globe && (S.rails.active == Scene::kRailJetty))                     ? "jetty"
+            : (globe && (S.rails.active == Scene::kRailZoom))                      ? "zoom"
+            : (globe && towerRail)
                 ? ((S.rails.active == Scene::kRailDroste) ? "droste" : "droste-out")
-            : (globe && sea && bathy.Ready() && !marsMode)                         ? "classic"
+            : (globe && sea && !marsMode)                                          ? "classic"
                                                                                    : nullptr;
         // THE FRAME a rail resolves in: the tangent rows and the planet, the portal and its
         // cycle, the dive's declared pace, the session camera's optics, the views a key names.
@@ -1150,107 +1160,67 @@ std::optional<int> FrameLoop::Session() {
     }
     startUnix = simUnix;
 
-    // M5c boundary clocks. Ocean = the station at the river's km 0 (the open-water level; the
-    // focus is the station nearest the solver's anchor, PHASE C3). West = the river tide
-    // interpolated to the river's entry, expressed as a DEVIATION from the ocean tide so the
-    // datum offset cancels.
-    entSta = model.Focus(); westA = model.Focus(); westB = model.Focus();
-    // The west edge's along-channel kilometre tracks the WINDOW (straight-line distance is
-    // a fine proxy on this reach): ~5.3 km for the original mouth window, ~15.5 for the
-    // M6d wide window (bracketed by Merrimacport/Riverside instead of Newburyport/Salisbury).
-    // PHASE C1: the river's ENTRY keys it -- the deepest cell of the domain's river side, its
-    // kilometre that point's projection onto the stations' river profile (consecutive stations by
-    // riverKm, in a chart about the entry at its own latitude). Not |WorldX0|.
-    kWestKm = 6.0;
-    if (swe.Ready() && S.water.swe.river == 0) {
-        const SweDomain& sd = swe.Domain();
-        int rBest = -1;
-        float eBest = 1.0e9f;
-        for (uint32_t r = 0; r < sd.ny; ++r) {
-            const float e = sd.elev[size_t(r) * sd.nx];
-            if (e < eBest) {
-                eBest = e;
-                rBest = int(r);
+    // THE BOUNDARY CLOCKS (2026-10-21: the rivers are data, sim/RiverModel.h). Ocean = the station at
+    // the mouth of the river that enters the domain (the open water's level; the focus is the station
+    // nearest the solver's anchor, PHASE C3), else the focus. Each river face: the river tide at its
+    // kilometre, interpolated between the stations on its reach, as a DEVIATION from the ocean's so
+    // the datum offsets cancel; and the transport it must carry (+ inward), the river's discharge
+    // less the prism the reach above it fills, q - A d(eta_face)/dt. The prism's area is the river's
+    // surface below the face's high water, read from the one bed along the reach (PrismArea), where
+    // until this date it was a scene's constant (the Merrimack's 3.9 km^2, "~19.5 km of ~200 m
+    // river; an NHD-integrated area is the named refinement").
+    entSta = model.Focus();
+    const auto riverClock = [&](const SweDomain& sd, const std::vector<RiverModel::Crossing>& all, double q0) {
+        // the crossings the domain made faces of, in its faces' order
+        std::vector<RiverModel::Crossing> at;
+        for (const SweDomain::FaceCells& F : sd.faces) {
+            for (const RiverModel::Crossing& c : all) {
+                if (c.side == F.side && m_A.rivers.R(c.reach).name == F.name) {
+                    at.push_back(c);
+                    break;
+                }
             }
         }
-        double la = 0.0, lo = 0.0;
-        sd.LatLonOf(0.5, rBest + 0.5, la, lo);
-        std::vector<size_t> prof;
-        for (size_t i = 0; i < model.Count(); ++i) {
-            if (model.S(i).riverKm >= 0) prof.push_back(i);
-        }
-        std::sort(prof.begin(), prof.end(),
-                  [&](size_t a, size_t b) { return model.S(a).riverKm < model.S(b).riverKm; });
-        const double mLat = 111194.93, mLon = mLat * std::cos(la * 3.14159265358979323846 / 180.0);
-        double bestD = 1.0e300, km = -1.0;
-        for (size_t k = 0; k + 1 < prof.size(); ++k) {
-            const auto& a = model.S(prof[k]);
-            const auto& b = model.S(prof[k + 1]);
-            const double ax = (a.lon - lo) * mLon, ay = (a.lat - la) * mLat;
-            const double bx = (b.lon - lo) * mLon, by = (b.lat - la) * mLat;
-            const double vx = bx - ax, vy = by - ay, vv = vx * vx + vy * vy;
-            const double t = vv > 0.0 ? std::clamp(-(ax * vx + ay * vy) / vv, 0.0, 1.0) : 0.0;
-            const double px = ax + t * vx, py = ay + t * vy, d = px * px + py * py;
-            if (d < bestD) {
-                bestD = d;
-                km = a.riverKm + t * (b.riverKm - a.riverKm);
+        RiverFaceClock c = BuildRiverClock(model, m_A.rivers, at, q0);
+        c.tide = S.water.swe.riverTide;
+        const int ocean = c.oceanSta >= 0 ? c.oceanSta : model.Focus();
+        constexpr double kD2R = 3.14159265358979323846 / 180.0;
+        for (size_t f = 0; f < c.faces.size(); ++f) {
+            // the face's high water: the highest its level stands over a day (25 h, the tide's two
+            // highs and the diurnal inequality)
+            double hw = -1.0e9;
+            for (double t = simUnix; t < simUnix + 25.0 * 3600.0; t += 600.0) {
+                hw = (std::max)(hw, model.Height(size_t(ocean), t) + datumOff + c.DEta(model, int(f), t));
             }
+            std::string said;
+            const auto t0 = std::chrono::steady_clock::now();
+            c.faces[f].prismM2 = m_A.rivers.PrismArea(
+                c.faces[f].at, hw,
+                [&](double la, double lo) { return compositor.SampleHeight(hgtCh, la * kD2R, lo * kD2R, 4.0); },
+                planetR, 25.0, &said);
+            Log("[river] %s's prism above its face: %s -- %.1f s", c.faces[f].name.c_str(), said.c_str(),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         }
-        if (km >= 0.0) kWestKm = std::min(20.0, km);
-        Log("[swe] the river's entry: the river side's deepest cell (row %d, bed %+.2f m) at %.5f N "
-            "%.5f E, %.2f km up the stations' profile (%.0f m off it) -> the west clock at km %.2f",
-            rBest, double(eBest), la, lo, km, std::sqrt(bestD), kWestKm);
-    }
-    {
-        double bestEnt = 1e9, bestA = -1e9, bestB = 1e9;
-        for (size_t i = 0; i < model.Count(); ++i) {
-            const double km = model.S(i).riverKm;
-            if (km < 0) continue;
-            if (km < bestEnt) { bestEnt = km; entSta = static_cast<int>(i); }
-            if (km <= kWestKm && km > bestA) { bestA = km; westA = static_cast<int>(i); }
-            if (km > kWestKm && km < bestB) { bestB = km; westB = static_cast<int>(i); }
-        }
-        if (bestB > 1e8) westB = westA;
-    }
-    wT = (model.S(westB).riverKm > model.S(westA).riverKm)
-                          ? (kWestKm - model.S(westA).riverKm) /
-                                (model.S(westB).riverKm - model.S(westA).riverKm)
-                          : 0.0;
-    // M12 step 5d: `water.swe.westBoundary` (--swe-west-off). Captured BY VALUE below, because
-    // the two closures are std::function members that outlive this call.
-    const bool westBoundary = S.water.swe.westBoundary;
-    oceanAt = [&](double t) { return model.Height(entSta, t) + datumOff; };
-    // The sound's tide: the entrance clock ~10 min later (its Ipswich mouth is a few km
-    // down an open coast). Active only when the window holds the sound.
-    southAt = [&, hasSound](double t) {
-        return hasSound ? model.Height(entSta, t - 600.0) - model.Height(entSta, t) : 0.0;
-    };
-    // TIDAL parts only: each station's Height is in its OWN local MLLW, so raw differences
-    // smuggle a constant datum offset into the boundary (with the Merrimacport bracket that
-    // was a permanent 19 cm seaward slope -- an artificial ever-ebb). The true NAVD river
-    // slope at this reach is cm-scale; call it zero and let the tide be the signal.
-    westAt = [&, westBoundary](double t) {
-        if (!westBoundary) return 0.0;
-        const double tw = (model.Height(westA, t) - model.S(westA).meanMllwM) * (1.0 - wT) +
-                          (model.Height(westB, t) - model.S(westB).meanMllwM) * wT;
-        return tw - (model.Height(entSta, t) - model.S(entSta).meanMllwM);
-    };
-    // M6r: the transport the Flather west boundary must CARRY (+east): river discharge
-    // minus the upriver prism demand. The reach beyond the window (km ~15.5 to the head
-    // of tide at Haverhill, ~km 35) fills and drains THROUGH this boundary; its surface
-    // area is the prism knob (~19.5 km of ~200 m river; an NHD-integrated area is the
-    // named refinement). d(eta_west)/dt by central difference of the station-fit clocks.
-    westQAt = [&, riverQ, westBoundary](double t) {
-        if (!westBoundary) return 0.0;
-        const double dh = (oceanAt(t + 300.0) + westAt(t + 300.0) - oceanAt(t - 300.0) -
-                           westAt(t - 300.0)) / 600.0;
-        return riverQ - kUpriverAreaM2 * dh;
+        return c;
     };
     if (swe.Ready()) {
-        Log("[swe] boundaries: ocean=%s, west=lerp(%s,%s,%.2f) Flather "
-            "(Q %.0f m^3/s, prism area %.1f km^2)",
-            model.S(entSta).name.c_str(), model.S(westA).name.c_str(),
-            model.S(westB).name.c_str(), wT, riverQ, kUpriverAreaM2 / 1.0e6);
+        const SweDomain& sd = swe.Domain();
+        m_rivers = riverClock(sd, m_A.rivers.EntersBox(sd.lat0, sd.lon0, sd.lat1, sd.lon1), S.water.swe.riverQ);
+        if (m_rivers.oceanSta >= 0) entSta = m_rivers.oceanSta;
+    }
+    oceanAt = [&](double t) { return model.Height(entSta, t) + datumOff; };
+    faceAt = [this](int f, double t) { return m_rivers.DEta(m_A.model, f, t); };
+    faceQAt = [this](int f, double t) { return m_rivers.Q(m_A.model, f, t); };
+    if (swe.Ready()) {
+        std::string faces;
+        for (size_t f = 0; f < m_rivers.faces.size(); ++f) {
+            char b[200];
+            snprintf(b, sizeof(b), "%s%s (Q %.0f m^3/s, prism %.2f km^2)", f ? ", " : "", m_rivers.faces[f].name.c_str(),
+                     m_rivers.faces[f].q, m_rivers.faces[f].prismM2 / 1.0e6);
+            faces += b;
+        }
+        Log("[swe] boundaries: ocean=%s, river faces: %s", model.S(entSta).name.c_str(),
+            faces.empty() ? "none (no river of data.river enters the box)" : faces.c_str());
     }
 
     // ---- M6x: THE GLOBAL WEATHER/PHYSICS MANAGER -- one query surface over every water
@@ -1281,9 +1251,17 @@ std::optional<int> FrameLoop::Session() {
         const double off = model.S(st).mllwMinusNavdM;
         auto oceanAt = [&model, st, off](double t) { return model.Height(static_cast<size_t>(st), t) + off; };
         SweConfig cfg;
-        cfg.westBoundary = v.river == 0;
         const double box[4] = {v.box[1], v.box[0], v.box[3], v.box[2]};   // the window's lat0, lon0, lat1, lon1
-        weather.AddDormantWindow(v.name.c_str(), box, v.nx, v.ny, cfg, oceanAt, 0.5);
+        // its rivers, as the scene's solver's: the reaches whose mouths its box holds
+        const std::vector<RiverModel::Crossing> at = m_A.rivers.EntersBox(box[0], box[1], box[2], box[3]);
+        for (const RiverModel::Crossing& c : at) cfg.faces.push_back({c.side, c.lat, c.lon, m_A.rivers.R(c.reach).name});
+        SweDomain shape;   // the faces' order as the window's domain will make them (by name and side)
+        for (const SweConfig::RiverFace& rf : cfg.faces) shape.faces.push_back({rf.side, 0, -1, rf.name});
+        auto clock = std::make_shared<RiverFaceClock>(riverClock(shape, at, -1.0));
+        const TideModel* tm = &model;
+        weather.AddDormantWindow(v.name.c_str(), box, v.nx, v.ny, cfg, oceanAt, 0.5,
+                                 [clock, tm](int f, double t) { return clock->DEta(*tm, f, t); },
+                                 [clock, tm](int f, double t) { return clock->Q(*tm, f, t); });
     }
     // PHASE B2 (D4): every solver binds the standing window (it reads it where the window holds its
     // cells, the cube elsewhere), and the pin and the whole-bed wait ask for its tiles. PHASE C1: this
@@ -1298,7 +1276,7 @@ std::optional<int> FrameLoop::Session() {
     if (S.Tool("ocean-probe")) {
         // nullopt = "lat,lon" did not parse: the block never returned, so the run goes on.
         if (const auto rc = tools::RunOceanProbe(opt, model, gpu, renderer, swe, resMgr,
-                                                 simUnix, oceanAt, southAt, westAt, westQAt,
+                                                 simUnix, oceanAt, faceAt, faceQAt,
                                                  weather)) {
             return *rc;
         }
@@ -1514,23 +1492,10 @@ std::optional<int> FrameLoop::Session() {
         // --swe-cycle N: the validation cycle integrates on the bed a run's spin-up would, so
         // it comes after the wait (before it, the kernel reads a bed no turn has delivered).
         if (S.Tool("swe-cycle")) {
-            // The west boundary's inputs, for the cycle's west log: the two stations that bracket
-            // the boundary's river kilometre (each tide in its own MLLW, less its own mean), the
-            // weight between them, and the entrance's tide and datum link to NAVD88.
-            auto describeWest = [&](double t) {
-                char b[480];
-                snprintf(b, sizeof(b),
-                         "boundary at river km %.2f: %s (km %.2f) %+.3f less mean %.3f | %s (km %.2f) "
-                         "%+.3f less mean %.3f | weight %.3f | entrance %s %+.3f less mean %.3f, "
-                         "MLLW->NAVD %+.3f",
-                         kWestKm, model.S(westA).name.c_str(), model.S(westA).riverKm,
-                         model.Height(westA, t), model.S(westA).meanMllwM,
-                         model.S(westB).name.c_str(), model.S(westB).riverKm,
-                         model.Height(westB, t), model.S(westB).meanMllwM, wT,
-                         model.S(entSta).name.c_str(), model.Height(entSta, t),
-                         model.S(entSta).meanMllwM, datumOff);
-                return std::string(b);
-            };
+            // The first river face's inputs, for the cycle's face log: the two stations that bracket
+            // its river kilometre (each tide in its own MLLW, less its own mean), the weight between
+            // them, and the entrance's tide and datum link to NAVD88.
+            auto describeWest = [&](double t) { return m_rivers.Describe(model, 0, t, datumOff); };
             // The stations' own tides over the cycle, a row every 120 s like the cycle's: each in
             // its own MLLW less its own mean, the river's stations only (out/swe_stations_<pid>.csv).
             {
@@ -1541,17 +1506,16 @@ std::optional<int> FrameLoop::Session() {
                 fopen_s(&sf, sp, "w");
                 if (sf) {
                     fprintf(sf, "unix");
-                    for (size_t i = 0; i < model.Count(); ++i) {
-                        if (model.S(i).riverKm < 0) continue;
-                        std::string nm = model.S(i).name;
+                    for (const TideModel::ProfileStation& p : model.Profile()) {   // the place's river
+                        std::string nm = model.S(size_t(p.index)).name;
                         std::replace(nm.begin(), nm.end(), ',', ' ');
-                        fprintf(sf, ",%s@%.2f", nm.c_str(), model.S(i).riverKm);
+                        fprintf(sf, ",%s@%.2f", nm.c_str(), p.km);
                     }
                     fprintf(sf, "\n");
                     for (double t = simUnix; t <= simUnix + opt.sweCycleH * 3600.0 + 1.0; t += 120.0) {
                         fprintf(sf, "%.0f", t);
-                        for (size_t i = 0; i < model.Count(); ++i) {
-                            if (model.S(i).riverKm < 0) continue;
+                        for (const TideModel::ProfileStation& p : model.Profile()) {
+                            const size_t i = size_t(p.index);
                             fprintf(sf, ",%.4f", model.Height(i, t) - model.S(i).meanMllwM);
                         }
                         fprintf(sf, "\n");
@@ -1574,29 +1538,18 @@ std::optional<int> FrameLoop::Session() {
             }
             return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents,
                                           tools::SweToolGrid{&swe.Domain(), surface.flat}, swe, resMgr,
-                                          simUnix, oceanAt, southAt, westAt, westQAt, describeWest,
+                                          simUnix, oceanAt, faceAt, faceQAt, describeWest,
                                           &focusProbe);
         }
         if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();
-            swe.Spinup(gpu, simUnix, S.water.swe.spinupH, oceanAt, westAt, southAt, westQAt);
+            swe.Spinup(gpu, simUnix, S.water.swe.spinupH, oceanAt, faceAt, faceQAt);
             Log("[swe] spun up %.2f h of history in %.1f s", S.water.swe.spinupH,
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         }
         if (bedTrace) m_bedTracer.Read(gpu, swe, "after-spinup", oceanAt(simUnix));
         if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, tools::SweToolGrid{&swe.Domain(), surface.flat}, swe);
-        {
-            // Spot probes for the log: bar, throat, ocean. dEta pathologies show instantly. The
-            // points are the tools' (world.flat, C4's keys): their places, then the solver's cells.
-            float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
-            tools::SweToolGrid{&swe.Domain(), surface.flat}.CellsOfFlat(pts, 3);
-            SweSolver::Probe pr[3];
-            swe.ReadProbes(gpu, pts, 3, pr);
-            Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "
-                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2400,0): dEta %+.3f",
-                pr[0].dEta, pr[0].u, pr[0].v, pr[0].valid ? 1 : 0, pr[1].dEta, pr[1].u,
-                pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta);
-        }
+        Log("[swe] probes  %s", SweProbes(gpu, swe, tools::SweToolGrid{&swe.Domain(), surface.flat}).c_str());
     }
     timeScale = S.time.timeScale;
     windowSec = S.time.windowDays * 86400.0;
@@ -1610,7 +1563,7 @@ std::optional<int> FrameLoop::Session() {
 
     // THE GROUND AS A RADIUS -- one law round the whole planet. A flat point's place on the planet
     // is east x + up (y + R) + north z; the ground in its direction stands at R + the elevation
-    // there (the survey's, held at the water's level, where it covers; else the globe's relief), and
+    // there (the height stack's as held, at the water's level or above; else the globe's relief), and
     // the point's CLEARANCE is how far it stands beyond that along its own radial. The old ground
     // was a flat y over (x, z): it answered only the anchor's hemisphere, since two points of the
     // sphere share each (x, z), and every frame's clamp lifted an eye 97 degrees away (Tokyo, from
@@ -1625,9 +1578,8 @@ std::optional<int> FrameLoop::Session() {
         const double gla = std::asin(std::clamp(p[1] / pr, -1.0, 1.0)) * r2d;
         const double glo = std::atan2(p[2], p[0]) * r2d;
         double elev = 0.0;
-        const float b = (bathy.Ready() && !marsMode) ? bathy.SampleLatLon(gla, glo) : -10000.0f;
-        if (b > -9000.0f) {
-            elev = std::max(static_cast<double>(b), lastWaterNavd);
+        if (hgtCh >= 0 && !marsMode) {   // the frame thread's read: what is held, never a paint
+            elev = std::max(double(compositor.SampleHeightResident(hgtCh, gla / r2d, glo / r2d, 2.0)), lastWaterNavd);
         } else if (globe && activeGlobe.Ready()) {
             elev = (std::max)(0.0, activeGlobe.ElevAt(gla, glo));
         }
@@ -1729,7 +1681,7 @@ std::optional<int> FrameLoop::Session() {
     if (!S.railDirW.empty()) {
         CreateDirectoryW(S.railDirW.c_str(), nullptr);
         if (!m_rail.Loaded()) {
-            Log("FATAL: --rail needs globe + sea + bathy data all present");
+            Log("FATAL: --rail needs globe + sea data present");
             return 1;
         }
     }
@@ -2527,7 +2479,6 @@ bool FrameLoop::Frame() {
     auto& compositor = m_A.compositor;
     auto& hgtCh = m_A.hgtCh;
     auto& waterAtlas = m_A.waterAtlas;
-    auto& bathy = m_A.bathy;
     auto& swe = m_A.swe;
     auto& gulf = m_A.gulf;
     auto& waterScene = m_A.waterScene;
@@ -2609,9 +2560,8 @@ bool FrameLoop::Frame() {
     auto& startUnix = m_startUnix;
     auto& entSta = m_entSta;
     auto& oceanAt = m_oceanAt;
-    auto& southAt = m_southAt;
-    auto& westAt = m_westAt;
-    auto& westQAt = m_westQAt;
+    auto& faceAt = m_faceAt;
+    auto& faceQAt = m_faceQAt;
     auto& weather = m_weather;
     auto& sceneToWaveCfg = m_sceneToWaveCfg;
     auto& waveField = m_waveField;
@@ -4194,13 +4144,12 @@ bool FrameLoop::Frame() {
     // The terrain speaks NAVD88; the tide speaks MLLW. One offset joins them. In
     // estuary mode the open-water level is the ENTRANCE station's (M5c), and the west
     // boundary rides the interpolated river tide.
-    const double waterNavd =
-        bathy.Ready() ? oceanAt(simUnix) : tide->focusHeight + datumOff;
+    const double waterNavd = oceanAt(simUnix);   // the entrance station's (the focus's when no river)
     lastWaterNavd = waterNavd;   // next frame's camera-pivot rays test against it
     // THE PLANE THE SOLVER IS FORCED BY, to the banks: inside its domain the level is that plane
     // plus its deviation (the solver is truth) -- the same value sea->SetTime hands the solver.
     {
-        const double tidePlane = bathy.Ready() ? waterNavd : tide->focusHeight;
+        const double tidePlane = waterNavd;
         if (waterBank) waterBank->SetTidePlane(tidePlane);
         if (waterBankB) waterBankB->SetTidePlane(tidePlane);
         if (m_A.waterBankEye) m_A.waterBankEye->SetTidePlane(tidePlane);
@@ -4212,9 +4161,12 @@ bool FrameLoop::Frame() {
     }
     PROF_BEGIN();
     if (swe.Ready()) {
-        swe.SetBoundaries(static_cast<float>(westAt(simUnix)),
-                          static_cast<float>(southAt(simUnix)),
-                          static_cast<float>(westQAt(simUnix)));
+        float dEta[kMaxRiverFaces] = {}, q[kMaxRiverFaces] = {};
+        for (int f = 0; f < swe.FaceCount(); ++f) {
+            dEta[f] = static_cast<float>(faceAt(f, simUnix));
+            q[f] = static_cast<float>(faceQAt(f, simUnix));
+        }
+        swe.SetBoundaries(dEta, q);
     }
     PROF_END(9);
     // M7k: arm the programmatic .wpix capture so it records the run's LAST warm
@@ -4228,7 +4180,7 @@ bool FrameLoop::Frame() {
     PROF_BEGIN();
     // PHASE B2: the churn stands in the camera's world: slot 0's windows about its eye.
     if (sea) sea->SetChurnWindows(m_A.surface.SlotRows(0), m_A.surface.slotEye[0].data());
-    if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
+    if (sea) sea->SetTime(simUnix, waterNavd,
                           cam.px, cam.pz);
     PROF_END(5);
     // M9ba: the exposure node's inputs; a bucket roll re-keys the tree and drops the
@@ -4708,14 +4660,9 @@ bool FrameLoop::Frame() {
                              static_cast<float>(resMgr.Mips(hgtTenant) - 1u));
         }
         if (swe.Ready()) {
-            float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
-            tools::SweToolGrid{&swe.Domain(), m_A.surface.flat}.CellsOfFlat(pts, 3);
-            SweSolver::Probe pr[3];
-            swe.ReadProbes(gpu, pts, 3, pr);
-            Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "
-                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2400,0): dEta %+.3f -- frame %u (t+%.1f s)",
-                pr[0].dEta, pr[0].u, pr[0].v, pr[0].valid ? 1 : 0, pr[1].dEta, pr[1].u,
-                pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta, frame, simUnix - startUnix);
+            Log("[swe] probes  %s -- frame %u (t+%.1f s)",
+                SweProbes(gpu, swe, tools::SweToolGrid{&swe.Domain(), m_A.surface.flat}).c_str(), frame,
+                simUnix - startUnix);
         }
         if (S.Tool("twin-surface") && sea && waterBank) {
             tools::LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, lastWaterNavd,

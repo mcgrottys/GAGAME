@@ -3,6 +3,7 @@
 #include "core/Common.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -163,9 +164,45 @@ struct Eot20Source : FieldSource {
     }
 };
 
-// L2: the New England station field -- the HQ enhancement. Phasor IDW (p=2) over the fitted
-// stations; coverage feathers with distance to the NEAREST station (full inside 20 km, gone
-// by 90 km), so the field claims exactly the water the survey actually measured.
+// A STATION REACHES ONLY SO FAR (2026-10-21, the world's stations). The station field and the MSL
+// surface were inverse-distance sums over EVERY station -- 20 New England stations, then 1,256 of the
+// world's: a tile's texel summed them all, though a station in Hawaii says nothing of the Merrimack. A
+// station's weight is 1 / d^2 tapered to nought at kStationReachM (smoothstep from the coverage's 90 km,
+// three times it at the far end), so the sum is local and continuous; the stations are found through a
+// grid of 1-degree cells.
+constexpr double kStationReachM = 270000.0;
+double StationWeight(double d2) {
+    const double d = std::sqrt(d2);
+    const double t = std::clamp((d - 90000.0) / (kStationReachM - 90000.0), 0.0, 1.0);
+    return (1.0 - t * t * (3.0 - 2.0 * t)) / d2;
+}
+struct StationGrid {
+    std::unordered_map<int64_t, std::vector<uint32_t>> cells;
+    static int64_t Key(int cy, int cx) { return int64_t(cy + 90) * 400 + (cx + 200); }
+    void Add(uint32_t i, double latDeg, double lonDeg) {
+        cells[Key(int(std::floor(latDeg)), int(std::floor(lonDeg)))].push_back(i);
+    }
+    // Every station of the cells within kStationReachM of the place.
+    template <class F>
+    void Near(double latDeg, double lonDeg, F visit) const {
+        const double dLat = kStationReachM / 110574.0;
+        const double dLon = (std::min)(180.0, dLat / (std::max)(std::cos(latDeg * kD2R), 0.01));
+        const int y0 = int(std::floor(latDeg - dLat)), y1 = int(std::floor(latDeg + dLat));
+        const int x0 = int(std::floor(lonDeg - dLon)), x1 = int(std::floor(lonDeg + dLon));
+        for (int cy = (std::max)(y0, -90); cy <= (std::min)(y1, 89); ++cy) {
+            for (int cx = x0; cx <= x1; ++cx) {
+                const int wx = ((cx + 180) % 360 + 360) % 360 - 180;
+                const auto it = cells.find(Key(cy, wx));
+                if (it == cells.end()) continue;
+                for (const uint32_t i : it->second) visit(i);
+            }
+        }
+    }
+};
+
+// L2: the station field -- the measured enhancement. Phasor IDW (p=2, StationWeight) over the fitted
+// stations near the point; coverage feathers with distance to the NEAREST station (full inside 20 km,
+// gone by 90 km), so the field claims exactly the water the stations actually measured.
 struct StationFieldSource : FieldSource {
     SourceInfo info;
     struct Sta {
@@ -173,9 +210,10 @@ struct StationFieldSource : FieldSource {
         double re, im;   // phasor at the fit epoch
     };
     std::vector<Sta> stas;
+    StationGrid grid;
 
     void Describe(int c, double lon0, double lat0, double lon1, double lat1) {
-        info.name = std::string("tide.stations.ne.") + WaterAtlas::kConName[c];
+        info.name = std::string("tide.stations.") + WaterAtlas::kConName[c];
         info.structure = "point harmonics, phasor IDW (fit epoch)";
         info.crs = "EPSG:4326 | CO-OPS station datums";
         info.cmPerPixel = 2.0e5;   // ~2 km: the inter-station spacing carries this
@@ -188,16 +226,19 @@ struct StationFieldSource : FieldSource {
     float Sample(double latRad, double lonRad, double, float out[2]) override {
         const double kx = 111320.0 * std::cos(latRad), ky = 110574.0;
         double re = 0, im = 0, wsum = 0, dminM = 1e18;
-        for (const Sta& s : stas) {
-            const double dx = (lonRad - s.lonRad) / kD2R * kx;
+        grid.Near(latRad / kD2R, lonRad / kD2R, [&](uint32_t i) {
+            const Sta& s = stas[i];
+            double dl = (lonRad - s.lonRad) / kD2R;
+            dl -= 360.0 * std::round(dl / 360.0);
+            const double dx = dl * kx;
             const double dy = (latRad - s.latRad) / kD2R * ky;
             const double d2 = dx * dx + dy * dy + 1.0;
             dminM = (std::min)(dminM, std::sqrt(d2));
-            const double w = 1.0 / d2;
+            const double w = StationWeight(d2);
             re += w * s.re;
             im += w * s.im;
             wsum += w;
-        }
+        });
         if (wsum <= 0.0) return 0.0f;
         out[0] = static_cast<float>(re / wsum);
         out[1] = static_cast<float>(im / wsum);
@@ -211,6 +252,7 @@ struct StationFieldSource : FieldSource {
 struct WaterAtlas::Impl {
     std::vector<std::unique_ptr<FieldSource>> sources;
     Compositor* comp = nullptr;
+    StationGrid stations;   // the tide model's, for MslNavd
 };
 
 bool WaterAtlas::Init(Compositor& comp, const TideModel& tides, const std::string& waterDir) {
@@ -246,6 +288,7 @@ bool WaterAtlas::Init(Compositor& comp, const TideModel& tides, const std::strin
         }
     }
     m_nStations = static_cast<int>(tides.Count());
+    for (size_t i = 0; i < tides.Count(); ++i) m_impl->stations.Add(uint32_t(i), tides.S(i).lat, tides.S(i).lon);
 
     for (int c = 0; c < kCon; ++c) {
         auto eq = std::make_unique<EquilibriumSource>(c);
@@ -284,6 +327,7 @@ bool WaterAtlas::Init(Compositor& comp, const TideModel& tides, const std::strin
         auto sta = std::make_unique<StationFieldSource>();
         sta->Describe(c, lon0 - 1.0, lat0 - 0.7, lon1 + 1.0, lat1 + 0.7);
         for (const P& p : perCon[c]) {
+            sta->grid.Add(uint32_t(sta->stas.size()), p.lat, p.lon);
             sta->stas.push_back({p.lat * kD2R, p.lon * kD2R, p.re, p.im});
         }
 
@@ -570,17 +614,23 @@ bool RunWaterSelfTest() {
     return ok;
 }
 
-double WaveAtlasNavdDelta(const TideModel* tides) {
-    // The regional NAVD-MSL offset, calibrated at the nearest station carrying a
-    // published link (the main.cpp ResolveDatum recipe: delta = -mllwMinusNavd -
-    // meanMllw; smallest |delta| wins -- Boston gives +0.092 m here).
-    double best = 0.0;
+double WaveAtlasNavdDelta(const TideModel* tides, double latDeg, double lonDeg) {
+    // The regional NAVD-MSL offset at a place: the NEAREST station on the open coast carrying a
+    // published link (Assembly.cpp NavdAboveMsl's law, 2026-10-21: delta = -mllwMinusNavd - meanMllw;
+    // a station up a river stands on a river's mean). The smallest |delta| anywhere was this rule
+    // while the stations were New England's alone; over a wider set it picks another coast's.
+    double best = 0.0, bestD2 = 0.0;
     bool found = false;
+    const double cl = std::cos(latDeg * kD2R);
     for (size_t i = 0; i < tides->Count(); ++i) {
         const TideStation& s = tides->S(i);
-        if (s.mllwMinusNavdM < -900.0) continue;
-        const double delta = -s.mllwMinusNavdM - s.meanMllwM;
-        if (!found || std::abs(delta) < std::abs(best)) best = delta;
+        if (s.mllwMinusNavdM < -900.0 || s.riverKm > 0.0) continue;
+        const double dLat = s.lat - latDeg, dLon = (s.lon - lonDeg) * cl;
+        const double d2 = dLat * dLat + dLon * dLon;
+        if (!found || d2 < bestD2) {
+            bestD2 = d2;
+            best = -s.mllwMinusNavdM - s.meanMllwM;
+        }
         found = true;
     }
     return best;
@@ -593,21 +643,23 @@ double WaterAtlas::MslNavd(double latDeg, double lonDeg) const {
     // msl +0.43 from river slope) dominate the entrance by distance and bias the
     // solver's level +0.46 m. With the transfer, the entrance's own station answers
     // for the entrance. Beyond the survey the geoid stands in for MSL (0).
-    const double delta = WaveAtlasNavdDelta(m_tides);
+    const double delta = WaveAtlasNavdDelta(m_tides, latDeg, lonDeg);
     double acc = 0, wsum = 0, dmin = 1e18;
     const double kx = 111320.0 * std::cos(latDeg * kD2R), ky = 110574.0;
-    for (size_t i = 0; i < m_tides->Count(); ++i) {
+    m_impl->stations.Near(latDeg, lonDeg, [&](uint32_t i) {
         const TideStation& s = m_tides->S(i);
         const bool linked = s.mllwMinusNavdM > -900.0;
         const double mslNavd =
             linked ? (s.meanMllwM + s.mllwMinusNavdM) : -delta;
-        const double dx = (lonDeg - s.lon) * kx, dy = (latDeg - s.lat) * ky;
+        double dl = lonDeg - s.lon;
+        dl -= 360.0 * std::round(dl / 360.0);
+        const double dx = dl * kx, dy = (latDeg - s.lat) * ky;
         const double d2 = dx * dx + dy * dy + 1.0;
         dmin = (std::min)(dmin, std::sqrt(d2));
-        const double w = 1.0 / d2;
+        const double w = StationWeight(d2);
         acc += w * mslNavd;
         wsum += w;
-    }
+    });
     if (wsum <= 0.0) return 0.0;
     const double t = std::clamp((dmin - 20000.0) / 70000.0, 0.0, 1.0);
     return (acc / wsum) * (1.0 - t);

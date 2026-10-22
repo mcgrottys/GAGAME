@@ -1,15 +1,15 @@
 {
   "_readme": [
     "MAVERICKS -- the reef off Pillar Point, Half Moon Bay, California (2026-10-19, the rolling-wave",
-    "work; Mark: a place known for big barrel waves, with public data to pull from). Everything here",
-    "is the harvested place's (data/places/mavericks.json, harvest place --place mavericks): the bed",
-    "is NOAA's ninth-arc CUDEM, four 2022v1 tiles (n37x50/n37x75 x w122x50/w122x75, NAVD88 metres)",
-    "named below as a height source and composed at 13.7 m into data/bathy/mavericks.*; the tide",
-    "stations are Pillar Point Harbor's (9414131) and three more within 40 km; the currents are the",
-    "Bay's eight stations and buoy 46237's ADCP (none stand at the point: the jet is off); the sea",
-    "state is the GFS-Wave node off the point with buoys 46012 (Half Moon Bay) and 46237 (SF Bar).",
-    "The solver's domain is the harvested box, no river. The swell is set below: Hs 5 m, Tp 17 s from",
-    "290, the winter WNW groundswell the reef stands up -- the sea state's own forecast is the day's.",
+    "work; Mark: a place known for big barrel waves, with public data to pull from). The scene is a",
+    "PLACE and names no data of its own (2026-10-21, Mark: \"Data sets should never be specific to place,",
+    "only the measurement type\"): it takes the one atlas of scenes/merrimack.json -- the water composite",
+    "of harvest/fidelity/world.gafid, which paints the reef's box at 3 m from NOAA's ninth-arc",
+    "CUDEM, its tide stations (Pillar Point Harbor, 9414131, is the focus below), currents and sea state,",
+    "and the planet's buildings and roads. Fly from here to the Merrimack and its data is there.",
+    "The solver's domain is the box below; no river of data.river enters it. The swell is set below: Hs",
+    "5 m, Tp 17 s from 290, the winter WNW groundswell the reef stands up -- the sea state's own forecast",
+    "is the day's.",
     "",
     "The world's anchor is the point's tip; x east, z north, metres. The break lies 400 m WSW of it,",
     "over the reef that rises from 20 m to 5 m in a few hundred metres (the bowl at about",
@@ -20,7 +20,7 @@
     "",
     "Launch from the repo root:  build/bin/gagame.exe scenes/demos/mavericks.json"
   ],
-  "base": "scenes/merrimack.json",
+  "base": "scenes/world.json",
   "scene": {
     "name": "mavericks",
     "mode": "world",
@@ -33,13 +33,7 @@
     ]
   },
   "data": {
-    "tides": "data/tides/mavericks/stations.json",
-    "tideFocus": "9414131",
-    "seastate": "data/sea/mavericks/seastate.json",
-    "currents": "data/currents/mavericks/currents.json",
-    "bathy": "data/bathy/mavericks.json",
-    "river": "",
-    "edits": ""
+    "tideFocus": "9414131"
   },
   "time": {
     "start": "2026-10-19T17:00:00Z"
@@ -64,9 +58,7 @@
         37.42,
         -122.42,
         37.6
-      ],
-      "river": "none",
-      "westBoundary": false
+      ]
     },
     "wavefield": {
       "orgX": -2200,
@@ -78,51 +70,6 @@
       "_box": "3.2 x 2 km: the reef, the lineup and the swell's approach from the WNW. The solver's cell is the z16 page texel whatever cellM says (1.9 m here, WaveFieldSource::Align), so the box's metres are its cost: the 5.95 x 3.5 km box that also held Half Moon Bay's beach (2026-10-19) was 6.1 M cells, and its re-solve held 12.9 GB and ran a 2,700-frame session out of memory (2026-10-20). The beach is mavericks_beach.json's own field."
     }
   },
-  "sources": [
-    {
-      "name": "massgis.coq2023",
-      "manifest": "data/aerial/aerial.json",
-      "feather": 25
-    },
-    {
-      "name": "noaa.cudem.mavericks",
-      "folder": "D:/DataCache/GAGAME/cudem/CA",
-      "match": "ncei19_n37x*_w122x*_2022v1.tif",
-      "kind": "height",
-      "unit": "m",
-      "datum": "NAVD88"
-    },
-    {
-      "name": "gfswave.mavericks",
-      "file": "data/sea/mavericks/seastate.json",
-      "kind": "seastate"
-    },
-    {
-      "name": "noaa.etopo15s.n45w075",
-      "kind": "height",
-      "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif",
-      "unit": "m",
-      "datum": "EGM2008",
-      "offset": -0.092
-    }
-  ],
-  "stations": [
-    {
-      "name": "9414131",
-      "lat": 37.5025,
-      "lon": -122.4822
-    },
-    {
-      "name": "46012",
-      "lat": 37.363,
-      "lon": -122.881
-    },
-    {
-      "name": "46237",
-      "lat": 37.786,
-      "lon": -122.634
-    }
-  ],
   "views": [
     {
       "name": "bowl",

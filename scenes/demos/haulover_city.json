@@ -108,20 +108,6 @@
       "radius": 200
     }
   ],
-  "layers": [
-    {
-      "name": "buildings",
-      "enabled": true,
-      "levelHeight": 3.0,
-      "defaultHeight": 7.0,
-      "radius": 9000,
-      "lod": "D:/DataCache/OSM/buildings/planet-261012-decks.tree",
-      "laneWidth": 3.5,
-      "defaultLanes": 2,
-      "pathWidth": 2.0,
-      "kerb": 0.12
-    }
-  ],
   "gates": [
     {
       "name": "haulover",
@@ -162,41 +148,5 @@
       },
       "toAz": 90
     }
-  ],
-  "sources": [
-    {
-      "name": "massgis.coq2023",
-      "manifest": "data/aerial/aerial.json",
-      "feather": 25
-    },
-    {
-      "name": "osm.planet",
-      "kind": "buildings",
-      "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"
-    },
-    {
-      "name": "osm.roads.planet",
-      "kind": "roads",
-      "manifest": "D:/DataCache/OSM/roads/planet-261005-roads-loc.roads.json"
-    },
-    {
-      "name": "noaa.cudem.haulover",
-      "folder": "D:/DataCache/GAGAME/cudem/FL",
-      "match": "ncei19_n26X*_w080X25_2018v1.tif",
-      "kind": "height",
-      "unit": "m",
-      "datum": "NAVD88"
-    },
-    {
-      "name": "nbi.2025",
-      "kind": "bridges",
-      "manifest": "D:/DataCache/NBI/nbi-2025.bridges.json"
-    },
-    {
-      "name": "noaa.enc",
-      "kind": "bridges",
-      "manifest": "D:/DataCache/ENC/enc-20261009.bridges.json"
-    },
-    {"name": "noaa.etopo15s.n45w075", "kind": "height", "file": "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif", "unit": "m", "datum": "EGM2008", "offset": -0.092}
   ]
 }

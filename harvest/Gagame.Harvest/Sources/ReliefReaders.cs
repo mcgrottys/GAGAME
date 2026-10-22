@@ -85,7 +85,7 @@ public sealed class CudemIndex : IReliefSource
     readonly SourceEnv _env;
     readonly string _bucket, _prefix, _listing;
     readonly string[] _cache;
-    List<(Bathy.Tile t, Box cell)>? _cells;
+    List<(CudemTiles.Tile t, Box cell)>? _cells;
     readonly Dictionary<string, Dictionary<string, long>> _sizes = new();
 
     public CudemIndex(SourceConfig c, SourceEnv env)
@@ -99,16 +99,16 @@ public sealed class CudemIndex : IReliefSource
         Copied.Check(c);
     }
 
-    List<(Bathy.Tile t, Box cell)> Cells()
+    List<(CudemTiles.Tile t, Box cell)> Cells()
     {
         if (_cells is not null) return _cells;
         var index = Config.S("index");
         var (zip, _) = _env.Polite.Get($"https://{_bucket}.s3.amazonaws.com/{_prefix}{index}", SourceConfig.Resolve(_env.Ctx, Config.S("index_cache"), ("index", index)));
-        return _cells = Bathy.ReadTileIndex(zip).Select(t => (t, cell: Bathy.TileBounds(t.Name) ?? (t.Bbox is { } b ? new Box(b[0], b[1], b[2], b[3]) : null)))
+        return _cells = CudemTiles.ReadTileIndex(zip).Select(t => (t, cell: CudemTiles.TileBounds(t.Name) ?? (t.Bbox is { } b ? new Box(b[0], b[1], b[2], b[3]) : null)))
             .Where(x => x.cell is not null).Select(x => (x.t, x.cell!)).ToList();
     }
 
-    long? SizeOf(Bathy.Tile t)
+    long? SizeOf(CudemTiles.Tile t)
     {
         if (!_sizes.TryGetValue(t.Region, out var s))
         {

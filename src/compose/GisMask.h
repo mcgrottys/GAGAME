@@ -60,7 +60,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <future>
 #include <map>
+#include <unordered_map>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -87,7 +90,7 @@ public:
     // wants it (the globe walk's culled, sized leaves), once, then served from the tile tree on
     // disk -- into an LRU of kLandCacheBytes. A tile decimates each ring to a quarter of its own
     // texel, so a tile of the whole globe walks a few points a ring, not 79 M.
-    bool Load(const std::string& dir, const std::string& landPath = std::string(),
+    bool Load(const std::string& dir, const std::string& landPath = std::string(), const std::string& waterPath = std::string(),
               const std::string& editsPath = std::string());
     bool Ready() const { return !m_coast.empty() || !m_landIdx.empty(); }
 
@@ -216,9 +219,90 @@ private:
         std::vector<Vec3> pts;
         std::vector<Ring> rings;
         std::vector<uint8_t> south;   // the ring holds the south pole: its parity starts inside
+        std::vector<uint8_t> cls;     // water only: 0 sea, 1 impounded, 2 reach (GAWATR01)
+        std::vector<int64_t> id;      // water only: the OSM feature a ring belongs to (its parity's group)
         bool touches = false;
     };
     void GatherLand(double latMin, double latMax, double lonMin, double lonMax, double eps, TileLand& t) const;
+    // One ring of a cell into the tile: decimated to `eps`, as unit vectors; false when it is too small.
+    static bool AppendRing(const float* ll, uint32_t n, const float box[4], double latMin, double latMax,
+                           double lonMin, double lonMax, double eps, TileLand& t);
+    // The tile's edges by column (CSR): each edge in the columns its longitudes span.
+    static void ColumnEdges(const TileLand& t, double lonMin, double lonMax, uint32_t dim,
+                            std::vector<std::pair<uint32_t, uint32_t>>& edges, std::vector<uint32_t>& colStart,
+                            std::vector<uint32_t>& colEdge);
+
+    // ---- THE PLANET'S INLAND WATER (GAWATR01, harvester/harvest_osm_water.py), paged by cell ----
+    // 2026-10-21 (Mark: "I would have river gauges and the gis for them also be a global composite"):
+    // OSM's water polygons, classed sea / impounded / reach, in place of the New England NHD carve.
+    struct WaterIndex {
+        int16_t cx, cy;
+        uint32_t refs;
+        uint64_t first;   // into the refs table
+    };
+    // A RING IS READ ONCE (2026-10-21): a ring is listed in every cell its box touches, so a large lake
+    // or a long river is in dozens; its points are kept by its place in the file, shared by every cell
+    // that lists it (measured before: 42,682 cell reads, 11.5 GB, for one 600-frame run).
+    struct WaterRing {
+        float lon0, lat0, lon1, lat1;
+        uint8_t cls;
+        int64_t osm;
+        int64_t key;                                  // the tier and the ring's offset: its identity
+        std::shared_ptr<const std::vector<float>> ll;   // lon, lat pairs (degrees)
+    };
+    struct WaterCell {
+        std::vector<WaterRing> rings;
+        uint64_t bytes = 0;
+    };
+    // A least-recently-used map of bytes, O(1) a touch.
+    template <class V>
+    struct Lru {
+        std::list<std::pair<int64_t, V>> order;   // front = most recent
+        std::unordered_map<int64_t, typename std::list<std::pair<int64_t, V>>::iterator> at;
+        std::unordered_map<int64_t, uint64_t> size;
+        uint64_t bytes = 0;
+        const V* Find(int64_t k) {
+            auto i = at.find(k);
+            if (i == at.end()) return nullptr;
+            order.splice(order.begin(), order, i->second);
+            return &i->second->second;
+        }
+        void Put(int64_t k, V v, uint64_t b, uint64_t cap) {
+            if (Find(k)) return;
+            order.emplace_front(k, std::move(v));
+            at[k] = order.begin();
+            size[k] = b;
+            bytes += b;
+            while (bytes > cap && order.size() > 1) {
+                const int64_t old = order.back().first;
+                bytes -= size[old];
+                size.erase(old);
+                at.erase(old);
+                order.pop_back();
+            }
+        }
+    };
+    // A TEXEL READS THE WATER IT CAN TELL (2026-10-21): a ring smaller than a texel cannot be told by
+    // it, so a tile reads only the rings at least a texel across -- from the coarsest SIZE TIER no wider
+    // than its texel (harvester/gawatr_tiers.py writes X.t<metres>.gawatr beside the planet's X.gawatr:
+    // the same rings, only those that large). Measured before the tiers: one 600-frame run read 8,536
+    // cells, 10 GB, 186 s of ponds for tiles kilometres a texel.
+    struct WaterTier {
+        double minM = 0.0;               // the smallest ring it holds, metres (0: every ring)
+        std::string path;
+        uint64_t refs0 = 0;              // the refs table's offset in the file
+        std::vector<WaterIndex> cells;   // sorted by (cy, cx)
+    };
+    bool ReadWaterTier(const std::string& path, double minM);
+    std::shared_ptr<const WaterCell> WaterCellAt(size_t tier, int cx, int cy) const;
+    void GatherWater(double latMin, double latMax, double lonMin, double lonMax, double eps, double texelM,
+                     TileLand& t) const;
+    std::vector<WaterTier> m_waterTiers;   // ascending minM; [0] the whole file
+    mutable std::mutex m_waterMx;
+    mutable Lru<std::shared_ptr<const WaterCell>> m_waterCells;
+    mutable Lru<std::shared_ptr<const std::vector<float>>> m_waterRings;
+    mutable std::map<int64_t, std::shared_future<std::shared_ptr<const WaterCell>>> m_waterLoading;
+    mutable uint64_t m_waterReads = 0, m_waterRingReads = 0, m_waterRingHits = 0;
     std::string m_landPath;
     std::vector<LandIndex> m_landIdx;   // sorted by (cy, cx)
     mutable std::mutex m_landMx;

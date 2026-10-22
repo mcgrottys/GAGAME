@@ -15,7 +15,7 @@ public sealed class Currents : IHarvester
     public string What => "Tidal current predictions at the entrance stations, buoy ADCP, and the GoMOFS surface field.";
     public string[] Outputs => ["data/currents/currents.json"];
     public Source[] Sources => [new("CO-OPS currents", "https://tidesandcurrents.noaa.gov/currents/"), new("GoMOFS", "https://tidesandcurrents.noaa.gov/ofs/gomofs/gomofs.html")];
-    public Insert? Insert => new(InsertKind.PlaceBox, "A place's current stations within the box.", Extras: ["--radius-km"]);
+    public Insert? Insert => null;
 
     const string Coops = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
     const string Ndbc = "https://www.ndbc.noaa.gov/data/realtime2";
@@ -33,7 +33,7 @@ public sealed class Currents : IHarvester
     SimpleFetcher _simple = null!;
     Polite? _polite;
 
-    /// The script's fetch: text unless binary; polite in place mode (max age ignored there).
+    /// The script's fetch: text unless binary; polite under a composite (max age ignored there).
     (byte[] data, bool cached) Fetch(string url, string? cachePath, double? maxAgeS = null, int timeoutS = 90)
     {
         if (_polite is not null) return _polite.Get(url, cachePath, timeoutS);
@@ -46,7 +46,7 @@ public sealed class Currents : IHarvester
         return (System.Text.Encoding.UTF8.GetString(b), c);
     }
 
-    /// Routes this instance's requests through a place's polite fetcher (the orchestrator's use).
+    /// Routes this instance's requests through a composite's polite fetcher (compose-currents).
     public Currents UsePolite(HarvestContext ctx, Polite polite)
     {
         _ctx = ctx;
@@ -60,12 +60,6 @@ public sealed class Currents : IHarvester
         _ctx = ctx;
         _simple = new SimpleFetcher(ctx, 0.6, 3);
         var a = new Args(argv);
-        if (a.Has("--place"))
-        {
-            var box = a.BoxOpt() ?? throw new HarvestStop("--place needs --box");
-            HarvestPlace(ctx, new Polite(ctx) { Place = a.Opt("--place") }, a.Opt("--place")!, box, a.Num("--radius-km", 20), a.LonLat("--anchor"), a.Int("--max-stations", 8), a.Opt("--adcp"));
-            return 0;
-        }
         var outDir = Path.Combine("data", "currents");
         var cacheDir = Path.Combine("cache", "currents");
         Directory.CreateDirectory(outDir);
@@ -413,9 +407,9 @@ public sealed class Currents : IHarvester
         }
     }
 
-    // ================================================================= a place
+    // ================================================================= stations in a box
 
-    public List<(string id, string name, int? bin, double km)> DiscoverPlace(Box box, double radiusKm, (double lon, double lat) anchor, int maxStations, string coopsCache)
+    public List<(string id, string name, int? bin, double km)> Discover(Box box, double radiusKm, (double lon, double lat) anchor, int maxStations, string coopsCache)
     {
         var (raw, _) = FetchText("https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=currentpredictions",
             Path.Combine(coopsCache, "_lists", "currentpredictions.json"));
@@ -444,16 +438,8 @@ public sealed class Currents : IHarvester
         }).ToList();
     }
 
-    public sealed class PlaceRecord
-    {
-        public List<(string path, long bytes)> Files = new();
-        public List<(string id, int? bin)> Stations = new();
-        public List<Dictionary<string, object?>> Failed = new();
-        public Dictionary<string, object?>? Adcp;
-    }
-
-    /// A field handed in by the place orchestrator: u, v and the grid keys of the schema.
-    public sealed class PlaceField
+    /// A surface current field (Ofs.Convert's product): u, v and the grid keys of the schema.
+    public sealed class SurfaceField
     {
         public string File = "";
         public int Nx, Ny;
@@ -462,52 +448,5 @@ public sealed class Currents : IHarvester
         public string? ValidUtc;
         public float[] U = Array.Empty<float>(), V = Array.Empty<float>();
         public Dictionary<string, object?> Meta() => D(("file", File), ("nx", Nx), ("ny", Ny), ("lon0", Lon0), ("lat0", Lat0), ("dlon", Dlon), ("dlat", Dlat), ("source", Source), ("valid_utc", ValidUtc));
-    }
-
-    public PlaceRecord HarvestPlace(HarvestContext ctx, Polite polite, string place, Box box, double radiusKm, (double lon, double lat)? anchor = null, int maxStations = 8, string? adcp = null, PlaceField? field = null, string? outRoot = null)
-    {
-        _ctx = ctx;
-        _simple ??= new SimpleFetcher(ctx, 0.6, 3);
-        _polite = polite;
-        var anc = anchor ?? (box.CenterLon, box.CenterLat);
-        var outDir = Path.Combine(outRoot ?? Path.Combine("data", "currents"), place);
-        var path = Path.Combine(outDir, "currents.json");
-        if (File.Exists(path)) throw new HarvestStop($"refusing to overwrite {path} (places only add)");
-        var cacheDir = Path.Combine("cache", "currents");
-        var picks = DiscoverPlace(box, radiusKm, anc, maxStations, Path.Combine("cache", "coops"));
-        ctx.Log($"[{place}] {picks.Count} current station(s): [{string.Join(", ", picks.Select(p => $"('{p.id}', {(p.bin is int b ? b.ToString() : "None")}, {p.km.ToString("R", CultureInfo.InvariantCulture)})"))}]");
-        var rec = new PlaceRecord();
-        var stations = new List<Dictionary<string, object?>>();
-        foreach (var (sid, name, bin, km) in picks)
-        {
-            try
-            {
-                var st = FetchTidalStation(sid, name, cacheDir, bin);
-                st["km_from_anchor"] = km;
-                stations.Add(st);
-            }
-            catch (Polite.StopException) { throw; }
-            catch (Exception e)
-            {
-                ctx.Log($"[{sid}] FAILED: {e.Message}");
-                rec.Failed.Add(D(("id", sid), ("bin", bin), ("why", e.Message)));
-            }
-        }
-        var buoy = adcp is not null ? FetchAdcp(adcp, cacheDir) : null;
-        var out_ = D(("generated_utc", NowIso()), ("tidal_stations", stations), ("buoy_adcp", buoy), ("field", null));
-        Directory.CreateDirectory(outDir);
-        if (field is not null)
-        {
-            var fpath = Path.Combine(outDir, field.File);
-            WriteUv(fpath, field.U, field.V, true);
-            rec.Files.Add((fpath, new FileInfo(fpath).Length));
-            out_["field"] = field.Meta();
-        }
-        Save(path, out_, exclusive: true);
-        rec.Files.Add((path, new FileInfo(path).Length));
-        ctx.Log($"wrote {path} ({stations.Count} tidal stations, adcp {(buoy is not null ? "yes" : "no")}, field {(field is not null ? "yes" : "no")})");
-        rec.Stations = stations.Select(s => ((string)s["id"]!, s.GetValueOrDefault("bin") as int?)).ToList();
-        rec.Adcp = buoy;
-        return rec;
     }
 }

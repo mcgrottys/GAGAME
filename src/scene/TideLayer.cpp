@@ -20,10 +20,12 @@ constexpr double kTwoPi = 6.283185307179586476925;
 }  // namespace
 
 void TideLayer::Configure(const std::wstring& shaderDir, const TideModel* model,
-                          float exaggeration) {
+                          float exaggeration, double latDeg, double lonDeg) {
     m_shaderDir = shaderDir;
     m_model = model;
     m_exagg = exaggeration;
+    m_lat = latDeg;
+    m_lon = lonDeg;
 }
 
 void TideLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -35,24 +37,33 @@ void TideLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
 
     // Static setup: which stations lie on the river profile (already in river order in the JSON),
     // the palette, and the curve plot's vertical range from the coefficient sums.
-    const size_t n = std::min<size_t>(m_model->Count(), kMaxStations);
+    // THE PLACE'S STATIONS: its river's profile first (river order), then the nearest the place.
+    m_nView = 0;
     m_nRibbon = 0;
+    for (const TideModel::ProfileStation& p : m_model->Profile()) {
+        if (m_nView >= kMaxStations) break;
+        m_ribbonIdx[m_nRibbon++] = m_nView;
+        m_view[m_nView++] = p.index;
+    }
+    for (const int i : m_model->Nearest(m_lat, m_lon, kMaxStations * 2)) {
+        if (m_nView >= kMaxStations) break;
+        bool have = false;
+        for (uint32_t v = 0; v < m_nView; ++v) have = have || m_view[v] == i;
+        if (!have) m_view[m_nView++] = i;
+    }
     double yMin = 0.0, yMax = 1.0;
-    for (size_t i = 0; i < n; ++i) {
-        const TideStation& s = m_model->S(i);
+    for (uint32_t v = 0; v < m_nView; ++v) {
+        const TideStation& s = m_model->S(size_t(m_view[v]));
         double range = 0;
         for (const TideCoeff& c : s.coeffs) range += c.ampM;
         yMin = std::min(yMin, s.meanMllwM - range);
         yMax = std::max(yMax, s.meanMllwM + range);
-        if (s.riverKm >= 0 && m_nRibbon < kMaxStations) {
-            m_ribbonIdx[m_nRibbon++] = static_cast<uint32_t>(i);
-        }
-        for (int c = 0; c < 4; ++c) m_curves.col[i][c] = kPalette[i][c];
+        for (int c = 0; c < 4; ++c) m_curves.col[v][c] = kPalette[v][c];
     }
     m_yMin = static_cast<float>(yMin - 0.3);
     m_yMax = static_cast<float>(yMax + 0.3);
-    Log("[tide] layer: %u river stations on the ribbon, plot range [%.2f, %.2f] m MLLW",
-        m_nRibbon, m_yMin, m_yMax);
+    Log("[tide] layer: %u stations of the place (%u on its river's ribbon), plot range [%.2f, %.2f] m MLLW",
+        m_nView, m_nRibbon, m_yMin, m_yMax);
 }
 
 bool TideLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
@@ -89,16 +100,16 @@ void TideLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 
 void TideLayer::SetTime(double simUnix, double windowSec) {
     if (!m_model) return;
-    const size_t n = std::min<size_t>(m_model->Count(), kMaxStations);
+    const size_t n = m_nView;
     const double epoch = m_model->EpochUnix();
 
     // ---- ribbon: interpolated station heights, scene-space station positions
     for (uint32_t r = 0; r < m_nRibbon; ++r) {
-        const TideStation& s = m_model->S(m_ribbonIdx[r]);
-        const double h = m_model->Height(m_ribbonIdx[r], simUnix);
-        m_ribbon.staX[r / 4][r % 4] = static_cast<float>(s.riverKm) * kKmToSceneM;
+        const int mi = m_view[m_ribbonIdx[r]];
+        const double h = m_model->Height(size_t(mi), simUnix);
+        m_ribbon.staX[r / 4][r % 4] = static_cast<float>(m_model->ProfileKm(mi)) * kKmToSceneM;
         m_ribbon.staH[r / 4][r % 4] = static_cast<float>(h);
-        // Ribbon pylons take the station colour of the underlying model index.
+        // Ribbon pylons take the station colour of its curve.
         for (int c = 0; c < 4; ++c) m_ribbon.staColor[r][c] = kPalette[m_ribbonIdx[r]][c];
     }
     m_ribbon.rib[0] = static_cast<float>(m_model->TotalRiverKm()) * kKmToSceneM;
@@ -107,7 +118,7 @@ void TideLayer::SetTime(double simUnix, double windowSec) {
     m_ribbon.rib[3] = static_cast<float>(m_nRibbon);
     m_ribbon.misc[0] = 0.0f;
     m_ribbon.misc[1] = contourStepM;
-    m_ribbon.misc[2] = static_cast<float>(m_model->S(m_model->Focus()).riverKm) * kKmToSceneM;
+    m_ribbon.misc[2] = static_cast<float>(m_model->ProfileKm(m_model->Focus())) * kKmToSceneM;
     m_ribbon.misc[3] = 0.0f;
 
     // ---- curves: window-relative phases (the doubles stay on the CPU; shaders only ever see
@@ -122,11 +133,18 @@ void TideLayer::SetTime(double simUnix, double windowSec) {
     m_curves.rect[3] = -0.42f;
     m_curves.misc[0] = static_cast<float>(kMaxCoeffs);
     m_curves.misc[1] = static_cast<float>(kOfficialSamples);
-    m_curves.misc[2] = static_cast<float>(m_model->Focus());
+    {
+        float focusAt = -1.0f;   // the focus station's curve, if the layer shows it
+        for (uint32_t v = 0; v < m_nView; ++v) {
+            if (m_view[v] == m_model->Focus()) focusAt = float(v);
+        }
+        m_curves.misc[2] = focusAt;
+    }
     m_curves.misc[3] = 0.0f;
 
     for (size_t s = 0; s < n; ++s) {
-        const TideStation& st = m_model->S(s);
+        const size_t mi = size_t(m_view[s]);
+        const TideStation& st = m_model->S(mi);
         const size_t nc = std::min<size_t>(st.coeffs.size(), kMaxCoeffs);
         m_curves.mean[s / 4][s % 4] = static_cast<float>(st.meanMllwM);
         m_curves.ncoeff[s / 4][s % 4] = static_cast<float>(nc);
@@ -142,7 +160,7 @@ void TideLayer::SetTime(double simUnix, double windowSec) {
         for (uint32_t k = 0; k < kOfficialSamples; ++k) {
             const double u = static_cast<double>(k) / (kOfficialSamples - 1);
             const double t = simUnix + (u - 0.5) * windowSec;
-            const double v = m_model->Official(s, t);
+            const double v = m_model->Official(mi, t);
             m_curves.official[s * (kOfficialSamples / 4) + k / 4][k % 4] =
                 std::isnan(v) ? -999.0f : static_cast<float>(v);
         }

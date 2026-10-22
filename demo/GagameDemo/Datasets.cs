@@ -43,5 +43,8 @@ public static class Datasets
     public static Dataset[] All { get; } = HarvesterFactory.All().Select(Dataset.Of).Append(Google).ToArray();
 
     /// The ones a fresh clone needs for the shipped scenes, in the order to fetch them.
-    public static readonly string[] Required = ["tides", "waves", "currents", "river", "bathy", "globe", "gis", "vectors", "overlay", "water"];
+    /// The water is the world composite (compose-water over harvest/fidelity/world.gafid: bed, rivers,
+    /// tides, currents, sea state) since 2026-10-21; the regional tides/waves/currents/river harvests
+    /// and the per-place bathy window are not what any scene reads.
+    public static readonly string[] Required = ["compose-water", "globe", "gis", "vectors", "overlay", "water"];
 }

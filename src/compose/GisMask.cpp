@@ -1,6 +1,12 @@
 #include "compose/GisMask.h"
 
 #include <algorithm>
+#include <unordered_set>
+#include <filesystem>
+#include <future>
+#include <chrono>
+#include <tuple>
+#include <set>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -8,6 +14,10 @@
 #include "core/Json.h"
 
 namespace ga {
+
+namespace {
+constexpr double kMPerDeg = 111194.93;   // metres a degree of a great circle (R 6371 km)
+}
 
 namespace {
 
@@ -259,8 +269,33 @@ void GisVectorMask::LoadEdits(const std::string& path) {
     }
 }
 
-bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, const std::string& editsPath) {
+bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, const std::string& waterPath,
+                         const std::string& editsPath) {
     m_pts.reserve(1400000);
+    if (!waterPath.empty()) {   // THE PLANET'S INLAND WATER: its cell indexes only (the header)
+        if (ReadWaterTier(waterPath, 0.0)) {
+            // ITS SIZE TIERS, by name beside it: X.t<metres>.gawatr
+            namespace fs = std::filesystem;
+            const fs::path src(waterPath);
+            const std::string stem = src.stem().string() + ".t";
+            std::error_code ec;
+            for (const auto& e : fs::directory_iterator(src.parent_path(), ec)) {
+                const std::string n = e.path().filename().string();
+                if (n.size() <= stem.size() || n.compare(0, stem.size(), stem) != 0 || e.path().extension() != src.extension()) continue;
+                const double m = std::atof(n.c_str() + stem.size());
+                if (m > 0.0) ReadWaterTier(e.path().string(), m);
+            }
+            std::sort(m_waterTiers.begin(), m_waterTiers.end(),
+                      [](const WaterTier& x, const WaterTier& y) { return x.minM < y.minM; });
+            std::string tiers;
+            for (const WaterTier& t : m_waterTiers) tiers += " " + std::to_string(int64_t(t.minM)) + " m";
+            Log("[gismask] THE PLANET'S INLAND WATER: %s, size tiers:%s (a tile reads the coarsest no wider "
+                "than its texel; a cell is read when a tile that needs it is painted) -- the NHD carve of New "
+                "England is not read", waterPath.c_str(), tiers.c_str());
+        } else {
+            Log("[gismask] the inland water %s is not GAWATR01 -- the NHD carve of New England alone", waterPath.c_str());
+        }
+    }
     if (!landPath.empty()) {   // THE GLOBAL COAST: its cell index only (see the header)
         std::ifstream f(landPath, std::ios::binary);
         char magic[8] = {};
@@ -290,7 +325,7 @@ bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, co
     const bool coast = !m_landIdx.empty() || ReadRings(dir + "coast_ne.bin", m_coast, /*stitchClip=*/true);
     // The NHD carve. survey.json: "NHD open-water even-odd per feature", with marsh and wetland
     // excluded because the live tide owns that call -- which is the same split as this gate.
-    ReadRings(dir + "nhd_water_ne.bin", m_water);
+    if (m_waterTiers.empty()) ReadRings(dir + "nhd_water_ne.bin", m_water);
     // WHICH WATER HAS A LEVEL OF ITS OWN (2026-10-18): the carve's sidecar names each ring's NHD FCode
     // (nhd_water_ne.attrs.json, one entry a ring, the harvester's order). SeaOcean (445xx) and Estuary
     // (493xx) are the sea, whose level is the live waterline; LakePond, Reservoir, StreamRiver,
@@ -298,7 +333,7 @@ bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, co
     // mask paints them at an opinion of 0.9, and the classifier's "water cannot stand above its own
     // surface" applies by the sea's share. No sidecar, or one of another length: every carve ring is
     // own-level, and the clause stays out of the carve -- the law before it.
-    {
+    if (m_waterTiers.empty()) {
         for (Ring& r : m_water) r.ownLevel = 1u;
         std::ifstream af(dir + "nhd_water_ne.attrs.json", std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(af)), std::istreambuf_iterator<char>());
@@ -356,6 +391,11 @@ bool GisVectorMask::Load(const std::string& dir, const std::string& landPath, co
         m_fingerprint = std::string(fp) + " " + std::to_string(static_cast<long long>(f.tellg()));
     }
     if (m_landIdx.empty()) m_fingerprint = fp;
+    if (!m_waterTiers.empty()) {   // the inland water's own size, so a new harvest repaints
+        std::ifstream f(m_waterTiers[0].path, std::ios::binary | std::ios::ate);
+        m_fingerprint += " + OSM water GAWATR01 v2 (texel-sized) " + std::to_string(static_cast<long long>(f.tellg()));
+        for (size_t i = 1; i < m_waterTiers.size(); ++i) m_fingerprint += " t" + std::to_string(int64_t(m_waterTiers[i].minM));
+    }
     Log("[gismask] bounds %.3f..%.3f lon, %.3f..%.3f lat -- OUTSIDE this the gate is not in the "
         "subset, so every tile it cannot affect keeps the identity it already has",
         m_lon0, m_lon1, m_lat0, m_lat1);
@@ -502,31 +542,20 @@ std::shared_ptr<const GisVectorMask::LandCell> GisVectorMask::LandCellAt(int cx,
     return cell;
 }
 
-void GisVectorMask::GatherLand(double latMin, double latMax, double lonMin, double lonMax, double eps,
-                               TileLand& t) const {
-    // The cells about the tile: a ring is filed by its box's centre and reaches ~0.1 deg past it.
-    const int x0 = static_cast<int>(std::floor(lonMin)) - 1, x1 = static_cast<int>(std::floor(lonMax)) + 1;
-    const int y0 = (std::max)(-90, static_cast<int>(std::floor(latMin)) - 1);
-    const int y1 = (std::min)(89, static_cast<int>(std::floor(latMax)) + 1);
-    for (int cy = y0; cy <= y1; ++cy) {
-        for (int cx = x0; cx <= x1; ++cx) {
-            const int wx = ((cx + 180) % 360 + 360) % 360 - 180;
-            const std::shared_ptr<const LandCell> cell = LandCellAt(wx, cy);
-            if (!cell) continue;
-            for (const LandRing& lr : cell->rings) {
-                if (lr.lon1 < lonMin || lr.lon0 > lonMax || lr.lat1 < latMin || lr.lat0 > latMax) continue;
+bool GisVectorMask::AppendRing(const float* ll, uint32_t n, const float box[4], double latMin, double latMax,
+                               double lonMin, double lonMax, double eps, TileLand& t) {
                 Ring r;
                 r.first = static_cast<uint32_t>(t.pts.size());
-                r.lon0 = lr.lon0;
-                r.lat0 = lr.lat0;
-                r.lon1 = lr.lon1;
-                r.lat1 = lr.lat1;
+                r.lon0 = box[0];
+                r.lat0 = box[1];
+                r.lon1 = box[2];
+                r.lat1 = box[3];
                 // Decimated to the tile's grain: a vertex is kept a quarter texel from the last kept.
-                const float* p = cell->ll.data() + 2 * size_t(lr.first);
+                const float* p = ll;
                 double plon = 1e9, plat = 1e9;
-                for (uint32_t i = 0; i < lr.count; ++i) {
+                for (uint32_t i = 0; i < n; ++i) {
                     const double lon = p[2 * i], lat = p[2 * i + 1];
-                    if (i + 1 < lr.count && std::abs(lon - plon) < eps && std::abs(lat - plat) < eps) continue;
+                    if (i + 1 < n && std::abs(lon - plon) < eps && std::abs(lat - plat) < eps) continue;
                     plon = lon;
                     plat = lat;
                     const double cl = std::cos(lat * kD2R);
@@ -536,11 +565,11 @@ void GisVectorMask::GatherLand(double latMin, double latMax, double lonMin, doub
                 r.count = static_cast<uint32_t>(t.pts.size()) - r.first;
                 if (r.count < 3) {
                     t.pts.resize(r.first);
-                    continue;
+                    return false;
                 }
                 // An edge can cross the box with neither end inside it: a ring whose box meets the
                 // tile's and is not wholly around it is swept in full, to be sure.
-                if (!t.touches && !(lr.lon0 <= lonMin && lr.lon1 >= lonMax && lr.lat0 <= latMin && lr.lat1 >= latMax)) {
+                if (!t.touches && !(box[0] <= lonMin && box[2] >= lonMax && box[1] <= latMin && box[3] >= latMax)) {
                     t.touches = true;
                 }
                 if (!t.touches) {   // the box is wholly inside this ring's box: does an edge cross it?
@@ -556,6 +585,199 @@ void GisVectorMask::GatherLand(double latMin, double latMax, double lonMin, doub
                     }
                 }
                 t.rings.push_back(r);
+                return true;
+}
+
+void GisVectorMask::ColumnEdges(const TileLand& t, double lonMin, double lonMax, uint32_t dim,
+                                std::vector<std::pair<uint32_t, uint32_t>>& edges, std::vector<uint32_t>& colStart,
+                                std::vector<uint32_t>& colEdge) {
+        std::vector<std::pair<uint32_t, uint32_t>> span;   // per edge: first and last column
+        for (uint32_t ri = 0; ri < t.rings.size(); ++ri) {
+            const Ring& r = t.rings[ri];
+            for (uint32_t i = 0; i < r.count; ++i) {
+                const Vec3& A = t.pts[r.first + i];
+                const Vec3& B = t.pts[r.first + (i + 1) % r.count];
+                double la = std::atan2(A.y, A.x) / kD2R, lb = std::atan2(B.y, B.x) / kD2R;
+                if (la > lb) std::swap(la, lb);
+                if (lb - la > 180.0 || lb < lonMin || la > lonMax) continue;   // no column of the tile between its ends
+                const double w = (lonMax - lonMin) / double(dim);
+                const int c0 = (std::max)(0, static_cast<int>(std::floor((la - lonMin) / w - 0.5)));
+                const int c1 = (std::min)(int(dim) - 1, static_cast<int>(std::ceil((lb - lonMin) / w - 0.5)));
+                if (c1 < c0) continue;
+                edges.push_back({ri, r.first + i});
+                span.push_back({uint32_t(c0), uint32_t(c1)});
+            }
+        }
+        colStart.assign(dim + 1, 0u);
+        for (const auto& s : span) {
+            for (uint32_t c = s.first; c <= s.second; ++c) ++colStart[c + 1];
+        }
+        for (uint32_t c = 0; c < dim; ++c) colStart[c + 1] += colStart[c];
+        colEdge.resize(colStart[dim]);
+        std::vector<uint32_t> cur(colStart.begin(), colStart.end() - 1);
+        for (size_t e = 0; e < span.size(); ++e) {
+            for (uint32_t c = span[e].first; c <= span[e].second; ++c) colEdge[cur[c]++] = uint32_t(e);
+        }
+}
+
+bool GisVectorMask::ReadWaterTier(const std::string& path, double minM) {
+    std::ifstream f(path, std::ios::binary);
+    char magic[8] = {};
+    uint32_t cells = 0, rings = 0;
+    uint64_t refs = 0;
+    if (!(f && f.read(magic, 8) && std::memcmp(magic, "GAWATR01", 8) == 0 && f.read(reinterpret_cast<char*>(&cells), 4) &&
+          f.read(reinterpret_cast<char*>(&rings), 4) && f.read(reinterpret_cast<char*>(&refs), 8))) {
+        return false;
+    }
+    WaterTier t;
+    t.minM = minM;
+    t.path = path;
+    t.cells.resize(cells);
+    for (uint32_t i = 0; i < cells && f; ++i) {
+        f.read(reinterpret_cast<char*>(&t.cells[i].cx), 2);
+        f.read(reinterpret_cast<char*>(&t.cells[i].cy), 2);
+        f.read(reinterpret_cast<char*>(&t.cells[i].refs), 4);
+        f.read(reinterpret_cast<char*>(&t.cells[i].first), 8);
+    }
+    if (!f) return false;
+    t.refs0 = static_cast<uint64_t>(f.tellg());
+    Log("[gismask]   %s: %u rings in %u cells (rings at least %.0f m across)", path.c_str(), rings, cells, minM);
+    m_waterTiers.push_back(std::move(t));
+    return true;
+}
+
+std::shared_ptr<const GisVectorMask::WaterCell> GisVectorMask::WaterCellAt(size_t tier, int cx, int cy) const {
+    const WaterTier& T = m_waterTiers[tier];
+    const auto it = std::lower_bound(T.cells.begin(), T.cells.end(), std::make_pair(cy, cx),
+                                     [](const WaterIndex& e, const std::pair<int, int>& k) {
+                                         return std::make_pair(int(e.cy), int(e.cx)) < k;
+                                     });
+    if (it == T.cells.end() || it->cy != cy || it->cx != cx) return nullptr;
+    const int64_t key = int64_t(tier) * 65536 + (cy + 90) * 360 + (cx + 180);
+    // ONE READ A CELL: a thread that misses while another reads the cell waits for that read.
+    std::promise<std::shared_ptr<const WaterCell>> mine;
+    {
+        std::unique_lock<std::mutex> lk(m_waterMx);
+        if (const auto* c = m_waterCells.Find(key)) return *c;
+        auto l = m_waterLoading.find(key);
+        if (l != m_waterLoading.end()) {
+            std::shared_future<std::shared_ptr<const WaterCell>> wait = l->second;
+            lk.unlock();
+            return wait.get();
+        }
+        m_waterLoading[key] = mine.get_future().share();
+    }
+    auto cell = std::make_shared<WaterCell>();
+    const auto tRead = std::chrono::steady_clock::now();
+    std::ifstream f(T.path, std::ios::binary);
+    std::vector<uint64_t> offs(it->refs);
+    f.seekg(static_cast<std::streamoff>(T.refs0 + it->first * 8ull));
+    f.read(reinterpret_cast<char*>(offs.data()), static_cast<std::streamsize>(offs.size() * 8));
+    std::sort(offs.begin(), offs.end());   // the file's order: one pass forward
+    size_t readNow = 0;
+    uint64_t readBytes = 0;
+    for (const uint64_t off : offs) {
+        if (!f) break;
+        float box[4];
+        uint8_t cls = 0, outer = 0;
+        uint16_t pad = 0;
+        float level = 0.0f;
+        int64_t osm = 0;
+        uint32_t n = 0;
+        f.seekg(static_cast<std::streamoff>(off));
+        f.read(reinterpret_cast<char*>(box), 16);
+        f.read(reinterpret_cast<char*>(&cls), 1);
+        f.read(reinterpret_cast<char*>(&outer), 1);
+        f.read(reinterpret_cast<char*>(&pad), 2);
+        f.read(reinterpret_cast<char*>(&level), 4);
+        f.read(reinterpret_cast<char*>(&osm), 8);
+        f.read(reinterpret_cast<char*>(&n), 4);
+        WaterRing wr{box[0], box[1], box[2], box[3], cls, osm, (int64_t(tier) << 40) | int64_t(off), nullptr};
+        {
+            std::lock_guard<std::mutex> lk(m_waterMx);
+            if (const auto* r = m_waterRings.Find(wr.key)) {
+                wr.ll = *r;
+                ++m_waterRingHits;
+            }
+        }
+        if (!wr.ll) {
+            auto ll = std::make_shared<std::vector<float>>(2 * size_t(n));
+            f.read(reinterpret_cast<char*>(ll->data()), static_cast<std::streamsize>(n) * 8);
+            wr.ll = ll;
+            ++readNow;
+            readBytes += uint64_t(n) * 8;
+            std::lock_guard<std::mutex> lk(m_waterMx);
+            m_waterRings.Put(wr.key, wr.ll, uint64_t(n) * 8 + 64, kLandCacheBytes);
+            ++m_waterRingReads;
+        }
+        cell->rings.push_back(std::move(wr));
+    }
+    cell->bytes = cell->rings.size() * sizeof(WaterRing);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tRead).count();
+    if (ms > 50.0) {
+        Log("[gismask] water cell %d,%d (tier %.0f m): %zu rings, %zu read now (%.1f MB), %.0f ms", cx, cy, T.minM,
+            cell->rings.size(), readNow, double(readBytes) / 1048576.0, ms);
+    }
+    std::lock_guard<std::mutex> lk(m_waterMx);
+    ++m_waterReads;
+    m_waterCells.Put(key, cell, cell->bytes + 64, 64ull << 20);
+    m_waterLoading.erase(key);
+    mine.set_value(cell);
+    return cell;
+}
+
+void GisVectorMask::GatherWater(double latMin, double latMax, double lonMin, double lonMax, double eps,
+                                double texelM, TileLand& t) const {
+    size_t tier = 0;   // the coarsest tier no wider than the texel
+    for (size_t i = 0; i < m_waterTiers.size(); ++i) {
+        if (m_waterTiers[i].minM <= texelM) tier = i;
+    }
+    // A ring is listed in every cell its box touches: the cells the tile touches hold every ring that
+    // can reach it, and a ring met in two of them is taken once (by its offset in the cell's order: the
+    // feature id and its box).
+    const int x0 = static_cast<int>(std::floor(lonMin)), x1 = static_cast<int>(std::floor(lonMax));
+    const int y0 = (std::max)(-90, static_cast<int>(std::floor(latMin)));
+    const int y1 = (std::min)(89, static_cast<int>(std::floor(latMax)));
+    std::unordered_set<int64_t> seen;
+    for (int cy = y0; cy <= y1; ++cy) {
+        for (int cx = x0; cx <= x1; ++cx) {
+            const int wx = ((cx + 180) % 360 + 360) % 360 - 180;
+            const std::shared_ptr<const WaterCell> cell = WaterCellAt(tier, wx, cy);
+            if (!cell) continue;
+            for (const WaterRing& wr : cell->rings) {
+                if (wr.lon1 < lonMin || wr.lon0 > lonMax || wr.lat1 < latMin || wr.lat0 > latMax) continue;
+                {   // a ring smaller than a texel cannot be told by it (gawatr_tiers.py's measure)
+                    const double latEq = (wr.lat0 <= 0.0f && wr.lat1 >= 0.0f) ? 0.0 : (std::min)(std::abs(wr.lat0), std::abs(wr.lat1));
+                    const double ew = (wr.lon1 - wr.lon0) * kMPerDeg * std::cos(latEq * kD2R);
+                    const double ns = (wr.lat1 - wr.lat0) * kMPerDeg;
+                    if ((std::max)(ew, ns) < texelM) continue;
+                }
+                if (!seen.insert(wr.key).second) continue;   // the same ring, met in another cell
+                const float box[4] = {wr.lon0, wr.lat0, wr.lon1, wr.lat1};
+                if (!AppendRing(wr.ll->data(), uint32_t(wr.ll->size() / 2), box, latMin, latMax, lonMin, lonMax, eps, t)) continue;
+                t.south.push_back(0u);
+                t.cls.push_back(wr.cls);
+                t.id.push_back(wr.osm);
+            }
+        }
+    }
+}
+
+void GisVectorMask::GatherLand(double latMin, double latMax, double lonMin, double lonMax, double eps,
+                               TileLand& t) const {
+    // The cells about the tile: a ring is filed by its box's centre and reaches ~0.1 deg past it.
+    const int x0 = static_cast<int>(std::floor(lonMin)) - 1, x1 = static_cast<int>(std::floor(lonMax)) + 1;
+    const int y0 = (std::max)(-90, static_cast<int>(std::floor(latMin)) - 1);
+    const int y1 = (std::min)(89, static_cast<int>(std::floor(latMax)) + 1);
+    for (int cy = y0; cy <= y1; ++cy) {
+        for (int cx = x0; cx <= x1; ++cx) {
+            const int wx = ((cx + 180) % 360 + 360) % 360 - 180;
+            const std::shared_ptr<const LandCell> cell = LandCellAt(wx, cy);
+            if (!cell) continue;
+            for (const LandRing& lr : cell->rings) {
+                if (lr.lon1 < lonMin || lr.lon0 > lonMax || lr.lat1 < latMin || lr.lat0 > latMax) continue;
+                const float box[4] = {lr.lon0, lr.lat0, lr.lon1, lr.lat1};
+                if (!AppendRing(cell->ll.data() + 2 * size_t(lr.first), lr.count, box, latMin, latMax, lonMin, lonMax, eps, t)) continue;
                 t.south.push_back(lr.lat0 <= -89.999f ? 1u : 0u);
             }
         }
@@ -698,35 +920,18 @@ void GisVectorMask::RasterizeGateImpl(double latMin, double latMax, double lonMi
     std::vector<std::pair<uint32_t, uint32_t>> edges;   // (ring, first point of the edge)
     if (!m_landIdx.empty()) {
         GatherLand(latMin, latMax, lonMin, lonMax, 0.25 * (lonMax - lonMin) / double(dim), land);
-        std::vector<std::pair<uint32_t, uint32_t>> span;   // per edge: first and last column
-        for (uint32_t ri = 0; ri < land.rings.size(); ++ri) {
-            const Ring& r = land.rings[ri];
-            for (uint32_t i = 0; i < r.count; ++i) {
-                const Vec3& A = land.pts[r.first + i];
-                const Vec3& B = land.pts[r.first + (i + 1) % r.count];
-                double la = std::atan2(A.y, A.x) / kD2R, lb = std::atan2(B.y, B.x) / kD2R;
-                if (la > lb) std::swap(la, lb);
-                if (lb - la > 180.0 || lb < lonMin || la > lonMax) continue;   // no column of the tile between its ends
-                const double w = (lonMax - lonMin) / double(dim);
-                const int c0 = (std::max)(0, static_cast<int>(std::floor((la - lonMin) / w - 0.5)));
-                const int c1 = (std::min)(int(dim) - 1, static_cast<int>(std::ceil((lb - lonMin) / w - 0.5)));
-                if (c1 < c0) continue;
-                edges.push_back({ri, r.first + i});
-                span.push_back({uint32_t(c0), uint32_t(c1)});
-            }
-        }
-        colStart.assign(dim + 1, 0u);
-        for (const auto& s : span) {
-            for (uint32_t c = s.first; c <= s.second; ++c) ++colStart[c + 1];
-        }
-        for (uint32_t c = 0; c < dim; ++c) colStart[c + 1] += colStart[c];
-        colEdge.resize(colStart[dim]);
-        std::vector<uint32_t> cur(colStart.begin(), colStart.end() - 1);
-        for (size_t e = 0; e < span.size(); ++e) {
-            for (uint32_t c = span[e].first; c <= span[e].second; ++c) colEdge[cur[c]++] = uint32_t(e);
-        }
+        ColumnEdges(land, lonMin, lonMax, dim, edges, colStart, colEdge);
     }
-    bool one = allowOneColumn && lonMin >= m_lon0 && lonMax <= m_lon1 && !land.touches &&
+    // THE PLANET'S INLAND WATER for this tile, the same way (its rings grouped by feature for the carve).
+    TileLand water;
+    std::vector<uint32_t> wColStart, wColEdge;
+    std::vector<std::pair<uint32_t, uint32_t>> wEdges;
+    if (!m_waterTiers.empty()) {
+        GatherWater(latMin, latMax, lonMin, lonMax, 0.25 * (lonMax - lonMin) / double(dim),
+                    (latMax - latMin) / double(dim) * kMPerDeg, water);
+        ColumnEdges(water, lonMin, lonMax, dim, wEdges, wColStart, wColEdge);
+    }
+    bool one = allowOneColumn && lonMin >= m_lon0 && lonMax <= m_lon1 && !land.touches && !water.touches &&
                !Touches(m_coastIdx, latMin, latMax, lonMin, lonMax) &&
                !Touches(m_waterIdx, latMin, latMax, lonMin, lonMax);
     for (size_t i = 0; one && i < m_edits.size(); ++i) {
@@ -814,6 +1019,33 @@ void GisVectorMask::RasterizeGateImpl(double latMin, double latMax, double lonMi
                 FillParity(xs, latMin, latMax, dim, wcol, m_water[ri].reach ? 2u : 1u);
             }
             s0 = s1;
+        }
+        if (!water.rings.empty()) {   // THE PLANET'S CARVE: each OSM feature's parity over its own rings
+            const uint32_t c = one ? dim / 2 : cx;
+            const double L = lon * kD2R;
+            const double mx = -std::sin(L), my = std::cos(L), ex = std::cos(L), ey = std::sin(L);
+            std::vector<std::pair<std::pair<int64_t, uint32_t>, double>> byFeature;   // ((feature, ring), lat)
+            for (uint32_t k = wColStart[c]; k < wColStart[c + 1]; ++k) {
+                const auto& [ri, ai] = wEdges[wColEdge[k]];
+                const Ring& r = water.rings[ri];
+                const uint32_t bi = r.first + ((ai - r.first) + 1) % r.count;
+                const Vec3& A = water.pts[ai];
+                const Vec3& B = water.pts[bi];
+                double lat = 0.0;
+                if (MeridianCross(A.x, A.y, A.z, B.x, B.y, B.z, mx, my, ex, ey, lat)) byFeature.push_back({{water.id[ri], ri}, lat});
+            }
+            std::sort(byFeature.begin(), byFeature.end());
+            for (size_t s0 = 0; s0 < byFeature.size();) {
+                size_t s1 = s0;
+                const int64_t feat = byFeature[s0].first.first;
+                const uint8_t cls = water.cls[byFeature[s0].first.second];
+                xs.clear();
+                while (s1 < byFeature.size() && byFeature[s1].first.first == feat) xs.push_back(byFeature[s1++].second);
+                std::sort(xs.begin(), xs.end());
+                FillParity(xs, latMin, latMax, dim, col, 255u);   // this feature carves WATER
+                if (cls != 0u) FillParity(xs, latMin, latMax, dim, wcol, cls == 2u ? 2u : 1u);   // at a level of its own
+                s0 = s1;
+            }
         }
         for (const Ring& e : m_edits) {                   // and the hand edits are law
             xs.clear();

@@ -83,8 +83,7 @@ const Schema& DataSchema() {
             .BindPath("tides", p.tides, "the tide stations (--tides)", R)
             .BindPath("seastate", p.seastate, "the sea state (--seastate)", R)
             .BindPath("currents", p.currents, "the currents (--currents)", R)
-            .BindPath("bathy", p.bathy, "the bathymetry survey (\"\" = none)", R)
-            .BindPath("river", p.river, "the river gauges' discharges, as harvest river writes them (\"\" = none)", R)
+            .BindPath("river", p.river, "the rivers: the water composite's river layer (reaches meeting the sea, their gauges and tide stations; sim/RiverModel.h; \"\" = none)", R)
             .BindPath("edits", p.edits,
                       "the hand polygons, a geojson: land, water and structures that override every survey, in the "
                       "height stack, the land/sea mask and the solver's bed (\"\" = none)", R)
@@ -217,24 +216,15 @@ const Schema& SweSchema() {
         auto& p = kDoc.water.swe;
         Schema* sc = new Schema("water.swe", &p);
         sc->Bind("enabled", p.enabled, "the shallow-water solver; false = the analytic tide plane (--swe-off)", R)
-            .Bind("westBoundary", p.westBoundary, "the west-boundary deviation; false = zeroed (--swe-west-off)", R)
+            .Bind("riverTide", p.riverTide, "the river faces' tide deviation; false = zeroed (--swe-river-off)", R)
             .Bind("spinupH", p.spinupH, Q::Time, "h", "history integrated before the first frame (--swe-spinup)", R)
             .Bind("gain", p.gain, Q::Dimensionless, "1", "solved-current gain (--swe-gain)", H)
-            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "river discharge, m^3/s; < 0 = riverGauges in data.river (--river)", R)
-            .Bind("riverGauges", p.riverGauges,
-                  "the gauges the discharge is read from, in the order believed: \"id[*scale] ...\" (a USGS site in "
-                  "data.river; scale = the river at the face over the river at the gauge)", R)
-            .Bind("upriverAreaM2", p.upriverAreaM2, Q::Dimensionless, "1",
-                  "m^2: the river's tidal reach above the solver's face: its prism, filled and drained through the face", R)
-            .Bind("riverQFallback", p.riverQFallback, Q::Dimensionless, "1",
-                  "m^3/s when no gauge reports (0 = no river flow)", R)
+            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)", R)
             .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
-            .BindEnum("window", p.window, {"full-weight", "survey"},
-                      "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included", R)
-            .BindBox("box", p.box, "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells the survey's angular cell over it in true metres at that latitude, its bed the stack's; zeros = the survey's window (`window`)", R)
-            .Bind("sponge", p.sponge, Q::Length, "m", "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it", R)
-            .BindEnum("river", p.river, {"west", "none"}, "the side of the domain a river enters by (the Flather face and its clock); none = no river", R);
+            .BindBox("box", p.box, "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells `cellM` over it in true metres at that latitude, its bed the one height stack's; zeros = no solver", R)
+            .Bind("cellM", p.cellM, Q::Length, "m", "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)", R)
+            .Bind("sponge", p.sponge, Q::Length, "m", "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it", R);
         return sc;
     }();
     return *s;
@@ -342,6 +332,8 @@ const Schema& StreamingSchema() {
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
+            .BindPath("gisWater", p.gisWater,
+                      "the planet's inland water as GAWATR01 (harvester/harvest_osm_water.py: OSM water polygons classed sea, impounded, reach), read by 1-degree cell -- in place of the New England NHD carve (\"\" = that carve)", R)
             .BindPath("gisLand", p.gisLand,
                       "the global coast: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py); "
                       "\"\" = the New England survey alone", R)
@@ -828,8 +820,7 @@ const Schema& SolverSchema() {
             .BindBox("box", kSolver.box, "its domain, [lon0, lat0, lon1, lat1] degrees", R)
             .Bind("nx", kSolver.nx, Q::Dimensionless, "1", "cells east to west", R)
             .Bind("ny", kSolver.ny, Q::Dimensionless, "1", "cells south to north", R)
-            .Bind("station", kSolver.station, "the tide station (its id in data.tides) its open sea is held to", R)
-            .BindEnum("river", kSolver.river, {"west", "none"}, "the side a river enters by", R);
+            .Bind("station", kSolver.station, "the tide station (its id in data.tides) its open sea is held to", R);
         return sc;
     }();
     return *s;

@@ -5,8 +5,7 @@ using static Gagame.Harvest.JsonUtil;
 
 namespace Gagame.Harvest.Harvesters;
 
-/// The NOS Operational Forecast Systems on the NODD bucket, shared by the place and the
-/// composites: the cycle listing, the vertical-datum grids, and a ROMS nowcast's surface current
+/// The NOS Operational Forecast Systems on the NODD bucket, for the composites: the cycle listing, the vertical-datum grids, and a ROMS nowcast's surface current
 /// rotated to east/north and scattered onto a regular lon/lat grid.
 public static class Ofs
 {
@@ -122,7 +121,7 @@ public static class Ofs
     /// A ROMS nowcast file's surface u/v, rotated to east/north by the grid's `angle`, scattered
     /// onto a regular grid of `step` degrees over the box's wet extent (null = the model's own rho
     /// spacing there), gaps of up to three cells filled. Null when the box holds no rho point.
-    public static (Currents.PlaceField field, Dictionary<string, object?> declared)? Convert(string ofs, string path, Box box, double? step, Action<string> log)
+    public static (Currents.SurfaceField field, Dictionary<string, object?> declared)? Convert(string ofs, string path, Box box, double? step, Action<string> log)
     {
         var name = Path.GetFileName(path);
         using var nc = new NetCdf4(path);
@@ -187,7 +186,7 @@ public static class Ofs
             ("model_grid", D(("u", new List<int> { uny, unx }), ("v", new List<int> { vny, vnx }), ("rho", rhoShape))),
             ("rho_spacing_deg", Round(model, 6)));
         log($"[ofs] {name}: surface u/v rotated to east/north, {filled} of {n} cells water on a {grid.Nx}x{grid.Ny} grid at {st:0.#####} deg (model rho spacing {model:0.#####}); valid {valid ?? "None"}");
-        var field = new Currents.PlaceField
+        var field = new Currents.SurfaceField
         {
             File = $"{ofs}_uv.f32", Nx = grid.Nx, Ny = grid.Ny, Lon0 = grid.Lon0, Lat0 = grid.Lat0, Dlon = st, Dlat = st,
             Source = $"{ofs.ToUpperInvariant()} {name} (NODD {Bucket}), surface level", ValidUtc = valid, U = outU, V = outV,

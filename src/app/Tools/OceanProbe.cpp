@@ -30,17 +30,15 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
                                  Renderer& renderer, SweSolver& swe,
                                  ResidencyManager& resMgr, double simUnix,
                                  const std::function<double(double)>& oceanAt,
-                                 const std::function<double(double)>& southAt,
-                                 const std::function<double(double)>& westAt,
-                                 const std::function<double(double)>& westQAt,
+                                 const std::function<double(int, double)>& faceAt,
+                                 const std::function<double(int, double)>& faceQAt,
                                  WeatherManager& weather) {
     double plat = 0, plon = 0;
     if (sscanf_s(opt.oceanProbe.c_str(), "%lf,%lf", &plat, &plon) == 2) {
         // The external solver window needs its history before it can be mirrored
         // (interactive runs spin it up right after this block).
         Log("[wx] probe: spinning the solver's window");
-        if (swe.Ready()) swe.Spinup(gpu, simUnix, 0.5, oceanAt, westAt, southAt,
-                                    westQAt);
+        if (swe.Ready()) swe.Spinup(gpu, simUnix, 0.5, oceanAt, faceAt, faceQAt);
         Log("[wx] probe: manager update at the probe point");
         weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix, plat, plon,
                        1000.0);

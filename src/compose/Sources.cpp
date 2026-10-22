@@ -259,52 +259,6 @@ int EquirectHeightSource::OwnMip(const Lattice& l) const {
     return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, 0.0, 0.0), 0);
 }
 
-// ------------------------------------------------------------------------------ CUDEM
-
-std::string CudemHeightSource::Law() const {
-    if (!m_bathy || !m_bathy->Ready()) return std::string();
-    if (!m_hashed) {
-        const std::vector<float>& e = m_bathy->Elev();
-        m_bytesFnv = Fnv1aBytes(e.data(), e.size() * sizeof(float));
-        m_hashed = true;
-    }
-    char b[192];
-    snprintf(b, sizeof(b), "grid float32 %dx%d fnv64 %016llx at %.6f,%.6f..%.6f,%.6f, feather %.3f, own level",
-             m_bathy->Nx(), m_bathy->Ny(), static_cast<unsigned long long>(m_bytesFnv), m_bathy->Lon0(),
-             m_bathy->Lat0(), m_bathy->Lon1(), m_bathy->Lat1(), m_feather);
-    return b;
-}
-
-// THE OWN LEVEL OF A GRID LAYER (HIERARCHY 4.20, 2026-10-18). Measured before this: a layer without an
-// own level is painted by TileTree::LeafTile at whatever level a view asks first and folded upward where
-// a finer level was painted earlier, so the tree's bytes were a function of the order of asks -- against
-// trees built over two weeks, a fresh repaint differed at fully weighted texels by up to 1.08 m for the
-// CUDEM grid at pyramid mip 11 and by kilometres for ETOPO at the globe's coarse rungs (a point sample of
-// a mountain range where the fold holds its mean). Declared, the level is painted from the grid, the
-// levels above are its folds (kept, deterministic) and the levels below the kept tile magnified: the
-// same rule a raster by file has had since 2026-10-17, and the bytes become a function of the data.
-int CudemHeightSource::OwnMip(const Lattice& l) const {
-    if (!m_bathy || !m_bathy->Ready() || m_info.cmPerPixel <= 0.0) return -1;
-    const double lat = 0.5 * (m_info.lat0 + m_info.lat1) * kPi / 180.0;
-    const double lon = 0.5 * (m_info.lon0 + m_info.lon1) * kPi / 180.0;
-    return (std::max)(l.LevelOf(m_info.cmPerPixel * 0.01, lat, lon), 0);
-}
-
-bool CudemHeightSource::Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
-    if (!m_bathy || !m_bathy->Ready()) return false;
-    lon0 = m_info.lon0; lat0 = m_info.lat0; lon1 = m_info.lon1; lat1 = m_info.lat1;
-    return true;
-}
-
-CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
-                                     const char* name)
-    : m_bathy(bathy), m_feather(featherFrac) {
-    m_info = {name,
-              "geotiff-window float32 (thalweg-preserving resample)",
-              "EPSG:4326 grid (the harvester's resample of its GeoTIFF)", 1370.0, bathy->Lon0(),
-              bathy->Lat0(), bathy->Lon1(), bathy->Lat1()};
-}
-
 // ------------------------------------------------------------------------------ hand edits
 
 bool EditsHeightSource::Load(const std::string& geojsonPath, float crestNavd) {
@@ -452,68 +406,6 @@ HeightSource::Range EditsHeightSource::RangeIn(double lat0, double lon0, double 
         any = true;
     }
     return any ? Range::Known : Range::None;
-}
-
-HeightSource::Range CudemHeightSource::RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo,
-                                               float& hi, bool& full) {
-    full = false;
-    if (!m_bathy || !m_bathy->Ready()) return Range::None;
-    const int nx = m_bathy->Nx(), ny = m_bathy->Ny();
-    const int x0 = (std::max)(0, int(std::floor((lon0 - m_bathy->Lon0()) / m_bathy->Dlon() - 0.5))),
-              x1 = (std::min)(nx - 1, int(std::floor((lon1 - m_bathy->Lon0()) / m_bathy->Dlon() - 0.5)) + 1);
-    const int y0 = (std::max)(0, int(std::floor((m_bathy->Lat1() - lat1) / m_bathy->Dlat() - 0.5))),
-              y1 = (std::min)(ny - 1, int(std::floor((m_bathy->Lat1() - lat0) / m_bathy->Dlat() - 0.5)) + 1);
-    if (x0 > x1 || y0 > y1) return Range::None;
-    if (double(x1 - x0 + 1) * double(y1 - y0 + 1) > 1048576.0) return Range::Unknown;   // the march is cheaper
-    const std::vector<float>& e = m_bathy->Elev();
-    bool any = false;
-    for (int y = y0; y <= y1; ++y) {
-        for (int x = x0; x <= x1; ++x) {
-            const float v = e[size_t(y) * size_t(nx) + size_t(x)];
-            if (v < -9000.0f) continue;
-            lo = any ? (std::min)(lo, v) : v;
-            hi = any ? (std::max)(hi, v) : v;
-            any = true;
-        }
-    }
-    return any ? Range::Known : Range::None;
-}
-
-float CudemHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
-    if (!m_bathy || !m_bathy->Ready()) return 0.0f;
-    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
-    const float v = m_bathy->SampleLatLon(lat, lon);
-    if (v < -9000.0f) return 0.0f;   // outside the grid, or nodata
-    metres = v;
-    return EdgeWeight(lon, lat);
-}
-
-// PHASE C5: the feather in the survey's own fractions of its extent, by lon and lat.
-float CudemHeightSource::EdgeWeight(double lon, double lat) const {
-    const double sx = m_bathy->Lon1() - m_bathy->Lon0(), sz = m_bathy->Lat1() - m_bathy->Lat0();
-    const double ex = (std::min)(lon - m_bathy->Lon0(), m_bathy->Lon1() - lon) / sx;
-    const double ez = (std::min)(lat - m_bathy->Lat0(), m_bathy->Lat1() - lat) / sz;
-    return Feather((std::min)(ex, ez), m_feather);
-}
-
-bool CudemHeightSource::FullWeightCells(int& c0, int& r0, int& c1, int& r1) const {
-    if (!m_bathy || !m_bathy->Ready()) return false;
-    const int nx = m_bathy->Nx(), ny = m_bathy->Ny();
-    // A cell's centre on the lattice, in the world frame Sample puts a sample point in (the
-    // linear lon/lat map both frames were built with); the other axis held at the window's
-    // middle, where only the axis being walked can bring the weight under one.
-    auto x = [&](int c) { return m_bathy->Lon0() + (c + 0.5) * m_bathy->Dlon(); };
-    auto z = [&](int r) { return m_bathy->Lat1() - (r + 0.5) * m_bathy->Dlat(); };
-    const double xMid = x(nx / 2), zMid = z(ny / 2);
-    c0 = 0;
-    while (c0 < nx && EdgeWeight(x(c0), zMid) < 1.0f) ++c0;
-    c1 = nx - 1;
-    while (c1 >= c0 && EdgeWeight(x(c1), zMid) < 1.0f) --c1;
-    r0 = 0;
-    while (r0 < ny && EdgeWeight(xMid, z(r0)) < 1.0f) ++r0;
-    r1 = ny - 1;
-    while (r1 >= r0 && EdgeWeight(xMid, z(r1)) < 1.0f) --r1;
-    return c0 <= c1 && r0 <= r1;
 }
 
 // ------------------------------------------------------------------- the bed classifier

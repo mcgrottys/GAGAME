@@ -15,7 +15,7 @@ public sealed class Tides : IHarvester
     public string What => "Harmonic constituents and a year of official predictions per station, fit at the exact harcon frequencies.";
     public string[] Outputs => ["data/tides/stations.json"];
     public Source[] Sources => [new("NOAA CO-OPS API", "https://api.tidesandcurrents.noaa.gov/api/prod/"), new("CO-OPS metadata API", "https://api.tidesandcurrents.noaa.gov/mdapi/prod/")];
-    public Insert? Insert => new(InsertKind.PlaceBox, "A place's stations: every harmonic station within the box (--radius-km widens it).", Extras: ["--radius-km"]);
+    public Insert? Insert => null;
 
     const string Api = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
     const string MdApi = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi";
@@ -43,20 +43,13 @@ public sealed class Tides : IHarvester
         var outDir = a.Opt("--out", Path.Combine("data", "tides"))!;
         var cacheDir = a.Opt("--cache", Path.Combine("cache", "coops"))!;
         foreach (var x in a.Raw)
-            if (x.StartsWith("--") && x is not ("--year" or "--out" or "--cache" or "--place" or "--box" or "--radius-km" or "--anchor"))
+            if (x.StartsWith("--") && x is not ("--year" or "--out" or "--cache"))
                 ctx.Log($"ignoring '{x}'");
-        var place = a.Opt("--place");
-        if (place is null)
-        {
-            Harvest(Stations(), year, outDir, cacheDir);
-            return 0;
-        }
-        var box = a.BoxOpt() ?? throw new HarvestStop("--place needs --box lon0,lat0,lon1,lat1");
-        HarvestPlace(ctx, new Polite(ctx) { Place = place }, place, box, a.Num("--radius-km", 0.0), year, cacheDir, a.LonLat("--anchor"));
+        Harvest(Stations(), year, outDir, cacheDir);
         return 0;
     }
 
-    /// Routes this instance's requests through a place's polite fetcher (the orchestrator's use).
+    /// Routes this instance's requests through a composite's polite fetcher (compose-tides, compose-river).
     public Tides UsePolite(HarvestContext ctx, Polite polite)
     {
         _ctx = ctx;
@@ -277,10 +270,12 @@ public sealed class Tides : IHarvester
         return (x[0], ab, Math.Sqrt(sq / nS), mx);
     }
 
-    // ------------------------------------------------------------------ places
+    // ------------------------------------------------------------------ stations in a box
 
     /// Harmonic (type R) stations inside the box or within radiusKm of it, nearest first.
-    public (List<Station> found, List<Dictionary<string, object?>> subordinate) DiscoverPlace(Box box, double radiusKm, string cacheDir, (double lon, double lat)? anchor)
+    /// The harmonic (reference) stations within radiusKm of the box, nearest first, from CO-OPS's own
+    /// station list (cached once); subordinate stations, which publish no constituents, listed apart.
+    public (List<Station> found, List<Dictionary<string, object?>> subordinate) Discover(Box box, double radiusKm, string cacheDir, (double lon, double lat)? anchor)
     {
         var (data, _) = FetchJson($"{MdApi}/stations.json?type=tidepredictions", Path.Combine(cacheDir, "_lists", "tidepredictions.json"));
         var anc = anchor ?? (box.CenterLon, box.CenterLat);
@@ -307,32 +302,15 @@ public sealed class Tides : IHarvester
         public List<(string path, long bytes)> Files = new();
         public List<Dictionary<string, object?>> Failed = new();
         public List<Dictionary<string, object?>> Stations = new();
-        public List<Dictionary<string, object?>> Subordinate = new();
         public int Year;
         public double EpochUnix;
-    }
-
-    /// The place mode: discover, fit, write data/tides/<place>/ (never overwriting).
-    public Record HarvestPlace(HarvestContext ctx, Polite polite, string place, Box box, double radiusKm, int? year = null, string? cacheDir = null, (double lon, double lat)? anchor = null, string? outRoot = null)
-    {
-        _ctx = ctx;
-        _fetch ??= new SimpleFetcher(ctx, 0.4, 4);
-        _polite = polite;
-        var y = year ?? DateTime.UtcNow.Year;
-        cacheDir ??= Path.Combine("cache", "coops");
-        var outDir = Path.Combine(outRoot ?? Path.Combine("data", "tides"), place);
-        var (stations, sub) = DiscoverPlace(box, radiusKm, cacheDir, anchor);
-        ctx.Log($"[{place}] {stations.Count} harmonic station(s) within {radiusKm:g} km of {box}: [{string.Join(", ", stations.Select(s => "'" + s.Id + "'"))}]; {sub.Count} subordinate station(s) have no constituents of their own (not fitted)");
-        var rec = Harvest(stations, y, outDir, cacheDir, exclusive: true, tolerant: true);
-        rec.Subordinate = sub;
-        return rec;
     }
 
     /// Fit every station and write stations.json + official sidecars into outDir.
     public Record Harvest(List<Station> stations, int year, string outDir, string cacheDir, bool exclusive = false, bool tolerant = false)
     {
         if (exclusive && File.Exists(Path.Combine(outDir, "stations.json")))
-            throw new HarvestStop($"refusing to overwrite {outDir}/stations.json (places only add)");
+            throw new HarvestStop($"refusing to overwrite {outDir}/stations.json");
         var rec = Fit(stations, year, outDir, cacheDir, exclusive, tolerant);
         var doc = D(
             ("generated_utc", NowIso()),
@@ -346,7 +324,7 @@ public sealed class Tides : IHarvester
     }
 
     /// Fit every station and write its official sidecar into outDir: the station entries of
-    /// stations.json, for a caller that writes the document itself (a place, a composite).
+    /// stations.json, for a caller that writes the document itself (the composite).
     public Record Fit(List<Station> stations, int year, string outDir, string cacheDir, bool exclusive = false, bool tolerant = false)
     {
         var epoch = Unix(new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Utc));

@@ -17,7 +17,6 @@
 #include "hal/Views.h"
 #include "core/GradeField.h"
 #include "scene/Layer.h"
-#include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/OceanCpu.h"
 #include "sim/SeaState.h"

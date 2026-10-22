@@ -99,7 +99,6 @@ struct DataSection {
     std::string tides;                // the water's products, as the harvesters write them: no
     std::string seastate;             // place's files by default -- "" = none, and every shipped
     std::string currents;             // root scene names its own
-    std::string bathy;                // PHASE C5: "" = no survey; the shipped scenes name theirs
     std::string route;                // PHASE C5: the chart's channel route (geojson); "" = none
     std::string tideFocus;            // PHASE C3: a tide station's id; "" = the nearest the water's anchor
     std::string river;                // the river gauges' discharges (harvest river); "" = none
@@ -166,27 +165,18 @@ struct SeaSection {
 };
 struct SweProps {
     bool enabled = true;
-    bool westBoundary = true;
+    bool riverTide = true;            // the river faces' tide deviation; false = zeroed (--swe-river-off)
     double spinupH = 1.0;
     float gain = 1.0f;
-    double riverQ = -1.0;             // m^3/s; < 0 = the gauges below, read from data.river
-    // THE RIVER'S GAUGES, in the order they are believed: "id[*scale] ...", a USGS site's id in
-    // data.river and the share of the river at the solver's face its discharge is (the drainage
-    // between); the first that reports is the discharge, else riverQFallback.
-    std::string riverGauges;
-    // The river's tidal reach above the solver's face (m^2): the prism the face's transport fills
-    // and drains, westQ = riverQ - area dh/dt (FrameLoop); 0 = none.
-    double upriverAreaM2 = 0.0;
-    double riverQFallback = 0.0;
+    // m^3/s at the first river face; < 0 = its gauge's, from data.river (sim/RiverModel.h DischargeAt)
+    double riverQ = -1.0;
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
-    int window = 0;                   // full-weight | survey: where the solver's grid stands (4.17):
-                                      // the open face's side drawn in, the walls the survey's
-    // PHASE C1: THE SOLVER'S DOMAIN -- a lat/lon box [lon0, lat0, lon1, lat1] (zeros: the survey's
-    // window, as `window` draws it), the sponge's start from an open side, and the side a river
-    // enters by (west | none).
+    // PHASE C1: THE SOLVER'S DOMAIN -- a lat/lon box [lon0, lat0, lon1, lat1] (zeros: no solver),
+    // its cell (one angle both ways, cellM metres north-south) and the sponge's start from an open
+    // side. Where rivers enter it is data (data.river's reaches, sim/RiverModel.h).
     double box[4] = {0.0, 0.0, 0.0, 0.0};
+    float cellM = 13.728f;
     float sponge = 1866.0f;
-    int river = 0;
 };
 struct BankProps {
     bool flatBed = false;
@@ -231,6 +221,7 @@ struct StreamingSection {
     // THE GLOBAL COAST: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py);
     // "" = the New England survey alone (compose/GisMask.h).
     std::string gisLand;
+    std::string gisWater;   // the planet's inland water, GAWATR01 ("" = New England's NHD carve)
     // F16 (HIERARCHY 4.20, the third clause): THE SURVEY'S GRAIN, metres -- the finest level the
     // land/sea mask has anything of its own for. A mask tile finer than it is its parent,
     // magnified: never painted, stored or loaded. The survey's shoreline (NOAA CUSP, NAD83 against
@@ -457,7 +448,6 @@ struct SolverProps {
     double box[4] = {0.0, 0.0, 0.0, 0.0};   // lon0, lat0, lon1, lat1
     uint32_t nx = 0, ny = 0;
     std::string station;
-    int river = 1;                          // west | none
 };
 // PHASE C3: where a station of the scene's data stands when its own file does not say.
 struct StationProps {

@@ -102,7 +102,6 @@
 #include "scene/View.h"
 #include "scene/WaterComponent.h"
 #include "scene/SceneReload.h"
-#include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/VesselSpec.h"
 #include "sim/WaterSurfaceTree.h"

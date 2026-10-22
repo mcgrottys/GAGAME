@@ -127,12 +127,30 @@ public sealed class ComposeSeastate : IHarvester
         var found = new Dictionary<string, Dictionary<string, object?>>(StringComparer.Ordinal);
         var regionBuoys = regions.Select(_ => new SortedSet<string>(StringComparer.Ordinal)).ToList();
         var answered = new List<string>();
+        // A HOST THAT REFUSES (2026-10-21): the buoys are assimilated on top of the forecast points,
+        // so they are optional. Polite's stop for the host holds (its one retry spent, nothing more
+        // is asked of it in this run), but the layer is still written: the forecast points, and
+        // no buoys from that host; the refusal is said once here and in the composite's
+        // `refused`. A budget stop (no inner exception) still stops the layer.
+        var refused = new List<Dictionary<string, object?>>();
+        var refusedHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool Refused(Polite.StopException e, string id, string host)
+        {
+            if (e.InnerException is null) return false;
+            host = e.Message.Split(' ')[0];   // Polite says "<host> refused twice (...)"
+            refusedHosts.Add(host);
+            refused.Add(D(("source", id), ("host", host), ("why", e.Message)));
+            run.Log($"{id}: {host} refused ({e.Message}); no buoys from it in this product, the forecast points stand");
+            return true;
+        }
         foreach (var src in sources)
         {
+            var host = Polite.HostOf(src.Config.Server ?? src.Config.Url ?? "");
+            if (refusedHosts.Contains(host)) { run.Log($"{src.Config.Id}: {host} refused earlier in this run; not asked"); continue; }
             List<IReadOnlyList<Station>> inside;
             try { inside = regions.Select(r => src.Stations(r.box)).ToList(); }
-            catch (Polite.StopException) { throw; }
-            catch (Exception e) { run.Log($"{src.Config.Id}: no stations ({e.Message}); the source is left out of this product"); continue; }
+            catch (Polite.StopException e) when (Refused(e, src.Config.Id, host)) { continue; }
+            catch (Exception e) when (e is not Polite.StopException) { run.Log($"{src.Config.Id}: no stations ({e.Message}); the source is left out of this product"); continue; }
             for (var i = 0; i < regions.Count; i++) regionBuoys[i].UnionWith(inside[i].Select(s => s.Id));
             string? firstObs = null;
             var got = 0;
@@ -141,8 +159,8 @@ public sealed class ComposeSeastate : IHarvester
                 if (found.ContainsKey(st.Id)) continue;
                 Dictionary<string, object?>? b;
                 try { b = src.Observe(st); }
-                catch (Polite.StopException) { throw; }
-                catch (Exception e) { run.Log($"buoy {st.Id}: no line from {src.Config.Id} ({e.Message})"); continue; }
+                catch (Polite.StopException e) when (Refused(e, src.Config.Id, host)) { break; }
+                catch (Exception e) when (e is not Polite.StopException) { run.Log($"buoy {st.Id}: no line from {src.Config.Id} ({e.Message})"); continue; }
                 if (b is null) continue;
                 b["lat"] = st.Lat; b["lon"] = st.Lon; b["name"] = st.Name;
                 found[st.Id] = b;
@@ -158,6 +176,7 @@ public sealed class ComposeSeastate : IHarvester
         }
         var buoys = found.OrderBy(kv => kv.Key, StringComparer.Ordinal).ToDictionary(kv => kv.Key, kv => kv.Value);
         run.Log($"{buoys.Count} buoy(s) in the regions");
+        if (refused.Count > 0) run.Extra["refused"] = refused;
 
         for (var i = 0; i < regions.Count; i++)
             run.Coverage.Add(D(("box", new List<double> { regions[i].box.Lon0, regions[i].box.Lat0, regions[i].box.Lon1, regions[i].box.Lat1 }), ("grain_m", regions[i].grainM),

@@ -8,8 +8,11 @@ namespace Gagame.Harvest.Harvesters;
 /// THE CURRENTS, MANY SOURCES IN, ONE FILE OUT, in data/currents/currents.json's schema
 /// (sim/CurrentModel.cpp) grown to hold every region at once:
 ///
-///   tidal_stations  every CO-OPS current-prediction station inside a painted region (its
-///                   shallowest bin), 45 days of max/slack events, with its own lat/lon
+///   tidal_stations  every current-prediction station CO-OPS publishes (its shallowest bin; a
+///                   point layer is the provider's whole set, 2026-10-21), 45 days of max/slack
+///                   events, with its own lat/lon; the coverage lists which stand in which
+///                   region. Before anything is deleted the missing windows (two requests a
+///                   station) are counted against the ledger's budget; short, the run stops.
 ///   buoy_adcp       the NDBC realtime2 ADCP buoy inside a region nearest the finest region's
 ///                   centre, with its lat/lon; `buoys_adcp` holds every one
 ///   fields          one surface field per (region, NOS OFS whose grid meets it): u then v planes,
@@ -43,22 +46,25 @@ public sealed class ComposeCurrents : IHarvester
         var run = new CompositeRun(ctx, new Polite(ctx), mapPath, outDir, "currents", "currents");
         var polite = run.Polite;
         var dir = Path.Combine(outDir, "currents");
-        if (Directory.Exists(dir)) foreach (var old in Directory.GetFiles(dir)) File.Delete(old);
-        Directory.CreateDirectory(dir);
         var regions = run.Regions();
         var cur = new Currents().UsePolite(ctx, polite);
         var cacheDir = Path.Combine("cache", "currents");
 
-        // ---- CO-OPS current predictions
+        // ---- CO-OPS current predictions: every station; the regions only list which stand in them
         var picks = new Dictionary<string, (string name, int? bin)>();
         var regionStations = new List<List<string>>();
         foreach (var (box, _) in regions)
-        {
-            var found = cur.DiscoverPlace(box, 0.0, (box.CenterLon, box.CenterLat), int.MaxValue, Path.Combine("cache", "coops"));
-            regionStations.Add(found.Select(f => f.id).ToList());
-            foreach (var f in found) picks.TryAdd(f.id, (f.name, f.bin));
-        }
-        // DiscoverPlace cached the listing; its positions go on each station
+            regionStations.Add(cur.Discover(box, 0.0, (box.CenterLon, box.CenterLat), int.MaxValue, Path.Combine("cache", "coops")).Select(f => f.id).ToList());
+        foreach (var f in cur.Discover(new Box(-180, -90, 180, 90), 0.0, (0.0, 0.0), int.MaxValue, Path.Combine("cache", "coops")))
+            picks.TryAdd(f.id, (f.name, f.bin));
+        var need = 2 * picks.Count(p => FirstWindow(cacheDir, p.Value.bin is int pb ? $"{p.Key}_b{pb}" : p.Key) is null);
+        var (_, left) = polite.Remaining();
+        run.Log($"{picks.Count} current station(s) published, {regionStations.Sum(r => r.Count)} inside the {regions.Count} region(s); {need} request(s) missing from the cache, {left} left in the ledger's budget");
+        if (need > left)
+            throw new HarvestStop($"[currents] {need} CO-OPS request(s) needed for {picks.Count} stations, {left} left in {polite.LedgerPath}'s budget: nothing fetched, the old output stands", 3);
+        if (Directory.Exists(dir)) foreach (var old in Directory.GetFiles(dir)) File.Delete(old);
+        Directory.CreateDirectory(dir);
+        // Discover cached the listing; its positions go on each station
         var listing = Load(Path.Combine("cache", "coops", "_lists", "currentpredictions.json"));
         var pos = listing.Arr("stations").Where(s => s.Str("id") is not null).GroupBy(s => s.Str("id")!).ToDictionary(g => g.Key, g => (lat: g.First().Num("lat"), lon: g.First().Num("lng")));
         var stations = new List<Dictionary<string, object?>>();

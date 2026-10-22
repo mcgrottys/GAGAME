@@ -26,7 +26,7 @@ public static class Geo
         return Haversine_km(lat, lon, clat, clon);
     }
 
-    /// The flat-earth km of harvest_currents._km / harvest_place.km / harvest_bathy.km_to_cell.
+    /// The flat-earth km (the Python harvesters' _km / km_to_cell, before the composites).
     public static double FlatKm(double lon0, double lat0, double lon1, double lat1) =>
         Math.Sqrt(Sq((lon1 - lon0) * 111.32 * Math.Cos((lat0 + lat1) / 2 * DegToRad)) + Sq((lat1 - lat0) * 110.57));
 

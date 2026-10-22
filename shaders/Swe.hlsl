@@ -26,17 +26,16 @@ cbuffer SweCb : register(b0) {
     float gSpongeSides;          // PHASE C1: the open sides, a bitmask: 1 N, 2 S, 4 W, 8 E
     float gDy;                   // M6r: north-south texel metres (equiangular CUDEM grid:
                                  // dy = 13.65 != dx = 10.08 -- the per-axis metric)
-    float gWestUext;             // M6r: Flather's u_ext (m/s, +east): the west TRANSPORT
-                                 // (river Q minus the upriver prism demand) over the live
-                                 // section area -- radiation alone cannot carry a prism
+    float gFaceCount;            // the river faces (gFaceA, gFaceB; SweSolver.h SweConfig::faces)
     float gDx, gDt, gDamp, gTideNavd;
-    float gSpongeD0, gSpongeRate, gRiverDEta, gGravity;   // gRiverDEta = west-boundary target
-                                                          // DEVIATION (river tide - ocean tide)
-    float4 gRiverBox;            // x = west EXTERIOR column width (texels; Flather pin, M6r),
-                                 // y = relax rate per substep (south strip only),
-                                 // z = SOUTH strip start row (>= ny disables), w = south target
-                                 // deviation -- Plum Island Sound's Ipswich entrance lies
-                                 // outside the window, so its tide enters as data too (M6d)
+    float gSpongeD0, gSpongeRate, gPadR, gGravity;
+    // THE RIVER FACES (2026-10-21): where a river enters the domain (sim/RiverModel.h). A face: its
+    // side (0 N, 1 S, 2 W, 3 E), the run of edge cells [c0, c1] along it (gFaceA); Flather's u_ext
+    // (m/s, + into the domain: the face's TRANSPORT -- river Q minus the upriver prism's demand --
+    // over its live section; radiation alone cannot carry a prism) and its exterior's target
+    // DEVIATION (river tide - ocean tide) (gFaceB).
+    float4 gFaceA[4];
+    float4 gFaceB[4];
     float gTideRate;             // M6r: d(tide plane)/dt, m/s -- the prism source term
     float gPadA, gPadB, gPadC;
     // PHASE C1: a cell's place in the domain's chart (SweSolver::SetBed): the first cell's centre in
@@ -228,22 +227,63 @@ float FaceUpdate(float q, int2 t, int2 nbr, float faceLen, float span) {
     return clamp(q, -0.25f * Vnbr / gDt, 0.25f * Vself / gDt);
 }
 
-// THE WEST TRACE (an instrument: SweSolver::TraceWestFace). CsSweFlux compiled with SWE_WEST_TRACE
-// records the Flather face's terms as it makes them -- the kernel's own expressions, not a copy --
-// and writes them for the exterior column instead of the flux: the traced state does not advance.
-// Without the define the hooks are nothing and the kernel is the one the solver runs.
-RWTexture2D<float4> gWestTrace : register(u5);   // 4 texels a row of the exterior column
-#ifdef SWE_WEST_TRACE
+// THE FACE TRACE (an instrument: SweSolver::TraceFace). CsSweFlux compiled with SWE_FACE_TRACE
+// records the first river face's Flather terms as it makes them -- the kernel's own expressions, not
+// a copy -- and writes them for that face's exterior cells instead of the flux: the traced state
+// does not advance. Without the define the hooks are nothing and the kernel is the one the solver runs.
+RWTexture2D<float4> gFaceTrace : register(u5);   // 4 texels a cell along the face's side
+#ifdef SWE_FACE_TRACE
 static float4 gWtFace = 0.0f;   // etaX, etaI, sill, hf
 static float4 gWtLaw = 0.0f;    // u_ext, the radiation term, ub, q before the clamp
-static float4 gWtClamp = 0.0f;  // q after the clamp, the clamp's two bounds, 1 = the row is pinned
+static float4 gWtClamp = 0.0f;  // q after the clamp, the clamp's two bounds, 1 = the cell is pinned
 static float gWtHi = 0.0f;      // the first interior cell's depth
-#define SWE_WEST_LAW(rad, ub, qRaw, lo, hi) gWtLaw = float4(gWestUext, (rad), (ub), (qRaw)); gWtClamp.yz = float2((lo), (hi))
-#define SWE_WEST_ROW(etaX, etaI, sill, hf, hI, q) gWtFace = float4((etaX), (etaI), (sill), (hf)); gWtClamp.xw = float2((q), 1.0f); gWtHi = (hI)
+static int gWtAlong = -1;       // the cell along the side the thread traced
+static float4 gWtCells = 0.0f;  // the exterior cell's eta, the interior depth, both beds
+#define SWE_FACE_LAW(f, rad, ub, qRaw, lo, hi) if ((f) == 0) { gWtLaw = float4(gFaceB[0].x, (rad), (ub), (qRaw)); gWtClamp.yz = float2((lo), (hi)); }
+#define SWE_FACE_ROW(f, a, etaX, etaI, sill, hf, hI, q) if ((f) == 0) { gWtFace = float4((etaX), (etaI), (sill), (hf)); gWtClamp.xw = float2((q), 1.0f); gWtHi = (hI); gWtAlong = (a); gWtCells = float4(EtaAt(e), (hI), BedAt(e), BedAt(i)); }
 #else
-#define SWE_WEST_LAW(rad, ub, qRaw, lo, hi)
-#define SWE_WEST_ROW(etaX, etaI, sill, hf, hI, q)
+#define SWE_FACE_LAW(f, rad, ub, qRaw, lo, hi)
+#define SWE_FACE_ROW(f, a, etaX, etaI, sill, hf, hI, q)
 #endif
+
+// The river face whose EXTERIOR cell `e` is (-1: none): a cell of a face's side, in its run, whose
+// bed can be wet (under +2 m).
+int FaceOfExterior(int2 e) {
+    [loop] for (int f = 0; f < (int)gFaceCount; ++f) {
+        const int side = (int)gFaceA[f].x;
+        const bool onEdge = side == 0 ? e.y == 0 : side == 1 ? e.y == (int)gNy - 1 : side == 2 ? e.x == 0 : e.x == (int)gNx - 1;
+        const int a = side < 2 ? e.x : e.y;
+        if (onEdge && a >= (int)gFaceA[f].y && a <= (int)gFaceA[f].z && BedAt(e) < 2.0f) return f;
+    }
+    return -1;
+}
+
+// M6r: FLATHER, the open boundary RADIATES. The exterior cell rides the river tide as pinned data;
+// the flux across the face to its interior neighbour `i` is the Flather condition
+//     u_b = u_ext + sqrt(g / h) (eta_ext - eta_int),
+// so an interior surplus flows OUT at the gravity-wave speed instead of reflecting off a relaxed
+// strip (the Dirichlet strip was a soft wall: transients bounced, and the basin's phase carried the
+// echo). u_ext is the PRESCRIBED transport (the river's discharge less the upriver prism's demand)
+// over the live section: radiation alone cannot carry a prism -- without u_ext the through-flow
+// throttles behind the standing dEta it needs to sustain itself (measured on the Merrimack: the gap
+// current lost a third of its amplitude). L: the face's length. Returns the flux INTO the domain.
+float FaceFlux(int f, int2 e, int2 i, float L) {
+    float hI;
+    const float etaI = SurfaceAt(i, hI);
+    const float etaX = gTideNavd + gFaceB[f].y;          // exterior = the river-tide data
+    const float sill = max(BedAt(e), BedAt(i));
+    const float hf = max(max(etaX, etaI) - sill, 0.0f);
+    float q = 0.0f;
+    if (hf > 0.05f) {
+        const float rad = sqrt(gGravity / hf) * (etaX - etaI);
+        const float ub = gFaceB[f].x + rad;
+        const float V = gDx * gDy / gDt;                 // positivity, as everywhere
+        q = clamp(hf * L * ub, -0.25f * hI * V, 0.25f * hf * V);
+        SWE_FACE_LAW(f, rad, ub, hf * L * ub, -0.25f * hI * V, 0.25f * hf * V);
+    }
+    SWE_FACE_ROW(f, ((int)gFaceA[f].x < 2 ? e.x : e.y), etaX, etaI, sill, hf, hI, q);
+    return q;
+}
 
 [numthreads(16, 16, 1)]
 void CsSweFlux(uint3 id : SV_DispatchThreadID) {
@@ -255,41 +295,28 @@ void CsSweFlux(uint3 id : SV_DispatchThreadID) {
     q.x = FaceUpdate(q.x, t, t + int2(1, 0), gDy, gDx);   // east face (dy long, dx span)
     q.y = FaceUpdate(q.y, t, t + int2(0, 1), gDx, gDy);   // south face (texture +y)
 
-    // M6r: FLATHER west boundary -- the open boundary RADIATES. The exterior column rides the
-    // station river tide as pinned data; the flux across its east face is the Flather
-    // condition  u_b = u_ext + sqrt(g/h) * (eta_ext - eta_int),  so an interior surplus flows
-    // OUT at the gravity-wave speed instead of reflecting off a relaxed strip (the Dirichlet
-    // strip was a soft wall: transients bounced, and the basin's phase carried the echo).
-    // u_ext is the PRESCRIBED transport (USGS river Q minus the upriver prism demand) over
-    // the live section: radiation alone cannot carry a prism -- without u_ext the through-
-    // flow throttles behind the standing dEta it needs to sustain itself (measured: the gap
-    // current lost a third of its amplitude).
-    if (t.x < (int)gRiverBox.x && BedAt(t) < 2.0f) {
-        float hI;
-        const float etaI = SurfaceAt(t + int2(1, 0), hI);
-        const float etaX = gTideNavd + gRiverDEta;          // exterior = the river-tide data
-        const float sill = max(BedAt(t), BedAt(t + int2(1, 0)));
-        const float hf = max(max(etaX, etaI) - sill, 0.0f);
-        q.x = 0.0f;
-        if (hf > 0.05f) {
-            const float ub = gWestUext + sqrt(gGravity / hf) * (etaX - etaI);
-            const float V = gDx * gDy / gDt;                // positivity, as everywhere
-            q.x = clamp(hf * gDy * ub, -0.25f * hI * V, 0.25f * hf * V);
-            SWE_WEST_LAW(sqrt(gGravity / hf) * (etaX - etaI), ub, hf * gDy * ub, -0.25f * hI * V,
-                         0.25f * hf * V);
-        }
-        SWE_WEST_ROW(etaX, etaI, sill, hf, hI, q.x);
+    // THE RIVER FACES (FaceFlux): a thread owns its cell's east and south faces, so a face whose
+    // exterior is this cell (a W or N side) or its east or south neighbour (an E or S side) is
+    // this thread's -- + east and + south, inward on W and N, outward on E and S.
+    if (gFaceCount > 0.0f) {
+        const int fw = FaceOfExterior(t);
+        if (fw >= 0 && (int)gFaceA[fw].x == 2) q.x = FaceFlux(fw, t, t + int2(1, 0), gDy);
+        if (fw >= 0 && (int)gFaceA[fw].x == 0) q.y = FaceFlux(fw, t, t + int2(0, 1), gDx);
+        const int fe = (t.x + 1 == (int)gNx - 1) ? FaceOfExterior(t + int2(1, 0)) : -1;
+        if (fe >= 0 && (int)gFaceA[fe].x == 3) q.x = -FaceFlux(fe, t + int2(1, 0), t, gDy);
+        const int fs = (t.y + 1 == (int)gNy - 1) ? FaceOfExterior(t + int2(0, 1)) : -1;
+        if (fs >= 0 && (int)gFaceA[fs].x == 1) q.y = -FaceFlux(fs, t + int2(0, 1), t, gDx);
     }
 
     // Kill reflections off the sponge: waves entering the analytic ocean just fade.
     const float sp = SpongeAt(t);
     if (sp > 0.0f) q *= 1.0f - 0.5f * sp * gSpongeRate;
-#ifdef SWE_WEST_TRACE
-    if (t.x == 0) {
-        gWestTrace[uint2(0, t.y)] = gWtFace;
-        gWestTrace[uint2(1, t.y)] = gWtLaw;
-        gWestTrace[uint2(2, t.y)] = gWtClamp;
-        gWestTrace[uint2(3, t.y)] = float4(EtaAt(t), gWtHi, BedAt(t), BedAt(t + int2(1, 0)));
+#ifdef SWE_FACE_TRACE
+    if (gWtAlong >= 0) {
+        gFaceTrace[uint2(0, gWtAlong)] = gWtFace;
+        gFaceTrace[uint2(1, gWtAlong)] = gWtLaw;
+        gFaceTrace[uint2(2, gWtAlong)] = gWtClamp;
+        gFaceTrace[uint2(3, gWtAlong)] = gWtCells;
     }
     return;
 #endif
@@ -311,7 +338,7 @@ void CsSweHeight(uint3 id : SV_DispatchThreadID) {
     // M6r, THE PRISM TERM. The eta bank stores deviation from a MOVING plane: when the plane
     // rises the volume must still ARRIVE, so every resident cell books the rise as debt. The
     // debt's gradient against the free boundaries (the sponge = the analytic ocean, the pinned
-    // west column = the river data) IS the flood current; the ebb is the debt paid back. This
+    // river faces = the river data) IS the flood current; the ebb is the debt paid back. This
     // also makes wet/dry hydrodynamic: a flat's surface no longer rides the plane for free --
     // it waits for the water. (Measured before this term: 43 m^3/s of storage flux across the
     // whole harbor at peak flood, ~5% of the real prism; the x5 render gain was compensation.)
@@ -321,20 +348,13 @@ void CsSweHeight(uint3 id : SV_DispatchThreadID) {
     // tidal forcing -- the basin drains into / fills from a boundary pinned to the real clock.
     dEta *= 1.0f - SpongeAt(t) * gSpongeRate;
 
-    // M6r west boundary, the Flather pair's other half: the EXTERIOR column is the upriver
-    // tide from the M1 station fits, interpolated to this edge, held as data (hard pin -- the
-    // radiation lives in the face flux, not in a relax rate). The CUDEM window ends here but
-    // the DATA keeps going: the truncation error becomes a boundary condition, and the
-    // boundary condition is NOAA's.
-    if (t.x < (int)gRiverBox.x && BedAt(t) < 2.0f) {
-        dEta = gRiverDEta;
-    }
-    // South boundary: the sound's tide (entrance clock, slightly lagged) enters where the
-    // window truncates its real mouth -- but ONLY through the deep channel. Pinning the whole
-    // marsh edge let the tide short-circuit into the Merrimack basin across box-averaged marsh
-    // and halved the throat current (diagnosed by the basin losing its lag entirely).
-    if (t.y >= (int)gRiverBox.z && BedAt(t) < -2.0f) {
-        dEta += (gRiverBox.w - dEta) * gRiverBox.y;
+    // M6r, the Flather pair's other half: a river face's EXTERIOR cells are the upriver tide from
+    // the station fits, interpolated to the face, held as data (hard pin -- the radiation lives in
+    // the face flux, not in a relax rate). The domain ends here but the DATA keeps going: the
+    // truncation becomes a boundary condition, and the boundary condition is the tide stations'.
+    if (gFaceCount > 0.0f) {
+        const int f = FaceOfExterior(t);
+        if (f >= 0) dEta = gFaceB[f].y;
     }
 
     gEta[t] = clamp(dEta, -6.0f, 6.0f);

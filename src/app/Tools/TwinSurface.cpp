@@ -8,7 +8,6 @@
 #include "render/Camera.h"
 #include "scene/SeaLayer.h"
 #include "scene/WaterBankLayer.h"
-#include "sim/BathyModel.h"
 #include "sim/Medium.h"
 #include "sim/SeaState.h"
 #include "sim/WaterSurfaceTree.h"

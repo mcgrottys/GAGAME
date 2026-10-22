@@ -41,7 +41,7 @@ public static class Bin
     public static int I32BE(ReadOnlySpan<byte> b, int at) => BinaryPrimitives.ReadInt32BigEndian(b.Slice(at));
     public static uint U32BE(ReadOnlySpan<byte> b, int at) => BinaryPrimitives.ReadUInt32BigEndian(b.Slice(at));
 
-    /// FNV-1a 64 over a byte run (the refbathy / hqbathy content identity).
+    /// FNV-1a 64 over a byte run (the hqbathy content identity; the composites' cache tags).
     public static ulong Fnv1a(ReadOnlySpan<byte> data)
     {
         var h = 0xcbf29ce484222325UL;

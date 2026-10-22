@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace Gagame.Harvest.Harvesters;
 
-/// NDBC's catalog, shared by the place and the composites: the station table (positions) and the
+/// NDBC's catalog, shared by the composites: the station table (positions) and the
 /// realtime2 listing (which station publishes which file now), both through the polite fetcher.
 public static class NdbcStations
 {
@@ -13,7 +13,7 @@ public static class NdbcStations
     public sealed record Catalog(Dictionary<string, (double lat, double lon, string name)> Pos, Dictionary<string, HashSet<string>> Files, string Listing);
 
     /// The station table and the realtime2 listing cached at `listing` (the caller picks the copy:
-    /// a place takes one under six hours old, a composite the first it ever took), from `root`.
+    /// a composite takes the first it ever took), from `root`.
     public static Catalog Read(Polite polite, string listing, string root = Root)
     {
         var (tab, _) = polite.GetTextP($"{root}/data/stations/station_table.txt", Path.Combine("cache", "coops", "_lists", "ndbc_station_table.txt"));

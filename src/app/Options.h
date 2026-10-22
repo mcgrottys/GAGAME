@@ -164,7 +164,7 @@ struct Options {
     float camX = 1e9f, camZ = 1e9f;   // --campos x,z world override (sea mode)
     std::string view;                 // --view NAME: a camera saved with F5 (data/views.json)
     bool sweOff = false;              // --swe-off: analytic tide plane only (pre-M5c behaviour)
-    bool sweWestOff = false;          // --swe-west-off: zero the west-boundary deviation
+    bool sweRiverOff = false;         // --swe-river-off: zero the river faces' deviation
     double sweSpinupH = 1.0;          // solver history integrated before the first frame
                                       // (M6r: the prism-debt field needs ~an hour to settle;
                                       // costs ~1 s at startup)
@@ -199,7 +199,7 @@ struct Options {
     // timestamp and place -- a deliberate look change, which is why the escape hatch exists.
     bool sunPinned = false;
     float sunAz = 112.0f, sunEl = 26.0f;
-    double riverQ = -1;               // --river q overrides data/river/river.json
+    double riverQ = -1;               // --river q: the first river face's discharge over its gauge's
     std::wstring sweUvDump;           // --swe-uv f.png: dump the solved current field after
                                       // spin-up (debug picture: red east, blue west)
     float sweGain = 1.0f;             // solved-current gain (see SeaLayer). M6r RETIRED the

@@ -56,7 +56,18 @@ public:
     // nearest the solver's anchor among those its domain holds -- sim/Stations.h).
     int Focus() const { return m_focus; }
     void SetFocus(int i) { m_focus = i; }
+    // THE RIVER PROFILE (2026-10-21): one river's stations, by kilometre from its mouth -- the place's
+    // river (Assembly: data.river's reach whose mouth is nearest the place, its own station list). Every
+    // river's stations carry a kilometre now that the stations are the world's, so the profile is a
+    // choice of river, not every station with a km.
+    struct ProfileStation { int index; double km; };
+    void SetProfile(std::vector<ProfileStation> p);
+    const std::vector<ProfileStation>& Profile() const { return m_profile; }
     double TotalRiverKm() const { return m_totalKm; }
+    // The station of `index` on the profile: its km, or -1 off it.
+    double ProfileKm(int index) const;
+    // The `k` stations nearest a place (degrees), nearest first.
+    std::vector<int> Nearest(double latDeg, double lonDeg, size_t k) const;
 
     // Metres above MLLW, analytic, valid for any t (accuracy degrades slowly outside fit year).
     double Height(size_t i, double unixT) const;
@@ -67,6 +78,7 @@ private:
     std::vector<TideStation> m_stations;
     double m_epochUnix = 0;
     double m_totalKm = 0;
+    std::vector<ProfileStation> m_profile;
     int m_focus = 0;
 };
 
