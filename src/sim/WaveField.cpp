@@ -836,7 +836,12 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     table.envMax = float(envMax);
     table.sumMax = float(sumMax);
 
-    {   // env slice: (rms/envMax, excess/2.5, sum/sumMax, spare)
+    {   // env slice: (rms/envMax, excess/2.5, sum/sumMax, sqrt(tan beta))
+        // The bed's steepest slope at the cell (the surf-similarity number's tan beta, Jet.hlsli
+        // PlungeShare), by central differences of the BED over +-4 cells -- the slope of the face a
+        // breaking crest runs up (land included: the beach), not of a single rock -- stored as its square
+        // root so beach slopes of 0.01 to 0.1 keep their resolution in a byte (1 at 45 degrees).
+        const int sGrad = 4;
         const int es = nc;
         const int sx = (es & 1) * nx, sy = (es >> 1) * ny;
         for (int j = 0; j < ny; ++j) {
@@ -852,6 +857,14 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                 px[0] = Quant8(rmsRaw * lim[idx], envMax);
                 px[1] = Quant8(exc, kExcessMax);
                 px[2] = Quant8(sumA[idx] * lim[idx], sumMax);
+                const int il = (std::max)(i - sGrad, 0), ir = (std::min)(i + sGrad, nx - 1);
+                const int jl = (std::max)(j - sGrad, 0), jr = (std::min)(j + sGrad, ny - 1);
+                const double gx = (double(in.bed[row + size_t(ir)]) - double(in.bed[row + size_t(il)])) /
+                                  (double((std::max)(ir - il, 1)) * cfg.cellM);
+                const double gz = (double(in.bed[size_t(jr) * size_t(nx) + size_t(i)]) -
+                                   double(in.bed[size_t(jl) * size_t(nx) + size_t(i)])) /
+                                  (double((std::max)(jr - jl, 1)) * cfg.cellM);
+                px[3] = Quant8(std::sqrt((std::min)(std::sqrt(gx * gx + gz * gz), 1.0)), 1.0);
             }
         }
     }
@@ -1915,6 +1928,7 @@ bool WaveField::BlendSolves(const Solved& a, const Solved& b, double w, uint64_t
                         d[0] = q8((1 - w) * dq(pa[0], ta.envMax) + w * dq(pb[0], tb.envMax), (std::max)(ta.envMax, tb.envMax));
                         d[1] = q8((1 - w) * dq(pa[1], ta.excMax) + w * dq(pb[1], tb.excMax), (std::max)(ta.excMax, tb.excMax));
                         d[2] = q8((1 - w) * dq(pa[2], ta.sumMax) + w * dq(pb[2], tb.sumMax), (std::max)(ta.sumMax, tb.sumMax));
+                        d[3] = q8((1 - w) * dq(pa[3], 1.0f) + w * dq(pb[3], 1.0f), 1.0f);   // sqrt(tan beta): the bed's
                     }
                 }
                 continue;
@@ -2243,7 +2257,10 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         // significant amplitude (eta / aEnv = 2 wRaw - 1)
         const double eCr = lipQ * (std::max)(eta / aEnv, 0.0);
         const double excessShare = 1.0 - 1.0 / (std::max)(eCr * eCr, 1.0);
-        const double q1c = (std::max)(aLoop / (std::max)(aH1 * chopM, 1e-3) - 1.0, 0.0) * excessShare;
+        // which crests plunge (WaterTerms.h PlungeShare): the bed's slope against this crest's height
+        const double sqB = bil(t.envSlice, 3);
+        const double plunge = PlungeShare(sqB * sqB, aEnv + (std::max)(eta, 0.0), kBar, depthM > 0.0 ? depthM : 1.0e9);
+        const double q1c = (std::max)(aLoop / (std::max)(aH1 * chopM, 1e-3) - 1.0, 0.0) * excessShare * plunge;
         const double g = 1.0 + q1c * wCr;
         const double wx = inBand ? 0.5 * sxS / aEnv : 0.0;   // grad(w) (sxS is grad(eta) so far)
         const double wz = inBand ? 0.5 * szS / aEnv : 0.0;

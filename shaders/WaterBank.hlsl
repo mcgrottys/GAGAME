@@ -1029,7 +1029,10 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float aLoop = LipReach(kBar, cothBar, aEnv + max(dW.y, 0.0f), depth);
             const float eCr = lipQ * max(dW.y / aEnv, 0.0f);
             const float excessShare = 1.0f - 1.0f / max(eCr * eCr, 1.0f);
-            const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * excessShare;
+            // which crests plunge (Jet.hlsli PlungeShare): the bed's slope, carried by the solve, against
+            // this crest's height -- a spilling bar keeps its steep face and its foam, a reef its barrel
+            const float plunge = PlungeShare(env.w * env.w, aEnv + max(dW.y, 0.0f), kBar, depth);
+            const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * excessShare * plunge;
             dW.xz *= 1.0f + q1 * wCr;   // the orbit grows; the throw is the flight's, below
             // THE LIP FALLS (2026-10-20, Mark: "we get lip but it doesn't seem to roll into the
             // wave"). The law above carries the crest forward and leaves it at its height: a shelf.

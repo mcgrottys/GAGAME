@@ -1601,6 +1601,11 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         Tracked* tr = e.tile;
         if (tr->state == TileState::Mapped && tr->landed) {
             if (!tr->stale || tr->dropped) continue;
+            // A stale tile whose refresh was REFUSED (the version law; residency audit 2026-10-22, F5):
+            // its old bytes stand and its byte says so (the version bit), and nothing is asked until the
+            // tree changes for it again (an Invalidate makes the next job). It is not pending: counted,
+            // it held PendingCount above zero for the run and no settle ever closed.
+            if (!tr->refill) continue;
             // F13: a stale held tile: its refresh job takes the queue here, in the order.
             ++pending;
             if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) {

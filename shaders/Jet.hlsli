@@ -53,6 +53,26 @@ float LipFall(float ePast, float k, float coth, float H, float h) {
     return kJetFallRatio * 0.5f * k * coth * ePast * ePast / (1.0f + max(H, 0.0f) / max(h, 0.3f));
 }
 
+// WHICH CRESTS PLUNGE (2026-10-22, Mark at the Merrimack bar: "we clip water heights"). The throw past
+// the fold onset (k A_h = 1, where the height field folds back on itself) is a PLUNGING breaker's, and a
+// beach makes plungers only where it is steep against the wave: the surf-similarity (Iribarren) number
+//     xi = tan(beta) / sqrt(H / L0),   L0 = 2 pi / (k tanh kh)   (the deep-water wavelength of k at h)
+// (Battjes 1974; Iribarren & Nogales 1949): SPILLING below ~0.4, PLUNGING to ~2.0, SURGING above (at the
+// breaking height). The share of the throw a crest takes is the plunging band's, the product of two
+// logistics in ln xi about those two bounds. Their width, s = ln(1.5) / (2 ln 9) = 0.092 (10 % to 90 %
+// across a factor of 1.5 in xi), is a CLOSURE: the classes are bands in the data, not lines. Measured on
+// the 10-22 16z solve: 75 % of the Merrimack's breaking cells spill (median xi 0.19); Mavericks' reef
+// (~1:15, 6 m, 16 s) is ~0.54. tan(beta) is the bed's steepest slope (waves refract to face the contours
+// before they break), carried by the solve per cell (WaveField: the envelope's fourth channel).
+float PlungeShare(float tanBeta, float Hc, float k, float h) {
+    const float kk = max(k, 1e-4f);
+    const float L0 = 6.2831853f / (kk * tanh(kk * max(h, 0.3f)));
+    const float xi = max(tanBeta, 1e-6f) / sqrt(max(Hc, 1e-3f) / L0);
+    const float lx = log(xi);
+    const float s = 0.0922f;
+    return 1.0f / ((1.0f + exp(-(lx - log(0.4f)) / s)) * (1.0f + exp((lx - log(2.0f)) / s)));
+}
+
 // THE THROW'S BOUND IS THE LANDING (2026-10-20, Mark: "I see the lip but the waves don't seem to
 // barrel correctly"). Measured at Mavericks' close pose: the lip's lowest point stood at -1.79 m over a
 // trough at -3.61 m -- it hung at most 79 % of the wave's height (67 % at the median), so no tube

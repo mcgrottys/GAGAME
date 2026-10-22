@@ -212,12 +212,15 @@ def param_names(sig_text):
     return out
 
 
+SKIPPED = []   # functions the subset cannot run (named in the report)
+
+
 def transpile(header_text):
     """Return (namespace dict, {func: {var: python-rhs}}, source-line-count consumed)."""
     lines = strip_comments(header_text)
     env = {"math": math, "sqrt": math.sqrt, "tanh": math.tanh, "sinh": math.sinh,
            "cosh": math.cosh, "exp": math.exp, "cos": math.cos, "sin": math.sin,
-           "atan": math.atan, "abs": abs, "pow": pow, "fabs": abs, "hypot": math.hypot}
+           "atan": math.atan, "log": math.log, "abs": abs, "pow": pow, "fabs": abs, "hypot": math.hypot}
     rhs = {}
     i, n = 0, len(lines)
     n_funcs = 0
@@ -265,7 +268,14 @@ def transpile(header_text):
                 i += 1
             rhs[fname] = {}
             py = ["def %s(%s):" % (fname, ", ".join(params))]
-            py += _transpile_body(body, ret_type, rhs[fname])
+            try:
+                py += _transpile_body(body, ret_type, rhs[fname])
+            except TranspileError as e:
+                # A function outside the subset (LipFlightTau writes an array out-parameter): it is
+                # not run here, and said so -- its literals are still compared below when listed.
+                SKIPPED.append((fname, str(e)))
+                del rhs[fname]
+                continue
             exec(compile("\n".join(py), "<%s>" % fname, "exec"), env)
             n_funcs += 1
             continue
@@ -418,14 +428,15 @@ ALLOW = {
     # HLSL disables a boat with 'B.z < 0.5f'; the C++ struct carries a bool, so one 0.5
     # comparison has no literal counterpart.  Same law, one fewer float.
     "WakeOne": ([0.5], []),
+    "PlungeShare": ([], []),
 }
 NAMED = {"BandPhaseSpeed": ("kGWave", "kDepthFloorM"),
          "ShoalFactor": ("kGWave", "kDepthFloorM"),
-                  "WaveCurrentAmp": (), "WakeBranch": (), "WakeOne": ("kGWave",)}
+                  "WaveCurrentAmp": (), "WakeBranch": (), "WakeOne": ("kGWave",), "PlungeShare": ()}
 SRC = {"BandPhaseSpeed": JET, "ShoalFactor": JET, "WaveCurrentAmp": JET,
-       "WakeBranch": BANK, "WakeOne": BANK}
+       "WakeBranch": BANK, "WakeOne": BANK, "PlungeShare": JET}
 
-for fname in ("BandPhaseSpeed", "ShoalFactor", "WaveCurrentAmp", "WakeBranch", "WakeOne"):
+for fname in ("BandPhaseSpeed", "ShoalFactor", "WaveCurrentAmp", "WakeBranch", "WakeOne", "PlungeShare"):
     h = literals(hlsl_body(SRC[fname], fname))
     c = literals(cpp_body(fname), NAMED[fname])
     only_h, only_c = multiset_diff(h, c)

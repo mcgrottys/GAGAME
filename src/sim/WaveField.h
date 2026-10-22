@@ -19,7 +19,7 @@
 //  Packing (the GPU contract): ONE R8G8B8A8_UNORM atlas, slices in a 2-wide grid --
 //  slice s at texel origin ((s&1)*nx, (s/2)*ny). Slices 0..nUsed-1 = per-component
 //  (a/aMax, k/kMax, cos*0.5+0.5, sin*0.5+0.5); slice kEnvSlice = (rms/envMax,
-//  excess/2.5, sum/sumMax, spare). Components whose wavelength the grid undersamples
+//  excess/2.5, sum/sumMax, sqrt(tan beta) -- the bed's steepest slope, for which crests plunge). Components whose wavelength the grid undersamples
 //  (lambda < kMinSamplesPerLambda * cell) are NOT uploaded -- the FFT cascades keep that
 //  band, exactly the fold doctrine: a rung carries a band only while it resolves its phase.
 // ================================================================================================
@@ -107,7 +107,8 @@ public:
     // field has curl wherever grad k is not parallel to d^), so it printed the integration
     // route into the sea as banding. Every cached solve carries the old, walked phase.
     // F28: 11, was 10 -- the eikonal is swept until still; every cached two-round phase re-solves.
-    static constexpr uint32_t kSolverVersion = 11;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
+    // 12 (2026-10-22): the envelope's fourth channel is sqrt(tan beta), the bed's slope (Jet.hlsli PlungeShare).
+    static constexpr uint32_t kSolverVersion = 12;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,

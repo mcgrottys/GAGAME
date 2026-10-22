@@ -236,6 +236,25 @@ inline double LipReach(double k, double coth, double Hc, double h) {
     const double eLand = std::sqrt(2.0 * H * (1.0 + H / wt::Max(h, 0.3)) / wt::Max(kJetFallRatio * k * coth, 1e-6));
     return 1.0 / wt::Max(k, 1e-4) + eLand;
 }
+// WHICH CRESTS PLUNGE (2026-10-22, Mark at the Merrimack bar: "we clip water heights"). The throw past
+// the fold onset (k A_h = 1, where the height field folds back on itself) is a PLUNGING breaker's, and a
+// beach makes plungers only where it is steep against the wave: the surf-similarity (Iribarren) number
+//     xi = tan(beta) / sqrt(H / L0),   L0 = 2 pi / (k tanh kh)   (the deep-water wavelength of k at h)
+// (Battjes 1974; Iribarren & Nogales 1949): SPILLING below ~0.4, PLUNGING to ~2.0, SURGING above (at the
+// breaking height). The share of the throw a crest takes is the plunging band's, the product of two
+// logistics in ln xi about those two bounds. Their width, s = ln(1.5) / (2 ln 9) = 0.092 (10 % to 90 %
+// across a factor of 1.5 in xi), is a CLOSURE: the classes are bands in the data, not lines. Measured on
+// the 10-22 16z solve: 75 % of the Merrimack's breaking cells spill (median xi 0.19); Mavericks' reef
+// (~1:15, 6 m, 16 s) is ~0.54. tan(beta) is the bed's steepest slope (waves refract to face the contours
+// before they break), carried by the solve per cell (WaveField: the envelope's fourth channel).
+inline double PlungeShare(double tanBeta, double Hc, double k, double h) {
+    const double kk = wt::Max(k, 1e-4);
+    const double L0 = 6.2831853 / (kk * std::tanh(kk * wt::Max(h, 0.3)));
+    const double xi = wt::Max(tanBeta, 1e-6) / std::sqrt(wt::Max(Hc, 1e-3) / L0);
+    const double lx = std::log(xi);
+    const double sw = 0.0922;
+    return 1.0 / ((1.0 + std::exp(-(lx - std::log(0.4)) / sw)) * (1.0 + std::exp((lx - std::log(2.0)) / sw)));
+}
 // d(LipFall)/d(ePast), H held
 inline double LipFallDe(double ePast, double k, double coth, double H, double h) {
     return kJetFallRatio * k * coth * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));

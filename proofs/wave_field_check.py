@@ -316,6 +316,19 @@ def full_check(path):
               d_r, d_g, d_b, 0.75 * t["envMax"] / 255, 0.75 * t["excMax"] / 255,
               0.75 * t["sumMax"] / 255))
 
+    # -- env alpha: sqrt(tan beta), the bed's steepest slope by +-4-cell central differences, clamped
+    #    at the window's edges (WaveField.cpp; Jet.hlsli PlungeShare reads it)
+    bedp = planes["bed"].astype(np.float64)
+    sg, cm = 4, d["cellM"]
+    ii, jj = np.arange(nx), np.arange(ny)
+    il, ir = np.maximum(ii - sg, 0), np.minimum(ii + sg, nx - 1)
+    jl, jr = np.maximum(jj - sg, 0), np.minimum(jj + sg, ny - 1)
+    gx = (bedp[:, ir] - bedp[:, il]) / (np.maximum(ir - il, 1) * cm)[None, :]
+    gz = (bedp[jr, :] - bedp[jl, :]) / (np.maximum(jr - jl, 1) * cm)[:, None]
+    sq = np.sqrt(np.minimum(np.hypot(gx, gz), 1.0))
+    d_a = float(np.abs(deq(env[..., 3], 1.0) - sq).max())
+    check("env_alpha_slope", d_a <= 0.75 / 255, "|d| sqrt(tan beta) %.5f (0.75 LSB = %.5f)" % (d_a, 0.75 / 255))
+
     hs_field = 2.0 * np.sqrt(2.0) * rms
     wet = ~dry
     if wet.any():
