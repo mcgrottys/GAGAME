@@ -100,6 +100,7 @@ public:
     bool Footprint(double& a, double& b, double& c, double& d) const override {
         return m_src && m_src->Footprint(a, b, c, d);
     }
+    bool MayCover(double a, double b, double c, double d) const override { return m_src && m_src->MayCover(a, b, c, d); }
     std::string Identity() const override {
         double a, b, c, d;
         std::string id = DomainSource::Identity() + (Footprint(a, b, c, d) ? "|" + m_src->Info().structure : "");

@@ -118,6 +118,11 @@ public:
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
     int OwnMip(const Lattice& lattice) const override;
     bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override;
+    // A SET TOUCHES WHERE A FILE IS (2026-10-21): the footprint is the box of every file, and a set's
+    // box spans the gaps between them -- ETOPO 15"'s 37 tiles, the Americas and the Atlantic and one
+    // at Japan, have a box from 135 W to 150 E. The tree folded that box: a face's coarsest tile
+    // painted thousands of own-level tiles of nothing. A box meets the set where it meets a file.
+    bool MayCover(double lon0, double lat0, double lon1, double lat1) const override;
     // A height's range over a box: the files' 16 x 16 blocks under it (BlockRange), in kHeightFrame.
     // Full where one file holds the whole box, every texel a number, past the feather.
     Range RangeIn(double lat0, double lon0, double lat1, double lon1, float& lo, float& hi, bool& full) override;
@@ -138,6 +143,7 @@ private:
         uint32_t w = 0, h = 0;
         double x0 = 0, x1 = 0, yLo = 0, yHi = 0, kx = 0, ky = 0;   // edges; texels per CRS unit
         bool down = true;                                          // row 0 at yHi
+        double lon0 = 0, lat0 = 0, lon1 = 0, lat1 = 0;             // its box in degrees (MayCover)
     };
     bool Placed(std::string* why);
     bool Valued(std::string* why);

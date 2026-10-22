@@ -219,17 +219,23 @@ bool RasterFileSource::Placed(std::string* why) {
         m_uy0 = (std::min)(m_uy0, f.yLo);
         m_uy1 = (std::max)(m_uy1, f.yHi);
         // The footprint in the exchange frame: each file's corners and midpoints, and its centre.
+        f.lon0 = f.lat0 = 1e9;
+        f.lon1 = f.lat1 = -1e9;
         for (int i = 0; i < 9; ++i) {
             double la = 0.0, lo = 0.0;
             if (!ToLatLon(f.x0 + (f.x1 - f.x0) * 0.5 * (i % 3), f.yLo + (f.yHi - f.yLo) * 0.5 * (i / 3),
                           la, lo)) {
                 return Fail(why, "its corners do not resolve to WGS84");
             }
-            lo0 = (std::min)(lo0, lo / kD2R);
-            lo1 = (std::max)(lo1, lo / kD2R);
-            la0 = (std::min)(la0, la / kD2R);
-            la1 = (std::max)(la1, la / kD2R);
+            f.lon0 = (std::min)(f.lon0, lo / kD2R);
+            f.lon1 = (std::max)(f.lon1, lo / kD2R);
+            f.lat0 = (std::min)(f.lat0, la / kD2R);
+            f.lat1 = (std::max)(f.lat1, la / kD2R);
         }
+        lo0 = (std::min)(lo0, f.lon0);
+        lo1 = (std::max)(lo1, f.lon1);
+        la0 = (std::min)(la0, f.lat0);
+        la1 = (std::max)(la1, f.lat1);
     }
     m_info.lon0 = lo0;
     m_info.lat0 = la0;
@@ -322,6 +328,13 @@ bool RasterFileSource::Footprint(double& lon0, double& lat0, double& lon1, doubl
     lon1 = m_info.lon1;
     lat1 = m_info.lat1;
     return !m_files.empty();
+}
+
+bool RasterFileSource::MayCover(double lon0, double lat0, double lon1, double lat1) const {
+    for (const auto& f : m_files) {
+        if (!(f->lon1 < lon0 || f->lon0 > lon1 || f->lat1 < lat0 || f->lat0 > lat1)) return true;
+    }
+    return false;
 }
 
 int RasterFileSource::OwnMip(const Lattice& lattice) const {
@@ -992,7 +1005,10 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lat
             if (r.x >= across(m) || r.y >= down(m) || !meets(r)) continue;
             TileBox b{};
             lattice.Box(r, b);
-            if (Compositor::Touches(lo0, la0, lo1, la1, b)) in[m].push_back(r);
+            if (Compositor::Touches(lo0, la0, lo1, la1, b) &&
+                node->MayCover(b.lonMin / kD2R, b.latMin / kD2R, b.lonMax / kD2R, b.latMax / kD2R)) {
+                in[m].push_back(r);
+            }
             for (uint32_t k = 0; m > st.own && k < 4; ++k) {
                 next.push_back({r.face, r.mip - 1, r.x * 2 + (k & 1), r.y * 2 + (k >> 1)});
             }

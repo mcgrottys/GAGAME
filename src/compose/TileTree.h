@@ -1046,15 +1046,8 @@ private:
     }
 
     // The SAME membership test the incumbent uses -- a declared footprint must span ~2 texels of
-    // this tile to be in its subset; an undeclared one is in where it may cover.
-    bool KidIn(size_t i, const Compositor::TileBox& box) const {
-        constexpr double kR2D = 180.0 / 3.14159265358979;
-        double fl0, fb0, fl1, fb1;
-        return m_kids[i]->m_node->Footprint(fl0, fb0, fl1, fb1)
-                   ? Compositor::Touches(fl0, fb0, fl1, fb1, box)
-                   : m_kids[i]->m_node->MayCover(box.lonMin * kR2D, box.latMin * kR2D,
-                                                 box.lonMax * kR2D, box.latMax * kR2D);
-    }
+    // this tile to be in its subset -- and the child's own: in only where it may cover (Touching).
+    bool KidIn(size_t i, const Compositor::TileBox& box) const { return m_kids[i]->Touching(box); }
     // Which children can touch this tile, and what each holds. False if any is still Absent.
     // A FLOAT ROOT's children answer in their own 256 x 128 tiles: the same lattice twice as wide a
     // tile, asked at x / 2. Every other node asks its children what it was asked.
@@ -1319,10 +1312,13 @@ private:
         return Status::Content;
     }
     // The compositor's membership rule (Compositor::Touches) against the node's footprint; a node
-    // that declares none touches every tile.
+    // that declares none touches every tile. And where its footprint spans gaps (a set of files),
+    // only where it may cover (DomainSource::MayCover).
     bool Touching(const Compositor::TileBox& b) const {
+        constexpr double kR2D = 180.0 / 3.14159265358979;
         double l0, b0, l1, b1;
-        return !m_node->Footprint(l0, b0, l1, b1) || Compositor::Touches(l0, b0, l1, b1, b);
+        return (!m_node->Footprint(l0, b0, l1, b1) || Compositor::Touches(l0, b0, l1, b1, b)) &&
+               m_node->MayCover(b.lonMin * kR2D, b.latMin * kR2D, b.lonMax * kR2D, b.latMax * kR2D);
     }
 
     // ---- M9bb: THE PYRAMID, IN THE COMPOSITOR. A leaf's freshly painted tile is folded into
