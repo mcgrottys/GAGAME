@@ -184,6 +184,12 @@ public:
     double hsBuoy = 0;       // the mean of the sea-state file's own buoys
     int activeParts = 0;
     std::string statusNote;  // "f012" style label for the title bar
+    // The cycle statusNote's hour belongs to: the grid's while the synthesis reads it, else the
+    // point series' (the title read the series' beside the grid's hour: "20261013 18z f008").
+    const std::string& CycleLabel() const {
+        static const std::string kNone;
+        return (m_fromGrid && m_grid) ? m_grid->CycleLabel() : m_sea ? m_sea->CycleLabel() : kNone;
+    }
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
     // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
     // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak

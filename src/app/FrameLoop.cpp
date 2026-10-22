@@ -136,7 +136,7 @@ double ClockAt(const scene::ClockProps& c, double simUnix, double sceneStartUnix
 
 void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool paused,
                  const TideModel& model, const TideLayer& tide, double windowDays,
-                 const SeaLayer* sea, const SeaState& seaState, const char* gulfInfo,
+                 const SeaLayer* sea, const char* gulfInfo,
                  const char* globeInfo, int mode) {
     const time_t tt = static_cast<time_t>(llround(simUnix));
     tm g{};
@@ -165,7 +165,7 @@ void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool 
                  L"|  Hs model %.2f m (buoys obs %.2f m)  |  %hs %hs  |  %hs",
                  g.tm_year + 1900, g.tm_mon + 1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec,
                  paused ? L"PAUSED " : L"", timeScale, tide.focusHeight,
-                 sea->hsModel, sea->hsBuoy, seaState.CycleLabel().c_str(),
+                 sea->hsModel, sea->hsBuoy, sea->CycleLabel().c_str(),
                  sea->statusNote.c_str(), sea->atlasStats.c_str());
         return;
     }
@@ -4600,7 +4600,7 @@ bool FrameLoop::Frame() {
         lastTitle = now;
         wchar_t title[512];
         FormatTitle(title, 512, simUnix, timeScale, paused, model, *tide,
-                    windowSec / 86400.0, sea, seaState,
+                    windowSec / 86400.0, sea,
                     gulf ? gulf->validation.c_str() : nullptr,
                     globe ? globe->stats.c_str() : nullptr,
                     (mode == 1 && altV > 60000.0) ? 3 : mode);   // title by altitude
