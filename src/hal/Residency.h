@@ -46,6 +46,7 @@
 #include "hal/ResidencyAudit.h"
 #include "core/Pga.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -799,11 +800,19 @@ private:
         // slot's ground had moved under the read (its key then is not the key the read was for).
         uint32_t loadsMovedGround = 0;
         uint64_t queueUs = 0;
-        // THE LANE IS SHARED (2026-10-21): this tenant's loads issued and not yet returned. No tenant
-        // holds more than half the Io lane's threads (ResidencyOrder.cpp, the loader), so a tenant
-        // whose tile costs minutes cold -- the swell's exposure, five 50 km rays a texel over the
-        // height stack -- cannot close the lane to the reads that cost two milliseconds.
-        int inFlight = 0;
+        // THE LANE IS SHARED BY ITS PAINTS (2026-10-21; core/TileAddress.h PaintPermit): a load that
+        // paints, composes or folds holds one of its tenant's permits, and a tenant has the Io lane's
+        // threads over the tenants painting within the glance and one more -- so a tenant whose tile
+        // costs minutes cold (the swell's exposure, five 50 km rays a texel over the height stack)
+        // never closes the lane to the reads that cost two milliseconds, which take no permit and run
+        // to the queue's cap. What a load will cost is the tree's to know, and only once it runs: the
+        // two cuts before this one capped LOADS in flight, half the lane (a 2 ms read was asked 6 a
+        // turn alone, 3 with company: 1,656 pages starved "with room in the queue"), then by each
+        // tenant's mean load (the exposure's first loads were warm reads of 2 ms; its next nine,
+        // issued at once, were cold paints of 15 s, and held the lane).
+        uint32_t paintTurn = UINT32_MAX;   // the last turn a load of this tenant took or was refused a permit
+        bool painted = false;              // ...since the loader last looked (RunLoad sets it, under m_mx)
+        uint32_t paintWaits = 0;           // loads refused a permit, this run
         // THE JOB'S OWN CLOCK (2026-10-21): the load job from its first instruction to the bookkeeping,
         // and of it the wait for m_mx after the provider returned -- what the provider's clock cannot see.
         uint64_t jobUs = 0, lockUs = 0;
@@ -896,6 +905,7 @@ private:
         // while it is not held, it blocks its children (they are unreachable as it is).
         bool stale = false, refresh = false, incomplete = false;
         bool askAgain = false;   // Again while its load ran (under m_mx): not whole is Seen, not Failed
+        bool paintWait = false;  // its load was refused a paint permit: asked again when its tenant has one
         std::shared_ptr<Tracked> refill;   // F13: a stale held tile's replacement on its way (m_refresh)
         // 4.7: the slot's address (0: none) and whether it is a mapping of bytes another slot read.
         uint64_t gkey = 0;
@@ -1065,6 +1075,12 @@ private:
     std::condition_variable m_drainCv;
     std::atomic<bool> m_quit{false};
     std::atomic<int> m_inFlight{0};
+    // THE LANE'S PAINT PERMITS (Tenant::paintTurn): each tenant's loads holding one, and this turn's
+    // share -- the Io lane's threads over the tenants painting within the glance and one more, rounded up.
+    static constexpr size_t kMaxPaintTenants = 32;
+    std::array<std::atomic<int>, kMaxPaintTenants> m_painting{};
+    std::atomic<int> m_paintShare{1};
+    int PaintShare() const;
     // THE POOL AHEAD OF ITS DEMAND. A pool chunk is a CreateHeap, and inside the turn it cost
     // 1-24 ms (the drive: 228 chunks, 262 ms, every one on the render thread). So the pool is kept
     // ahead: when the free list falls under kPoolReserveTiles a worker creates the next chunk

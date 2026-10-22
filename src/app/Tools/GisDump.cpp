@@ -7,29 +7,39 @@
 #include "core/Common.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <string>
 #include <vector>
 
 namespace ga::app::tools {
 
 void RunGisDump(const Options& opt, const GisVectorMask& gisMask) {
-    // M9av: LOOK AT THE GATE. 255 = water (or no opinion), 0 = land.
+    // M9av: LOOK AT THE GATE. 255 = water (or no opinion), 0 = land. PATH@lat0,lon0,lat1,lon1,dim
+    // (2026-10-21) dumps that box in one tile of dim texels a side -- the grain a tile of the mask's
+    // tree reads at -- and shows water at a level of its own (inland, flag bit 2) as 192.
     double b0, a0, b1, a1;
     gisMask.Bounds(b0, a0, b1, a1);
-    const uint32_t dim = 1024;
+    uint32_t dim = 1024;
+    std::string path = opt.gisDump;
+    if (const size_t at = path.find('@'); at != std::string::npos) {
+        unsigned d = 0;
+        if (sscanf_s(path.c_str() + at + 1, "%lf,%lf,%lf,%lf,%u", &a0, &b0, &a1, &b1, &d) == 5 && d >= 2) dim = d;
+        path.resize(at);
+    }
     std::vector<uint8_t> g;
     gisMask.RasterizeGate(a0, a1, b0, b1, dim, g);
     std::vector<uint8_t> v(static_cast<size_t>(dim) * dim);
     for (size_t i = 0; i < v.size(); ++i) {
-        // value where surveyed; 128 (grey) where the mask has no opinion
-        v[i] = (g[i * 2 + 1] & 1u) ? g[i * 2] : 128u;
+        // value where surveyed; 128 (grey) where the mask has no opinion; 192 inland water
+        v[i] = !(g[i * 2 + 1] & 1u) ? 128u : (g[i * 2 + 1] & 4u) ? 192u : g[i * 2];
     }
-    std::ofstream pf(opt.gisDump, std::ios::binary);
+    std::ofstream pf(path, std::ios::binary);
     pf << "P5\n" << dim << " " << dim << "\n255\n";
     pf.write(reinterpret_cast<const char*>(v.data()), v.size());
     Log("[gismask] --gis-dump: %s (%ux%u over %.3f,%.3f..%.3f,%.3f) %s",
-        opt.gisDump.c_str(), dim, dim, b0, a0, b1, a1,
+        path.c_str(), dim, dim, b0, a0, b1, a1,
         pf ? "written" : "FAILED TO WRITE");
     std::exit(0);
 }

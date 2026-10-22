@@ -928,6 +928,11 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lat
     IngestStats st;
     const DomainSource* node = tree.Node();
     double lo0 = 0, la0 = 0, lo1 = 0, la1 = 0;
+    if (!tree.Fits(lattice)) {   // a tile of this frame is not this tree's tile (TileTree::Fits)
+        Log("[ingest] %s on %s: REFUSED -- a %ux%u tile is not this tree's (%zu bytes)", node->Name(),
+            lattice.Tag().c_str(), lattice.texW, lattice.texH, tree.TileBytes());
+        return st;
+    }
     st.own = node->OwnMip(lattice);
     if (st.own < 0 || !node->Footprint(lo0, la0, lo1, la1)) return st;
     const std::string tag = lattice.Tag();
@@ -972,14 +977,19 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice, const std::vector<Lat
     const uint32_t top = lattice.MaxMip();
     std::vector<std::vector<TileRequest>> in(top + 1);
     std::vector<TileRequest> frontier;
+    // A level's tiles a side, by columns and by rows apart: a 256 x 128 tile (a height's) makes a face
+    // twice as many rows as columns, and the top level two tiles, one above the other. (Until
+    // 2026-10-21 both were the columns' count and the top one tile: no height's pass reached the
+    // lower half of a face, which the readers then painted cold.)
+    auto across = [&](int m) { return (std::max)(1u, (lattice.faceDim >> m) / lattice.texW); };
+    auto down = [&](int m) { return (std::max)(1u, (lattice.faceDim >> m) / lattice.texH); };
     for (uint32_t f = 0; f < (lattice.kind == Lattice::Kind::Cube ? 6u : 1u); ++f) {
-        frontier.push_back({f, top, 0, 0});
+        for (uint32_t y = 0; y < down(int(top)); ++y) frontier.push_back({f, top, 0, y});
     }
     for (int m = int(top); m >= st.own && !frontier.empty(); --m) {
-        const uint32_t n = (std::max)(1u, (lattice.faceDim >> m) / lattice.texW);
         std::vector<TileRequest> next;
         for (const TileRequest& r : frontier) {
-            if (r.x >= n || r.y >= n || !meets(r)) continue;
+            if (r.x >= across(m) || r.y >= down(m) || !meets(r)) continue;
             TileBox b{};
             lattice.Box(r, b);
             if (Compositor::Touches(lo0, la0, lo1, la1, b)) in[m].push_back(r);

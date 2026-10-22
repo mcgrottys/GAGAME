@@ -13,6 +13,7 @@
 #include "core/ThreadManager.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -1578,8 +1579,22 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     ++loader.turns;
     loader.inFlightAtTurn += static_cast<uint64_t>((std::max)(m_inFlight.load(), 0));
     const auto issuedAt = std::chrono::steady_clock::now();
-    // THE LANE IS SHARED (Residency.h Tenant::inFlight): half its threads to a tenant at most.
-    const int laneShare = (std::max)(1, Threads().IoCap() / 2);
+    // THE LANE IS SHARED BY ITS PAINTS (Residency.h Tenant::paintTurn, core/TileAddress.h PaintPermit):
+    // this turn's share, and a tile whose load was refused a permit waits for one.
+    for (Tenant& tn : m_tenants) {
+        if (tn.painted) tn.paintTurn = m_frame;
+        tn.painted = false;
+    }
+    m_paintShare.store(PaintShare(), std::memory_order_relaxed);
+    // A tile waiting for a permit is asked only while its tenant has one free, and no more of them
+    // in a turn than it has free: the rest would be refused again at once.
+    std::array<int, kMaxPaintTenants> permitAsked{};
+    const auto permitFree = [&](int tenant) {
+        const size_t t = size_t(tenant) % kMaxPaintTenants;
+        if (m_painting[t].load(std::memory_order_relaxed) + permitAsked[t] >= m_paintShare.load(std::memory_order_relaxed)) return false;
+        ++permitAsked[t];
+        return true;
+    };
     for (size_t ni = 0; ni < m_need.size(); ++ni) {
         if (ni >= m_needSorted) SortNeedTo(ni + kNeedChunk);
         const OrderEntry& e = m_need[ni];
@@ -1597,13 +1612,13 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
                 continue;
             }
             if (tr->refill && tr->refill->state == TileState::Seen) {
-                if (m_tenants[tr->tenant].inFlight >= laneShare) continue;   // its half of the lane is busy
+                if (tr->refill->paintWait && !permitFree(tr->tenant)) continue;   // its tenant's permits are taken
+                tr->refill->paintWait = false;
                 tr->refill->state = TileState::Loading;
                 tr->refill->issuedTurn = m_frame;
                 tr->refill->issuedAt = issuedAt;
                 toLoad.push_back(tr->refill);
                 ++m_inFlight;
-                ++m_tenants[tr->tenant].inFlight;
                 ++L.refills;
             }
             continue;
@@ -1640,7 +1655,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         }
         if (tr->state != TileState::Seen || tr->pos == UINT32_MAX) continue;
         if (gate == Gate::Wait) continue;   // its parent first
-        if (m_tenants[tr->tenant].inFlight >= laneShare) continue;   // its half of the lane is busy: the next tenant's
+        if (tr->paintWait && !permitFree(tr->tenant)) continue;   // its tenant's permits are taken: the next tenant's
         if (starvePlant != 0 && tr->req.face == starvePlant) continue;   // the watchdog's plant
         if (!m_letGoAt.empty()) {   // the livelock's instrument: read and let go within the glance
             const auto it = m_letGoAt.find(e.key);
@@ -1682,13 +1697,13 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             tr->alias = false;   // a read, whatever this slot was before
         }
         tr->state = TileState::Loading;
+        tr->paintWait = false;
         tr->issuedTurn = m_frame;
         tr->issuedAt = issuedAt;
         const std::shared_ptr<Tracked> sp = m_tenants[tr->tenant].tracked[tr->pos];
         m_loading.push_back(sp);
         toLoad.push_back(sp);
         ++m_inFlight;
-        ++m_tenants[tr->tenant].inFlight;
         ++L.issued;
     }
     m_orderPending = pending;
@@ -1858,6 +1873,17 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     }
 }
 
+// THE LANE'S PAINT SHARE (Residency.h Tenant::paintTurn): the Io lane's threads over the tenants that
+// took or were refused a paint permit within the glance, and one more.
+int ResidencyManager::PaintShare() const {
+    int painting = 0;
+    for (const Tenant& t : m_tenants) {
+        painting += (t.paintTurn != UINT32_MAX && m_frame - t.paintTurn <= kGlanceTurns) ? 1 : 0;
+    }
+    const int lane = Threads().IoCap();
+    return (std::max)(1, (lane + painting) / (painting + 1));   // and one more share, the newcomer's; rounded up
+}
+
 // THE WATCHDOG (Residency.h): starved = in the first P, not held, no load in flight, no retiring
 // slot; in flight = Loading, Loaded (waiting for the gather) or Mapped with its bytes not landed.
 void ResidencyManager::StarveWatch() {
@@ -1943,6 +1969,10 @@ void ResidencyManager::StarveWatch() {
                   std::to_string(kMaxLoadsInFlight) + ")";
         } else if (ParentGate(t, tr) == Gate::Wait) {
             why = "its parent is not tracked (never asked)";
+        } else if (tr->paintWait) {   // its tenant's permits taken, or this turn's free ones promised ahead of it
+            why = "waits for a paint permit: its tenant paints on " +
+                  std::to_string(m_painting[size_t(tr->tenant) % kMaxPaintTenants].load()) + " of the lane's " +
+                  std::to_string(Threads().IoCap()) + " threads, its share " + std::to_string(m_paintShare.load());
         } else if (starvePlant != 0 && tr->req.face == starvePlant) {
             why = "PLANTED: --starve-plant skips its slice";
         } else {
@@ -2054,13 +2084,14 @@ void ResidencyManager::LogLoader() const {
         if (!n && !t.magnifiedKnown) continue;
         Log("[loader]   %S: %llu loads -- %u read (%.2f ms each), %u painted (%.1f ms each); of them %u "
             "answered magnified, %u failed or not whole, %u refused (the slot's ground moved under the read) | "
-            "queue wait %.2f ms a load | the job %.2f ms a load, of it waiting for the manager's lock %.2f | %u known magnified, no load",
+            "queue wait %.2f ms a load | the job %.2f ms a load, of it waiting for the manager's lock %.2f | %u known magnified, no load "
+            "| %u refused a paint permit (asked again with one)",
             t.name.c_str(), static_cast<unsigned long long>(n), t.loadsRead,
             t.loadsRead ? double(t.readUs) / (1000.0 * t.loadsRead) : 0.0, t.loadsPaint,
             t.loadsPaint ? double(t.paintUs) / (1000.0 * t.loadsPaint) : 0.0, t.loadsMagnified,
             t.loadsFailed, t.loadsMovedGround, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0,
             n ? double(t.jobUs) / (1000.0 * double(n)) : 0.0, n ? double(t.lockUs) / (1000.0 * double(n)) : 0.0,
-            t.magnifiedKnown);
+            t.magnifiedKnown, t.paintWaits);
     }
 }
 

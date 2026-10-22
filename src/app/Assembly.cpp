@@ -367,10 +367,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // wide a tile). Painted on demand, each coarse level the terrain or the solver asked for was
         // an area mean of the whole file -- 655 ms a height read, cold, at the jetty with a 62 Mpx bed
         // and a 25 Mpx lidar on the tree, against 2 ms warm; folds kept at boot make it the read of
-        // a tile. (PHASE B3 deleted the z14 height page; this is the pyramid, not a page.)
+        // a tile. (PHASE B3 deleted the z14 height page; this is the pyramid, not a page.) A height leaf
+        // is the Float root's child, so its frames are the root's twice as wide a tile (FloatKidFrame):
+        // until 2026-10-21 the cube's was surface.cubeH itself, 128 x 128, in the folder the root's
+        // 256 x 128 reads share (TileTree::Fits).
         IngestSources(A->sceneSources,
                       std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)},
-                      {hal::BlockBinding::Pyramid(256, 128), surface.cubeH});
+                      {TileTree::FloatKidFrame(hal::BlockBinding::Pyramid(128, 128)),
+                       TileTree::FloatKidFrame(surface.cubeH)});
     }
     if (S.Tool("ingest")) return nullptr;
 
