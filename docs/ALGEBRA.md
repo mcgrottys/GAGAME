@@ -1715,6 +1715,34 @@ weight, not a value: the edit paints the share of the texel no finer witness cov
 And the first thing the data showed once it stood was a 10 m light tower in the composite's surface,
 which the slab had been hiding. A prior from the picture is a prior; the transect is the measurement.
 
+52. **The bank's sheet never folds, even in a storm on the bar** (2026-10-18, the rolling-wave work).
+Prior: a 3 m / 10 s sea at the ebb over the Merrimack bar overturns, so a Lagrangian sheet drawn
+without the mesh's fold guard would show the lips. Measured (the column plane's inverted band over
+every ring, `--dump-fibers` at `newburyport_surf`): ZERO labels with det(1 + J) < 0 -- the kernel's
+displacement is a sum of LINEAR orbits whose steepness the limiter (Hs <= 0.6 h), the Miche shed cap
+(ak <= 0.44) and the chop of 1.1 keep under the loop's threshold (k A_horizontal >= 1; in shallow water
+k a coth(kh) ~ a/h ~ 0.3 at the limit), and the guard was removing nothing. The overturn of a real
+breaker is the CREST'S nonlinearity (the front face steepening to vertical, u_crest > c), which no
+superposition of Airy orbits carries. Law: the fold guard is not what hides the roll; a crest law is
+what is missing. The machinery is proven on a sea made to fold (chop 4: 4.4 % of ring 0's labels fold,
+2.0 % of its columns are tubes, kernel = numpy twin on every band, every ring, to the millimetre).
+Second finding, measured by the twin: up the vertical through a prolate loop the crossings are
+lower UPRIGHT (the face), upper UPRIGHT (the tube's ceiling = the loop's floor), INVERTED (the lip's
+top) -- the first cut named the inverted branch the underside and drew the lips as crevasses.
+
+53. **Six wrong crest laws, each measured** (2026-10-19; docs/WATER_VOLUME.md 7). Prior: giving
+the lateral term the breaker's raw amplitude would fold the crests. Measured in order: (a) the
+raw ratio alone moved det(1 + J) from 0.43 to 0.33 -- the deep-water orbit is the ceiling; (b)
+Airy's coth(kh) on the cascades' deep-water k gave coth 113 on the 213 m band in the shallows,
+52 m of slosh -- the k must be the band's in this depth (Guo 2002); (c) the raw ratio over the
+whole orbit sheared every crest sideways ten times its height -- a sea mid-plunge at every
+phase; (d) weighting each of 32 components by its own crest phase drifted the whole sheet (the
+weights average 1/2); (e) the crest is the SEA's, its elevation against its envelope, and the
+throw is bounded by the wavelength; (f) the per-vertex Newton inversion blew up at small det and
+the first-order affine cell images overlapped -- the column carries the label, the scatter
+rasterizes the mesh's own triangles. Law: a closure on a superposition must be written on the
+SUM, not on the terms; the inversion of a sheet belongs to the structure that already holds it.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.

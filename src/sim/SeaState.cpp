@@ -1,3 +1,4 @@
+#include "core/Planet.h"
 #include "sim/SeaState.h"
 
 #include "core/Common.h"
@@ -213,7 +214,7 @@ PartParam SeaState::MakePartition(double hs, double tp, double fromDeg, bool win
 bool SeaState::WindSeaPm(double wind10Ms, double* hsOut, double* tpOut) {
     if (!(wind10Ms > 0.9)) return false;   // below this PM's Hs is under the partition floor
     const double u = 1.075 * wind10Ms;     // U10 -> U19.5
-    const double fp = 0.877 * 9.81 / (2.0 * kPi * u);
+    const double fp = 0.877 * PlanetGWave() / (2.0 * kPi * u);
     if (fp <= 1e-4) return false;
     if (hsOut) *hsOut = 0.0246 * u * u;
     if (tpOut) *tpOut = 1.0 / fp;

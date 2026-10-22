@@ -49,6 +49,8 @@
 #include "sim/CurrentModel.h"
 
 #include "sim/WaveField.h"
+#include "core/Planet.h"
+#include "core/Pga.h"
 #include "sim/WaterTerms.h"   // F7: BreakFactor, the clipped Rayleigh sea
 #include "core/ThreadManager.h"
 
@@ -71,7 +73,6 @@ namespace ga {
 namespace {
 
 constexpr double kPiW = 3.14159265358979323846;
-constexpr double kGrav = 9.81;
 constexpr int kBracketN = 96;        // log-spaced dispersion candidates (proof: nsamp=96)
 constexpr int kBisectN = 48;         // bisections -> bracket width ~4e-16 * k
 constexpr double kDepthFloor = 0.15; // m; the proof's np.maximum(h, 0.15)
@@ -119,7 +120,7 @@ double SolveDispersion(double sig, double hf, double uopp, bool& blocked) {
     const double* kk = BracketGrid();
     auto f = [&](double k) {
         const double s = sig + k * uopp;
-        return s * s - (kGrav * k) * std::tanh(k * hf);
+        return s * s - (PlanetGWave() * k) * std::tanh(k * hf);
     };
     double fPrev = f(kk[0]);
     double lo = 0.0, hi = 0.0;
@@ -595,7 +596,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         const double sig = 2.0 * kPiW / T;
         const double prop = Wrap360(dirs[ic] + 180.0) * (kPiW / 180.0);   // travel TOWARD
         const double d0 = std::sin(prop), d1 = std::cos(prop);            // (east, north)
-        const double c0 = kGrav * T / (2.0 * kPiW);
+        const double c0 = PlanetGWave() * T / (2.0 * kPiW);
         const double cg0 = 0.5 * c0;
         // Snell vs the fixed bar-normal frame, PER-COMPONENT incidence -- the mean direction
         // gets 15 of 16 components wrong (ALGEBRA.md `wavefield`, fidelity-verified).
@@ -676,7 +677,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         table.dirX[ic] = float(d0);
         table.dirZ[ic] = float(d1);
 
-        const double lambdaDeep = 2.0 * kPiW * kGrav / (sig * sig);
+        const double lambdaDeep = 2.0 * kPiW * PlanetGWave() / (sig * sig);
         if (lambdaDeep < cfg.minSamplesPerLambda * cfg.cellM) continue;   // the fold gate
         uploaded[ic] = true;
         ++nUp;
@@ -782,7 +783,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             //
             // Re-applied after every sweep so it stays a boundary condition rather than an
             // initial guess the sweep is free to undercut.
-            const int rounds = EikonalSweep(nx, ny, dxm, (sig * sig) / kGrav, d0, d1, feik, phibuf);
+            const int rounds = EikonalSweep(nx, ny, dxm, (sig * sig) / PlanetGWave(), d0, d1, feik, phibuf);
             for (int cur = roundsMin.load(); rounds < cur && !roundsMin.compare_exchange_weak(cur, rounds);) {}
             for (int cur = roundsMax.load(); rounds > cur && !roundsMax.compare_exchange_weak(cur, rounds);) {}
         }
@@ -1067,6 +1068,7 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
     auto mixD = [&](double v) { mixBytes(&v, sizeof(v)); };
     auto mixU = [&](uint32_t v) { mixBytes(&v, sizeof(v)); };
     mixU(kSolverVersion);
+    mixD(PlanetGWave());   // the planet's gravity: a field solved under one never answers for another
     mixD(m_cfg.orgX);
     mixD(m_cfg.orgZ);
     mixU(uint32_t(m_cfg.nx));
@@ -1452,11 +1454,11 @@ bool WaveField::ConvergeCache(const std::string& arg) {
                 feik[idx] = (h[idx] > 0.0) ? kp[idx] : kShore;
                 phi[idx] = 1e30;
             }
-            EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / kGrav, d0, d1, feik, phi);   // the solve's (F28: until still)
+            EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, feik, phi);   // the solve's (F28: until still)
             std::vector<double> phi8 = phi;
             for (int round = 0; round < kMaxRounds; ++round) {
                 prev = phi;
-                EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / kGrav, d0, d1, feik, phi, 4);
+                EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, feik, phi, 4);
                 size_t moved = 0; double mx = 0.0;
                 for (size_t idx = 0; idx < cells; ++idx) {
                     if (phi[idx] != prev[idx]) { ++moved; mx = (std::max)(mx, std::abs(prev[idx] - phi[idx])); }
@@ -1830,7 +1832,13 @@ void WaveField::Hold(const std::shared_ptr<const Solved>& s) {
     std::lock_guard<std::mutex> lk(m_heldMx);
     std::erase_if(m_held, [&](const std::shared_ptr<const Solved>& h) { return h->key == s->key; });
     m_held.push_back(s);
-    while (m_held.size() > kHeldMax) m_held.erase(m_held.begin());   // the oldest goes
+    auto heldBytes = [&] {
+        size_t b = 0;
+        for (const auto& h : m_held) b += SolvedBytes(*h);
+        return b;
+    };
+    // the oldest goes, while there are too many or they weigh past the budget (the newest stays)
+    while (m_held.size() > 1 && (m_held.size() > kHeldMax || heldBytes() > kHeldBytes)) m_held.erase(m_held.begin());
 }
 
 std::shared_ptr<const WaveField::Solved> WaveField::Fetch(uint64_t key, double simUnix,
@@ -2095,7 +2103,7 @@ bool WaveField::BlendMidpointTest(double simUnix, const std::vector<PartParam>& 
     return ok;
 }
 
-WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const {
+WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double depthM, double chopM) const {
     Probe p;
     const std::shared_ptr<const Solved> live = Live();
     if (!live || live->atlas.empty()) return p;
@@ -2139,6 +2147,11 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
     // the shift is ~1e-7 m, five orders under the 8-bit atlas's own half-LSB floor, so the
     // 9b/9c twin sees nothing -- it is only ever more accurate.)
     double eta = 0.0, dxS = 0.0, dzS = 0.0, sxS = 0.0, szS = 0.0;
+    // THE CREST LAW's ratio, read before the components: the solver's raw-over-limited excess
+    // at this point (the envelope slice; 1 where nothing breaks). With depthM <= 0 (the
+    // instruments' deep-water read) the orbit is Airy's and the crest is not thrown.
+    const double q1 = (depthM > 0.0) ? (std::max)(bil(t.envSlice, 1) * double(t.excMax), 1.0) - 1.0 : 0.0;
+    double sumA = 0.0, sumAK = 0.0, sumACoth = 0.0, sumADx = 0.0, sumADz = 0.0;
     double vxS = 0.0, vyS = 0.0, vzS = 0.0;
     double jxxS = 0.0, jxzS = 0.0, jzzS = 0.0;
     for (uint32_t c = 0; c < t.nUsed && c < uint32_t(kMaxComp); ++c) {
@@ -2177,18 +2190,98 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
         const double sig = double(t.sigma[c]);
         const double aC = aC0 * ca;   // in phase with the crest
         const double aS = aC0 * sa;   // 90 deg ahead of it
+        // THE ORBIT IS THE DEPTH'S (the crest law, 2026-10-19; WaterBank.hlsl's solved loop): the
+        // horizontal excursion is coth(kh) times the vertical -- Airy's ellipse at the surface, 1
+        // in deep water. depthM <= 0 is the deep-water orbit (the instruments that read the field
+        // alone); the hull's twin hands the depth it stands in.
+        const double coth = (depthM > 0.0) ? 1.0 / std::tanh(k * (std::max)(depthM, 0.3)) : 1.0;
         eta += aC;                                   // eta = a cos(theta)   <- the reference
-        dxS -= aS * dX;                              // D_h = -a sin(theta) d^   (chop = 1;
-        dzS -= aS * dZ;                              //        WaterBank scales this by wfChop)
+        dxS -= aS * dX * coth;                       // D_h = -a sin(theta) coth(kh) d^   (chop = 1;
+        dzS -= aS * dZ * coth;                       //        WaterBank scales this by wfChop)
+        // the sea's sums for the crest law after the loop (the kernel's)
+        sumA += aC0;
+        sumAK += aC0 * k;
+        sumACoth += aC0 * coth;
+        sumADx += aC0 * dX;
+        sumADz += aC0 * dZ;
         sxS -= aS * k * dX;                          // grad eta = -a k sin(theta) d^
         szS -= aS * k * dZ;                          //   (the k is the term: a slope is 1/L)
         vxS += sig * aC * dX;                        // u = +sigma a cos(theta) d^  (crest
         vzS += sig * aC * dZ;                        //   water runs WITH the wave)
         vyS += sig * aS;                             // w = +sigma a sin(theta) == d(eta)/dt
-        const double aKC = aC * k;                   // grad D_h = -a k cos(theta) d^ (x) d^
+        const double aKC = aC * k * coth;            // grad D_h = -a k cos(theta) coth(kh) d^ (x) d^
         jxxS -= aKC * dX * dX;
         jxzS -= aKC * dX * dZ;
         jzzS -= aKC * dZ * dZ;
+    }
+    // THE CREST THROWS FORWARD, THE TROUGH STAYS (WaterBank.hlsl's solved loop, after its
+    // components -- the law and its reasons are there). On the sum: the sea's crest weight from
+    // its elevation against its envelope, the lateral term grown by q1 there and the crest
+    // carried forward by the same share of the sea's horizontal amplitude along its travel; the
+    // throw bounded by the wavelength (k A_h <= pi/2, A_h chopped). The Jacobian follows by the
+    // product rule, grad(w) = grad(eta) / (2 A_env) inside the saturate and 0 outside; the
+    // (x, z) term is symmetrized, as the stored Jacobian is.
+    if (q1 > 0.0 && sumA > 1e-9) {
+        const double rmsNow = bil(t.envSlice, 0) * double(t.envMax);
+        const double aEnv = (std::max)(1.4142135623730951 * rmsNow, 1e-3);
+        const double wRaw = 0.5 + 0.5 * eta / aEnv;
+        const double wCr = (std::min)((std::max)(wRaw, 0.0), 1.0);
+        const bool inBand = wRaw > 0.0 && wRaw < 1.0;
+        const double kBar = sumAK / sumA;
+        const double cothBar = sumACoth / sumA;
+        const double dLen = std::sqrt(sumADx * sumADx + sumADz * sumADz);
+        const double dBx = dLen > 1e-9 ? sumADx / dLen : 0.0, dBz = dLen > 1e-9 ? sumADz / dLen : 0.0;
+        const double aH1 = aEnv * cothBar;                 // the sea's horizontal amplitude, chop 1
+        // THE CREST'S STEEPNESS CLIMBS TO THE CUSP (WaterBank.hlsl, the crest law, 2026-10-19 late):
+        // the share of the raw variance above the limit, 1 - 1/lipQ^2 with lipQ = q1 + 1, takes the
+        // crest's excursion from the sea's own toward the loop's limit pi / 2k (the chopped
+        // amplitude is what the kernel bounds).
+        const double lipQ = q1 + 1.0;
+        // the reach is the landing (WaterTerms.h LipReach), on this crest's height over the trough
+        const double aLoop = LipReach(kBar, cothBar, aEnv + (std::max)(eta, 0.0), depthM > 0.0 ? depthM : 1.0e9);
+        // the set wave (the kernel's): the crest's own excess, the sea's times eta over the
+        // significant amplitude (eta / aEnv = 2 wRaw - 1)
+        const double eCr = lipQ * (std::max)(eta / aEnv, 0.0);
+        const double excessShare = 1.0 - 1.0 / (std::max)(eCr * eCr, 1.0);
+        const double q1c = (std::max)(aLoop / (std::max)(aH1 * chopM, 1e-3) - 1.0, 0.0) * excessShare;
+        const double g = 1.0 + q1c * wCr;
+        const double wx = inBand ? 0.5 * sxS / aEnv : 0.0;   // grad(w) (sxS is grad(eta) so far)
+        const double wz = inBand ? 0.5 * szS / aEnv : 0.0;
+        // THE FLIGHT (WaterBank.hlsl's solved loop; the law at WaterTerms.h LipFlightTau): the throw
+        // along the sheet, the fall the boost back, one translator; bounded by the trough. Per unit
+        // of w the throw is q1c aH u (u the launch direction along the sheet): its horizontal part
+        // rides the lateral channels at chop 1 (the caller's lq carries the chop), its vertical part
+        // the elevation at the chop (the kernel throws aH at its chop).
+        const double m = dBx * sxS + dBz * szS;
+        const double r = 1.0 / std::sqrt(1.0 + m * m);
+        const double shX = q1c * aH1 * dBx * r, shZ = q1c * aH1 * dBz * r;   // the throw per unit of w
+        const double shY = q1c * aH1 * chopM * m * r;
+        const double tx = q1c * dxS + shX, tz = q1c * dzS + shZ;     // d(D_new)/d(w)
+        jxxS = jxxS * g + tx * wx;
+        jzzS = jzzS * g + tz * wz;
+        jxzS = jxzS * g + 0.5 * (tx * wz + tz * wx);
+        const double aHc = aH1 * chopM;
+        const double ePast = (std::max)(aHc * g - 1.0 / (std::max)(kBar, 1e-4), 0.0);
+        const double hF = depthM > 0.0 ? depthM : 1.0e9;
+        const double HF = aEnv + (std::max)(eta, 0.0);
+        const double fall = LipFall(ePast, kBar, cothBar, HF, hF);
+        // the flight's translator on the label's point (x: the lateral at chop 1, y: the elevation)
+        const double tau[3] = {shX * wCr, shY * wCr - fall, shZ * wCr};
+        double px = dxS * g, py = eta, pz = dzS * g;
+        Motor::Translation(tau[0], tau[1], tau[2]).TransformPoint(px, py, pz);
+        const double floorY = (std::min)(eta, -aEnv);
+        if (py >= floorY) {
+            // the slope through w: the rise along the sheet up, the fall down (d(fall)/d(w))
+            const double dd = shY - LipFallDe(ePast, kBar, cothBar, HF, hF) * aHc * q1c;
+            sxS += dd * wx;
+            szS += dd * wz;
+            eta = py;
+        } else {
+            sxS = szS = 0.0;
+            eta = floorY;
+        }
+        dxS = px;
+        dzS = pz;
     }
     p.eta = float(eta);
     p.dx = float(dxS);
@@ -2216,7 +2309,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
 bool RunWaveFieldSelfTest() {
     const int nx = 160, ny = 120;
     const double cellM = 10.0, T = 8.0, sig = 2.0 * 3.14159265358979 / T;
-    const double kInfC = sig * sig / 9.81;
+    const double kInfC = sig * sig / PlanetGWave();
     const double prop = 0.9;   // travel direction, radians from north through east
     const double d0 = std::sin(prop), d1 = std::cos(prop);
     const size_t cells = size_t(nx) * size_t(ny);

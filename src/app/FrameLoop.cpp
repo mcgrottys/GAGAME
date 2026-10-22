@@ -1038,8 +1038,10 @@ std::optional<int> FrameLoop::Session() {
             return (v && v->hasAt) ? &v->at : nullptr;
         };
         std::string rwhy;
-        if (railName && !S.railDirW.empty()) {
-            const std::string path = std::string("scenes/rails/") + railName + ".json";
+        if ((railName || !S.rails.file.empty()) && !S.railDirW.empty()) {
+            // a scene's own rail file wins over the named one (rails.file, 2026-10-19)
+            const std::string path = !S.rails.file.empty() ? S.rails.file
+                                                           : std::string("scenes/rails/") + railName + ".json";
             if (!m_rail.Load(path, &rwhy) || !m_rail.Resolve(m_railFrame, &rwhy)) {
                 Log("FATAL: [rail] %s", rwhy.c_str());
                 return 1;
@@ -3766,6 +3768,25 @@ bool FrameLoop::Frame() {
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs);
+            // THE COLUMN PLANE (the rolling-wave work): the first eye's bank's Eulerian columns.
+            {
+                uint32_t rs[3], rt[3], rl[3];
+                for (uint32_t k = 0; k < 3; ++k) {
+                    rs[k] = waterBank->ColumnRingSrv(k);
+                    rt[k] = waterBank->ColumnRingTexels(k);
+                    rl[k] = waterBank->ColumnRingTiles(k);
+                }
+                globe->SetWaterColumn(waterBank->ColumnSrv(), WaterBankLayer::kColScale,
+                                      WaterBankLayer::kColBias, waterBank->ColumnRingsUnder(), rs, rt, rl);
+            }
+            globe->SetWaterSpray(waterBank->SpraySrv(), WaterBankLayer::kSprayMax);
+            if (sea) globe->SetFarSea(sea->Scale().hsRef, sea->Scale().storm);   // the sea past the rings
+            {   // THE SEA'S FOLDS: the morph's distance and the walk's blocks, about ring 0's origin
+                float ox = 0.0f, oz = 0.0f;
+                waterBank->RingOrigin(0, ox, oz);
+                globe->SetWaterFolds(waterBank->FoldDistSrv(), &waterBank->FoldCells(), ox, oz, waterBank->FoldBlockM(),
+                                     waterBank->Chart().east, waterBank->Chart().north, waterBank->ColumnRingsUnder());
+            }
             globe->SetBankChartUp(waterBank->Chart().up);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
             // bands -- the same plane the bank's texels were filled from (ChartOf).
@@ -4099,6 +4120,7 @@ bool FrameLoop::Frame() {
             walkWantNsAcc += globe->walkWantNs;
             morphFullAcc += globe->walkMorphFull;
             morphPartAcc += globe->walkMorphPart;
+            m_walkFoldAcc += globe->walkFoldLeaves;
             wantTouchAcc += resMgr.wantTouches;
             wantHitAcc += resMgr.wantHits;
             ++walkFrames;
@@ -5467,10 +5489,10 @@ int FrameLoop::Finish() {
             const auto ms = [&](uint64_t cyc) { return double(cyc) / tscPerNs / 1e6 / nf; };
             const double walkMs = m_profMs[7] / (std::max)(1u, frameMsN);
             const double emitMs = double(m_walkWantNsAcc) / nf / 1e6, meshMs = double(m_walkMeshNsAcc) / nf / 1e6;
-            Log("[walk] a frame's mean over %llu frames: %.0f nodes, %.0f leaves; SetView %.2f ms = leaf emit "
-                "%.2f + meshlets %.2f + the walk's own (cull, split, the leaf's rest) %.2f",
+            Log("[walk] a frame's mean over %llu frames: %.0f nodes, %.0f leaves (%.0f under the mesh's depth, the sea's "
+                "folds'); SetView %.2f ms = leaf emit %.2f + meshlets %.2f + the walk's own (cull, split, the leaf's rest) %.2f",
                 static_cast<unsigned long long>(m_walkFrames), double(m_walkNodesAcc) / nf, double(m_walkLeavesAcc) / nf,
-                walkMs, emitMs, meshMs, walkMs - emitMs - meshMs);
+                double(m_walkFoldAcc) / nf, walkMs, emitMs, meshMs, walkMs - emitMs - meshMs);
             Log("[walk]   the leaf's emit: %.0f cube wants, %.0f window wants of %.0f (world, slice) pairs "
                 "(%.0f found asked by an earlier world, %.0f behind the face, %.0f outside the box, %.0f past "
                 "the floor), %.0f corner projections",

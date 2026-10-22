@@ -23,6 +23,7 @@
 #include "compose/SurfaceFrame.h"
 #include "compose/WaterAtlas.h"
 #include "hal/TileAtlas.h"
+#include "hal/Readback.h"
 #include "core/OriginLattice.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
@@ -48,6 +49,52 @@ public:
     // filled twice and diffed. Public because it is a debug lever, not state.
     bool flatBed = false;
     float flatBedNavd = -30.0f;
+    // THE COLUMN PLANE (the rolling-wave work, 2026-10-18; WaterBank.hlsl CsBankScatter): the
+    // Lagrangian sheet scattered into Eulerian columns of three crossings (face, lip underside,
+    // lip top), so an overturning crest has geometry instead of a faded lateral term. Scene
+    // `water.bank.column`; off, no plane is made and the mesh draws as it did.
+    bool column = true;
+    static constexpr float kColScale = 100.0f;    // the fixed point: a centimetre (14 bits, +-82 m;
+                                                  // the label's offset rides in the low 18 bits)
+    static constexpr float kColBias = 64.0f;      // metres below the waterline the encoding reaches
+    static constexpr uint32_t kColSubLabels = 2;  // sub-labels an axis a texel in the scatter
+    uint32_t ColumnSrv() const { return (column && m_ready) ? m_column.Srv() : 0xFFFFFFFFu; }
+    // THE COLUMN LADDER (2026-10-20; Mark: nothing in code is "fine" or "coarse"). Ring 0's
+    // columns again at half its texel, a quarter, an eighth: the rings UNDER ring 0, each a mip of
+    // the one above over ring 0's span (so ring -(k+1) has 512 x 2^(k+1) texels a side), four bands
+    // each, in its own reserved atlas of 128^2 tiles, resident only where the ring above witnessed a
+    // fold (the scatter's inverted triangles flag the tiles of the ring under; the flags come back
+    // through the frame ring; the CPU maps those tiles and their eight neighbours and unmaps the
+    // rest). How deep the ladder goes is the scene's (`water.bank.columnTexel`, the finest texel it
+    // reaches, 0.3 m by default = two rings under). A NULL tile reads absent and the readers take the
+    // next ring up: the hierarchy's law, finest resident. Nothing here is named by its grain.
+    static constexpr uint32_t kColumnRingsUnderMax = 3;   // 0.6, 0.3, 0.15 m; 4096^2 x 4 bands is the API's ceiling
+    float columnTexel = 0.3f;                              // the finest texel the ladder reaches (m)
+    uint32_t ColumnRingsUnder() const { return m_ringsUnder; }
+    uint32_t ColumnRingSrv(uint32_t k) const { return (column && m_ready && k < m_ringsUnder) ? m_under[k].atlas.Srv() : 0xFFFFFFFFu; }
+    uint32_t ColumnRingTexels(uint32_t k) const { return k < m_ringsUnder ? m_under[k].texels : 0u; }
+    uint32_t ColumnRingTiles(uint32_t k) const { return k < m_ringsUnder ? m_under[k].tiles : 0u; }
+    uint32_t ColumnRingMapped(uint32_t k) const { return k < m_ringsUnder ? m_under[k].mappedCount : 0u; }
+    // THE SPRAY (2026-10-19, Mark's idea): the water the crest law cannot carry -- the throw the
+    // quarter-wavelength bound removes -- leaves the sheet as DROPLETS. A fixed ring of particles
+    // on the GPU (two float4 each: position in the rings' chart + age, velocity + size), spawned by
+    // the fill kernel at crest texels where the bound bites, stepped by CsSprayStep (gravity, the
+    // drag of a water drop in air by its terminal velocity, death at the column's face or by age),
+    // drawn by GlobeLayer as lit sprites after the lip sheets. Not water a hull feels: no CPU twin.
+    static constexpr uint32_t kSprayMax = 65536;
+    static constexpr float kSprayTerminalMs = 5.0f;   // Gunn & Kinzer 1949: a 1-2 mm drop falls at 4-6.5 m/s
+    static constexpr float kSprayLifeS = 6.0f;
+    uint32_t SpraySrv() const { return (column && m_ready) ? m_spraySrv : 0xFFFFFFFFu; }
+    // THE SEA'S FOLDS (2026-10-20): ring 0's inverted triangles marked on a 64 x 64 grid of 8-texel
+    // blocks (the scatter), their distance field for the globe's morph (CsFoldDist, in blocks),
+    // and the grid back on the CPU for the walk (the blocks a fold stood over, bx | bz << 8, as of
+    // the readback's frame, about ring 0's origin of this one -- a frame or two of slip).
+    static constexpr uint32_t kFoldGrid = 64;
+    uint32_t FoldDistSrv() const { return (column && m_ready && m_foldDistSrv) ? m_foldDistSrv : 0xFFFFFFFFu; }
+    const std::vector<uint16_t>& FoldCells() const { return m_foldCells; }
+    double FoldBlockM() const { return 8.0 * m_baseTexelM; }
+    uint32_t SprayAlive() const { return m_sprayAlive; }
+    uint32_t SpraySpawned() const { return m_spraySpawned; }
 
     static constexpr int kMips = 6;         // texel = base * 2^m; at base 1.2: 1.2..38 m
                                             // texels, 0.6..20 km spans (scene bankTexelM)
@@ -291,6 +338,23 @@ private:
         float svU[4], svV[4], svW[4], svO[4];
         // THE PREVIOUS TABLE (the wave roll; WaterBank.hlsl gWaveSigP..): appended at the END.
         float waveSigP[64], waveDirP[64], waveScaleP[64], waveBP[4];
+        // THE COLUMN PLANE (gColU / gColA): its UAV slot, sub-labels an axis, on; the fixed point's
+        // scale and bias. Appended at the END on both sides.
+        uint32_t colU[4];
+        float colA[4];
+        // THE COLUMN LADDER (gColR / gColN / gColMap): ring under k's UAV slot, its flags' UAV
+        // slot, its texels a side, its tiles a side; the rings under and on; the MAPPED SET of
+        // every ring under as bits (ring k's at ColMapBase(k): 0, 64, 320; row-major by tile).
+        uint32_t colR[12];   // ring k's four at 4k
+        uint32_t colN[4];
+        uint32_t colMap[128];
+        // THE SPRAY (gSprayU / gSprayA): the particles' UAV slot, the counters' UAV slot, the ring's
+        // size, on; dt (s), the drop's terminal speed (m/s), its life (s), the spawn gain.
+        uint32_t sprayU[4];
+        float sprayA[4];
+        // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (Jet.hlsli, the spray, the
+        // wakes). Appended at the END on both sides.
+        float planet[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -362,6 +426,28 @@ private:
     const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
     float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)
 
+    TileAtlas2D m_column;                     // R32_UINT, four bands of rings: the Eulerian columns
+    struct ColumnRing {                       // a ring under ring 0 (WaterBankLayer.h, the ladder)
+        TileAtlas2D atlas;                    // R32_UINT, four bands tall
+        GpuTexture flags;                     // tiles x tiles: the tiles the ring above flagged
+        uint32_t flagUav = 0xFFFFFFFFu;
+        uint32_t texels = 0, tiles = 0;
+        std::vector<uint8_t> mapped;          // tiles x tiles
+        uint32_t mappedCount = 0, logged = 0xFFFFFFFFu;
+    };
+    ColumnRing m_under[kColumnRingsUnderMax];
+    uint32_t m_ringsUnder = 0;
+    hal::RegionReadback m_flagRb;             // every ring's flags and the spray's counters, back through the frame ring
+    Com<ID3D12Resource> m_sprayBuf;           // kSprayMax x 2 float4
+    uint32_t m_sprayUav = 0xFFFFFFFFu, m_spraySrv = 0xFFFFFFFFu;
+    D3D12_RESOURCE_STATES m_sprayState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    GpuTexture m_sprayCount;                  // 4x1: spawned this frame, alive this frame, the running total
+    uint32_t m_sprayCountUav = 0xFFFFFFFFu;
+    hal::Pso m_sprayStep;
+    hal::Pso m_columnClear;                   // CsColumnClear: the mapped tiles of every ring under to absent, every frame
+    uint32_t m_sprayAlive = 0, m_spraySpawned = 0, m_sprayLogFrame = 0;
+    double m_lastSimUnix = 0.0;
+    hal::Pso m_scatter;                       // CsBankScatter (after the fill, a UAV barrier between)
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
                                              // needs to recover sub-ring sparkle (hsScale;
                                              // churn joins it next)
@@ -389,6 +475,11 @@ private:
     uint64_t m_landSeen[kMips] = {};   // the height tree's loads when each ring's land test last ran
     uint8_t m_wet[kMips][kRingTiles * kRingTiles] = {};   // per logical tile
     double m_simUnix = 0, m_camX = 0, m_camZ = 0;   // the eye in the chart
+    double m_camH = 0;
+    GpuTexture m_fold, m_foldDist;   // the fold grid (R32_UINT) and its distance (R32_FLOAT), 64 x 64
+    uint32_t m_foldUav = 0, m_foldDistUav = 0, m_foldDistSrv = 0;
+    std::vector<uint16_t> m_foldCells;
+    hal::Pso m_foldDistPso;   // ...and its height over the chart's tangent plane (P.up - R): ChartRows' row 3 w
     double m_eyeFlat[3] = {};                       // ...and in the flat frame
     Space::Anchor m_chart{};                        // the rings' plane (Chart above)
     OriginLattice::Origin m_origin{};               // ...which is this origin of the planet's cloud

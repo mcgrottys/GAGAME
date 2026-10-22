@@ -4,6 +4,7 @@
 //  A new boat belongs HERE, as a function returning data, and nowhere else. If adding one ever
 //  requires touching Vessel.cpp, the element set was wrong and that is the thing to fix.
 // ================================================================================================
+#include "core/Planet.h"
 #include "sim/VesselSpec.h"
 
 namespace ga {
@@ -626,7 +627,7 @@ VesselSpec MakeCarBaja() {
     const double mCorner = M / 4.0;
     const double w12 = 2.0 * 3.14159265358979323846 * 1.2;
     const double k = w12 * w12 * mCorner;
-    const double x0 = mCorner * 9.80665 / k;
+    const double x0 = mCorner * PlanetG() / k;
     const double droop = yTop - (rModel - lift) + x0;
     const double c = 2.0 * 0.5 * std::sqrt(k * mCorner);
     auto wheel = [&](const char* name, double x, double z, bool front) {

@@ -1,4 +1,5 @@
 #include "scene/SeaLayer.h"
+#include "core/Planet.h"
 
 #include "hal/GpuProfiler.h"
 
@@ -239,7 +240,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                     pk = i;
                 }
             }
-            m_cPeak = static_cast<float>(9.81 / (2.0 * 3.14159265 * parts[pk].fp));
+            m_cPeak = static_cast<float>(PlanetGWave() / (2.0 * 3.14159265 * parts[pk].fp));
             m_peakDirX = parts[pk].dirToX;
             m_peakDirZ = parts[pk].dirToZ;
             m_peakDirValid = true;   // M7j: the shadow may only march a REAL direction
@@ -281,7 +282,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             Log("[sea] storm %.1f m / %.0f s -> implied wind %.1f m/s (PM inversion; the old "
                 "period-only closure gave %.1f)",
                 m_stormHs, m_stormTp, windMs,
-                9.81 * (m_stormTp * 0.55) / (2.0 * 3.14159265) * 0.85 * 2.0);
+                PlanetGWave() * (m_stormTp * 0.55) / (2.0 * 3.14159265) * 0.85 * 2.0);
         }
         const double t = std::max(0.0, (windMs - 3.0) / 9.0);
         m_windGate = static_cast<float>(std::min(1.0, std::pow(t, 1.5)));
@@ -304,7 +305,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             double lnk2[3] = {0, 0, 0};  // M9bt: and its SECOND moment -- the band's WIDTH
             const double df = 0.004;
             for (double f = df; f < 2.0; f += df) {
-                const double k = (2.0 * kPiD * f) * (2.0 * kPiD * f) / 9.81;
+                const double k = (2.0 * kPiD * f) * (2.0 * kPiD * f) / PlanetGWave();
                 const double s = SeaState::SpectrumAt(parts, activeParts, f);
                 for (int c = 0; c < 3; ++c) {
                     if (k >= kCut[c] && k < kCut[c + 1]) {
@@ -592,7 +593,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.miscC[0] = m_chopK;
         m_churnCb.miscC[1] = m_fft.PatchL(2);
         m_churnCb.miscC[2] = static_cast<float>(std::fmod(m_tSec, 1024.0f));
-        m_churnCb.miscC[3] = 0;
+        m_churnCb.miscC[3] = static_cast<float>(PlanetGWave());   // the planet's gravity (SeaChurn: Jet.hlsli)
         // PHASE C5: the world.flat chart's rows (the exact map); the height window's rows below.
         m_surface->TangentRows(m_churnCb.tanE, m_churnCb.tanU, m_churnCb.tanN);
         memcpy(m_churnCb.eyeT, m_churnEyeT, sizeof(m_churnEyeT));   // PHASE B2

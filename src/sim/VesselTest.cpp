@@ -146,7 +146,7 @@ bool RunVesselSelfTest() {
     // ---- 3. HEAVE PERIOD. T = 2 pi sqrt(m / (rho g A_wp)). Pure hydrostatic stiffness; if the
     // buoyancy magnitude were wrong by any factor this lands somewhere else.
     {
-        const double k = rho * kG * B * L;
+        const double k = rho * PlanetG() * B * L;
         const double tExpect = 2.0 * kPi * std::sqrt(M / k);
         Vessel v;
         v.Build(spec, Motor::Translation(0.0, 3.0, 0.0));
@@ -183,7 +183,7 @@ bool RunVesselSelfTest() {
         const double KG = 0.5 * H;                          // CG at the box centre
         const double GM = KB + BM - KG;
         const double Iroll = M / 12.0 * (B * B + H * H);
-        const double tExpect = 2.0 * kPi * std::sqrt(Iroll / (M * kG * GM));
+        const double tExpect = 2.0 * kPi * std::sqrt(Iroll / (M * PlanetG() * GM));
 
         Vessel v;
         v.Build(spec, Motor::Translation(0.0, 3.0, 0.0));
@@ -235,14 +235,14 @@ bool RunVesselSelfTest() {
         // component is read in world coordinates to keep the comparison honest.
         double fw[3] = {w.a[0], w.a[1], w.a[2]};
         v.Body().pose.TransformDir(fw[0], fw[1], fw[2]);
-        const double expect = M * kG * std::tan(ramp.slopeRad);
+        const double expect = M * PlanetG() * std::tan(ramp.slopeRad);
         Log("[vessel] tilted plane %.1f deg: horizontal force %.1f N (analytic m g tan = %.1f N; "
             "world-up buoyancy would give 0)",
             ramp.slopeRad * 180.0 / kPi, fw[0], expect);
         if (std::abs(fw[0] - expect) > 0.06 * expect) {
             fail("down-slope force (buoyancy is not normal to the surface)", fw[0], expect);
         }
-        if (std::abs(fw[1]) > 0.02 * M * kG) fail("vertical residual on the ramp", fw[1], 0.0);
+        if (std::abs(fw[1]) > 0.02 * M * PlanetG()) fail("vertical residual on the ramp", fw[1], 0.0);
     }
 
     // ---- 5. THE WAVE GATE. On an Airy train the hull must (a) heave at the ENCOUNTER period and
@@ -309,8 +309,8 @@ bool RunVesselSelfTest() {
         const Bivector w = v.NetWrench(none, c, 0.0);
         if (v.Telemetry().waterValid) fail("no-coverage water reported valid", 1, 0);
         // gravity only: the net force is exactly -mg, no buoyancy invented from nothing
-        if (std::abs(w.a[1] + M * kG) > 1e-6) fail("no-coverage buoyancy invented", w.a[1],
-                                                   -M * kG);
+        if (std::abs(w.a[1] + M * PlanetG()) > 1e-6) fail("no-coverage buoyancy invented", w.a[1],
+                                                   -M * PlanetG());
     }
 
     // ---- 7. THE GROUND (beaching, 2026-10-11). The bed is a second surface, and the same
@@ -356,11 +356,11 @@ bool RunVesselSelfTest() {
         const VesselTelemetry& t = v.Telemetry();
         Log("[vessel] dry ground: keel %.4f m into the bed (settle %.3f), bed carries %.0f N on %d "
             "points (weight %.0f), water %.4f m^3, residual %.3g N %.3g N m",
-            pen, settle, t.contactN, t.contactPts, M * kG, t.immersedVol, fmag, tmag);
+            pen, settle, t.contactN, t.contactPts, M * PlanetG(), t.immersedVol, fmag, tmag);
         if (std::abs(pen - settle) > 0.02) fail("ground: penetration vs settle", pen, settle);
         if (!(pen > 0.0)) fail("ground: the barge is not on the bed", pen, settle);
         if (t.contactPts != 6) fail("ground: keel points touching", t.contactPts, 6);
-        if (std::abs(t.contactN - M * kG) > 0.02 * M * kG) fail("ground: weight on the bed", t.contactN, M * kG);
+        if (std::abs(t.contactN - M * PlanetG()) > 0.02 * M * PlanetG()) fail("ground: weight on the bed", t.contactN, M * PlanetG());
         if (t.immersedVol > 1e-9) fail("ground: water under a dry hull", t.immersedVol, 0.0);
         if (fmag > 2.0) fail("ground: residual force at rest (N)", fmag, 0.0);
         if (tmag > 2.0) fail("ground: residual torque at rest (N m)", tmag, 0.0);
@@ -405,7 +405,7 @@ bool RunVesselSelfTest() {
             for (int i = 0; i < 60; ++i) v.Step(hill, c, (60 + i) * dtLive, dtLive);
             const double v2 = speedOf(v);
             const double a = v2 - v1;
-            const double aExpect = kG * (std::sin(hill.slopeRad) - mu * std::cos(hill.slopeRad));
+            const double aExpect = PlanetG() * (std::sin(hill.slopeRad) - mu * std::cos(hill.slopeRad));
             Log("[vessel] dry slope 35 deg: slides at %.4f m/s^2 (g (sin t - mu cos t) = %.4f), heel %.2f deg",
                 a, aExpect, heelOf(v));
             if (std::abs(a - aExpect) > 0.05 * aExpect) fail("ground: sliding acceleration", a, aExpect);
@@ -546,7 +546,7 @@ bool RunVesselSelfTest() {
     {
         const VesselSpec car = reg.Build("car.baja");
         if (car.kind.empty()) fail("car: not registered", 0, 1);
-        const double W = (car.massLoaded.v > 0.0 ? car.massLoaded.v : car.massDry.v) * kG;
+        const double W = (car.massLoaded.v > 0.0 ? car.massLoaded.v : car.massDry.v) * PlanetG();
         auto wheelRoot = [](const Element& e, double load) {   // k x (1 + (x/T)^2) = load, Newton
             const double T = e.suspTravel.v, k = e.suspK.v;
             double x = load / k;
@@ -871,8 +871,8 @@ bool RunVesselSelfTest() {
             StillWater dry;
             dry.levelNavd = 0.0;
             dry.bedNavd = 1.0;
-            const double Wb = (spec.massLoaded.v > 0.0 ? spec.massLoaded.v : spec.massDry.v) * kG;
-            const double Wc = (both.forms[1].massLoaded.v > 0.0 ? both.forms[1].massLoaded.v : both.forms[1].massDry.v) * kG;
+            const double Wb = (spec.massLoaded.v > 0.0 ? spec.massLoaded.v : spec.massDry.v) * PlanetG();
+            const double Wc = (both.forms[1].massLoaded.v > 0.0 ? both.forms[1].massLoaded.v : both.forms[1].massDry.v) * PlanetG();
             Vessel v;
             v.Build(both, Motor::Translation(0.0, 1.0 + 1.5, 0.0));
             Settle(v, dry, 4800);

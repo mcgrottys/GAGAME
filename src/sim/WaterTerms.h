@@ -46,21 +46,16 @@
 // ================================================================================================
 #pragma once
 
+#include "core/Planet.h"
+
 #include <cmath>
 
 namespace ga {
 
-// Gravity, exactly the value every shader in this engine writes as 9.81f.  It is a CONSTANT OF
-// THE PORT, not a physical measurement to be refined: if this and the HLSL literal ever differ,
-// the CPU's dispersion relation is not the GPU's and every wavelength drifts.
-//
-// IT IS DELIBERATELY NOT sim/Medium.h's kG (9.80665, standard gravity), and the two must not be
-// merged. That one is PHYSICS -- it weighs hulls, and the vessel gates pin draughts and periods
-// against it. This one is PARITY -- it reproduces a shader literal. They differ by 0.03%, which
-// is nothing next to the wake's own engineering closures and everything next to a silent
-// divergence between the sea the hull feels and the sea the GPU draws. Use ga::kG when computing
-// a force; use kGWave when reproducing a kernel.  (proofs/water_terms.py pins them APART.)
-inline constexpr double kGWave = 9.81;
+// Gravity is the PLANET'S (core/Planet.h, 2026-10-20): PlanetGWave() is GM / R^2 as the kernels receive
+// it (a float through their constant buffers), so a twin of a kernel computes with exactly the value
+// the kernel does. (It was the literal 9.81 here and in every shader, kept apart from the hulls'
+// standard gravity 9.80665; both are the planet's now, the waves' rounded as the GPU rounds it.)
 
 // The last-resort depth floor, 0.15 m.  Both depth laws below divide by tanh(k*h) or by a group
 // speed built from it, and both go singular as h -> 0; the shoreline is a place where h really
@@ -69,13 +64,9 @@ inline constexpr double kGWave = 9.81;
 // phase speed, SeaChurn.hlsl 0.4 m), because at 15 cm nothing in a wave band is linear anyway.
 inline constexpr double kDepthFloorM = 0.15;
 
-// The mesh's FOLD GUARD floor, shaders/GlobeMesh.hlsl kLatFoldFloor (M9bm). The mesh draws the
-// lateral Gerstner offset scaled by smoothstep(0, 0.35, areaJac), areaJac = det(I + J) of the
-// displacement: fully applied above 0.35, rolled off to zero at the overturn, where neighbouring
-// vertices would cross. 0.35 sits under foamlaw's saturation knee (J = 0.45), so the guard only acts
-// where the foam law has already declared the crest broken -- carried with that argument, not
-// re-derived. A hull that stands on the surface the mesh draws must displace by the same guard.
-inline constexpr double kLatFoldFloor = 0.35;
+// (The mesh's FOLD GUARD, kLatFoldFloor = 0.35 (M9bm), is gone on both processors, 2026-10-18: the
+// column plane carries a fold as three crossings a column and the mesh draws the column's face;
+// the hull's one Newton step runs on the unscaled offset, docs/WATER_VOLUME.md.)
 
 // The swell shadow's two kernel constants, shaders/WaterBank.hlsl (M7j/M9ba): the exposure page is
 // read at max(have, 3) -- mips >= 3 of the z14 page, ~76 m texels, the grain the line-of-sight march
@@ -146,7 +137,7 @@ inline double Lerp(double a, double b, double t) {
 // ================================================================================================
 inline double BandPhaseSpeed(double kBand, double depth) {
     const double kh = kBand * wt::Max(depth, kDepthFloorM);
-    return std::sqrt(kGWave / kBand * std::tanh(kh));
+    return std::sqrt(PlanetGWave() / kBand * std::tanh(kh));
 }
 
 // ================================================================================================
@@ -181,12 +172,81 @@ inline double BandPhaseSpeed(double kBand, double depth) {
 //  The 0.05 floor under c_g and the 1e-3 floor under sinh(2kh) are the same species of guard:
 //  both denominators go to zero only at h = 0, which the depth floor already excludes.
 // ================================================================================================
+// THE WAVENUMBER IN THIS DEPTH and the Airy orbit's horizontal factor (shaders/Jet.hlsli
+// ShoaledKh / OrbitCoth, the crest law of 2026-10-19): Guo's explicit dispersion, coth(kh).
+inline double ShoaledKh(double kDeep, double depth) {
+    const double x = std::sqrt(wt::Max(kDeep * depth, 1e-6));
+    return x * x * std::pow(1.0 - std::exp(-std::pow(x, 2.5)), -0.4);
+}
+inline double OrbitCoth(double kDeep, double depth) {
+    return 1.0 / std::tanh(ShoaledKh(kDeep, wt::Max(depth, 0.3)));
+}
+
+// THE LIP'S FALL (2026-10-20; docs/WATER_VOLUME.md 15). Water thrown e metres past the cusp has left
+// the face at the crest's speed c and falls for t = e / c, a t^2 / 2. Two corrections from the
+// literature (Mark: "review your math with online documentation"):
+//   - c WITH AMPLITUDE: linear dispersion runs ~20 % slow at breaking and in the surf zone, where
+//     amplitude dispersion dominates (coastalwiki, "Nonlinear wave dispersion relations"); the
+//     cnoidal form c^2 = g h (1 + alpha H / h), alpha ~ 1, carried onto the full dispersion as
+//     c^2 = (g / k) tanh(kh) (1 + H / h): linear theory again as H / h -> 0 in deep water;
+//   - a, THE JET TIP'S MEASURED FALL: 0.6 - 0.8 g, not g (Shakeri, Tavakolinejad, Maxeiner and
+//     Duncan, APS DFD 2007, plunging jets in a wave tank).
+// So   fall = (a / g) k coth(kh) e^2 / (2 (1 + H / h)),   and g cancels: no planet's gravity in it,
+// only the ratio, which is any planet's. Its limits: nothing at the cusp (e = 0); the launch speed
+// is the crest's, which the literature disputes (below c, Melville & Rapp; to 1.3 c, Duncan); the
+// loop the throw is bounded by is the trochoid's kinematic device, not a surface the Euler equations
+// allow (Gerstner's waves are deep-water, rotational, and unstable past steepness 1/3).
+inline constexpr double kJetFallRatio = 0.7;   // a / g, measured (0.6 - 0.8)
+inline double LipFall(double ePast, double k, double coth, double H, double h) {
+    return kJetFallRatio * 0.5 * k * coth * ePast * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));
+}
+// THE LIP'S FLIGHT AS A MOTOR (2026-10-20, Mark: "the lip's flight as a GA motor (the free-fall frame
+// as a boost, the flight a CGA translator)"). In the free-fall frame -- Longuet-Higgins' frame for the
+// plunging jet -- the thrown water moves on a straight line, and it leaves ALONG THE SHEET: the launch
+// direction is the travel d projected into the sheet's tangent plane, (d . T) T^-1 for the tangent
+// bivector T, which for the height field is d + (d . grad eta) up, normalised. The boost back to the
+// planet's frame is the fall along -up (LipFall). Both are translators and translators commute, so the
+// flight is ONE translator, tau = s u - fall up, applied to the label's point by the motor sandwich
+// (GA.hlsli MotorPoint; Pga.h's Motor::Translation on the CPU). Where the sheet is level -- the crest's
+// top -- u is the travel and this is the law of before; on the front face u turns down and the water
+// is thrown along the face, on the back it turns up and the crest rises as it is thrown, as a crest
+// does before it pitches. (du / dx is not carried into the twins' Jacobian, as dq1 / deta is not.)
+// The flight's translator tau (x east, y up, z north): s the throw along the sheet, (dBx, dBz) the
+// travel, (gx, gz) the sheet's slope, fall the boost. Applied as Pga.h's Motor::Translation(tau).
+inline void LipFlightTau(double dBx, double dBz, double gx, double gz, double s, double fall, double tau[3]) {
+    const double m = dBx * gx + dBz * gz;
+    const double r = 1.0 / std::sqrt(1.0 + m * m);
+    tau[0] = dBx * r * s;
+    tau[1] = m * r * s - fall;
+    tau[2] = dBz * r * s;
+}
+// THE THROW'S BOUND IS THE LANDING (2026-10-20, Mark: "I see the lip but the waves don't seem to
+// barrel correctly"). Measured at Mavericks' close pose: the lip's lowest point stood at -1.79 m over a
+// trough at -3.61 m -- it hung at most 79 % of the wave's height (67 % at the median), so no tube
+// closed. The throw was bounded by the trochoid's loop, pi / 2k, a kinematic device. The physical bound
+// is the fall's own: the jet flies until it lands in the trough. LipFall(e*) = Hc, the crest's height
+// over the trough, gives the flight
+//     e* = sqrt(2 Hc (1 + Hc / h) / ((a / g) k coth(kh))),
+// and the crest's reach is the cusp plus that flight, 1 / k + e*. No new constant: a set wave (more
+// Hc) throws farther and lands, as it does. Tubes are measured by their vortex ratio, the length over
+// the width of the tube's section (Mead & Black 2001, J. Coastal Research 29: ~1 a round tube, the
+// most intense, ~3 an almond), which this law does not fix: the reef's slope and the swell set it.
+inline double LipReach(double k, double coth, double Hc, double h) {
+    const double H = wt::Max(Hc, 0.0);
+    const double eLand = std::sqrt(2.0 * H * (1.0 + H / wt::Max(h, 0.3)) / wt::Max(kJetFallRatio * k * coth, 1e-6));
+    return 1.0 / wt::Max(k, 1e-4) + eLand;
+}
+// d(LipFall)/d(ePast), H held
+inline double LipFallDe(double ePast, double k, double coth, double H, double h) {
+    return kJetFallRatio * k * coth * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));
+}
+
 inline double ShoalFactor(double kBand, double depth) {
     const double kh = kBand * wt::Max(depth, kDepthFloorM);
     const double th = std::tanh(kh);
-    const double c = std::sqrt(kGWave / kBand * th);
+    const double c = std::sqrt(PlanetGWave() / kBand * th);
     const double cg = 0.5 * c * (1.0 + 2.0 * kh / wt::Max(std::sinh(2.0 * kh), 1e-3));
-    const double cgDeep = 0.5 * std::sqrt(kGWave / kBand);
+    const double cgDeep = 0.5 * std::sqrt(PlanetGWave() / kBand);
     return wt::Clamp(std::sqrt(cgDeep / wt::Max(cg, 0.05)), 0.75, 1.7);
 }
 
@@ -516,7 +576,7 @@ inline void WakeOne(const WakeVessel& v, double px, double pz, double sampleM, W
     const double disc = xi * xi - 8.0 * zeta * zeta;
     if (disc <= 0.0) return;                            // outside the wedge: no stationary phase
     const double sq = std::sqrt(disc);
-    const double K0 = kGWave / (v.speed * v.speed);     // the ONE scale: lambda_t = 2 pi / K0
+    const double K0 = PlanetGWave() / (v.speed * v.speed);     // the ONE scale: lambda_t = 2 pi / K0
     const double dist = wt::Max(std::sqrt(rX * rX + rZ * rZ), 1.0);
     const double dRel = dist / halfLen;                 // distance in hull half-lengths
     // Airy caustic at the wedge edge, where sq -> 0 and the two branches merge (1.8 and the

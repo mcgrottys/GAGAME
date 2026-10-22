@@ -144,6 +144,7 @@ float3 ComposedColorPages(float3 dir, float3 p CS_WC_PARAM) {
         if (lodB > kCsWindowFloor) break;
         const float haveB = CsHaveWindow(gCsU5.y, buv, sl);
         if (haveB > kCsWindowFloor) continue;
+        if (!WalkEdgeOk(wc, k, max(lodB, haveB), 8.0f)) continue;   // the box's edge (Walk.hlsli)
         const float gB = PageGroundM(CsBlockGround(k), haveB);
         if (PageWins(gB, ground)) {
             c = PageSample(gTexArr[gCsU5.x], sAnisoWrap, buv, sl, haveB).rgb;
@@ -197,6 +198,7 @@ float2 CsBuildingField(float3 dir, float3 p CS_WC_PARAM) {
         if (lodB > kCsWindowFloor) break;
         const float haveB = CsHaveWindow(gCsU5.w, buv, sl);
         if (haveB > kCsWindowFloor) continue;
+        if (!WalkEdgeOk(wc, k, max(lodB, haveB), 8.0f)) continue;   // the box's edge (Walk.hlsli)
         const float gB = PageGroundM(CsBlockGround(k), haveB);
         if (PageWins(gB, ground)) {
             b = PageSample(gTexArr[gCsU5.z], sAnisoWrap, buv, sl, haveB);
@@ -265,6 +267,10 @@ float ComposedHeightChain(float3 dir, float lod CS_WC_PARAM) {
         const float2 buv = WalkUv(wc, k);
         const float haveB = CsHaveWindow(gCsU6.y, buv, sl);
         if (haveB > kCsHeightWindowFloor) continue;
+        // THE BOX'S EDGE (Walk.hlsli WalkEdgeOk): the trilinear tap at this mip must lie inside the
+        // box, or the wrap reads the box's far side -- the Mavericks horizon's cones, a sea vertex
+        // 10 km west lifted to the height of the coast 19 km east.
+        if (!WalkEdgeOk(wc, k, max(max(want, 0.0f), haveB) + 1.0f, 2.0f)) continue;
         const float gB = PageGroundM(CsBlockGround(k), haveB);
         if (PageWins(gB, ground)) {
             win = true;
@@ -313,7 +319,7 @@ bool CsMaskSample(float3 dir, float3 p CS_WC_PARAM, out float4 m) {
         const uint sl = WalkSlice(wc, uint(k));
         const float2 buv = WalkUv(wc, uint(k));
         const float haveB = CsHaveWindow(gCsU3.y, buv, sl);
-        if (haveB <= kCsWindowFloor) {
+        if (haveB <= kCsWindowFloor && WalkEdgeOk(wc, uint(k), haveB, 2.0f)) {   // inside the box (Walk.hlsli)
             m = PageSampleLevel(gTexArr[gCsU3.x], sLinearWrap, buv, sl, 0.0f, haveB);
             if (m.a > 0.001f) return true;
         }

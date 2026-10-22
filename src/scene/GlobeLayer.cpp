@@ -665,6 +665,24 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
             return false;
         }
     }
+    {   // THE SPRAY's sprites (Globe.hlsl VsSpray / PsSpray): alpha over the frame, depth-tested
+        // against the surface and the lips, no write.
+        hal::GraphicsPipelineDesc sp;
+        sp.rootSig = m_rootSig;
+        sp.vs = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"VsSpray", L"vs_6_0");
+        sp.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsSpray", L"ps_6_0");
+        sp.blend = true;
+        sp.srcBlend = D3D12_BLEND_SRC_ALPHA;
+        sp.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        sp.srcBlendAlpha = D3D12_BLEND_ONE;
+        sp.dstBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        sp.depthTest = true;
+        sp.depthWrite = false;
+        sp.depthClip = TRUE;
+        if (sp.vs.Valid() && sp.ps.Valid()) {
+            hal::Reload(m_sprayPso, [&] { return hal::BuildGraphics(gpu, sp, "globe.spray"); }, "globe.spray");
+        }
+    }
 
     // THE KEPT FRAME's composite (GlobeKeep.hlsl): the cache's colour and depth into the frame,
     // depth-tested and written as the surface would have been.
@@ -808,7 +826,7 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     // Back faces culled: MsMain winds every triangle, bands included, one way about the surface's
     // outward normal, whichever way the cube face orients its uv (the VS fallback above still mixes
     // winding and stays NONE). The wireframe twins inherit it and show what is rasterized.
-    d.cull = D3D12_CULL_MODE_BACK;
+    d.cull = D3D12_CULL_MODE_NONE;   // the mesh shader culls (MsMain: land's back faces; the sea is two-sided)
     d.depthClip = TRUE;
     d.depthTest = true;
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
@@ -979,9 +997,27 @@ double SplitRange(const WalkParams& wp, double arc) {
     return d;
 }
 
+// THE SEA'S FOLDS (2026-10-20): is a block a fold stood over within D metres of the planet point P
+// (a node's centre on the geoid)? P's chart coordinates are its dots with the chart's east and
+// north; a block is a square of the grid about ring 0's origin. The nearest is not needed, only
+// whether one is in reach.
+static bool FoldWithin(const WalkParams& wp, const double P[3], double D) {
+    const double cx = P[0] * wp.foldE[0] + P[1] * wp.foldE[1] + P[2] * wp.foldE[2] - wp.foldOrg[0];
+    const double cz = P[0] * wp.foldN[0] + P[1] * wp.foldN[1] + P[2] * wp.foldN[2] - wp.foldOrg[1];
+    const double B = wp.foldB;
+    for (const uint16_t c : wp.foldCells) {
+        const double x0 = double(c & 0xFFu) * B, z0 = double(c >> 8) * B;
+        const double dx = (std::max)((std::max)(x0 - cx, cx - (x0 + B)), 0.0);
+        const double dz = (std::max)((std::max)(z0 - cz, cz - (z0 + B)), 0.0);
+        if (dx * dx + dz * dz < D * D) return true;
+    }
+    return false;
+}
+
 // Whether a node of this level and arc, `dist` from an eye, is split (WalkNode's rule, said once so
-// every world of a shared walk asks it from its own eye).
-bool SplitAt(const WalkParams& wp, int level, double arc, double dist) {
+// every world of a shared walk asks it from its own eye). `foldNear`: a fold of the sea lies within
+// arc * kLodFactor of the node (FoldWithin; asked only under the mesh's own depth).
+bool SplitAt(const WalkParams& wp, int level, double arc, double dist, bool foldNear = false) {
     // M6j/M8h: the mesh path walks two rungs past CUDEM scale (level 18 = 1.19 m vertex
     // spacing -- level 16's 4.77 m exactly saturated the old 4.8 m bank ring and could
     // not articulate what a finer ring stores; the user's call: more wave vertices).
@@ -1033,6 +1069,15 @@ bool SplitAt(const WalkParams& wp, int level, double arc, double dist) {
             const double pxFloor = dist * wp.pixAng * GlobeLayer::kWavePxFloor;
             split = cell > (std::max)(waveTexel, pxFloor);
         }
+    }
+    // THE SEA'S FOLDS (2026-10-20, Mark: "refine the walk below level 18 where the sea folds").
+    // Under the mesh's own depth a node keeps splitting while a fold of the sheet lies within the
+    // distance rule's reach of it -- the eye's own graded law, measured from the fold instead of
+    // the eye, so neighbours stay a level apart and the seam bands close them -- down to the depth
+    // the column ladder reaches (columnTexel), floored by the pixel as the wave rule is. The vertex
+    // morphs on the same distance (GlobeMesh.hlsl, FoldDist).
+    if (!split && foldNear && level >= wp.maxDepth && level < wp.foldMaxDepth) {
+        split = arc / 32.0 > dist * static_cast<double>(wp.pixAng) * GlobeLayer::kWavePxFloor;
     }
     return split;
 }
@@ -1191,7 +1236,10 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
     // drawn -- and the walk goes on down only for the worlds that need more. One traversal, one
     // set of tile requests, and every world at its own grain.
     if (wp.worldCount == 0) {
-        if (SplitAt(wp, level, arc, dist)) {
+        const double P[3] = {px, py, pz};
+        const bool foldNear = !wp.foldCells.empty() && level >= wp.maxDepth &&
+                              level < wp.foldMaxDepth && FoldWithin(wp, P, arc * GlobeLayer::kLodFactor);
+        if (SplitAt(wp, level, arc, dist, foldNear)) {
             const double h = size * 0.5;
             WalkNode(wp, nodes, face, level + 1, u0, v0, h, leaf, active);
             WalkNode(wp, nodes, face, level + 1, u0 + h, v0, h, leaf, active);
@@ -1750,6 +1798,14 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     // the bank IS the water's geometry. Off elsewhere, so nothing but the helm changes.
     wp.waveGrainM = (m_msPath && m_bankSrv[0] != 0xFFFFFFFFu) ? m_bankBase : 0.0f;
     wp.waveMaxDepth = kWaveMaxDepth;
+    if (wp.waveGrainM > 0.0f && m_foldCells && m_foldB > 0.0) {
+        wp.foldCells = *m_foldCells;
+        wp.foldOrg[0] = m_foldOrg[0];
+        wp.foldOrg[1] = m_foldOrg[1];
+        wp.foldB = m_foldB;
+        for (int i = 0; i < 3; ++i) { wp.foldE[i] = m_foldE[i]; wp.foldN[i] = m_foldN[i]; }
+        wp.foldMaxDepth = wp.maxDepth + static_cast<int>(m_foldUnder);
+    }
     wp.pixAng = cam.fovY / (std::max)(viewportH, 1.0f);
     wp.wants = m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0);
     wp.surfT = m_surfT;
@@ -1818,6 +1874,10 @@ void GlobeLayer::DigestWalk(std::vector<uint8_t>& d, const WalkParams& wp) {
     put(wp.wnK, sizeof(wp.wnK)); put(wp.wnFace, sizeof(wp.wnFace)); put(wp.wnRung, sizeof(wp.wnRung));
     put(wp.wnAx, sizeof(wp.wnAx)); put(wp.wnAy, sizeof(wp.wnAy)); put(wp.wnSlice, sizeof(wp.wnSlice));
     putI(wp.probeCullFar ? 1 : 0); put(wp.occ, sizeof(wp.occ));
+    // the sea's folds: where they stand moves the walk
+    putI(static_cast<int>(wp.foldCells.size()));
+    if (!wp.foldCells.empty()) put(wp.foldCells.data(), wp.foldCells.size() * sizeof(uint16_t));
+    put(wp.foldOrg, sizeof(wp.foldOrg)); putD(wp.foldB); putI(wp.foldMaxDepth);
 }
 
 void GlobeLayer::StartPredictWalk(const Camera& cam, const Camera& pred, float viewportH) {
@@ -1979,6 +2039,7 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
         // snapped onto even = the level renders at half the resolution the walk paid for)?
         if (dist > morphEnd) ++walkMorphFull;
         else if (dist > morphStart) ++walkMorphPart;
+        if (std::lround(-std::log2(size)) > wp.maxDepth) ++walkFoldLeaves;   // only the folds go under it
         if (m_msPath) {
             // EVERY WORLD THAT STOPS HERE draws this tile (M13), anchored at its own eye and
             // morphed from it -- the records its own walk would have made. The tile was asked of
@@ -2475,6 +2536,27 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.bankU[1] = m_bankSrv[1];
     m_cb.bankU[2] = (m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
     m_cb.bankU[3] = 512u;
+    // THE COLUMN PLANE (SetWaterColumn): on with the bank it belongs to.
+    m_cb.colU[0] = m_colSrv;
+    m_cb.colU[1] = (m_colSrv != 0xFFFFFFFFu && m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
+    m_cb.colU[2] = m_colRings;
+    m_cb.colU[3] = m_foldDistSrv;   // the sea's folds' distance (GlobeMesh.hlsl: the morph)
+    for (uint32_t k = 0; k < 3; ++k) {
+        m_cb.colR[k * 4 + 0] = m_colRingSrv[k];
+        m_cb.colR[k * 4 + 1] = m_colRingTexels[k];
+        m_cb.colR[k * 4 + 2] = m_colRingTiles[k];
+        m_cb.colR[k * 4 + 3] = (m_cb.colU[1] != 0u && k < m_colRings && m_colRingSrv[k] != 0xFFFFFFFFu) ? 1u : 0u;
+    }
+    m_cb.sprayU[0] = m_spraySrv;
+    m_cb.sprayU[1] = m_sprayN;
+    m_cb.sprayU[2] = (m_cb.colU[1] != 0u && m_spraySrv != 0xFFFFFFFFu && m_sprayN != 0u) ? 1u : 0u;
+    m_cb.sprayU[3] = 0u;
+    m_cb.farSea[0] = m_farHsRef > 1e-6 ? static_cast<float>(1.0 / m_farHsRef) : 0.0f;
+    m_cb.farSea[1] = m_farStorm ? 1.0f : 0.0f;
+    m_cb.farSea[2] = m_cb.farSea[3] = 0.0f;
+    m_cb.colA[0] = m_colScale;
+    m_cb.colA[1] = m_colBias;
+    m_cb.colA[2] = m_cb.colA[3] = 0.0f;
     m_cb.bankA[0] = m_bankBase;
     m_cb.bankA[1] = 6.0f;
     m_cb.bankA[2] = static_cast<float>(debugLens);
@@ -2691,12 +2773,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // identity axes and that eye's own coordinates -- what every reader read before charts floated.
     auto chartRows = [&](float* dst, const float* src, const float* eye) {
         memcpy(dst, src, 16 * sizeof(float));
-        if (src[0] == 0.0f && src[1] == 0.0f && src[2] == 0.0f) {
+        const bool none = src[0] == 0.0f && src[1] == 0.0f && src[2] == 0.0f;
+        if (none) {
             const float id[12] = {1.0f, 0.0f, 0.0f, eye[0], 0.0f, 0.0f, 1.0f, eye[2], 0.0f, 1.0f, 0.0f, 0.0f};
             memcpy(dst, id, sizeof(id));
         }
         for (int i = 0; i < 3; ++i) dst[12 + i] = eye[i];
-        dst[15] = 0.0f;
+        // w: the eye's height over the chart's tangent plane (the bank's doubles; the root's chart
+        // has the level's flat y, row 2 w of its slot)
+        dst[15] = none ? eye[11] : src[15];
     };
     chartRows(m_cb.bankChart, &m_bankOrg[12], &m_levelRows[0]);
     // Set B's eye: the first slot of the TABLE whose bank is set B -- a Droste level or a gate
@@ -2859,6 +2944,22 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
         const UINT n = static_cast<UINT>(meshlets.size());
+        // THE SPRAY, after the surface (the tube is the surface's own sheet now): six vertices a
+        // droplet, the ring's whole length (dead ones collapse), the globe's root signature (the
+        // droplets ride gBufU). Only the shipped look (no lens, no wire, no probe).
+        const bool sprayOn = surfaceDebug == 0 && !cacheLens && !ResidencyLensOn() && !DebugViewOn() && !overdrawProbe;
+        auto lipPass = [&]() {
+            if (!sprayOn) return;
+            if (m_sprayPso.Get() && cbData.sprayU[2] != 0u && ctx.viewIndex == 0) {
+                GpuScope sscope(ctx.prof, ctx.cmd->Native(), "globe.spray");
+                PixMarker(ctx.cmd->Native(), "globe.spray (the droplets the crest law throws)");
+                ctx.cmd->Pipeline(m_sprayPso.Get());
+                ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                ctx.cmd->GraphicsConstantsAt(1, cbVa);
+                ctx.cmd->Draw(6, cbData.sprayU[1], 0, 0);
+            }
+            ctx.cmd->Pipeline(msSel);
+        };
         if (overdrawProbe && ctx.viewIndex == 0) {
             // --gate-overdraw: the same records, one world a dispatch, each measured.
             ID3D12Device* dev = ctx.gpu->Device();
@@ -2918,6 +3019,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                                   n <= kClassMax;
             if (!keepable) {
                 ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                lipPass();
             } else {
                 Keep& K = m_keep[ctx.viewIndex];
                 EnsureKeep(*ctx.gpu, K, ctx.frameW, ctx.frameH);
@@ -2931,6 +3033,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                 K.lastKey = key;
                 if (!kept && !fill) {
                     ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                    lipPass();
                     ++keepPlain;
                 } else {
                 GlobeCbData q = cbData;
@@ -2982,6 +3085,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                     ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
                 }
                 ctx.cmd->Targets(ctx.colorRtv, &ctx.depthDsv);
+                lipPass();   // into the frame alone, over the surface just drawn
                 if (!kept) {
                     // THE CLASSES from the pixels (GlobeClass.hlsl), and the frame's depth beside the cache.
                     GpuScope cscope(ctx.prof, cl, "globe.classify");
@@ -3257,6 +3361,8 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     memcpy(viewHole0, m_viewHole, sizeof(viewHole0));
     const int viewHoleN0 = m_viewHoleCount;
     uint32_t bankSrv0[3] = {m_bankSrv[0], m_bankSrv[1], m_bankSrv[2]};
+    const uint32_t colSrv0 = m_colSrv;
+    const uint32_t colRings0 = m_colRings;
     float bankOrg0[kBankRows];
     for (int i = 0; i < kBankRows; ++i) bankOrg0[i] = m_bankOrg[i];
     const WaveChart::Frame chart0 = m_chartFrame;
@@ -3275,6 +3381,8 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
         m_bankSrv[0] = rings->disp;
         m_bankSrv[1] = rings->param;
         m_bankSrv[2] = rings->detail;
+        m_colSrv = 0xFFFFFFFFu;   // the column plane is the first eye's rings'; another eye's rings have none
+        m_colRings = 0;
         for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = rings->org[i];
         m_chartFrame = rings->chart;
         m_chartOn = rings->chartOn;
@@ -3325,6 +3433,8 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     memcpy(m_viewHole, viewHole0, sizeof(viewHole0));
     m_viewHoleCount = viewHoleN0;
     for (int i = 0; i < 3; ++i) m_bankSrv[i] = bankSrv0[i];
+    m_colSrv = colSrv0;
+    m_colRings = colRings0;
     for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = bankOrg0[i];
     m_chartFrame = chart0;
     m_chartOn = chartOn0;

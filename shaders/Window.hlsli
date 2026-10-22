@@ -34,7 +34,9 @@ WalkChain WindowChain(float3 p, uint s) {
         const float2 uv = WIN_UV(s, k, p);
         const float2 b = uv + WIN_OFF(s, k);
         inside = inside && k < (WIN_K(s)) && all(b >= 0.0f) && all(b < 1.0f);
-        WalkSet(w, k, WIN_SLICE(s, k), uv);
+        // the point's distance to the box's nearest edge, for the readers' footprint test
+        const float e = min(min(b.x, 1.0f - b.x), min(b.y, 1.0f - b.y));
+        WalkSet(w, k, WIN_SLICE(s, k), uv, e);
         if (inside) w.n = k + 1u;
     }
     return w;

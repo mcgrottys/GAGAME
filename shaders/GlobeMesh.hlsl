@@ -48,16 +48,11 @@ StructuredBuffer<MeshletRec> gMeshlets : register(t0, space0);
 //   bit 19      this meshlet meets the upper half (cells 4..7) of that record's edge
 static const uint kSeamNone = 0u, kSeamCoarser = 1u;
 
-// M9bm: the lateral term is fully applied above this areaJac and rolls off to zero at the
-// overturn. 0.35 sits under foamlaw's saturation knee (J = 0.45), so the guard only ever acts
-// where the foam law has already declared the crest broken.
-static const float kLatFoldFloor = 0.35f;
-
 // ONE vertex of the surface: the record's grid position g (node cells, 0..32), CDLOD-morphed
 // and displaced, as the M6j path always computed it. MsMain's 81 vertices and the seam bands
 // below both come from here, so a band vertex is the neighbour's own arithmetic on the
 // neighbour's own record (the same doubles the neighbour amplifies from), not an estimate.
-VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
+VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut) {
     const float cx0 = float(rec.cell0 & 0xFFu);
     const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
     const bool fine = rec.arc <= 650.0f;
@@ -66,7 +61,14 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     float d0;
     if (fine) {
         const float2 duC = (g - float2(cx0 + 4.0f, cy0 + 4.0f)) * rec.uvStepCell;
-        d0 = length(rec.anchorRel + rec.dPdu * duC.x + rec.dPdv * duC.y);
+        const float3 p0 = rec.anchorRel + rec.dPdu * duC.x + rec.dPdv * duC.y;
+        d0 = length(p0);
+        // THE SEA'S FOLDS (2026-10-20): the walk keeps splitting under the mesh's own depth where the
+        // sheet turns over (GlobeLayer SplitAt), by the distance from the fold as it splits by the
+        // distance from the eye; the vertex morphs on the nearer of the two, so a node the fold holds
+        // is drawn at the grain it was split for. A function of the point alone: both sides of a
+        // seam agree.
+        if (rec.level == 0u) d0 = min(d0, FoldDist(BankXZ(p0)));
     } else {
         const float3 dir0 = CubeDir(rec.face, rec.uv0 + g * rec.uvStepCell);
         d0 = length(CsToTangent(dir0) * gGlo.x - sLvlCamAbs);   // M10: the level's own eye
@@ -172,33 +174,27 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         // the same marsh drawn dry (Mark, 2026-10-18, the Merrimack's mouth; the mix lens showed
         // the classifier calling all of it water).
         dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (gWavesB.w + bP.x + bD.y) : gWavesB.w;
-        // M9bm: THE FOLD GUARD.
-        //
-        // The lateral term was applied with nothing bounding the Jacobian it induces. Where
-        // d(Dx)/dx approaches -1 neighbouring vertices cross, the surface turns over, and the
-        // mesh renders a near-vertical WALL with the water visible behind it -- the user's
-        // "gap ... it looks like the water behind it has the section of wave it's missing".
-        // Seen only under --wireflat: shaded, the crease reads as a wave face.
-        //
-        // areaJac = det(I + J_h) IS the tangent bivector's own magnitude (ALGEBRA
-        // "caustics"), and it reaches zero exactly at the overturn -- "breaking is the
-        // crest's area 2-blade degenerating". So the object already computed for the normal
-        // is the one that detects the fold; no new quantity, no threshold pulled from the air.
-        //
-        // Scaling the lateral term to zero as the blade degenerates loses NOTHING physical:
-        // foamlaw's Jacobian trigger, saturate((0.80 - J) * 4), has already been paying that
-        // excess out as foam since M8. This is the same law the depth-limited breaking clamp
-        // states -- "converts the excess into foam instead of geometry" -- applied to the
-        // horizontal component, which was the one term still exempt from it.
-        const float areaJac =
-            (1.0f + dDdx.x) * (1.0f + dDdz.z) - dDdz.x * dDdx.z;
-        latW = float2(bD.x, bD.z) * (1.0f - landness) *
-               smoothstep(0.0f, kLatFoldFloor, areaJac);
+        // THE LAGRANGIAN SHEET, DRAWN WHOLE (2026-10-20, Mark: "switch to drawing the Lagrangian
+        // sheet"). The water vertex is its label at its particle: the label plus its lateral
+        // displacement, at its level plus its vertical. Where the sea overturns, the sheet folds
+        // over itself -- the crest's labels run backwards and their triangles turn over -- and the
+        // tube is those triangles, drawn: MsMain culls a back face only where it is not water, so
+        // the folded part of the sheet is seen from either side (SV_CullPrimitive). The column
+        // plane's face and the two lip sheets rebuilt from its bands (MsLip, 2026-10-18..20) are
+        // gone from the drawing: a fold rebuilt from Eulerian height bands loses which crossing
+        // joins which across a texel, and every artefact of that week was the rebuild -- the
+        // curtains, the end caps, the square ends, the slats. The column stays a READER (the
+        // spray's death, the hull's twin). The fold guard that once stood here (M9bm: the lateral
+        // term faded as areaJac fell, because a folded triangle was a culled back face, "a wall
+        // with the water behind it") is not back: nothing culls the water now.
+        latW = float2(bD.x, bD.z) * (1.0f - landness);
     }
     const float disp = lerp(dispWater, dispLand, landness);
+    landOut = landness;
 
     VsOut o;
-    o.mid = gid;   // M9b: this record's index, for PsMeshlet's tint
+    // M9b: this record's index, for PsMeshlet's tint.
+    o.mid = gid;
     o.lvl = rec.level;
     o.dir = dir;
     o.h = h;
@@ -209,7 +205,8 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         o.rel = CsToTangent(dir) * (gGlo.x + disp) - sLvlCamAbs;
     }
     o.rel += BankVec(latW);   // the chart's east and north, in the tangent frame
-    o.geo = geo;   // the label: the lateral term moves the drawn point, never where it is read
+    // the label: the lateral term moves the drawn point, never where it is read
+    o.geo = geo;
     // M9bg: the water's colour, shaded AT THIS VERTEX from its own wave normal (the bank's
     // Loads -- stage-proof) and the analytic sky. The pixel stage does no water work.
     // EVERY vertex is shaded, including dry ones: a shoreline triangle's land corner is still
@@ -224,7 +221,10 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     o.pos = mul(float4(TrueRel(o.rel), 1.0f), gViewProj);
     return o;
 }
-
+VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
+    float land;
+    return SurfaceVertexL(rec, gid, g, land);
+}
 // ------------------------------------------------------------------------------------------
 // Step 23: THE SEAM BANDS -- the shell made watertight (docs/ALGEBRA.md priors 28).
 //
@@ -389,10 +389,24 @@ uint3 BandTri(const Band bd, uint t) {
 
 // One thread block per meshlet: 9x9 = 81 vertices, 8x8x2 = 128 triangles, plus up to four
 // seam bands (step 23: at most 64 vertices and 56 triangles more).
+// THE CULL IS THE MESH SHADER'S (2026-10-20): the pipeline culls nothing, and a grid triangle is
+// dropped here when it shows the camera its back AND none of its corners is water. Land culls as
+// it always did; the sea's sheet is two-sided, so where it folds over itself the turned-over
+// triangles -- the tube -- are drawn. Back means: the displaced triangle turns to the eye the side
+// its undisplaced self turns away from it (the flat triangle is seen from above, outside).
+// Seam bands never cull (they stand behind by construction).
+struct PrimCull {
+    bool cull : SV_CullPrimitive;
+};
+groupshared float3 sMsRel[81];
+groupshared float3 sMsGeo[81];
+groupshared bool sMsWater[81];
+
 [outputtopology("triangle")]
 [numthreads(128, 1, 1)]
 void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
-            out vertices VsOut verts[145], out indices uint3 tris[184]) {
+            out vertices VsOut verts[145], out indices uint3 tris[184],
+            out primitives PrimCull prims[184]) {
     // M10: the dispatch is 2-D (one dimension caps at 65535 groups); fold it back to the record.
     // The tail groups of the last row emit nothing (gGlo.z = the record count) -- through the ONE
     // SetMeshOutputCounts the validator allows (two call sites fail validation even on exclusive
@@ -426,8 +440,12 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         // path was.
         const uint x = gtid % 9u, y = gtid / 9u;
         const float2 g = float2(cx0 + float(x), cy0 + float(y));
-        const VsOut o = SurfaceVertex(rec, gid, g);
+        float landV;
+        const VsOut o = SurfaceVertexL(rec, gid, g, landV);
         verts[gtid] = o;
+        sMsRel[gtid] = o.rel;
+        sMsGeo[gtid] = o.geo;
+        sMsWater[gtid] = landV < 0.999f;
         // Step 23: a seam vertex also writes its band copies -- itself, pushed behind, for
         // any band on its edge, and its outward copy for a hairline band. A corner vertex
         // sits on two edges.
@@ -449,13 +467,22 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     // A band's turn, in its own (along the seam, out of the record) frame, is the same on every
     // edge; that frame keeps the grid's turn on E and N and mirrors it on W and S.
     const bool mirror = dot(cross(rec.dPdu, rec.dPdv), rec.upT) < 0.0f;
+    GroupMemoryBarrierWithGroupSync();   // the grid's positions, for the cull
     if (gtid < 128u) {
         const uint cell = gtid / 2u;
         const uint x = cell % 8u, y = cell / 8u;
         const uint v0 = y * 9u + x;
-        const uint3 t = (gtid & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u)
-                                    : uint3(v0, v0 + 1u, v0 + 9u);
-        tris[gtid] = mirror ? t.xzy : t;
+        uint3 t = (gtid & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u)
+                              : uint3(v0, v0 + 1u, v0 + 9u);
+        t = mirror ? t.xzy : t;
+        tris[gtid] = t;
+        const float3 r0 = sMsRel[t.x], r1 = sMsRel[t.y], r2 = sMsRel[t.z];
+        const float3 g0 = sMsGeo[t.x], g1 = sMsGeo[t.y], g2 = sMsGeo[t.z];
+        const float faceOut = dot(cross(g1 - g0, g2 - g0), rec.upT);   // the wound turn's sign, outward
+        const float faceEye = dot(cross(r1 - r0, r2 - r0), -r0);       // ...and toward the eye, displaced
+        const bool back = faceOut * faceEye < 0.0f;
+        const bool water = sMsWater[t.x] || sMsWater[t.y] || sMsWater[t.z];
+        prims[gtid].cull = back && !water;
     }
 
     // Step 23: the coarse vertices of the level bands (five per band, threads 0..19 at most)
@@ -478,5 +505,6 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         }
         const uint3 t = BandTri(bands[e], gtid - bands[e].tbase);
         tris[128u + gtid] = (mirror != (e == 0u || e == 3u)) ? t.xzy : t;
+        prims[128u + gtid].cull = false;
     }
 }

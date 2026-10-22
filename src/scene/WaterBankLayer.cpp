@@ -1,4 +1,5 @@
 #include "scene/WaterBankLayer.h"
+#include "core/Planet.h"
 
 #include "compose/GisMask.h"
 #include "core/ThreadManager.h"
@@ -18,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <filesystem>
 #include <map>
 #include <cmath>
@@ -53,6 +55,75 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                  L"water.param (level + sigma2 + current)");
     m_detail.Init(gpu, kMips * kRingTexels, kRingTexels, DXGI_FORMAT_R16G16B16A16_FLOAT,
                   L"water.detail (hsScale + sparkle context)");
+    // THE COLUMN PLANE: the same rings, four bands tall (face, lip top = the inverted branch, lip underside = the upright max, the lip's coverage), uint
+    // for the scatter's atomics (WaterBank.hlsl CsBankScatter).
+    if (column) {
+        m_column.Init(gpu, kMips * kRingTexels, 4 * kRingTexels, DXGI_FORMAT_R32_UINT,
+                      L"water.column (the Eulerian columns: face, lip top, lip underside, lip coverage)");
+        // THE COLUMN LADDER (WaterBankLayer.h): the rings under ring 0, as deep as the scene's
+        // columnTexel asks, each its own reserved atlas and its flags.
+        {
+            const double want = std::log2(double(m_baseTexelM) / std::max(double(columnTexel), 1e-3));
+            m_ringsUnder = static_cast<uint32_t>(std::clamp(static_cast<int>(std::lround(want)), 0, int(kColumnRingsUnderMax)));
+            for (uint32_t k = 0; k < m_ringsUnder; ++k) {
+                ColumnRing& r = m_under[k];
+                r.texels = kRingTexels << (k + 1);
+                r.tiles = r.texels / 128;
+                wchar_t name[96];
+                swprintf(name, 96, L"water.column ring -%u (%u texels a side, four bands)", k + 1, r.texels);
+                r.atlas.Init(gpu, r.texels, 4 * r.texels, DXGI_FORMAT_R32_UINT, name);
+                swprintf(name, 96, L"water.column ring -%u flags (a fold stood over this tile)", k + 1);
+                r.flags = gpu.CreateTexture2D(r.tiles, r.tiles, DXGI_FORMAT_R32_UINT,
+                                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, name);
+                r.flagUav = hal::Uav2D(gpu, r.flags.res.Get(), DXGI_FORMAT_R32_UINT);
+                r.mapped.assign(size_t(r.tiles) * r.tiles, 0);
+            }
+        }
+        m_flagRb.Init(gpu, 4ull * 32 * 32 * kColumnRingsUnderMax + 4ull * kFoldGrid * kFoldGrid + 256ull,
+                      L"water.column flags + fold grid + spray counters readback");
+        // THE SEA'S FOLDS (WaterBankLayer.h): the grid and its distance
+        m_fold = gpu.CreateTexture2D(kFoldGrid, kFoldGrid, DXGI_FORMAT_R32_UINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"water.folds (ring 0's inverted triangles, 8-texel blocks)");
+        m_foldUav = hal::Uav2D(gpu, m_fold.res.Get(), DXGI_FORMAT_R32_UINT);
+        m_foldDist = gpu.CreateTexture2D(kFoldGrid, kFoldGrid, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"water.folds distance (blocks)");
+        m_foldDistUav = hal::Uav2D(gpu, m_foldDist.res.Get(), DXGI_FORMAT_R32_FLOAT);
+        m_foldDistSrv = hal::Srv2D(gpu, m_foldDist.res.Get(), DXGI_FORMAT_R32_FLOAT);
+        // THE SPRAY's ring of particles (WaterBankLayer.h): one buffer, two views -- float4-strided
+        // for the kernels (RWStructuredBuffer<float4>), uint-strided for the sprite shader's gBufU.
+        {
+            D3D12_HEAP_PROPERTIES hp{};
+            hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width = uint64_t(kSprayMax) * 32u;
+            rd.Height = 1;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                           IID_PPV_ARGS(&m_sprayBuf)));
+            m_sprayBuf->SetName(L"water.spray (the droplets the crest law throws)");
+            m_sprayState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            m_sprayUav = gpu.SrvHeap().Alloc();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
+            u.Format = DXGI_FORMAT_UNKNOWN;
+            u.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            u.Buffer.NumElements = kSprayMax * 2u;
+            u.Buffer.StructureByteStride = 16;
+            gpu.Device()->CreateUnorderedAccessView(m_sprayBuf.Get(), nullptr, &u, gpu.SrvHeap().Cpu(m_sprayUav));
+            m_spraySrv = gpu.CreateStructuredBufferSrv(m_sprayBuf.Get(), kSprayMax * 8u, 4);
+            m_sprayCount = gpu.CreateTexture2D(4, 1, DXGI_FORMAT_R32_UINT,
+                                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                               L"water.spray counters (spawned, alive, total)");
+            m_sprayCountUav = hal::Uav2D(gpu, m_sprayCount.res.Get(), DXGI_FORMAT_R32_UINT);
+        }
+    }
 
     // Root signature: b0 CB, t0 tile list, then the BINDLESS pair -- one unbounded SRV range
     // and one unbounded UAV range over the shared heap, so this kernel reaches every texture
@@ -86,7 +157,10 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                .Cbv(0)
                .Srv(0)
                .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5)})
-               .Table({hal::UavRange(0, hal::kUnbounded, 2)})
+               // space2: the heap as float4 planes; space3: as uint planes (the column plane's
+               // atomics).
+               .Table({hal::UavRange(0, hal::kUnbounded, 2), hal::UavRange(0, hal::kUnbounded, 3),
+                       hal::UavRange(0, hal::kUnbounded, 4)})   // space4: structured float4 (the spray)
                .Sampler(wrap)
                .Sampler(clamp)
                .Build(gpu, "waterbank");
@@ -98,6 +172,38 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
                           "waterbank"),
         "WaterBank kernel");
     m_fill->SetName(L"CsBankFill");
+    if (column) {
+        m_scatter = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankScatter", L"cs_6_0"),
+                              "waterbank.scatter"),
+            "WaterBank scatter kernel");
+        m_scatter->SetName(L"CsBankScatter");
+        m_sprayStep = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsSprayStep", L"cs_6_0"),
+                              "waterbank.spray"),
+            "WaterBank spray kernel");
+        m_sprayStep->SetName(L"CsSprayStep");
+        m_columnClear = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsColumnClear", L"cs_6_0"),
+                              "waterbank.columnclear"),
+            "WaterBank column clear kernel");
+        m_columnClear->SetName(L"CsColumnClear");
+        m_foldDistPso = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsFoldDist", L"cs_6_0"),
+                              "waterbank.folddist"),
+            "WaterBank fold distance kernel");
+        m_foldDistPso->SetName(L"CsFoldDist");
+        Log("[waterbank] column plane on: %ux%u hardware tiles a band, %u sub-labels an axis, "
+            "%.0f per m about the waterline, reach %.0f m; the ladder: %u rings under ring 0, the finest "
+            "%.3f m (%u texels a side), each resident where the ring above witnessed a fold",
+            m_column.TileW(), m_column.TileH(), kColSubLabels, kColScale, kColBias, m_ringsUnder,
+            m_ringsUnder ? m_baseTexelM / float(1u << m_ringsUnder) : m_baseTexelM,
+            m_ringsUnder ? m_under[m_ringsUnder - 1].texels : 0u);
+    }
     m_ready = true;
     Log("[waterbank] %d mip rings x %dx%d tiles (%.1f m .. %.0f m texels, %.1f .. %.0f km "
         "spans); land tiles NULL",
@@ -112,7 +218,23 @@ void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
         sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
     hal::Reload(m_fill, [&] { return hal::BuildCompute(gpu, m_rs.Get(), cs, "waterbank"); },
                 "waterbank");
+    if (column) {
+        const ShaderBlob sb =
+            sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankScatter", L"cs_6_0");
+        hal::Reload(m_scatter, [&] { return hal::BuildCompute(gpu, m_rs.Get(), sb, "waterbank.scatter"); },
+                    "waterbank.scatter");
+        const ShaderBlob sp =
+            sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsSprayStep", L"cs_6_0");
+        hal::Reload(m_sprayStep, [&] { return hal::BuildCompute(gpu, m_rs.Get(), sp, "waterbank.spray"); },
+                    "waterbank.spray");
+        const ShaderBlob fc =
+            sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsColumnClear", L"cs_6_0");
+        hal::Reload(m_columnClear, [&] { return hal::BuildCompute(gpu, m_rs.Get(), fc, "waterbank.columnclear"); },
+                    "waterbank.columnclear");
+    }
 }
+
+static bool SameRows(const Space::Anchor& a, const Space::Anchor& b);   // below
 
 void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, const double eye[3]) {
     m_simUnix = simUnix;
@@ -144,6 +266,16 @@ void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, const double eye[3]) {
         m_chartSet = true;
     }
     ChartOfFlat(eye[0], eye[1], eye[2], m_camX, m_camZ);
+    // THE EYE OVER THE CHART'S PLANE (2026-10-20): P.up - R in doubles, so a reader can stand a
+    // chart point at its height without a 6.4e6 m float (Globe.hlsl ChartPointRel). At the root's
+    // chart it is the flat frame's own y.
+    if (!m_surface || !m_chartSet || SameRows(m_chart, m_surface->flat)) {
+        m_camH = eye[1];
+    } else {
+        double P[3];
+        m_surface->flat.PlanetOf(eye[0], eye[1], eye[2], P);
+        m_camH = P[0] * m_chart.up[0] + P[1] * m_chart.up[1] + P[2] * m_chart.up[2] - m_chart.planetR;
+    }
     const double camX = m_camX, camZ = m_camZ;
     // Where the rings stand is not a drawing decision: `enabled` says whether this frame FILLS
     // them (Render), and a bank anchored while nothing reads it is mapped and ready for the
@@ -193,6 +325,7 @@ void WaterBankLayer::ChartRows(float out[16]) const {
     out[3] = static_cast<float>(m_camX);
     out[7] = static_cast<float>(m_camZ);
     out[11] = root ? 0.0f : 1.0f;
+    out[15] = static_cast<float>(m_camH);   // row 3's w: the eye over the chart's plane (row 3 xyz: GlobeLayer's eye)
 }
 
 void WaterBankLayer::SetBoats(const float* a32, const float* b32) {
@@ -402,6 +535,22 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
                     m_detail.RequestUnmap(htx, hty0 + k);
                 }
             }
+            // The column plane's three bands of this logical tile, by ITS hardware tile shape
+            // (R32_UINT: 128x128, one a band).
+            if (column) {
+                const uint32_t ctx0 = static_cast<uint32_t>((m * kRingTexels + tx * kTileTexels) / m_column.TileW());
+                const uint32_t ccx = (std::max)(kTileTexels / m_column.TileW(), 1u);
+                const uint32_t ccy = (std::max)(kTileTexels / m_column.TileH(), 1u);
+                for (uint32_t band = 0; band < 4; ++band) {
+                    const uint32_t cty0 = static_cast<uint32_t>((band * kRingTexels + ty * kTileTexels) / m_column.TileH());
+                    for (uint32_t ky = 0; ky < ccy; ++ky) {
+                        for (uint32_t kx = 0; kx < ccx; ++kx) {
+                            if (wet) m_column.RequestMap(ctx0 + kx, cty0 + ky);
+                            else m_column.RequestUnmap(ctx0 + kx, cty0 + ky);
+                        }
+                    }
+                }
+            }
             if (state != (wet ? 1 : 0)) changed = true;
             state = wet ? 1 : 0;
         }
@@ -412,6 +561,10 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
     m_param.CommitMappings(gpu, &fresh);
     fresh.clear();
     m_detail.CommitMappings(gpu, &fresh);
+    if (column) {
+        fresh.clear();
+        m_column.CommitMappings(gpu, &fresh);
+    }
     m_provisional[m] = provisional;
     (void)changed;
 }
@@ -657,6 +810,89 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
         for (size_t i = 0; i < plane.size(); ++i) plane[i] = disp[i * 4 + 1];
         fwrite(plane.data(), sizeof(float), plane.size(), fr);
         fclose(fr);
+    }
+    // THE ROLLING-WAVE WORK (2026-10-18): the whole disp and param planes raw (four channels a
+    // texel), and the column plane decoded (three bands, metres about the waterline, NaN where
+    // absent) -- proofs/wave_volume.py scatters the labels itself and holds the kernel to it.
+    if (FILE* fr = fopen("fiber_disp.f32", "wb")) {
+        fwrite(disp.data(), sizeof(float), disp.size(), fr);
+        fclose(fr);
+    }
+    if (FILE* fr = fopen("fiber_param.f32", "wb")) {
+        fwrite(param.data(), sizeof(float), param.size(), fr);
+        fclose(fr);
+    }
+    if (column) {
+        GpuTexture wrap;
+        wrap.res = m_column.Res();
+        wrap.format = DXGI_FORMAT_R32_UINT;
+        wrap.width = 3072;
+        wrap.height = 4 * 512;
+        wrap.state = m_state;
+        uint32_t pitch = 0;
+        const std::vector<uint8_t> data = gpu.ReadbackTexture(wrap, &pitch);
+        std::vector<float> plane(3072ull * 4 * 512);
+        size_t present[4] = {0, 0, 0, 0};
+        for (uint32_t y = 0; y < 4 * 512; ++y) {
+            const uint32_t* px = reinterpret_cast<const uint32_t*>(data.data() + static_cast<size_t>(pitch) * y);
+            const bool coverage = y >= 3 * 512;   // band 3: the lip's coverage count, not a height
+            for (uint32_t x = 0; x < 3072u; ++x) {
+                const uint32_t v = px[x];
+                const bool have = coverage ? v != 0u : (v != 0u && v != 0xFFFFFFFFu);
+                // the column's word: height-major (WaterBank.hlsl ColEncode), the label's offset below
+                plane[static_cast<size_t>(y) * 3072 + x] =
+                    coverage ? static_cast<float>(v)
+                    : have ? static_cast<float>(v >> 18) / kColScale - kColBias : std::numeric_limits<float>::quiet_NaN();
+                if (have) ++present[y / 512];
+            }
+        }
+        if (FILE* fr = fopen("fiber_column.f32", "wb")) {
+            fwrite(plane.data(), sizeof(float), plane.size(), fr);
+            fclose(fr);
+        }
+        Log("[fibers] column plane: face %zu, lip top (inverted) %zu, lip underside %zu, lip coverage %zu texels present of %zu "
+            "(fiber_column.f32, 4 bands of 3072x512; band 3 = the coverage count)",
+            present[0], present[1], present[2], present[3], static_cast<size_t>(3072) * 512);
+        // THE RINGS UNDER, the same way: fiber_column_r-1.f32, fiber_column_r-2.f32 ... (4 bands of
+        // texels x texels each; a NULL tile NaN / 0 -- a texture copy of an unmapped tile returns the
+        // pool page's last bytes, so the dump is masked by the mapped set).
+        for (uint32_t k = 0; k < m_ringsUnder; ++k) {
+            const ColumnRing& r = m_under[k];
+            GpuTexture wrapF;
+            wrapF.res = r.atlas.Res();
+            wrapF.format = DXGI_FORMAT_R32_UINT;
+            wrapF.width = r.texels;
+            wrapF.height = 4 * r.texels;
+            wrapF.state = m_state;
+            uint32_t pitchF = 0;
+            const std::vector<uint8_t> dataF = gpu.ReadbackTexture(wrapF, &pitchF);
+            std::vector<float> planeF(size_t(r.texels) * 4 * r.texels);
+            size_t presentF[4] = {0, 0, 0, 0};
+            for (uint32_t y = 0; y < 4 * r.texels; ++y) {
+                const uint32_t* px = reinterpret_cast<const uint32_t*>(dataF.data() + static_cast<size_t>(pitchF) * y);
+                const bool coverage = y >= 3 * r.texels;
+                const uint32_t ty = (y % r.texels) / 128;
+                for (uint32_t x = 0; x < r.texels; ++x) {
+                    const uint32_t v = px[x];
+                    const bool mappedT = r.mapped[size_t(ty) * r.tiles + x / 128] != 0;
+                    const bool have = mappedT && (coverage ? v != 0u : (v != 0u && v != 0xFFFFFFFFu));
+                    planeF[static_cast<size_t>(y) * r.texels + x] =
+                        !mappedT ? (coverage ? 0.0f : std::numeric_limits<float>::quiet_NaN())
+                        : coverage ? static_cast<float>(v)
+                        : have ? static_cast<float>(v >> 18) / kColScale - kColBias : std::numeric_limits<float>::quiet_NaN();
+                    if (have) ++presentF[y / r.texels];
+                }
+            }
+            char fname[64];
+            snprintf(fname, sizeof(fname), "fiber_column_r-%u.f32", k + 1);
+            if (FILE* fr = fopen(fname, "wb")) {
+                fwrite(planeF.data(), sizeof(float), planeF.size(), fr);
+                fclose(fr);
+            }
+            Log("[fibers] ring -%u: face %zu, lip top %zu, lip underside %zu, coverage %zu texels present of %zu; %u tiles mapped "
+                "(%s, 4 bands of %ux%u)",
+                k + 1, presentF[0], presentF[1], presentF[2], presentF[3], size_t(r.texels) * r.texels, r.mappedCount, fname, r.texels, r.texels);
+        }
     }
     if (FILE* fj = fopen("fiber_meta.json", "wb")) {
         fprintf(fj, "{ \"baseTexelM\": %.3f, \"rings\": [", m_baseTexelM);
@@ -1016,7 +1252,114 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     toUav(m_disp);
     toUav(m_param);
     toUav(m_detail);
+    if (column) {
+        toUav(m_column);
+        for (uint32_t k = 0; k < m_ringsUnder; ++k) toUav(m_under[k].atlas);
+        // THE LADDER'S RESIDENCY: the flags that came back through the ring (kFrameCount frames old)
+        // say, for every ring under, which of its tiles a fold of the ring above landed in; those
+        // tiles and their eight neighbours (ColumnFetch's taps at a tile's edge read the neighbour)
+        // are mapped, four bands each, the rest unmapped. A tile's mapping changes only on a flip.
+        if (m_flagRb.Ready() && m_flagRb.BeginSlot(ctx.gpu->FrameIndex()) > 0) {
+            for (const hal::RegionReadback::Region& g : m_flagRb.Delivered()) {
+                if (g.tag == 1u && g.w == 4 && g.bytes.size() >= 16) {   // the spray's counters
+                    const uint32_t* c = reinterpret_cast<const uint32_t*>(g.bytes.data());
+                    m_spraySpawned = c[0];
+                    m_sprayAlive = c[1];
+                    continue;
+                }
+                if (g.tag == 9u && g.w == kFoldGrid && g.h == kFoldGrid && g.bytes.size() >= size_t(kFoldGrid) * kFoldGrid * 4) {
+                    const uint32_t* f = reinterpret_cast<const uint32_t*>(g.bytes.data());
+                    m_foldCells.clear();
+                    for (uint32_t i = 0; i < kFoldGrid * kFoldGrid; ++i) {
+                        if (f[i] != 0u) m_foldCells.push_back(static_cast<uint16_t>((i % kFoldGrid) | ((i / kFoldGrid) << 8)));
+                    }
+                    continue;
+                }
+                if (g.tag < 2u || g.tag - 2u >= m_ringsUnder) continue;
+                ColumnRing& r = m_under[g.tag - 2u];
+                if (g.w != r.tiles || g.h != r.tiles || g.bytes.size() < size_t(r.tiles) * r.tiles * 4) continue;
+                const uint32_t* f = reinterpret_cast<const uint32_t*>(g.bytes.data());
+                uint32_t n = 0;
+                for (uint32_t ty = 0; ty < r.tiles; ++ty) {
+                    for (uint32_t tx = 0; tx < r.tiles; ++tx) {
+                        uint8_t want = 0;
+                        for (int dy = -1; dy <= 1 && !want; ++dy) {
+                            for (int dx = -1; dx <= 1 && !want; ++dx) {
+                                const int nx = int(tx) + dx, ny = int(ty) + dy;
+                                if (nx < 0 || ny < 0 || nx >= int(r.tiles) || ny >= int(r.tiles)) continue;
+                                if (f[uint32_t(ny) * r.tiles + uint32_t(nx)] != 0u) want = 1;
+                            }
+                        }
+                        uint8_t& have = r.mapped[size_t(ty) * r.tiles + tx];
+                        if (want != have) {
+                            for (uint32_t band = 0; band < 4; ++band) {
+                                if (want) r.atlas.RequestMap(tx, band * r.tiles + ty);
+                                else r.atlas.RequestUnmap(tx, band * r.tiles + ty);
+                            }
+                            have = want;
+                        }
+                        n += want;
+                    }
+                }
+                std::vector<uint32_t> fresh;
+                r.atlas.CommitMappings(*ctx.gpu, &fresh);
+                r.mappedCount = n;
+            }
+        }
+        for (uint32_t k = 0; k < m_ringsUnder; ++k) ctx.cmd->Barrier(m_under[k].flags, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ctx.cmd->Barrier(m_sprayCount, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ctx.cmd->Barrier(m_fold, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ctx.cmd->Barrier(m_foldDist, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (m_sprayState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            ctx.cmd->Barrier(m_sprayBuf.Get(), m_sprayState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            m_sprayState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+    }
     m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    // THE SPRAY's rows: dt from the sim clock (capped as the frame is), the drop's terminal speed,
+    // its life, the spawn gain (droplets a frame per metre of throw the sheet cannot carry).
+    {
+        const double dt = (m_lastSimUnix > 0.0) ? std::min(std::max(m_simUnix - m_lastSimUnix, 0.0), 0.25) : 0.0;
+        m_lastSimUnix = m_simUnix;
+        cb.sprayU[0] = column ? m_sprayUav : 0xFFFFFFFFu;
+        cb.sprayU[1] = column ? m_sprayCountUav : 0xFFFFFFFFu;
+        cb.sprayU[2] = kSprayMax;
+        cb.sprayU[3] = column ? 1u : 0u;
+        cb.sprayA[0] = static_cast<float>(dt);
+        cb.sprayA[1] = kSprayTerminalMs;
+        cb.sprayA[2] = kSprayLifeS;
+        // the spawn gain: parcels a frame per metre of excursion past the cusp per second -- a
+        // volume budget, not a carpet (Mark's video: a parcel per crest texel per frame)
+        cb.sprayA[3] = 0.25f;
+    }
+    memset(cb.colR, 0, sizeof(cb.colR));
+    memset(cb.colMap, 0, sizeof(cb.colMap));
+    static const uint32_t kMapBase[kColumnRingsUnderMax] = {0u, 64u, 320u};
+    for (uint32_t k = 0; k < m_ringsUnder; ++k) {
+        const ColumnRing& r = m_under[k];
+        cb.colR[k * 4 + 0] = column ? r.atlas.Uav() : 0xFFFFFFFFu;
+        cb.colR[k * 4 + 1] = column ? r.flagUav : 0xFFFFFFFFu;
+        cb.colR[k * 4 + 2] = r.texels;
+        cb.colR[k * 4 + 3] = r.tiles;
+        for (uint32_t i = 0; i < r.tiles * r.tiles; ++i) {
+            if (!r.mapped[i]) continue;
+            const uint32_t bit = kMapBase[k] + i;
+            cb.colMap[bit >> 5] |= 1u << (bit & 31u);
+        }
+    }
+    cb.planet[0] = static_cast<float>(PlanetGWave());   // the planet's gravity (core/Planet.h)
+    cb.planet[1] = cb.planet[2] = cb.planet[3] = 0.0f;
+    cb.colN[0] = m_ringsUnder;
+    cb.colN[1] = (column && m_ringsUnder) ? 1u : 0u;
+    cb.colN[2] = (column && m_foldUav) ? m_foldUav : 0u;
+    cb.colN[3] = (column && m_foldDistUav) ? m_foldDistUav : 0u;
+    cb.colU[0] = column ? m_column.Uav() : 0xFFFFFFFFu;
+    cb.colU[1] = kColSubLabels;
+    cb.colU[2] = column ? 1u : 0u;
+    cb.colU[3] = 0u;
+    cb.colA[0] = kColScale;
+    cb.colA[1] = kColBias;
+    cb.colA[2] = cb.colA[3] = 0.0f;
 
     {   // M12 step 4b instrument: the bank's constant buffer, fingerprinted at its upload --
         // the gate for the lattice-row moves (winA, geoA from the surface) and for the fills
@@ -1034,9 +1377,69 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         1, ctx.gpu->PushConstants(tiles.data(), tiles.size() * sizeof(BankTile)));
     ctx.cmd->ComputeBindless(2);
     ctx.cmd->ComputeBindless(3);
+    if (m_columnClear && column && m_ringsUnder) {   // the mapped tiles of every ring under to absent
+        uint32_t anyMapped = 0, maxTexels = 0;
+        for (uint32_t k = 0; k < m_ringsUnder; ++k) { anyMapped += m_under[k].mappedCount; maxTexels = std::max(maxTexels, m_under[k].texels); }
+        if (anyMapped) {
+            GpuScope fcscope(ctx.prof, ctx.cmd->Native(), "waterbank.columnclear");
+            ctx.cmd->Pipeline(m_columnClear.Get());
+            ctx.cmd->Dispatch(maxTexels / 8, maxTexels / 8, m_ringsUnder);
+            for (uint32_t k = 0; k < m_ringsUnder; ++k) ctx.cmd->UavBarrier(m_under[k].atlas.Res());
+        }
+    }
     ctx.cmd->Pipeline(m_fill.Get());
     ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16,
                       static_cast<UINT>(tiles.size()));
+    // THE COLUMN PLANE: the scatter reads the planes the fill wrote and the clears it made, so
+    // the fill's writes must land first (a UAV barrier), then the same tiles once more.
+    if (column && m_scatter) {
+        GpuScope sscope(ctx.prof, ctx.cmd->Native(), "waterbank.scatter");
+        ctx.cmd->UavBarriers({m_disp.Res(), m_param.Res(), m_column.Res()});
+        for (uint32_t k = 0; k < m_ringsUnder; ++k) ctx.cmd->UavBarriers({m_under[k].atlas.Res(), m_under[k].flags.res.Get()});
+        ctx.cmd->Pipeline(m_scatter.Get());
+        ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16, static_cast<UINT>(tiles.size()));
+        // THE FOLDS' DISTANCE, from the grid the scatter just marked; the globe reads it this frame
+        if (m_foldDistPso) {
+            GpuScope fdscope(ctx.prof, ctx.cmd->Native(), "waterbank.folddist");
+            ctx.cmd->UavBarrier(m_fold.res.Get());
+            ctx.cmd->Pipeline(m_foldDistPso.Get());
+            ctx.cmd->Dispatch(kFoldGrid / 8, kFoldGrid / 8, 1);
+            ctx.cmd->UavBarrier(m_foldDist.res.Get());
+            ctx.cmd->Barrier(m_foldDist, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        }
+        ctx.cmd->Pipeline(m_fill.Get());
+        // THE SPRAY's step, after the scatter (the column's face is this frame's for the deaths).
+        if (m_sprayStep) {
+            GpuScope pscope(ctx.prof, ctx.cmd->Native(), "waterbank.spray");
+            ctx.cmd->UavBarriers({m_sprayBuf.Get(), m_column.Res(), m_sprayCount.res.Get()});
+            ctx.cmd->Pipeline(m_sprayStep.Get());
+            ctx.cmd->Dispatch(kSprayMax / 256, 1, 1);
+            ctx.cmd->Pipeline(m_fill.Get());
+            ctx.cmd->UavBarrier(m_sprayBuf.Get());
+            ctx.cmd->Barrier(m_sprayBuf.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_sprayState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        // every ring's flags and the spray's counters back to the CPU through the ring
+        if (m_flagRb.Ready()) {
+            ctx.cmd->UavBarrier(m_sprayCount.res.Get());
+            ctx.cmd->Barrier(m_sprayCount, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            for (uint32_t k = 0; k < m_ringsUnder; ++k) {
+                ColumnRing& r = m_under[k];
+                ctx.cmd->UavBarrier(r.flags.res.Get());
+                ctx.cmd->Barrier(r.flags, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                m_flagRb.CopyRegion(*ctx.cmd, r.flags.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, r.tiles, r.tiles, 2u + k);
+            }
+            m_flagRb.CopyRegion(*ctx.cmd, m_sprayCount.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, 4, 1, 1u);
+            ctx.cmd->UavBarrier(m_fold.res.Get());
+            ctx.cmd->Barrier(m_fold, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            m_flagRb.CopyRegion(*ctx.cmd, m_fold.res.Get(), 0, DXGI_FORMAT_R32_FLOAT, 0, 0, kFoldGrid, kFoldGrid, 9u);
+        }
+        if (++m_sprayLogFrame % 120u == 0u) {
+            Log("[spray] %u droplets alive, %u spawned a frame (of a ring of %u); %zu fold blocks of %u", m_sprayAlive,
+                m_spraySpawned, kSprayMax, m_foldCells.size(), kFoldGrid * kFoldGrid);
+        }
+    }
     // PHASE B0: THE BANK'S BED TRACE (the header): the same kernel on the same rows and tiles,
     // compiled with HP_TRACE and BANK_TRACE, writing its readings to a target of its own.
     if (traceOn && m_sc) {
@@ -1073,13 +1476,27 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     toSrv(m_disp);
     toSrv(m_param);
     toSrv(m_detail);
+    if (column) {
+        toSrv(m_column);
+        for (uint32_t k = 0; k < m_ringsUnder; ++k) toSrv(m_under[k].atlas);
+    }
     m_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-    char s[96];
-    snprintf(s, sizeof(s), "bank %zu/%d t %.0f KB", tiles.size(),
-             kMips * kRingTiles * kRingTiles,
-             tiles.size() * 2.0 * 64.0 * 2.0);
+    char s[160];
+    snprintf(s, sizeof(s), "bank %zu/%d t %.0f KB col", tiles.size(),
+             kMips * kRingTiles * kRingTiles, tiles.size() * 2.0 * 64.0 * 2.0);
+    for (uint32_t k = 0; k < m_ringsUnder; ++k) {
+        ColumnRing& r = m_under[k];
+        char t[32];
+        snprintf(t, sizeof(t), " -%u:%u/%u", k + 1, r.mappedCount, r.tiles * r.tiles);
+        strncat(s, t, sizeof(s) - strlen(s) - 1);
+        if (column && r.mappedCount != r.logged) {
+            Log("[waterbank] column ring -%u: %u of %u tiles mapped under a fold (%.1f MB)",
+                k + 1, r.mappedCount, r.tiles * r.tiles, r.mappedCount * 4.0 * 64.0 / 1024.0);
+            r.logged = r.mappedCount;
+        }
+    }
     stats = s;
 }
 

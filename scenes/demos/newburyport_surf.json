@@ -1,0 +1,43 @@
+{
+  "_readme": [
+    "NEWBURYPORT'S SURF -- the buildings scene with a storm on the bar (2026-10-18, the rolling-wave",
+    "work): Hs 3 m, Tp 10 s from 95 deg (the storm rail's sea) at the ebb, so the entrance stands up",
+    "and the crests on the bar overturn. Two eyes seaward of the north jetty tip: `surf` from 12 m,",
+    "the bar in profile; `surf_high` from 60 m, the bar whole. The buildings, the orthos and the",
+    "coast are the base's.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/newburyport_surf.json"
+  ],
+  "base": "scenes/demos/newburyport_buildings.json",
+  "scene": {"name": "newburyport-surf", "mode": "world", "view": "tube"},
+  "time": {"start": "2026-08-28T19:30:00Z"},
+  "sea": {
+    "storm": {"hs": 3, "tp": 10, "dir": 95}
+  },
+  "views": [
+    {
+      "name": "surf",
+      "_at": "the north jetty tip from 12 m, looking east over the bar",
+      "at": {"x": 522, "alt": 12, "z": 72, "az": 95, "pitch": -8},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    },
+    {
+      "name": "surf_high",
+      "_at": "60 m over the water east of the jetties, looking north-east along the bar",
+      "at": {"x": 700, "alt": 60, "z": -60, "az": 50, "pitch": -28},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    },
+    {
+      "name": "tube",
+      "_at": "5 m over the throat just inside the north jetty tip, looking WNW at the crests the ebb stands up (the column plane's tubes at chop 4 cluster 40-200 m west of the tip)",
+      "at": {"x": 500, "alt": 5, "z": 20, "az": 290, "pitch": -6},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    },
+    {
+      "name": "tube_high",
+      "_at": "25 m over the throat, looking down WSW onto the same crests",
+      "at": {"x": 480, "alt": 25, "z": 60, "az": 250, "pitch": -35},
+      "fovY": 55, "gauge": "root", "nearZ": 0.25
+    }
+  ]
+}

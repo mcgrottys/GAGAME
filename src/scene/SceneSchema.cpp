@@ -244,7 +244,15 @@ const Schema& BankSchema() {
         auto& p = kDoc.water.bank;
         Schema* sc = new Schema("water.bank", &p);
         sc->Bind("flatBed", p.flatBed, "replace the bed with a flat floor (--flat-bed)", R)
-            .Bind("flatBedNavd", p.flatBedNavd, Q::Length, "m NAVD88", "the floor's height", R);
+            .Bind("flatBedNavd", p.flatBedNavd, Q::Length, "m NAVD88", "the floor's height", R)
+            .Bind("column", p.column,
+                  "the column plane: the sheet's labels scattered into Eulerian columns, a reader of an "
+                  "overturning crest (WaterBank.hlsl CsBankScatter; the crest is drawn by the sheet itself)",
+                  R)
+            .Bind("columnTexel", p.columnTexel, Q::Length, "m",
+                  "the finest texel the column ladder reaches: rings under ring 0 halve its 1.2 m until they reach it "
+                  "(0.3 = two rings), each resident only where the ring above witnessed a fold",
+                  R);
         return sc;
     }();
     return *s;
@@ -579,6 +587,7 @@ const Schema& RailsSchema() {
                      {"none", "classic", "zoom", "flood", "jetty", "droste", "droste-out"},
                      "the rail flown (--rail, --rail-zoom, --rail-flood, --rail-jetty, --rail-droste[-out])", R)
             .List("keys", &RailKeySchema_(), "an authored keyed flight, inline (the shipped rails are scenes/rails/<active>.json)", false)
+            .BindPath("file", p.file, "a rail file of the scene's own (scenes/rails/*.json's shape), flown instead of the named one when capture.railDir is set (2026-10-19: scenes/rails/mavericks_lineup.json)", R)
             .Nest("droste", DrosteRailSchema(), &p.droste, "the dive");
         return sc;
     }();

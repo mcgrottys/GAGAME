@@ -580,6 +580,7 @@ private:
     double m_profMs[kProfN] = {}, m_profHelmMs[kProfN] = {};
     std::vector<float> m_railPreMs;   // M9u: the whole pre-RenderFrame half
     uint64_t m_walkNodesAcc = 0, m_walkLeavesAcc = 0, m_walkWantNsAcc = 0, m_walkFrames = 0;
+    uint64_t m_walkFoldAcc = 0;   // leaves under the mesh's own depth (the sea's folds), summed
     uint64_t m_morphFullAcc = 0, m_morphPartAcc = 0;
     uint64_t m_wantTouchAcc = 0, m_wantHitAcc = 0;
     // F19: the walk's breakdown over the run (from frame 150), printed in [perf] at the exit.

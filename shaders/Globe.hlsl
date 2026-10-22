@@ -133,6 +133,22 @@ cbuffer GlobeCb : register(b1) {
     // meshlet classes' SRV slot, y = 1 on a kept frame (a meshlet whose pixels were all land is not
     // drawn: the cache has it).
     uint4  gKeepU;
+    // THE COLUMN PLANE (WaterBank.hlsl CsBankScatter; the rolling-wave work, 2026-10-18) --
+    // appended at the END on both sides (priors 22): x = its SRV (R32_UINT, three bands of 512
+    // rows: face, lip underside, lip top), y = on; gColA.x = the fixed point's scale (per metre),
+    // .y = its bias (m); set A's rings only. Read by ColumnLip (the thin sheet's thickness).
+    // ...z = THE RINGS UNDER ring 0 (the column ladder, WaterBankLayer.h), w unused; gColR[k] is
+    // ring -(k+1): x its SRV, y its texels a side, z its tiles a side, w on.
+    uint4  gColU;
+    float4 gColA;
+    uint4  gColR[3];
+    // THE SPRAY (WaterBankLayer.h): x = the droplets' SRV (gBufU, eight uints a droplet: x, h, z,
+    // age, vx, vy, vz, size), y = the ring's size, z = on. Appended at the END (priors 22).
+    uint4  gSprayU;
+    // THE SEA PAST THE RINGS (FarSeaScale): x = 1 / the Hs the cascades were synthesised for
+    // (SeaLayer's WaveScale::hsRef), y = 1 while a declared storm stands (the scale is 1). Appended
+    // at the END on both sides (priors 22).
+    float4 gFarSea;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -323,6 +339,145 @@ float2 BankXZOfDir(float3 dirT) {
 // A vector of the rings' plane (the lateral displacement, metres along the chart's east and north)
 // in the tangent frame.
 float3 BankVec(float2 v) { return BankChartRow(0u).xyz * v.x + BankChartRow(1u).xyz * v.y; }
+// A POINT OF THE RINGS' CHART, eye-relative in the level's tangent frame (2026-10-20, Mark: "the
+// same methods as 3d buildings ... the orientations adjust to the part of the world they are
+// on"). The chart is the lattice origin under the eye (core/OriginLattice.h, the buildings'
+// floating origin): chart (x, z) is the radial projection R (d.e, d.n) of the point's direction
+// about that origin's tangent point, `alt` the point's height over the geoid. The point is
+// (R + alt) d, and its offset from the eye, along the chart's own east, north and up, is a
+// difference of small numbers term by term: the horizontal scale (R + alt) / R, the sag
+// s (R + alt) / 2R^2 under the tangent plane, and the eye's own height over that plane carried
+// from doubles (row 3 w, WaterBankLayer::ChartRows) -- no 6.4e6 m float anywhere, and up is the
+// chart's up wherever on the planet the origin stands. Second order in s / R^2 (a millimetre at
+// 4 km from the origin).
+// THE SEA'S FOLDS' DISTANCE (WaterBank.hlsl CsFoldDist): metres from a point of the rings' chart to
+// the nearest 8-texel block of ring 0 a fold stood over, bilinear between the blocks' centres (Loads:
+// this runs in the mesh stage); 1e9 where none is near or no fold grid is bound (gColU.w).
+float FoldDist(float2 xz) {
+    if (gColU.w == 0xFFFFFFFFu || gColU.y == 0u || sLvlBank != 0) return 1.0e9f;
+    const float B = gBankA.x * 8.0f;
+    const float2 l = (xz - BankRingOrg(0u)) / B - 0.5f;
+    if (any(l < 0.0f) || any(l > 63.0f)) return 1.0e9f;
+    const int2 t0 = min(int2(floor(l)), int2(62, 62));
+    const float2 f = l - float2(t0);
+    const float d00 = gTex[gColU.w][t0].x, d10 = gTex[gColU.w][t0 + int2(1, 0)].x;
+    const float d01 = gTex[gColU.w][t0 + int2(0, 1)].x, d11 = gTex[gColU.w][t0 + int2(1, 1)].x;
+    return lerp(lerp(d00, d10, f.x), lerp(d01, d11, f.x), f.y) * B;
+}
+// THE COLUMN AS THE SHADING'S READER (2026-10-20, the thin sheet's light). The sheet is drawn
+// whole (GlobeMesh.hlsl); what a pixel of a lip cannot know from the sheet alone is how much water
+// stands under it before the next crossing -- the lip's THICKNESS, the light it passes. The column
+// plane holds exactly that (WaterBank.hlsl CsBankScatter): at a point of the rings' chart, from the
+// finest ring under that holds it, the face (band 0), the lip's top (band 1) and its underside
+// (band 2), and the lip's coverage (band 3), metres about the waterline, bilinear; the lip bands
+// weighted by their coverage. At a fold line the texel's centre stands under no upright arm and
+// band 2 is the face: there the underside is the top (the sheet closes, its thickness goes to 0).
+bool ColPresent(uint v) { return v != 0u && v != 0xFFFFFFFFu; }
+float ColH(uint v) { return float(v >> 18) / gColA.x - gColA.y; }
+float ColUnderH(uint rawF, uint rawT, uint rawU) {
+    const float hU = ColH(rawU);
+    return (ColPresent(rawU) && ColPresent(rawF) && hU > ColH(rawF) + 0.02f) ? hU : ColH(rawT);
+}
+bool ColumnLip(float2 xz, out float face, out float top, out float under, out float cover) {
+    face = 0.0f;
+    top = 0.0f;
+    under = 0.0f;
+    cover = 0.0f;
+    if (gColU.y == 0u || sLvlBank != 0) return false;
+    const float2 org = BankRingOrg(0u);
+    for (int kk = int(gColU.z) - 1; kk >= 0; --kk) {
+        const uint k = uint(kk);
+        if (gColR[k].w == 0u) continue;
+        const uint srv = gColR[k].x, nF = gColR[k].y;
+        const float texelF = gBankA.x / float(2u << k);
+        const float2 tf = (xz - org) / texelF - 0.5f;
+        const int2 t0 = int2(floor(tf));
+        const float2 fr = tf - float2(t0);
+        if (!(all(t0 >= 0) && all(t0 < int(nF) - 1))) continue;
+        float fS = 0.0f, cS = 0.0f, tS = 0.0f, uS = 0.0f, wL = 0.0f;
+        bool okAll = true;
+        [unroll] for (int q = 0; q < 4; ++q) {
+            const int2 tc = t0 + int2(q & 1, q >> 1);
+            const float bw = ((q & 1) ? fr.x : 1.0f - fr.x) * ((q >> 1) ? fr.y : 1.0f - fr.y);
+            const uint rawF = gTexU[srv].Load(int3(tc.x, tc.y, 0)).x;
+            const uint rawT = gTexU[srv].Load(int3(tc.x, int(nF) + tc.y, 0)).x;
+            const uint rawU = gTexU[srv].Load(int3(tc.x, int(2u * nF) + tc.y, 0)).x;
+            const float cw = saturate(float(gTexU[srv].Load(int3(tc.x, int(3u * nF) + tc.y, 0)).x) * (1.0f / 16.0f));
+            okAll = okAll && ColPresent(rawF);
+            fS += bw * ColH(rawF);
+            cS += bw * cw;
+            if (cw > 0.0f && ColPresent(rawT)) {
+                // THE TWO CROSSINGS ABOVE THE FACE, whichever branch made them (2026-10-20): the column
+                // keeps the overturned branch in band 1 and the upright max in band 2, and which is the
+                // higher depends on the overturn -- the trochoid's loop puts the inverted crest on top,
+                // a falling lip curls its inverted water UNDER (measured: band 1 below band 2 at the
+                // median of the curl's texels, a lip -1.5 m thick to the old reader). The lip's top is
+                // the higher of the two, its underside the lower.
+                const float hA = ColH(rawT), hB = ColUnderH(rawF, rawT, rawU);
+                const float w = bw * cw;
+                tS += w * max(hA, hB);
+                uS += w * min(hA, hB);
+                wL += w;
+            }
+        }
+        if (!okAll) continue;   // a NULL tile reads absent: the ring above is asked
+        face = fS;
+        cover = cS;
+        if (wL > 0.0f) {
+            top = tS / wL;
+            under = uS / wL;
+        }
+        return true;
+    }
+    return false;
+}
+// THE WATER A REFRACTED RAY CROSSES (2026-10-20, Mark: "shade the sun through the crest's own thickness
+// along the refracted ray (the backlit face)"). From the drawn point (chart x, chart z, its height about
+// the waterline) along the refracted direction (tangent frame), marched through the EULERIAN surface the
+// column holds (ring 0's face band, its own texel, one load a step) until the ray stands above it: the
+// metres of water it crosses before it leaves the sheet -- through the back of a crest, or into a tube's
+// air. -1 where it does not leave within the march (it meets the depths: the body's colour stands). A
+// ray going down more steeply than a flat sea's refraction ever sends one (the critical angle's 48
+// degrees) cannot leave through a crest, and is not marched; a flat sea's every ray is such a ray.
+float WaterPathThrough(float3 at, float3 tDirT) {
+    if (gColU.y == 0u || sLvlBank != 0) return -1.0f;
+    const float3 d = float3(dot(tDirT, BankChartRow(0u).xyz), dot(tDirT, BankChartRow(2u).xyz),
+                            dot(tDirT, BankChartRow(1u).xyz));   // chart x, up, chart z
+    if (d.y < -0.66f) return -1.0f;
+    const float texel = gBankA.x;
+    const float2 org = BankRingOrg(0u);
+    const float stepM = 0.5f * texel;
+    [loop] for (int i = 1; i <= 32; ++i) {
+        const float sM = stepM * float(i);
+        const float2 xz = at.xy + d.xz * sM;
+        const int2 tc = int2(floor((xz - org) / texel));
+        if (any(tc < 2) || any(tc > 509)) return -1.0f;
+        const uint raw = gTexU[gColU.x].Load(int3(tc.x, tc.y, 0)).x;
+        // above the face -- or where the column holds no water at all (the land, a NULL tile): out
+        if (!ColPresent(raw) || at.z + d.y * sM > ColH(raw)) return sM - 0.5f * stepM;
+    }
+    return -1.0f;
+}
+// THE SEA'S SCALE PAST THE RINGS (2026-10-20, Mark: "we don't see waves going to the horizon"): the
+// local Hs over the Hs the cascades were synthesised for, clamped as the bank's tile corners have it
+// (sim/WaveScale.h GridAt, the global gfswave grid, gTexIdx.y), and 1 under a declared storm or
+// where the grid has no opinion. The bank's sources (a buoy's box over the grid) are the CPU's only:
+// past the rings a source box's own sea gives way to the grid's -- its feather is a quarter degree.
+float FarSeaScale(float latDeg, float lonDeg) {
+    if (gFarSea.y != 0.0f || gTexIdx.y == 0xFFFFFFFFu || gFarSea.x <= 0.0f) return 1.0f;
+    const float2 uv = float2(frac((lonDeg - gWavesA.y) * gWavesA.w / gWavesB.x),
+                             saturate(((gWavesA.x - latDeg) * gWavesA.z + 0.5f) / gWavesB.y));
+    const float h = gTex[gTexIdx.y].SampleLevel(sLinearClamp, uv, 0).x;
+    return (h >= 0.0f) ? clamp(h * gFarSea.x, 0.15f, 3.0f) : 1.0f;
+}
+float3 ChartPointRel(float2 c, float alt) {
+    const float4 e = BankChartRow(0u), n = BankChartRow(1u), u = BankChartRow(2u), r3 = BankChartRow(3u);
+    const float R = gGlo.x;
+    const float sc = 1.0f + alt / R;
+    const float sag = (c.x * c.x + c.y * c.y) * sc / (2.0f * R);
+    return e.xyz * (c.x * sc - e.w) + n.xyz * (c.y * sc - n.w) + u.xyz * (alt - sag - r3.w)
+         - (sLvlCamAbs - r3.xyz);
+}
 
 uint BankDispSrv() { return (sLvlBank == 1) ? gBankBU.x : gBankU.x; }
 uint BankParamSrv() { return (sLvlBank == 1) ? gBankBU.y : gBankU.y; }
@@ -871,9 +1026,14 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // another level's bed has only its direction -- for the Mercator height. PHASE A2: the colour's
 // windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
 // pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
+// lipThick / lipCov: where the pixel
+// is a lip's (its top or its underside, PsSurface from the column), the sheet's thickness there and
+// how much of the pixel is that lip; drawnAt: the drawn point (chart x, chart z, its height about the
+// waterline) -- THE LIGHT THROUGH THE WATER (below).
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
-                       float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl) {
+                       float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
+                       float lipThick, float lipCov, float3 drawnAt) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -905,13 +1065,31 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     }
     float3 nSmooth = upT;    // ring-texel band limit -> the body's diffuse
     float3 nPix = upT;       // + the bands this pixel resolves -> glint, Fresnel, both rays
+    float3 nBiv = upT;       // the sheet's own normal, uncapped (the lip's: TWO-SIDED, below)
     float lvlW = gWavesB.w;  // live water level here: the frame's waterline, plus the bank's departure where a ring texel holds one
     float dispW = 0.0f;      // the wave's own vertical displacement here; 0 where no ring reads
     {
         float4 bD, bP, bDet;
         float bT;
         float3 bDdx, bDdz;
-        if (BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz)) {
+        const bool inRing = BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz);
+        if (!inRing) {
+            // THE SEA PAST THE RINGS (2026-10-20, Mark: "we don't see waves going to the horizon").
+            // The rings reach 256 of their coarsest texels from the eye (~10 km); past them the sea
+            // drew Cox-Munk's sigma^2 alone, and the outermost ring's square edge read as a tile of
+            // lower resolution in the open ocean. The geometry there is the waterline's -- a mesh
+            // cell is hundreds of metres -- but a pixel still resolves the swell to the horizon: the
+            // bands below run here too, every band the pixel's footprint resolves (no ring resolves
+            // any: bT past every wavelength), at the deep sea's scale (FarSeaScale: no shoaling, no
+            // shelter, the dry weight 1), and their slope variance leaves the whole sea's sigma^2
+            // as it does inside a ring. Each band folds back into sigma^2 as its footprint grows
+            // (wPix), so the waves fade into the glint's statistics at the horizon and never end at
+            // an edge. bD, bP and the tangents stay BankSampleT's zeros: the waterline, flat.
+            bT = 1.0e9f;
+            const float hsF = FarSeaScale(latDeg, lonDeg);
+            bDet = float4(hsF, 1.0f, hsF, hsF);
+        }
+        {
             // ONE SEA, ONE SLOPE VARIANCE (Mark, 2026-10-11: the dark square under the eye). The
             // far field's s2 above is the WHOLE sea's mean-square slope. The bank models only its
             // cascades (each band's gain^2 times its unit mss -- the gains are the amplitudes
@@ -925,7 +1103,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             const float mssModel = max(bDet.z * bDet.z * 0.0004f + bDet.x * bDet.x * 0.0018f +
                                            bDet.w * bDet.w * 0.0060f,
                                        bP.y);
-            s2 = max(bP.y + max(s2 - mssModel, 0.0f), 0.0015f);
+            if (inRing) s2 = max(bP.y + max(s2 - mssModel, 0.0f), 0.0015f);   // past the rings s2 stays the whole sea's
             lvlW = gWavesB.w + bP.x;   // the bank holds the DEPARTURE from the waterline (WaterBank.hlsl); a NULL tile's 0 is the waterline
             dispW = bD.y;
             // The wave normal: the tangent bivector's dual, analytic from the reconstruction
@@ -933,10 +1111,28 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             // the kernel's 4x4 support IS that grain; what changed is that it is now
             // continuous across a texel border instead of stepping at it). The two extra ring
             // probes are gone, and the 1.1 cap rides inside BankSlope.
-            const float2 sRing = BankSlope(bDdx, bDdz);
+            const float2 sRing0 = BankSlope(bDdx, bDdz);
+            // THE RING'S SLOPE FOLDS BY THE PIXEL (2026-10-20, Mark's "low res tile" in the open
+            // ocean: the outermost ring's square edge). The ring's slope is the bands its texel holds,
+            // and it was shaded whole whatever the pixel's footprint: far out in ring 5 a pixel two
+            // hundred metres across still drew the 38 m texel's swell as resolved, and one step past
+            // the ring the folded sea was smooth -- an edge. Every rung folds where it cannot be
+            // resolved (the bands below do, by wPix): as the footprint outgrows the ring's texel --
+            // from two texels, the shortest band it holds, to eight -- its slope fades and its
+            // variance joins sigma^2, so the glint carries what the pixel cannot draw, and at the
+            // ring's edge the ring has already become the statistics the sea past it is.
+            const float wRingPx = 1.0f - smoothstep(2.0f * bT, 8.0f * bT, footPx);
+            const float2 sRing = sRing0 * wRingPx;
+            s2 += (1.0f - wRingPx * wRingPx) * 0.5f * dot(sRing0, sRing0);
             float sx = sRing.x;
             float sz = sRing.y;
             nSmooth = normalize(upT - east * sx - north * sz);
+            {   // the bivector's dual itself, before the slope form folds it up and caps it
+                const float3 nL = cross(float3(bDdz.x, bDdz.y, 1.0f + bDdz.z), float3(1.0f + bDdx.x, bDdx.y, bDdx.z));
+                const float3 nW = east * nL.x + upT * nL.y + north * nL.z;
+                const float lW = length(nW);
+                if (lW > 1e-6f) nBiv = nW / lW;
+            }
 
             // The bands the PIXEL resolves but the ring texel does not, read from the cascade
             // DERIVATIVE textures at full FFT resolution and weighted by the fold difference
@@ -994,6 +1190,47 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             const float slW = length(float2(sx, sz));
             if (slW > 1.1f) { sx *= 1.1f / slW; sz *= 1.1f / slW; }
             nPix = normalize(upT - east * sx - north * sz);
+        }
+    }
+    // TWO-SIDED WATER (2026-10-20, the Lagrangian sheet drawn whole). Where the sea overturns, the
+    // eye sees the sheet from below -- the tube's ceiling, the lip's underside -- and the bank's
+    // normal (the surface's slope, always turned up) is the far side's. The drawn triangle says
+    // which side the eye is on; the normal is turned to it. Over an unfolded sea both point up and
+    // nothing changes.
+    // THE FOLD DECIDES, THE EYE PICKS THE SIDE (2026-10-20). The side was first the cross of rel's
+    // screen derivatives -- garbage where a 2x2 quad straddles two slivers at the folded rim (the
+    // speckle) -- then the triangle's face times the sheet's normal, measured wrong on the curl
+    // (Mark: "the order of drawing the vertices is putting back faces towards the camera"): with the
+    // atmosphere held off, NO back face is visible at the close pose, but on 10,358 front-facing
+    // pixels the sheet's own normal points down and away -- the field folded finer than the
+    // triangle, or a triangle across the fold's hinge -- and face times normal turned the lip's
+    // normal away from the eye. The law now: where the sheet is folded (its own normal nBiv, the
+    // tangent bivector's dual, points down) the eye picks the side -- +-nBiv, whichever faces it;
+    // where it is not, nothing turns (the 81,778 grazing pixels of open sea whose field normal faces
+    // away from the facet that faces the eye keep the slope form, as before the sheet was two-sided).
+    // No derivative, no face: one smooth normal and the eye.
+    {
+        // Continuous, both hinges (the black lines with the sun ahead: where the sheet's normal turns
+        // edge-on to the eye, n . v ~ 0, a hard choice of +-n flipped the shading between a mirror and
+        // the dark side). The turned normal is trusted by how folded the sheet is (-n . up) and how
+        // plainly it faces one side of the eye (|n . v|), each over a fifth of the turn; at either
+        // hinge the slope form stands, as over the unfolded sea.
+        const float cV = dot(nBiv, v);
+        const float3 nEye = (cV >= 0.0f) ? nBiv : -nBiv;   // the sheet's normal on the eye's side
+        const float wSide = saturate(abs(cV) * 5.0f);
+        const float wFold = saturate(-dot(nBiv, upT) * 5.0f) * wSide;
+        nPix = normalize(lerp(nPix, nEye, wFold));
+        nSmooth = normalize(lerp(nSmooth, nEye, wFold));
+        // THE LIP'S OWN NORMAL (2026-10-20, the backlit lip read as a mirror of the sky). The slope
+        // form is the bivector folded up (|n.y|) and capped at a slope of 1.1, so every normal stands
+        // within 48 degrees of up; a lip curling down in front of the face faces the eye sideways or
+        // below, and on the slope form it was a surface seen at grazing -- Fresnel's mirror, the sun it
+        // passes counted for nothing. On a lip's pixel the normal is the bivector's own, turned to the
+        // eye's side, by the same hinge weight.
+        if (lipCov > 0.0f) {
+            const float wL = saturate(lipCov) * wSide;
+            nPix = normalize(lerp(nPix, nEye, wL));
+            nSmooth = normalize(lerp(nSmooth, nEye, wL));
         }
     }
 
@@ -1131,7 +1368,44 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // and the mirror itself is part sky, part the very water it stands on.
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
     const half3 sunHere = half3(SunAt(upT, hp));
-    const half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
+    half3 bodyLit = albW * (half3(SkyAmbient(nSmooth, upT, hp)) + half(ndl * 1.15f) * sunHere);
+    // THE LIGHT THROUGH THE WATER (2026-10-20, Mark: "shade the sun through the crest's own thickness
+    // along the refracted ray (the backlit face)"). The body above is the water under this point. Where
+    // the refracted ray LEAVES the water -- through a lip (its thickness from the column, lipThick /
+    // |t . n|), through the back of a crest or into a tube's air (WaterPathThrough, marched) -- it
+    // crosses `path` metres of water and comes out the other side: it sees what is there, the sky (a
+    // ray going up) or the face below (going down), through T = exp(-K_d path); and on the way the
+    // sun's beam, entering the far side of so thin a water, scatters once toward the eye:
+    //     L_sun = c_scatter E_sun p(mu) T (1 - T),
+    // p the water's phase function at the angle mu between the ray and the sun -- Henyey-Greenstein at
+    // g = 0.924, the mean cosine of Petzold's average-particle phase function (Mobley, Ocean Optics
+    // Book), strongly forward: the glow of a crest with the sun behind it. T (1 - T): the sun reaching
+    // the scattering water through the same thin crest, and the share of the path that scatters. Its
+    // limits, stated: Henyey-Greenstein matches Petzold's mean cosine and is much too small within a
+    // few degrees of forward (Fournier-Forand is the realistic form); one scattering only; the sun's
+    // path taken as the ray's. A ray that does not leave keeps the body as ever.
+    {
+        float pathW = -1.0f, wPath = 0.0f;
+        if (lipCov > 0.0f) {
+            pathW = lipThick / max(abs(dot(tDir, nPix)), 0.25f);
+            wPath = saturate(lipCov);
+        } else {
+            pathW = WaterPathThrough(drawnAt, tDir);
+            wPath = (pathW >= 0.0f) ? 1.0f : 0.0f;
+        }
+        if (wPath > 0.0f) {
+            const half3 Tp = exp(-half3(wq.kd * pathW));
+            const float tUp = dot(tDir, upT);
+            const float3 tSky = normalize(tDir + max(0.02f - tUp, 0.0f) * upT);
+            const half wSky = half(saturate(0.5f + 2.0f * tUp));
+            const half3 behind = lerp(bodyLit, half3(SkyRadianceDirDiscless(tSky, upT)), wSky);
+            const float gP = 0.924f;
+            const float mu = dot(tDir, GA_SUN_DIR);
+            const float hg = (1.0f - gP * gP) / (12.566371f * pow(max(1.0f + gP * gP - 2.0f * gP * mu, 1e-4f), 1.5f));
+            const half3 glow = cScatter * sunHere * half(3.14159265f * hg * sunSph) * Tp * (1.0h - Tp);
+            bodyLit = lerp(bodyLit, lerp(bodyLit, behind, Tp) + glow, half(wPath));
+        }
+    }
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1699,8 +1973,25 @@ float4 PsSurface(VsOut i, out float land) {
     // of a shoreline pixel is untouched by the choice.
     float3 wcol = i.wcol;
     if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
+        // THE LIP UNDER THIS PIXEL, from the column at the DRAWN point's own ground (Eulerian: the
+        // sheet's point, not its label's), and whether the pixel is that lip -- its height up at
+        // the lip's bands -- or the face beneath it: the share by where the drawn point stands
+        // between the face and the underside.
+        float lipThick = 0.0f, lipCov = 0.0f;
+        const float2 xzD = BankXZ(i.rel);
+        const float aD = dot(i.rel - ChartPointRel(xzD, 0.0f), BankChartRow(2u).xyz) - gWavesB.w;
+        {
+            float cF, cT, cU, cC;
+            // a lip stands only where the sheet turned over: the folds' distance (four loads) says
+            // where to ask the column at all -- within a fold block of one
+            if (FoldDist(xzD) < 8.0f * gBankA.x && ColumnLip(xzD, cF, cT, cU, cC) && cC > 0.0f && cT > cF) {
+                const float gap = max(cU - cF, 0.05f);
+                lipCov = saturate(cC) * smoothstep(0.25f, 0.75f, (aD - cF) / gap);
+                lipThick = max(cT - cU, 0.0f);
+            }
+        }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipThick, lipCov, float3(xzD, aD));
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
@@ -1962,4 +2253,65 @@ LimbOut PsLimb(SkyVsOut i) {
     const float4 clip = mul(float4(rdT * max(sLvlSigma * max(t0c, 0.0f), 1e-3f), 1.0f), gViewProj);
     o.depth = saturate(clip.z / clip.w);
     return o;
+}
+
+// ------------------------------------------------------------------ THE SPRAY (the droplets)
+//
+// Six vertices an instance, one instance a droplet of the ring (WaterBankLayer.h): a camera-facing
+// quad at the droplet's position -- its chart coordinates turned into the tangent frame by the
+// rings' chart rows (BankXZ's inverse: east and north by the eye's coordinate along each, up by
+// the height over the eye's altitude) -- lit as foam: the sun on the sphere's up and the sky, a
+// soft disc. A dead droplet (age < 0) collapses to nothing.
+struct SprayVsOut {
+    float4 pos : SV_Position;
+    float2 uv : TEXCOORD0;
+    float3 upT : TEXCOORD1;
+    float age : TEXCOORD2;
+};
+
+SprayVsOut VsSpray(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
+    SprayVsOut o;
+    LoadLevel(0u);
+    const uint b = inst * 8u;
+    const float age = asfloat(gBufU[gSprayU.x][b + 3u]);
+    const float3 p = float3(asfloat(gBufU[gSprayU.x][b]), asfloat(gBufU[gSprayU.x][b + 1u]), asfloat(gBufU[gSprayU.x][b + 2u]));
+    // a droplet is a parcel of spray, not one drop: it spreads as it flies (a sprite's radius
+    // grows a quarter metre a second) and thins by the same share (PsSpray)
+    const float size = asfloat(gBufU[gSprayU.x][b + 7u]) + 0.12f * max(age, 0.0f);
+    const float4 e = BankChartRow(0u), n = BankChartRow(1u);
+    const float3 upT = BankChartRow(2u).xyz;
+    // the chart point less the eye, on the lattice origin's own arithmetic (ChartPointRel: the
+    // sag and the eye's height over the chart's plane from doubles, wherever the origin stands)
+    float3 rel = ChartPointRel(p.xz, p.y);
+    const uint corner = (vid == 0u || vid == 3u) ? 0u : (vid == 1u) ? 1u : (vid == 2u || vid == 4u) ? 2u : 3u;
+    const float2 c = float2((corner & 1u) ? 1.0f : -1.0f, (corner & 2u) ? 1.0f : -1.0f);
+    const float3 view = normalize(rel);
+    // A STREAK, NOT A BEAD (2026-10-20, Mark's dotted arcs): a parcel's sprite is stretched along
+    // its velocity in the sprite's plane by the distance it flies in a twelfth of a second, so a
+    // texel's parcels, one a frame, read as one jet and not as beads on a parabola.
+    const float3 vel = float3(asfloat(gBufU[gSprayU.x][b + 4u]), asfloat(gBufU[gSprayU.x][b + 5u]), asfloat(gBufU[gSprayU.x][b + 6u]));
+    const float3 velT = e.xyz * vel.x + upT * vel.y + n.xyz * vel.z;   // the chart's axes into the tangent frame
+    float3 along = velT - view * dot(velT, view);
+    const float alongLen = length(along);
+    const float3 right0 = normalize(cross(upT, view));
+    const float3 up0 = cross(view, right0);
+    along = (alongLen > 1e-3f) ? along / alongLen : up0;
+    const float3 across = normalize(cross(view, along));
+    const float stretch = size + alongLen * (1.0f / 12.0f);
+    rel += (across * c.x * size + along * c.y * stretch) * ((age >= 0.0f) ? 1.0f : 0.0f);
+    o.pos = mul(float4(TrueRel(rel), 1.0f), gViewProj);
+    o.uv = c;
+    o.upT = upT;
+    o.age = age;
+    return o;
+}
+
+float4 PsSpray(SprayVsOut i) : SV_Target {
+    if (i.age < 0.0f) discard;
+    const float r2 = dot(i.uv, i.uv);
+    if (r2 > 1.0f) discard;
+    // foam's light: the sun on the sphere's up, the sky from above, as the water's foam takes it
+    const float3 lit = SunAt(i.upT, 0.0f) * saturate(dot(GA_SUN_DIR, i.upT)) * 0.9f + SkyAmbient(i.upT, i.upT, 0.0f);
+    const float a = (1.0f - r2) * (1.0f - r2) * 0.35f / (1.0f + i.age);
+    return float4(lit * 0.85f, a);
 }

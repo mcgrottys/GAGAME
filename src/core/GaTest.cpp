@@ -257,6 +257,8 @@ bool RunGaSelfTest() {
     //  the identities those proofs established, so a regression fails --selftest.
     // ================================================================================
     const double PI = 3.14159265358979324;
+    // The PROOFS' reference gravity: the numbers pinned below are proofs/*.py's, computed at 9.81; this is
+    // their parameter, not the engine's gravity (that is the planet's, core/Planet.h).
     const double G = 9.81;
 
     // ---- 6. THE SOLVED WAVE FIELD: dispersion under current (bracket+bisect selects

@@ -31,6 +31,8 @@
 // ================================================================================================
 #pragma once
 
+#include "core/Planet.h"
+
 #include "core/Common.h"
 
 namespace ga {
@@ -102,7 +104,7 @@ struct Medium {
     }
 };
 
-// Standard gravity. One place, so a spec cannot disagree with a gate about it.
-inline constexpr double kG = 9.80665;
+// Gravity is the planet's (core/Planet.h PlanetG: GM / R^2), one place, so a spec cannot disagree
+// with a gate about it -- and a hull on Mars weighs what it weighs there.
 
 }  // namespace ga

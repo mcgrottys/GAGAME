@@ -325,7 +325,10 @@ public:
         float jxx = 0.0f, jxz = 0.0f, jzz = 0.0f;
         float a[kMaxComp] = {}, k[kMaxComp] = {}, phase[kMaxComp] = {};
     };
-    Probe ProbeAt(double wx, double wz, double simUnix) const;
+    // depthM: the water's depth at the point, for the depth's orbit (the lateral term coth(kh) per
+    // component, the crest law of 2026-10-19); <= 0 reads the deep-water orbit (the instruments).
+    // chopM: the scene's chop (the kernel's gWaveB.z), for the throw's bound alone -- dx/dz stay chop 1.
+    Probe ProbeAt(double wx, double wz, double simUnix, double depthM = 0.0, double chopM = 1.0) const;
 
     std::string stats;   // provenance line for the title bar / report
 
@@ -350,7 +353,13 @@ private:
     // between them in kBlendSteps steps; the two real solves are held here (with their phase), and
     // a blend is made on a worker and never cached.
     static constexpr int kBlendSteps = 8;            // 0.25 m / 8 = 3.1 cm of tide a step
-    static constexpr size_t kHeldMax = 3;            // real solves kept in memory (577 MB each)
+    // THE HELD SOLVES' BUDGET (2026-10-20): a byte budget, not a count. The count was set where a
+    // solve was 577 MB (the Merrimack's 1920 x 1152 window); a window of 6.1 M cells (Mavericks
+    // reaching Half Moon Bay's beach) made each about 1.6 GB and a re-solve ran a session out of
+    // memory. The newest is always held; older ones go while the held bytes pass the budget.
+    static constexpr size_t kHeldMax = 3;
+    static constexpr size_t kHeldBytes = size_t(1536) << 20;
+    static size_t SolvedBytes(const Solved& s) { return s.atlas.size() + s.phi.size() * sizeof(float); }
     std::shared_ptr<const Solved> Held(uint64_t key, bool needPhi) const;
     void Hold(const std::shared_ptr<const Solved>& s);
     // A real solve of `key` at `levelAt`, from the cache (with its phase) or solved.

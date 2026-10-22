@@ -109,6 +109,47 @@ public:
         m_estGeo[3] = latSpan;
     }
     // M7: per-frame wave-bank binding (SRVs + ring origins).
+    // THE COLUMN PLANE (the rolling-wave work, 2026-10-18): the first eye's bank's Eulerian
+    // columns (no drawing reads them since the sheet is drawn whole, 2026-10-20). 0xFFFFFFFF = none.
+    // THE SEA PAST THE RINGS (Globe.hlsl FarSeaScale): the Hs the cascades were synthesised for and
+    // whether a declared storm stands (sim/WaveScale.h), so the pixel's bands carry the grid's sea.
+    void SetFarSea(double hsRef, bool storm) {
+        m_farHsRef = hsRef;
+        m_farStorm = storm;
+    }
+    void SetWaterSpray(uint32_t srv, uint32_t n) {
+        m_spraySrv = srv;
+        m_sprayN = n;
+    }
+    // ...and the column ladder's rings under ring 0: n of them, each its SRV, its texels and its
+    // tiles a side (WaterBankLayer.h ColumnRingSrv / ColumnRingTexels / ColumnRingTiles).
+    void SetWaterColumn(uint32_t srv, float scale, float bias, uint32_t ringsUnder = 0,
+                        const uint32_t* ringSrv = nullptr, const uint32_t* ringTexels = nullptr,
+                        const uint32_t* ringTiles = nullptr) {
+        m_colSrv = srv;
+        m_colScale = scale;
+        m_colBias = bias;
+        m_colRings = ringsUnder > 3 ? 3 : ringsUnder;
+        for (uint32_t k = 0; k < 3; ++k) {
+            m_colRingSrv[k] = k < m_colRings ? ringSrv[k] : 0xFFFFFFFFu;
+            m_colRingTexels[k] = k < m_colRings ? ringTexels[k] : 0u;
+            m_colRingTiles[k] = k < m_colRings ? ringTiles[k] : 0u;
+        }
+    }
+    // THE SEA'S FOLDS (2026-10-20, WaterBankLayer.h): the distance field the vertex morphs on, and
+    // for the walk the blocks a fold stood over (bx | bz << 8 of a 64 x 64 grid of blockM about ring
+    // 0's origin, in the rings' chart, whose east and north are given in the planet frame), and how
+    // many levels under the mesh's own depth a fold may refine (the column ladder's rings under).
+    void SetWaterFolds(uint32_t distSrv, const std::vector<uint16_t>* cells, double orgX, double orgZ,
+                       double blockM, const double east[3], const double north[3], uint32_t levelsUnder) {
+        m_foldDistSrv = distSrv;
+        m_foldCells = cells;
+        m_foldOrg[0] = orgX;
+        m_foldOrg[1] = orgZ;
+        m_foldB = blockM;
+        for (int i = 0; i < 3; ++i) { m_foldE[i] = east[i]; m_foldN[i] = north[i]; }
+        m_foldUnder = levelsUnder;
+    }
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
                       const float bandK[3], const float bandRms[3], const float bandFold[3],
@@ -178,6 +219,11 @@ public:
         // the bank actually reaches -- see WalkNode.
         float waveGrainM = 0.0f;
         int waveMaxDepth = kMaxDepth;
+        // THE SEA'S FOLDS (SetWaterFolds), copied at capture (the walk may run on a worker while the
+        // bank's readback rewrites its own list): empty = none; foldMaxDepth the deepest a fold refines.
+        std::vector<uint16_t> foldCells;
+        double foldOrg[2] = {}, foldB = 0.0, foldE[3] = {}, foldN[3] = {};
+        int foldMaxDepth = 0;
         float pixAng = 1.0e-3f;     // one pixel's angle: the relief-mip selector
         bool wants = false;         // a residency manager and at least one cube tenant
         int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1, bldT = -1;
@@ -678,6 +724,13 @@ private:
         float bankChart[16];
         float bankBChart[16];
         uint32_t keepU[4];    // THE KEPT FRAME (Keep): classes' UAV slot, kept frame, keep on, spare
+        // THE COLUMN PLANE (gColU / gColA; WaterBankLayer::ColumnSrv): its SRV, on; the fixed
+        // point's scale and bias. Appended at the END on both sides (priors 22).
+        uint32_t colU[4];
+        float colA[4];
+        uint32_t colR[12];   // the column ladder's rings under: SRV, texels, tiles, on
+        uint32_t sprayU[4];   // THE SPRAY (gSprayU): the droplets' SRV, the ring's size, on
+        float farSea[4];      // THE SEA PAST THE RINGS (gFarSea): 1 / hsRef, storm
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -789,6 +842,7 @@ public:
     // M9bk probe: leaves sitting past their own morph band (k == 1: the odd vertices are
     // snapped onto the even ones, so the level renders at HALF the density the walk paid for).
     mutable uint64_t walkMorphFull = 0, walkMorphPart = 0;
+    mutable uint64_t walkFoldLeaves = 0;   // leaves under the mesh's own depth: the sea's folds' (SplitAt)
     // M13 step 0 (--water-tiles): WHAT WOULD THE WATER COST ON THE PLANET'S OWN LATTICE? The
     // counter answers it before a line of the kernel moves: under the plan's rule each water leaf
     // reads the cube-quadtree tile at its level - 2 (one texel per cell) and the one at level - 3
@@ -806,6 +860,7 @@ public:
         leafStats = LeafStats{};
         walkMeshNs = 0;
         walkMorphFull = walkMorphPart = 0;
+        walkFoldLeaves = 0;
         if (waterTileCount) {
             waterTiles.clear();
             for (uint32_t& c : waterTilesByLevel) c = 0;
@@ -867,6 +922,19 @@ private:
     const SurfaceFrame* m_surface = nullptr;
     double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    uint32_t m_colSrv = 0xFFFFFFFFu;   // the column plane (SetWaterColumn)
+    uint32_t m_colRings = 0;                                       // ...and its ladder's rings under ring 0
+    uint32_t m_colRingSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    uint32_t m_colRingTexels[3] = {0, 0, 0}, m_colRingTiles[3] = {0, 0, 0};
+    uint32_t m_foldDistSrv = 0xFFFFFFFFu;   // SetWaterFolds
+    double m_farHsRef = 0.0;                // SetFarSea (0: no reference, scale 1)
+    bool m_farStorm = false;
+    const std::vector<uint16_t>* m_foldCells = nullptr;
+    double m_foldOrg[2] = {}, m_foldB = 0.0, m_foldE[3] = {}, m_foldN[3] = {};
+    uint32_t m_foldUnder = 0;
+    uint32_t m_spraySrv = 0xFFFFFFFFu, m_sprayN = 0;   // the droplets (SetWaterSpray)
+    hal::Pso m_sprayPso;
+    float m_colScale = 1000.0f, m_colBias = 64.0f;
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};
     float m_bankK[3] = {0.03f, 0.15f, 1.0f};

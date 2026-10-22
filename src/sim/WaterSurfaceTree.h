@@ -190,12 +190,24 @@ private:
         int nCh = 0;
         WaveChart::Chart ch[WaveChart::kMax];
         double norm = 1.0;
+        // THE SHORE STOP'S PROFILE (2026-10-19 night): the dry weight along the sea's travel through
+        // this point, 8 stations each way, read HERE -- the memoised part, on this thread -- so
+        // Finish (the pure part, across the pool) never touches the bed tree: it reads the bed from
+        // a worker and the page memo's map is not a thing eight threads may insert into (the probe
+        // crashed in HeightPage::Texel under AtMany's ParallelFor, and hung an hour the time before).
+        // Station i stands at i * profStep metres along (profDirX, profDirZ); dryProf[8] is the point.
+        double dryProf[17] = {};
+        double profStep = 1.0, profDirX = 1.0, profDirZ = 0.0;
     };
     void Prepare(double wx, double wz, double simUnix, Prep& p) const;
     SurfaceSample Finish(const Prep& p, double wx, double wz, double simUnix, bool displaced) const;
     // The kernel's cascade loop's gains, once for At and BandGains.
+    // brkOut: the breaking factor the gains were scaled by (the crest law reads it back).
+    // ...rmsRawOut / kEffOut: the raw envelope rms (the gains before the limiter) and the sea's
+    // energy wavenumber, the lateral bound's inputs (WaterBank.hlsl, after the cascade loop).
     void BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
-                 double gain[OceanCpu::kCascades]) const;
+                 double gain[OceanCpu::kCascades], double* brkOut = nullptr,
+                 double* rmsRawOut = nullptr, double* kEffOut = nullptr) const;
 
     const WeatherManager* m_wx = nullptr;
     const WaveField* m_wave = nullptr;

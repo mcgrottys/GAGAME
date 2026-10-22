@@ -14,8 +14,6 @@
 //  Kernels are list-driven: Dispatch(tileW/16, tileH/16, listCount); id.xy spans one tile,
 //  id.z indexes gTileList.
 // ================================================================================================
-#include "Jet.hlsli"
-
 #include "WindowRows.hlsli"
 
 cbuffer ChurnCb : register(b0) {
@@ -23,7 +21,7 @@ cbuffer ChurnCb : register(b0) {
     uint  gTilesX, gTileW, gTileH, gListCount;
     float gDt, gTau, gPad0, gPad1;
     float4 gMiscC;   // x = chop-band WAVENUMBER (rad/m; M5c -- was deep phase speed),
-                     // y = patchL2, z = advWrapT, w unused
+                     // y = patchL2, z = advWrapT, w = the planet's gravity (core/Planet.h)
     float4 gWaveD;   // xy = peak propagation dir, z = deriv texture valid, w = source gain
     float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw unused (C3b: no jet to blend)
     float4 gWindow;  // M9az: x, y = world tile index of the window's origin; z = atlas tiles in y in the tenant's array
@@ -37,6 +35,8 @@ cbuffer ChurnCb : register(b0) {
     float4 gTanU;
     float4 gTanN;
 };
+#define GA_PLANET_G (gMiscC.w)
+#include "Jet.hlsli"
 
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"

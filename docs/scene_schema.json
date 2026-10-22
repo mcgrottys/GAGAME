@@ -162,7 +162,9 @@
     ] },
     { "type": "water.bank", "keys": [
       { "key": "flatBed", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "replace the bed with a flat floor (--flat-bed)" },
-      { "key": "flatBedNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m NAVD88", "default": -30, "reload": "restart", "doc": "the floor's height" }
+      { "key": "flatBedNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m NAVD88", "default": -30, "reload": "restart", "doc": "the floor's height" },
+      { "key": "column", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the column plane: the sheet's labels scattered into Eulerian columns, a reader of an overturning crest (WaterBank.hlsl CsBankScatter; the crest is drawn by the sheet itself)" },
+      { "key": "columnTexel", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 0.3, "reload": "restart", "doc": "the finest texel the column ladder reaches: rings under ring 0 halve its 1.2 m until they reach it (0.3 = two rings), each resident only where the ring above witnessed a fold" }
     ] },
     { "type": "water.wavefield", "keys": [
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "the solved wave field, blended inside its feathered window" },
@@ -347,6 +349,7 @@
     { "type": "rails", "keys": [
       { "key": "active", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "none", "names": ["none", "classic", "zoom", "flood", "jetty", "droste", "droste-out"], "reload": "restart", "doc": "the rail flown (--rail, --rail-zoom, --rail-flood, --rail-jetty, --rail-droste[-out])" },
       { "key": "keys", "type": "list", "field": "none", "element": "rails.key", "named": false, "reload": "hot", "doc": "an authored keyed flight, inline (the shipped rails are scenes/rails/<active>.json)" },
+      { "key": "file", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a rail file of the scene's own (scenes/rails/*.json's shape), flown instead of the named one when capture.railDir is set (2026-10-19: scenes/rails/mavericks_lineup.json)" },
       { "key": "droste", "type": "object", "field": "none", "schema": "rails.droste", "reload": "hot", "doc": "the dive" }
     ] },
     { "type": "rails.key", "keys": [

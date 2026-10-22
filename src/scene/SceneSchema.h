@@ -191,6 +191,8 @@ struct SweProps {
 struct BankProps {
     bool flatBed = false;
     float flatBedNavd = -30.0f;
+    bool column = true;   // the Eulerian column plane: overturning crests as geometry (WaterBank.hlsl)
+    float columnTexel = 0.3f;   // the finest texel the column ladder reaches (m): rings under ring 0, resident under a fold
 };
 struct WaterSection {
     bool pixelWater = true;
@@ -315,6 +317,7 @@ struct DrosteRail {
 };
 struct RailsSection {
     int active = 0;                   // none | classic | zoom | flood | jetty | droste | droste-out
+    std::string file;                 // a rail file of the scene's own, flown instead of the named one
     DrosteRail droste;                // keys: List(RailKey), unnamed
 };
 // A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): one file, a folder and a
