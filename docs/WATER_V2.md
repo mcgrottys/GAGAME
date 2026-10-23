@@ -395,7 +395,7 @@ file. Mark's d3 visualizer (link to come) is the reference for the band mapping 
 5. ~~**The waterline.**~~ Answered (2026-10-23, Mark: "wetness should be based off the solved water there
    not just the tide"): the shore reads the bank's level at every vertex and pixel (dbd25c0). §12 takes the
    next step: wet is the column holding water, with no level compared at all.
-6. **The water as columns (§12).** Its four questions are in §12.8.
+6. ~~**The water as columns (§12).**~~ Its four questions answered 2026-10-23 (§12.9).
 
 ## 12. The water as columns
 
@@ -475,10 +475,24 @@ and dry as the flow comes and goes.
 **State per column:** the surface `η = b + h` (absolute, NAVD88) and the signed face fluxes. These are
 today's virtual-pipe faces, kept: they are the momentum on the faces.
 
+**The scheme is a hybrid (Mark: "why not both"), and the hybrid has a name.** Stelling and Duinmeijer
+(2003) keep the staggered faces we already have and make them shock-capturing. In a flow expansion they
+approximate the momentum advection to conserve momentum, which is what a Godunov scheme does at a bore,
+a hydraulic jump or a front running onto dry land. In a contraction they conserve the energy head
+(Bernoulli). The face depth is taken upwind. The two approximations converge to the same solution where
+the flow is smooth, so it is one law.
+
+Today's pipes have no advection term at all (a face accelerates down the surface slope and is damped).
+Run-up and bores are exactly where that is missing, so the term is the hybrid's whole cost. GeoClaw's kind
+stays in the plan as the instrument: an HLL face flux on the same faces, run side by side on the dam break
+and Monai (§12.5). If the staggered hybrid misses there, the HLL flux joins it at the fronts, blended by a
+continuous front weight, not switched.
+
 * **Mass:** `∂h/∂t + ∇·q = 0`. Today's `CsSweHeight` without the prism debt.
-* **Momentum,** per unit width: `∂(h u)/∂t = −g h_f ∇η − C_d |u| u + F_w/ρ`, where `h_f` is the face
-  depth and `F_w` the waves' force per area (below); a face's flux is this times its length. That is
-  today's `FaceUpdate` plus the one new term.
+* **Momentum,** per unit width: `∂(h u)/∂t + ∇·(h u ⊗ u) = −g h_f ∇η − C_d |u| u + F_w/ρ`, where
+  `h_f` is the face depth and `F_w` the waves' force per area (below); a face's flux is this times its
+  length. That is today's `FaceUpdate` plus two terms: the advection, discretised as above, and the
+  waves' force.
 * **Wet is `h > ε`,** one tolerance, the solver's own (1 cm; GeoClaw's "dry cells").
 * **Positivity:** no face ships more than its donor holds. Today's quarter-volume clamp (`Swe.hlsl:227`)
   is the "limit the outgoing fluxes of draining cells" of Bollermann, Chen, Kurganov and Noelle (2013).
@@ -487,14 +501,35 @@ today's virtual-pipe faces, kept: they are the momentum on the faces.
 * **The tide enters only through the open sea,** as the rivers already do: Flather faces on the ocean
   sides, `u_b = u_ext + √(g/h)(η − η_ext)`, with `η_ext` the manager's Level at the face. That Level is the
   tide's phasors (stage 2a), plus the Packet's tsunami (stage 5), plus the setup of a sea no solver holds.
-  No moving plane and no debt; the prism arrives because the boundary rises.
+  No moving plane and no debt; the prism arrives because the boundary rises. The open sea stops being a
+  sponge: a sponge would eat a tsunami before it arrived.
+* **The land soaks (Mark: "water gets sponged up by dry cells but still spreads out and goes down rivers;
+  eventually soil saturation").** The sponge moves from the open sea to the ground, where it belongs. A
+  land column holds a second store under its bed: its soil's water. Water standing on it infiltrates at a
+  rate that falls as the soil fills, by the Green–Ampt law that GPU flood models pair with the shallow-water
+  equations (Buttinger-Kreuzhuber et al. 2022; Hou et al. 2021). What the soil does not take keeps flowing,
+  over the land and down the river channels the bed already carries, and out at the river faces. For now
+  the soil store is one stated depth and rate. Later it is the soil's own measurements: saturated
+  conductivity and water contents at 250 m from SoilGrids2 (HiHydroSoil v2, or CSIRO's six-layer product);
+  one global dataset per measurement, never per place. Then saturation is the soil column's state: it
+  drains, and a second surge runs off ground the first one wet.
 * **The waves push.** `F_w = −∇·S`, with `S` the radiation stress of the sea in the column:
   `S_xx = E(n(1 + cos²θ) − ½)`, `S_yy = E(n(1 + sin²θ) − ½)`, `S_xy = E n sinθ cosθ`, where
   `E = ρ g H_rms²/8` and `n = c_g/c` (Longuet-Higgins and Stewart 1964). In the surf zone this is the
   breaking dissipation `D` over the phase speed along the travel, `F ≈ D k̂/c`; XBeach's longshore
-  forcing, `F_y = D_r sinθ / c`, is that form. The sea comes from the solved field where its window holds
-  it (each component's `a·L`, `k` and direction), and from the eye's spectrum through the bank's own
-  breaking law elsewhere. That is one law, read from the two sources the bank already composes.
+  forcing, `F_y = D_r sinθ / c`, is that form.
+* **The wave solve publishes the force (Mark asked which fits the design and the boat).** The deciding
+  fact: the bank's rings follow the camera. A solver that read its force from them would put a setup under
+  the boat that changed with where the eye is, and with two eyes (the minimap) it would have two answers.
+  The physics must not know where anyone is looking. The wave solve's window is fixed and its products
+  are cached by content identity, so it publishes `F_w` as two planes per bucket, beside its others: a
+  STATIC producer (§2.4) that every reader takes alike.
+  * C4 grows the wave solve with the flow: a second, nested window at the solver's grain over the
+    solver's domain, as XBeach-type models pair a wave model with the flow it drives.
+  * Where no wave solve covers, the solver computes the force itself from the global GFS-Wave grid's sea
+    at the cell (eye-independent) through the bank's breaking law at the cell's own depth.
+  * The boat reads the setup through the solver's level, which it already reads (`SolverRefine`): drawn
+    and felt see one setup, wherever the eyes are.
 
 Setup, a bar going awash, overwash and run-up then come out of the solver. No setup law of our own is
 written. The magnitude to expect: at a planar shore the setup is about `(5γ/16) H_b`, and field data give
@@ -534,31 +569,49 @@ resident columns. The ±6 m clamp goes: `h ≥ 0` is the only bound, and positiv
 | `shaders/WaterBank.hlsl` | the level read becomes the column (`Δh` above); the dry weight on `h`; `SolverSurfaceDev` (1ee0e89) retires, since there is no debt to read around |
 | `shaders/Compose.hlsli`, `GlobeMesh.hlsl`, `Globe.hlsl` | the classifier's height witness becomes wet by `h` (`VsOut.wl` becomes the column's water) |
 | `src/sim/WaterManager.cpp`, `WaterSurfaceTree.cpp` | the hull reads `b + h` and wet by `h`; `Reconstruct` becomes the column's surface |
-| `src/sim/WaveField.cpp`, the bank | the sea the force reads: per-component `a·L`, `k` and direction in the window; the eye's spectrum through `BreakFactor` elsewhere |
+| `src/sim/WaveField.cpp` | publishes `F_w = −∇·S` as two planes per bucket from its components (`a·L`, `k`, direction); C4's nested window at the solver's grain |
+| `shaders/Swe.hlsl` (again) | the Stelling–Duinmeijer advection on the faces; the land's soil store and its Green–Ampt infiltration; the force read from the published planes, or from the GFS-Wave grid's sea at the cell where none covers |
 
 ### 12.5 Steps, each with its gate
 
 | step | what | gate |
 |---|---|---|
-| **C1** | The solver holds columns: the absolute surface, no plane, no debt; the tide at Flather ocean faces from the manager's Level; wet is `h > 1 cm` | the levels at the three stations inside the window (Plum Island at the entrance, Newburyport, Salisbury Point: their official predictions) over a tide cycle, rms and lag no worse than today's; a lake at rest over the real bed stays flat to 1 mm for an hour; volume conserved to 10⁻⁵ of the prism |
-| **C2** | Residency follows the water; the +1.2 m threshold goes | a scripted surge (+2 m at the faces) floods the marsh platforms and recedes, with no tile left resident and dry past its hysteresis; the flooded area against a flood fill of the bed under the same level (`FloodWindow`, `SweSolver.cpp:1164`), within one ring of cells |
+| **C1** | The solver holds columns: the absolute surface, no plane, no debt; the tide at Flather ocean faces from the manager's Level; wet is `h > 1 cm`; the Stelling–Duinmeijer advection | §12.6's judges, each for what it can see: the levels at Plum Island, Newburyport and Salisbury Point over a tide cycle, rms and lag no worse than today's; the currents at the entrance (ACT0816) and Newburyport (ACT0821), peak speeds and slack times; a lake at rest flat to 1 mm for an hour; volume conserved to 10⁻⁵ of the prism; the dam break against Ritter's solution |
+| **C2** | Residency follows the water; the +1.2 m threshold goes; the land soaks (the soil store, Green–Ampt) | a scripted surge (+2 m at the faces) floods the marsh platforms and recedes, with no tile left resident and dry past its hysteresis; the flooded area against a flood fill of the bed under the same level (`FloodWindow`, `SweSolver.cpp:1164`), within one ring of cells; the volume ledger closes (in at the faces = in the columns + in the soil + out at the faces) |
 | **C3** | The drawn water and the hull read columns: the bank's `Δh`, the classifier wet by `h`, `TreeWater` the same | `--twin-surface`'s LEVEL rows unchanged; frozen-clock stills at the entrance where only shore texels change |
-| **C4** | The waves push: the radiation-stress force from the solved field and the eye's sea | the setup on a planar test beach against `(5γ/16) H_b` within 15 %; the entrance bar awash under the 2 m sea (the islands gone); no change on a calm day (`H_s → 0`) |
-| **C5** | Run-up: the Monai valley benchmark (NTHMP BP7, the 1:400 tank) as a scene, then the asteroid through stages 5–6 | the maximum run-up in the valley within 10 % (NTHMP's standard for this test) |
+| **C4** | The waves push: the wave solve publishes the force, a nested window covers the solver's domain, and the GFS-Wave grid stands in where none does | the setup on a planar test beach against `(5γ/16) H_b` within 15 %; the entrance bar awash under the 2 m sea (the islands gone); no change on a calm day (`H_s → 0`); the boat's level and the drawn level agree under two eyes (`--twin-surface` with the minimap on) |
+| **C5** | Run-up: Carrier–Greenspan on a plane beach (analytic), then the Monai valley benchmark (NTHMP BP7, the 1:400 tank) as a scene, then the asteroid through stages 5–6 | the run-up against Carrier–Greenspan; Monai's maximum run-up in the valley within 10 % (NTHMP's standard for this test); the HLL instrument on the same faces as a second opinion |
 
 C1 changes the solver's state, so today's spin-up and the stations are its gate. C3 is what you will
 see at the bar. C4 is what makes the bar right.
 
-### 12.6 Cost (estimates, to be measured)
+### 12.6 The judges (Mark: "can't we get a few to trust? ... be careful with the word 'only'")
+
+No one of them is the truth. Each sees some failures and is blind to others, so each is named with its
+blind spot. A disagreement between two of them is a finding to read, not a verdict.
+
+| judge | what it sees | what it cannot see |
+|---|---|---|
+| **The stations' harmonic predictions** (Plum Island 8440452 at the entrance, Newburyport 8440466, Salisbury Point 8440273; `data/composite/world/tides`) | the astronomical tide's level and phase, place by place | surge, a river in flood, anything not astronomical: a prediction is a model too |
+| **NOAA's observed water levels** (CO-OPS 6-minute verified data where a station observes, Boston 8443970 among them, on NAVD) | the real water, surge and river included | places without a gauge; verified data lag about a month; fetching them is a new network source, asked of Mark first |
+| **The current predictions** (ACT0816 Merrimack River entrance, ACT0821 Newburyport, ACT0826 Plum Island Sound entrance; already loaded) | the flow: peak flood and ebb speeds, slack times | the level; a single point of a section |
+| **The manager's Level at the open faces** (the atlas: EOT20 and the stations) | that the boundary is fed what every other reader composes | anything inside: a consistency check, not truth |
+| **Analytic solutions** (a lake at rest, exact volume accounting, Ritter's dam break, the planar-beach setup, Carrier–Greenspan run-up) | the scheme itself, exactly | real beds and real seas |
+| **The lab** (NTHMP's Monai valley, BP7) | run-up over complex ground, measured | our place |
+
+### 12.7 Cost (estimates, to be measured)
 
 * **The window:** 1788 × 1174 cells (2.1 M), a step of about 0.25 s, up to 16 substeps a frame.
-* **The force:** a handful of loads and multiply-adds a face; its sea is sampled from what the bank
-  already holds.
+* **The force:** two loads from the published planes and a few multiply-adds a face. The planes are made
+  once per bucket on the CPU, beside the wave solve's others: about 13 MB a bucket at today's 2 m window,
+  and about 17 MB for the nested window over the solver's 2.1 M cells.
+* **The advection (Stelling–Duinmeijer):** an upwind momentum difference a face, a handful of loads.
+* **The soil:** one more value a land column (its water) and one rate a step.
 * **Residency:** one reduction a batch, over the wet set's edge tiles.
 * **The step:** a reduction, instead of a constant.
 * **Expected net:** about today's cost. More resident tiles where water spreads, fewer where marsh dries.
 
-### 12.7 What it does not change
+### 12.8 What it does not change
 
 * the tide as phasors (stage 2a);
 * the term loop's deferral (stage 2), though C1 makes the Level the solver's boundary, which is that
@@ -567,20 +620,22 @@ see at the bar. C4 is what makes the bar right.
 * the column plane's drawing;
 * the residency of the tile tree.
 
-### 12.8 Questions for Mark
+### 12.9 Mark's answers (2026-10-23)
 
-1. **The scheme.** Keep the virtual-pipe faces with the column state (the smallest step; its physics is
-   measured), or move to a Godunov (`h`, `hu`, `hv`) scheme with an HLL/HLLC solver, as GeoClaw and
-   Tsunami-HySEA use (sharper bores and run-up, a larger change)? Recommended: the pipes for C1–C4; revisit
-   at C5 if Monai misses.
-2. **The ocean side.** Flather faces (they admit an arrival and radiate the outgoing) or a sponge that
-   relaxes to the stateless Level (simpler; it partly reflects)? Recommended: Flather, the rivers' law
-   already in the solver.
-3. **The wave force's source.** The solver reads the sea itself from the planes the bank holds
-   (recommended: no new plane), or the wave solve publishes force planes per bucket (precomputed; about
-   13 MB a bucket at the window's 2 m)?
-4. **The re-baseline.** C1 moves the inlet's levels by whatever today's plane formulation gets wrong (the
-   debt, the clamp). OK to take the stations as the only judge?
+1. **The scheme:** "Why not both or a hybrid?" Yes: the staggered faces made shock-capturing by
+   Stelling–Duinmeijer, with an HLL face flux as the instrument beside it; a blend at the fronts only if
+   Monai asks for it (§12.3).
+2. **The ocean side:** "for now we should have water get sponged up by dry cells but still spread out and
+   go down rivers. Eventually I'll want soil saturation." Read as: the sponge belongs to the ground, not the
+   sea. The land soaks (the soil store, Green–Ampt), the water spreads and drains down the rivers, and the
+   soil's saturation becomes its state later, from the soil's own measurements. The open sea gets Flather
+   faces, because a sponge there would eat the tsunami (§12.3). *If the sea's side should stay a sponge for
+   now too, that is one line to change back.*
+3. **The force's source:** "which do you think fits our design best? I would want the one that works best
+   with my boat." The wave solve publishes it, so the physics never depends on where the eye is: one setup
+   for the drawn sea, the solver and the boat (§12.3).
+4. **The judges:** "Can't we get a few to trust? ... be careful with the word 'only'." Six, each with its
+   blind spot (§12.6). None alone.
 
 ## Sources
 
@@ -623,3 +678,14 @@ see at the bar. C4 is what makes the bar right.
   - Tsunami-HySEA: [an operational GPU model for tsunami early warning](https://riuma.uma.es/entities/publication/0073a3e0-2ceb-4ef0-ab32-7b7be570e73f);
     NTHMP [benchmark problems](https://www.weather.gov/media/nthmp/MMS/Benchmarking/TsunamiInundationBenchmarkProblemsSummary.pdf)
     (BP7, Monai valley: run-up within 10 %; BP9, Okushiri).
+  - Stelling & Duinmeijer, [A staggered conservative scheme for every Froude number in rapidly varied shallow
+    water flows](https://cir.nii.ac.jp/crid/1362262945010575872), Int. J. Numer. Meth. Fluids 43, 2003
+    (doi 10.1002/fld.537); Pudjaprasetya & Magdalena, [momentum conservative schemes for shallow water flows](https://global-sci.com/article/82799/momentum-conservative-schemes-for-shallow-water-flows), 2014.
+  - Infiltration with shallow-water flood models on GPUs: Buttinger-Kreuzhuber et al., [Environmental Modelling &
+    Software 2022](https://repositum.tuwien.at/handle/20.500.12708/101838?mode=full) (full SWE, Green–Ampt, ~1000x on the GPU);
+    Hou et al. 2021, [Water Policy](https://iwa.silverchair.com/wp/article-pdf/23/4/1059/924697/023041059.pdf);
+    the Sanders group, [surface flow with a groundwater store](https://lboro.ac.uk/departments/abce/unesco-chair/events/webinar-series/2026/11-march-sanders).
+  - Soil hydraulic properties at 250 m: FutureWater, [HiHydroSoil v2.0](https://www.futurewater.eu/2020/10/futurewater-releases-new-hihydrosoil-dataset-global-maps-of-soil-hydraulic-properties-at-250m-resolution/);
+    CSIRO, [Global 250m soil hydraulic properties](https://researchdata.edu.au/global-250m-soil-hydraulic-properties/3378855).
+  - NOAA CO-OPS: [API for data retrieval](https://tidesandcurrents.noaa.gov/api/) (`water_level`, 6-minute,
+    preliminary or verified); [verified 6-minute data](https://catalog.data.gov/dataset/nos-co-ops-water-level-data-verified-6-minute).
