@@ -1241,6 +1241,26 @@ std::optional<int> FrameLoop::Session() {
                  haveCurrents ? &currents : nullptr);
     if (sea) weather.SetSeaSources(sea->Sources());   // PHASE C2: the sea state's sources
     if (swe.Ready()) weather.AddExternalWindow(S.scene.name.c_str(), &swe, oceanAt);   // C3: the scene's name
+    // WATER V2 C4: the sea at the solver's open water, from the global wave grid (GFS-Wave), whose waves
+    // push the solved water (setup): the same sea whichever way any eye looks.
+    if (swe.Ready() && m_A.seaGrid.Ready()) {
+        const SeaGrid* grid = &m_A.seaGrid;
+        swe.SetSeaSource([grid](double la, double lo, double t, double& hs, double& tp, double& fromDeg) {
+            SeaHour sh;
+            if (!grid->HourAt(la, lo, grid->HourIndex(t), sh)) return false;
+            hs = sh.combinedHs;
+            tp = sh.combinedTp;
+            fromDeg = sh.combinedFromDeg;
+            return true;
+        });
+    }
+    // WATER V2 C1: the solver's open sea rides the manager's Level (the tide atlas) along its sides.
+    if (swe.Ready()) {
+        const WaterAtlas* atlas = &waterAtlas;
+        swe.SetLevelSource([atlas](double la, double lo, double t) {
+            return atlas->Ready() ? atlas->MslNavd(la, lo) + atlas->Level(la, lo, t) : NAN;
+        });
+    }
     // The scene's dormant solvers (`solvers`): each asleep until the eye comes, its domain a box of
     // cells on the stack's bed, its open sea held to its own station's tide on NAVD88.
     for (const scene::SolverProps& v : S.solvers) {
@@ -1550,6 +1570,14 @@ std::optional<int> FrameLoop::Session() {
         // A SOLVER'S WINDOW HOLDS ITS WATER: flooded on the bed its kernel reads when the whole-bed
         // wait finished (the trace reads it back), else on the CPU grid, and the line says which.
         swe.LogHoldsWater(gpu, bedWhole);
+        // --tool swe-test: the scheme's analytic judges (WATER_V2 12.5, C1) on the bed the wait made whole.
+        if (S.Tool("swe-test")) {
+            const bool ok = swe.RunSchemeTests(gpu);
+            gpu.WaitIdle();
+            resMgr.Shutdown();
+            gpu.Shutdown();
+            return ok ? 0 : 1;
+        }
         // --swe-cycle N: the validation cycle integrates on the bed a run's spin-up would, so
         // it comes after the wait (before it, the kernel reads a bed no turn has delivered).
         if (S.Tool("swe-cycle")) {
@@ -1597,10 +1625,32 @@ std::optional<int> FrameLoop::Session() {
                     return model.Height(size_t(fi), t) + datumOff;
                 };
             }
+            // THE JUDGES (WATER_V2 12.6): every tide station the domain holds, its own prediction on
+            // NAVD88 by its own link -- CO-OPS's where the station has one, else ResolveDatum's law at
+            // its place (its fitted mean is MSL, and NAVD88 stands NavdAboveMsl over MSL there).
+            std::vector<tools::SweFocusProbe> levelJudges;
+            for (size_t i = 0; i < model.Count(); ++i) {
+                const TideStation& st = model.S(i);
+                if (!swe.Domain().Holds(st.lat, st.lon)) continue;
+                double off = st.mllwMinusNavdM;
+                std::string from = "CO-OPS";
+                if (off <= -900.0) {
+                    double delta = 0.0;
+                    model.NavdAboveMsl(st.lat, st.lon, &delta, &from);
+                    off = -(st.meanMllwM + delta);
+                }
+                Log("[judge] level %s: MLLW - NAVD88 = %+.3f m (%s)", st.id.c_str(), off, from.c_str());
+                tools::SweFocusProbe p;
+                p.id = st.id;
+                p.lat = st.lat;
+                p.lon = st.lon;
+                p.pred = [&model, i, off](double t) { return model.Height(i, t) + off; };
+                levelJudges.push_back(std::move(p));
+            }
             return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents,
                                           tools::SweToolGrid{&swe.Domain(), surface.flat}, swe, resMgr,
                                           simUnix, oceanAt, faceAt, faceQAt, describeWest,
-                                          &focusProbe);
+                                          &focusProbe, &levelJudges);
         }
         if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();

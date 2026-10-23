@@ -1589,7 +1589,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"bathy-map", "building-lod", "dump-water-state", "export", "fidelity-map",
                               "gis-dump", "gis-sweep-test", "height-tree-probe", "fetch-probe", "exposure-ab", "ingest", "paint-ab", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "roads-probe", "sea-verify", "selftest", "swe-cycle",
-                              "swe-uv", "trace",
+                              "swe-test", "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
                               "water-map", "wave-blend-test", "wave-converge", "wave-map", "wave-recheck"}});
             scene::WriteRegistries("docs/registries.json", extra);

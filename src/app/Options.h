@@ -170,6 +170,7 @@ struct Options {
                                       // costs ~1 s at startup)
     double sweCycleH = 0;             // --swe-cycle N: headless validation over N hours -> CSV
     double sweCycleStageM = 0;        // --swe-cycle-stage M: the cycle's told west stage raised by M
+    double sweCycleSurgeM = 0;        // --swe-cycle-surge A: a scripted surge of A m on the open sea (C2's gate)
                                       // metres (an instrument; the told transport is unchanged)
     std::wstring waveMap;             // --wave-map out.png: the solved field on the solver's
                                       // OWN cells, no camera, mesh, fold or light in the way

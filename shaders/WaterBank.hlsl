@@ -402,13 +402,17 @@ float4 WavePageSample(float2 uv, uint plane, out bool prev) {
     return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip) + (0.5f / 255.0f);
 }
 
-// THE SOLVER'S SURFACE IS ITS WET CELLS' (2026-10-23, Mark: "the water dips in like a dimple" over the
-// Merrimack's entrance shoal). The solver books the tide's rise as debt in EVERY cell (Swe.hlsl, the
-// prism term), so a dry cell's stored deviation sinks under its own bed. Nothing in the solver reads it
-// there (SurfaceAt answers the bed), but a plain bilinear read drew the water funnelling down into every
-// dry hump, a cell wide. A dry cell has no opinion here (absence, not a value): the deviation is its wet
-// corners' (the derived plane's w: 5 cm of water, outside the sponge), each by its bilinear weight; only
-// where no corner is wet does the stored value stand -- under the bed, where the shore draws land.
+// THE SOLVER'S SURFACE IS ITS WET COLUMNS' (WATER_V2 12, C1, 2026-10-23; 1ee0e89's law, its debt gone).
+// The solver publishes each column's surface (b + h; a dry column's is its bed) and whether the column
+// holds water (the fibre's w: h > 1 cm). The surface here is the wet corners' by their bilinear
+// weights. Where no corner holds water the solver says NO WATER -- not a level -- and the level stands
+// under the solver's own bed (a dry column publishes its bed) by the bank's dry band (its dry weight,
+// smoothstep(0.05, 0.65, depth), reads zero there; the shore classifier reads land), and never above the
+// frame's waterline: a dune is land under the waterline as surely as under its crest, and a level that
+// climbed the dunes would be interpolated, between a ring's texels and a mesh's vertices, into cliffs of
+// water metres high beside the sea (the twin read 1.7 m at 8 km). A column's water is a statement about
+// the column, never a level for a finer bed to sit under. The solver's bed, not each reader's: the hull
+// and the drawn sea compose one level from the same texels.
 // The twin: SweSolver.cpp Reconstruct.
 float SolverSurfaceDev(float2 texel) {
     const float2 tf = texel - 0.5f;
@@ -424,7 +428,7 @@ float SolverSurfaceDev(float2 texel) {
         sw += w * wet;
         se += w * wet * e;
     }
-    return lerp(raw, se / max(sw, 1e-6f), saturate(sw * 20.0f));
+    return lerp(min(raw - 0.65f, 0.0f), se / max(sw, 1e-6f), saturate(sw * 20.0f));
 }
 
 float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
@@ -626,7 +630,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             min(min(texel.x, gSvO.x - texel.x), min(texel.y, gSvO.y - texel.y));
         const float wDom = smoothstep(0.0f, 1.0f, eCells);
         if (wDom > 0.0f) {
-            const float dEta = SolverSurfaceDev(texel);   // the wet cells' surface (above)
+            const float dEta = SolverSurfaceDev(texel);   // the wet columns' surface (above)
             lvl = lerp(level, gSweB.x + dEta, wDom);
             const float4 s = LoadBilinearClamp(gSlotsB.x, texel, gSweDims.xy);
             if (s.w > 0.5f) cur = s.xy;

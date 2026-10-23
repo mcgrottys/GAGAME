@@ -105,6 +105,12 @@ bool WaterManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
         w.owned->Init(gpu, sc, shaderDir, dom, cfg);
         LogWindowHoldsWater(w.owned->Domain(), cfg, "on activation: on the CPU bed, the stack at the cells");
         w.owned->SetBed(gpu, m_hgtArr, m_hgtRes, m_hgtMips, m_bed);   // PHASE B2: the standing window
+        if (m_atlas) {   // C1: the open sea rides the manager's Level
+            const WaterAtlas* atlas = m_atlas;
+            w.owned->SetLevelSource([atlas](double la, double lo, double t) {
+                return atlas->Ready() ? atlas->MslNavd(la, lo) + atlas->Level(la, lo, t) : NAN;
+            });
+        }
         w.solver = w.owned.get();
         w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, w.faceAt, w.faceQAt);
         w.active = true;
@@ -159,6 +165,7 @@ void WaterManager::SolverRefine(double latDeg, double lonDeg, double unixT,
         return;
     }
     const double atlas = s.levelNavd;
+    // the wet columns' surface; where none holds water, under the solver's bed (SweSolver Reconstruct)
     s.levelNavd = atlas + wDom * (w->oceanAt(unixT) + double(d.dEta) - atlas);
     s.levelSrc = w->levelTag;
     if (d.currentValid) {

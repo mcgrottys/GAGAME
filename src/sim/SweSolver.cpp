@@ -112,6 +112,15 @@ double SweDomain::SpongeAt(int i, int j, double spongeM) const {
     return 1.0 - t * t * (3.0 - 2.0 * t);   // the kernel's 1 - smoothstep(d0 - 700, d0, d)
 }
 
+bool SweDomain::SeaFaceCell(int side, int a) const {
+    const float e = elev[EdgeCell(side, a)];
+    if (e < -9000.0f) return false;
+    for (const FaceCells& f : faces) {
+        if (f.side == side && a >= f.c0 && a <= f.c1 && e < 2.0f) return false;   // the river's
+    }
+    return ((openSides >> side) & 1u) != 0u || e < 0.0f;
+}
+
 std::vector<uint8_t> SweDomain::FaceMask() const {
     std::vector<uint8_t> m(size_t(nx) * ny, 0);
     for (const FaceCells& f : faces) {
@@ -213,8 +222,10 @@ void SweSolver::LogCbFingerprint() {
 void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
                        const BedWindow& w) {
     (void)gpu;
-    m_table.SrvArray(0, heightArr, heightArr ? heightArr->GetDesc().Format : DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
-    m_table.SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
+    for (hal::Table* t : {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1]}) {
+        t->SrvArray(0, heightArr, heightArr ? heightArr->GetDesc().Format : DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
+        t->SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
+    }
     const SweDomain& d = m_dom;
     m_cb.cellX[0] = static_cast<float>((0.5 - 0.5 * double(d.nx)) * d.dx / d.R);
     m_cb.cellX[1] = static_cast<float>(d.dx / d.R);
@@ -320,9 +331,19 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
             return t.empty() ? std::string("none") : t;
         }().c_str());
 
-    // Two grade banks over the bathy grid, padded up to tile multiples internally by the atlas.
-    m_eta.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.eta (dEta from the tide plane)");
+    // The banks over the bathy grid, padded up to tile multiples internally by the atlas. C1: the state
+    // is the water each column holds and the fluxes (two banks, taking turns); the bed is cached a
+    // frame; the published surface is what the readers read.
+    m_h.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.h (the water each column holds)");
+    m_bed.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.bed (the column's bed, a frame)");
+    m_soil.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.soil (the water the column's soil holds)");
+    m_eta.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.eta (the column's surface less the tide plane)");
     m_flux.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.flux (signed face fluxes)");
+    m_velA.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.vel (the faces' velocities, one turn)");
+    m_velB.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.vel (the faces' velocities, the other turn)");
+    m_waveA.Init(gpu, nx, ny, DXGI_FORMAT_R16G16B16A16_FLOAT, L"swe.wave (the sea in the columns, one sweep)");
+    m_waveB.Init(gpu, nx, ny, DXGI_FORMAT_R16G16B16A16_FLOAT, L"swe.wave (the sea in the columns, the other)");
+    m_lim.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.lim (a column's share of its outgoing fluxes)");
     {
         // M9h: grad(flow). The first field here whose residency comes from the ALGEBRA rather
         // than from a physics policy. grad is a grade-1 operator and the flow is grade 1, so
@@ -362,9 +383,64 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         m_velGrad.ActivateSlice(gpu, 0);
     }
 
-    // Static residency: everything that can ever be wet -- bed below max tide + surge + wave
-    // margin. Land and dune tiles stay NULL forever; their reads are the hardware zero.
     const auto& elev = m_dom.elev;
+    // THE SPILL LEVELS (C1): for each cell, the lowest level at which water from the boundary reaches
+    // it -- the least, over the paths from an open side or a river face, of the highest bed along the
+    // path (4-connected, the kernel's faces; a priority flood). The domain's wet area at a level L is
+    // the cells whose spill level is under L: the hypsometry the open sea's prism is reckoned from
+    // (OceanBoundary). A hollow behind a dune is not part of it until the water tops the dune.
+    std::vector<float> spill(size_t(nx) * ny, 3.0e38f);
+    {
+        using Item = std::pair<float, uint32_t>;
+        std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+        const auto seed = [&](size_t i) {
+            if (elev[i] > -9000.0f && elev[i] < spill[i]) {
+                spill[i] = elev[i];
+                open.push({elev[i], uint32_t(i)});
+            }
+        };
+        int seaFaces[4] = {0, 0, 0, 0};
+        for (int side = 0; side < 4; ++side) {
+            const int len = side < 2 ? int(nx) : int(ny);
+            for (int a = 0; a < len; ++a) {
+                if (!m_dom.SeaFaceCell(side, a)) continue;
+                seed(m_dom.EdgeCell(side, a));
+                ++seaFaces[side];
+            }
+        }
+        Log("[swe] %s the sea continues past the edge at %d N, %d S, %d W, %d E cells (the open sides whole; "
+            "elsewhere the cells whose bed lies below mean sea): Flather faces on the Level there",
+            cfg.name, seaFaces[0], seaFaces[1], seaFaces[2], seaFaces[3]);
+        for (const SweDomain::FaceCells& F : m_dom.faces) {
+            for (int a = F.c0; a <= F.c1; ++a) seed(m_dom.EdgeCell(F.side, a));
+        }
+        while (!open.empty()) {
+            const Item top = open.top();
+            open.pop();
+            if (top.first > spill[top.second]) continue;
+            const int c = int(top.second % nx), r = int(top.second / nx);
+            const int nb[4][2] = {{c + 1, r}, {c - 1, r}, {c, r + 1}, {c, r - 1}};
+            for (const auto& q : nb) {
+                if (q[0] < 0 || q[1] < 0 || q[0] >= int(nx) || q[1] >= int(ny)) continue;
+                const size_t j = size_t(q[1]) * nx + size_t(q[0]);
+                if (elev[j] < -9000.0f) continue;
+                const float m = (std::max)(top.first, elev[j]);
+                if (m < spill[j]) {
+                    spill[j] = m;
+                    open.push({m, uint32_t(j)});
+                }
+            }
+        }
+        m_spill.clear();
+        for (const float s : spill) {
+            if (s < 1.0e38f) m_spill.push_back(s);
+        }
+        std::sort(m_spill.begin(), m_spill.end());
+    }
+    // C2: THE FIRST RESIDENCY, before the water says where it is: the tiles holding a cell the boundary's
+    // water reaches at +1.2 m NAVD. From the first batch on the water's own rule decides (UpdateResidency):
+    // a tile stays while a column holds water or water touches its edge, and goes when dry past the
+    // hysteresis -- the marsh platforms, the dunes and the streets join when the water comes.
     auto mapWet = [&](auto& bank) {
         for (uint32_t ty = 0; ty < bank.TilesY(); ++ty) {
             for (uint32_t tx = 0; tx < bank.TilesX(); ++tx) {
@@ -373,13 +449,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                 const uint32_t y1 = (std::min)((ty + 1) * bank.TileH(), ny);
                 for (uint32_t y = ty * bank.TileH(); y < y1 && !wet; ++y) {
                     for (uint32_t x = tx * bank.TileW(); x < x1; ++x) {
-                        const float e = elev[y * nx + x];
-                        // < 1.2 NAVD: subtidal + the flats that actually wet at normal ranges.
-                        // The marsh PLATEAU above stays NULL: its creeks are subgrid at 13.7 m,
-                        // so sheet-flooding those cells fills real storage on a fake clock
-                        // (+80 min aggregate lag in the M6d validation). Rejoins the domain
-                        // when subgrid channel conveyance exists.
-                        if (e > -9000.0f && e < 1.2f) {
+                        if (spill[size_t(y) * nx + x] < 1.2f) {
                             wet = true;
                             break;
                         }
@@ -391,8 +461,38 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         std::vector<uint32_t> fresh;
         bank.CommitMappings(gpu, &fresh);
     };
-    mapWet(m_eta);
-    mapWet(m_flux);
+    // Every other bank covers the state's tiles (their grids differ by format: a 4-byte texel tiles
+    // 128 x 128, an 8-byte one 128 x 64).
+    auto mapCover = [&](auto& bank) {
+        for (uint32_t ty = 0; ty < bank.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < bank.TilesX(); ++tx) {
+                const uint32_t x0 = tx * bank.TileW(), y0 = ty * bank.TileH();
+                const uint32_t x1 = x0 + bank.TileW() - 1, y1 = y0 + bank.TileH() - 1;
+                bool live = false;
+                for (uint32_t hy = y0 / m_h.TileH(); hy <= y1 / m_h.TileH() && hy < m_h.TilesY() && !live; ++hy) {
+                    for (uint32_t hx = x0 / m_h.TileW(); hx <= x1 / m_h.TileW() && hx < m_h.TilesX(); ++hx) {
+                        if (m_h.IsResident(hx, hy)) {
+                            live = true;
+                            break;
+                        }
+                    }
+                }
+                if (live) bank.RequestMap(tx, ty);
+            }
+        }
+        std::vector<uint32_t> fresh;
+        bank.CommitMappings(gpu, &fresh);
+    };
+    mapWet(m_h);
+    mapCover(m_bed);
+    mapCover(m_soil);
+    mapCover(m_eta);
+    mapCover(m_flux);
+    mapCover(m_velA);
+    mapCover(m_velB);
+    mapCover(m_waveA);
+    mapCover(m_waveB);
+    mapCover(m_lim);
 
     // ---- M9h: THE CAYLEY CLOSURE DECIDES THE DERIVED FIELD'S RESIDENCY --------------------
     // The flow is grade 1 wherever the solver simulates it, and NOWHERE else; nabla is grade 1
@@ -457,6 +557,12 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     const float hmax = -deepest + 3.0f;
     m_dt = 0.45f * (std::min)(dx, dyM) / std::sqrt(static_cast<float>(PlanetGWave()) * (std::max)(hmax, 5.0f));
 
+    {
+        Log("[swe] %s spill levels: %zu cells reachable from the boundary; wet at 0 m NAVD %.2f km^2, at +1 m "
+            "%.2f km^2, at +2 m %.2f km^2",
+            cfg.name, m_spill.size(), WetAreaAt(0.0) / 1.0e6, WetAreaAt(1.0) / 1.0e6, WetAreaAt(2.0) / 1.0e6);
+    }
+
     m_cb.nx = nx;
     m_cb.ny = ny;
     m_cb.etaTilesX = m_eta.TilesX();
@@ -465,13 +571,18 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.etaTileH = m_eta.TileH();
     m_cb.fluxTileW = m_flux.TileW();
     m_cb.fluxTileH = m_flux.TileH();
-    m_cb.spongeSides = static_cast<float>(m_dom.openSides);
+    m_cb.openSides = static_cast<float>(m_dom.openSides);
     m_cb.dx = dx;
     m_cb.dy = dyM;
     m_cb.dt = m_dt;
     m_cb.damp = 0.99995f;   // background linear part only; the real friction is quadratic drag
-    m_cb.spongeD0 = cfg.spongeM;          // ramp start from an open side: past the bar, before the open sea
-    m_cb.spongeRate = m_dt / 10.0f;       // full-strength deviations die in ~10 s
+    m_cb.wetEps = 0.01f;    // wet is h > 1 cm: the solver's one tolerance (GeoClaw's dry cells)
+    m_cb.soilRate = 0.0f;
+    m_cb.soil[0] = cfg.soilCapM;      // C2: the land soaks (Swe.hlsl CsSweHeight)
+    m_cb.soil[1] = cfg.soilKs;
+    m_cb.soil[2] = cfg.soilSuctionM;
+    m_cb.soil[3] = cfg.soilCapM > 0.0f ? 1.0f : 0.0f;
+    m_cb.cd = 0.0015f;      // the bed's drag (Swe.hlsl FaceUpdate)
     m_cb.gravity = static_cast<float>(PlanetGWave());   // the planet's (core/Planet.h)
     // M6r: A RIVER FACE IS FLATHER -- its exterior cells pinned to the river-tide data, the face
     // between each and its interior neighbour radiating at the gravity-wave speed (Swe.hlsl). The
@@ -518,17 +629,19 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         d.arraySlices = 1;
         m_uvBank.Init(gpu, d, policy::None());
         m_uvBank.ActivateSlice(gpu, 0);
-        mapWet(m_uvBank);
+        mapCover(m_uvBank);
         m_uvSrv = gpu.CreateSrv(m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
 
     // Root signature: b0 CBV, t0 root SRV (tile list), table [t1 height page, t2 its residency
-    // map (M9ar), u0 eta, u1 flux, u2 uv, u3 mv (M9h: the derived grad(flow) bank)].
+    // map (M9ar), u0 eta, u1 flux, u2 uv, u3 mv (M9h: the derived grad(flow) bank), u6 h, u7 the
+    // fluxes before, u8 bed, u9 soil], t3 root SRV (the live tiles).
     m_rs = hal::RootLayout{}
                .Cbv(0)
                .Srv(0)
-               .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4)})
+               .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4), hal::UavRange(6, 10)})
+               .Srv(3)
                .Build(gpu, "swe");
     m_rs->SetName(L"swe root signature");
 
@@ -539,7 +652,13 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
             "Swe kernel");
         out->SetName(entry);
     };
-    makePso(L"CsSweClearEta", m_clearEta);
+    makePso(L"CsSweReset", m_resetK);
+    makePso(L"CsSweBedFill", m_bedFillK);
+    makePso(L"CsSweTileStats", m_statsK);
+    makePso(L"CsSweLedger", m_ledgerK);
+    makePso(L"CsSweClearTile", m_clearTileK);
+    makePso(L"CsSweWaves", m_wavesK);
+    makePso(L"CsSweLimit", m_limitK);
     makePso(L"CsSweClearFlux", m_clearFlux);
     makePso(L"CsSweUvClear", m_uvClear);
     makePso(L"CsSweFlux", m_fluxK);
@@ -547,19 +666,85 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     makePso(L"CsSweDerive", m_deriveK);
     makePso(L"CsSweVelGrad", m_velGradK);
 
-    m_table = hal::Table::Alloc(gpu, 6, "swe");   // t1, t2 filled by SetHeightPage; u0..u3 here
-    m_table.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT);
-    m_table.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
-    // The bank is an ARRAY now, so its UAV must be an array view pinned to slice 0. A plain
-    // Texture2D view of an array resource is invalid, and the solve would write nowhere.
-    m_table.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);   // M9ax: uv bank
-    m_table.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+    // t1, t2 filled by SetBed; the UAVs here. m_table reads m_velA (u7) and writes m_velB (u10);
+    // m_tableB the other way (the substeps take turns: Record).
+    for (int k = 0; k < 2; ++k) {
+        hal::Table& t = k ? m_tableB : m_table;
+        t = hal::Table::Alloc(gpu, 16, "swe");
+        t.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        // The bank is an ARRAY now, so its UAV must be an array view pinned to slice 0. A plain
+        // Texture2D view of an array resource is invalid, and the solve would write nowhere.
+        t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);   // M9ax: uv bank
+        t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.Uav2D(6, m_h.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(7, (k ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(9, m_soil.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(10, (k ? m_velA : m_velB).Res(), DXGI_FORMAT_R32G32_FLOAT);
+    }
+    // C2: the tile statistics and the ledger.
+    m_statsTex = gpu.CreateTexture2D(m_h.TilesX(), m_h.TilesY(), DXGI_FORMAT_R32G32B32A32_UINT,
+                                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                     L"swe.tilestats (the water, tile by tile)");
+    m_ledgerTex = gpu.CreateTexture2D(1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"swe.ledger (in through the open faces)");
+    for (hal::Table* t : {&m_table, &m_tableB}) {
+        t->Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        t->Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        t->Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);   // the solve reads B
+        t->Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        t->Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT);
+    }
+    // C4: the sweeps' tables -- m_table's views with the two sea banks in turn.
+    for (int k = 0; k < 2; ++k) {
+        hal::Table& t = m_waveTable[k];
+        t = hal::Table::Alloc(gpu, 16, "swe.waves");
+        t.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.Uav2D(6, m_h.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(7, m_velA.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(9, m_soil.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(10, m_velB.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        t.Uav2D(13, (k ? m_waveB : m_waveA).Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        t.Uav2D(14, (k ? m_waveA : m_waveB).Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT);
+    }
+    m_dryFor.assign(size_t(m_h.TilesX()) * m_h.TilesY(), 0.0);
+    // The boundary's faces (the ledger's) and the tiles that hold the boundary's exterior cells (never
+    // released: the boundary's water is pinned there).
+    m_keep.assign(size_t(m_h.TilesX()) * m_h.TilesY(), 0);
+    m_ledgerFaces.assign(1, 0u);
+    for (int side = 0; side < 4; ++side) {
+        const int len = side < 2 ? int(nx) : int(ny);
+        for (int a = 0; a < len; ++a) {
+            const int x = side == 2 ? 0 : side == 3 ? int(nx) - 1 : a;
+            const int y = side == 0 ? 0 : side == 1 ? int(ny) - 1 : a;
+            // each edge cell once (a corner belongs to its row, N or S)
+            if (side < 2 || (y > 0 && y < int(ny) - 1)) m_ledgerFaces.push_back(uint32_t(x) | (uint32_t(y) << 12));
+            bool river = false;
+            for (const SweDomain::FaceCells& F : m_dom.faces) river = river || (F.side == side && a >= F.c0 && a <= F.c1);
+            if (river || m_dom.SeaFaceCell(side, a)) {
+                m_keep[size_t(y / int(m_h.TileH())) * m_h.TilesX() + size_t(x / int(m_h.TileW()))] = 1;
+            }
+        }
+    }
+    m_ledgerFaces[0] = uint32_t(m_ledgerFaces.size() - 1);
+    m_live.assign(size_t(m_h.TilesX()) * m_h.TilesY(), 0u);
+    for (uint32_t ty = 0; ty < m_h.TilesY(); ++ty) {
+        for (uint32_t tx = 0; tx < m_h.TilesX(); ++tx) m_live[size_t(ty) * m_h.TilesX() + tx] = m_h.IsResident(tx, ty) ? 1u : 0u;
+    }
 
-    Log("[swe] grid %ux%u dx %.2f x dy %.2f m  dt %.3f s  eta %u/%u t  flux %u/%u t  "
-        "resident %.1f MB",
-        nx, ny, dx, dyM, m_dt, m_eta.ResidentCount(), m_eta.TilesX() * m_eta.TilesY(),
+    Log("[swe] grid %ux%u dx %.2f x dy %.2f m  dt %.3f s  h %u/%u t  flux %u/%u t  "
+        "resident %.1f MB (h, bed, soil, eta, two fluxes)",
+        nx, ny, dx, dyM, m_dt, m_h.ResidentCount(), m_h.TilesX() * m_h.TilesY(),
         m_flux.ResidentCount(), m_flux.TilesX() * m_flux.TilesY(),
-        (m_eta.ResidentBytes() + m_flux.ResidentBytes()) / 1048576.0);
+        (ResidentBytes() + m_soil.ResidentBytes()) / 1048576.0);
     // The region readback's slot: every request a frame may carry at its largest, eta and current
     // (12 bytes a texel), with room for the copy footprints' row alignment.
     m_readback.Init(gpu, uint64_t(kMaxRegions) * kMaxRegionTexels * kMaxRegionTexels * 16u,
@@ -582,6 +767,11 @@ double SweSolver::DomainWeight(double latDeg, double lonDeg) const {
                                 (std::min)(ty, double(m_cb.ny) - ty));
     const double t = std::clamp(e, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);   // HLSL smoothstep(0, 1, e)
+}
+
+double SweSolver::WetAreaAt(double levelNavd) const {
+    const size_t k = size_t(std::lower_bound(m_spill.begin(), m_spill.end(), float(levelNavd)) - m_spill.begin());
+    return double(k) * m_dom.dx * m_dom.dy;
 }
 
 void SweSolver::RequestRegion(double latDeg, double lonDeg, double radiusM) {
@@ -631,13 +821,18 @@ namespace {
 
 // THE ONE RECONSTRUCTION (WaterBank.hlsl SolverSurfaceDev and LoadBilinearClamp at texel (u Nx, (1 - v) Ny)),
 // over any store: `at(ix, iy, eta, uv4)` answers one grid texel or says it does not hold it.
-// THE SOLVER'S SURFACE IS ITS WET CELLS' (2026-10-23, Mark: "the water dips in like a dimple" over the
-// Merrimack's entrance shoal). The solver books the tide's rise as debt in EVERY cell (Swe.hlsl, the
-// prism term), so a dry cell's stored deviation sinks under its own bed. Nothing in the solver reads it
-// there (SurfaceAt answers the bed), but a plain bilinear read drew the water funnelling down into every
-// dry hump, a cell wide. A dry cell has no opinion here (absence, not a value): the deviation is its wet
-// corners' (the derived plane's w: 5 cm of water, outside the sponge), each by its bilinear weight; only
-// where no corner is wet does the stored value stand -- under the bed, where the shore draws land.
+// THE SOLVER'S SURFACE IS ITS WET COLUMNS' (WATER_V2 12, C1, 2026-10-23; 1ee0e89's law, its debt gone).
+// The solver publishes each column's surface (b + h; a dry column's is its bed) and whether the column
+// holds water (the fibre's w: h > 1 cm). The surface here is the wet corners' by their bilinear
+// weights. Where no corner holds water the solver says NO WATER -- not a level -- and the level stands
+// under the solver's own bed (a dry column publishes its bed) by the bank's dry band (its dry weight,
+// smoothstep(0.05, 0.65, depth), reads zero there; the shore classifier reads land), and never above the
+// frame's waterline: a dune is land under the waterline as surely as under its crest, and a level that
+// climbed the dunes would be interpolated, between a ring's texels and a mesh's vertices, into cliffs of
+// water metres high beside the sea (the twin read 1.7 m at 8 km). A column's water is a statement about
+// the column, never a level for a finer bed to sit under. The solver's bed, not each reader's: the hull
+// and the drawn sea compose one level from the same texels.
+// Here: dEta is that composed level less the tide plane, and `wet` the corners' wet share.
 template <class At>
 bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolver::Deviation& out) {
     const double fx = tx - 0.5, fy = ty - 0.5;
@@ -657,7 +852,9 @@ bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolve
         for (int j = 0; j < 4; ++j) uv[j] += w * double(c[j]);
     }
     const double a = std::clamp(sw * 20.0, 0.0, 1.0);
-    out.dEta = float(eta + (se / (std::max)(sw, 1e-6) - eta) * a);
+    const double dry = (std::min)(eta - 0.65, 0.0);
+    out.dEta = float(dry + (se / (std::max)(sw, 1e-6) - dry) * a);
+    out.wet = float(sw);
     out.u = float(uv[0]);
     out.v = float(uv[1]);
     out.currentValid = uv[3] > 0.5;   // the kernel's `s.w > 0.5`
@@ -770,31 +967,327 @@ void SweSolver::ServeRegions(hal::CommandContext& cmd, Gpu& gpu,
     m_requests.clear();
 }
 
-void SweSolver::RecordReset(hal::CommandContext& cmd, Gpu& gpu) {
-    PixScope scope(cmd.Native(), "swe.reset (state -> the analytic tide plane)");
-    cmd.ComputeRoot(m_rs.Get());
-    LogCbFingerprint();
-    cmd.ComputeConstants(0, m_cb);
-    cmd.ComputeTable(2, m_table.Base());
+void SweSolver::SeaBoundary() {
+    if (!m_testH.empty()) return;   // a scheme test states its own sea
+    for (float& v : m_cb.sea) v = 0.0f;
+    // GAGAME_SWE_NOSEA (an instrument: the A/B of the waves' push, and the calm day's gate)
+    static const bool noSea = std::getenv("GAGAME_SWE_NOSEA") != nullptr;
+    if (!m_seaAt || noSea) return;
+    // the open water: the open sides' middle, else the domain's centre
+    double tx = 0.5 * double(m_cb.nx), ty = 0.5 * double(m_cb.ny);
+    if (m_dom.openSides & 8u) tx = double(m_cb.nx) - 0.5;
+    else if (m_dom.openSides & 4u) tx = 0.5;
+    else if (m_dom.openSides & 1u) ty = 0.5;
+    else if (m_dom.openSides & 2u) ty = double(m_cb.ny) - 0.5;
+    double la = 0.0, lo = 0.0;
+    m_dom.LatLonOf(tx, ty, la, lo);
+    double hs = 0.0, tp = 0.0, fromDeg = 0.0;
+    if (!m_seaAt(la, lo, m_simTime, hs, tp, fromDeg) || !(hs > 0.01) || !(tp > 1.0)) return;
+    const double toR = (fromDeg + 180.0) * 3.14159265358979323846 / 180.0;
+    m_cb.sea[0] = static_cast<float>(hs);
+    m_cb.sea[1] = static_cast<float>(2.0 * 3.14159265358979323846 / tp);
+    m_cb.sea[2] = static_cast<float>(hs * hs / 16.0);
+    m_cb.sea[3] = 1.0f;
+    m_cb.sea2[0] = static_cast<float>(std::sin(toR));    // east
+    m_cb.sea2[1] = static_cast<float>(-std::cos(toR));   // south (texture +y)
+    static double saidHs = -1.0, saidTp = -1.0, saidFrom = -1.0;
+    if (std::abs(hs - saidHs) > 0.01 * hs || std::abs(tp - saidTp) > 0.1 || std::abs(fromDeg - saidFrom) > 2.0) {
+        saidHs = hs;
+        saidTp = tp;
+        saidFrom = fromDeg;
+        Log("[swe] the sea at the open water (%.4f N %.4f E): Hs %.2f m, Tp %.1f s, from %.0f deg -- its waves push "
+            "the solved water", la, lo, hs, tp, fromDeg);
+    }
+}
 
-    const auto& el = m_eta.ResidentList();
-    cmd.ComputeSrvAt(1, gpu.PushConstants(el.data(), el.size() * 4));
-    cmd.Pipeline(m_clearEta.Get());
-    cmd.Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
+void SweSolver::AfterBatch(Gpu& gpu) {
+    if (!m_ready || !m_testH.empty()) return;
+    GpuTexture wrap = m_statsTex;
+    wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> raw = gpu.ReadbackTexture(wrap, &pitch);
+    UpdateResidency(gpu, raw, pitch);
+}
 
-    const auto& fl = m_flux.ResidentList();
-    cmd.ComputeSrvAt(1, gpu.PushConstants(fl.data(), fl.size() * 4));
+void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint32_t pitch) {
+    const uint32_t tX = m_h.TilesX(), tY = m_h.TilesY();
+    const double dtS = (m_statsAt > 0.0) ? (std::max)(m_simTime - m_statsAt, 0.0) : 0.0;
+    m_statsAt = m_simTime;
+    std::vector<uint8_t> want(size_t(tX) * tY, 0);
+    std::vector<float> vol(size_t(tX) * tY, 0.0f);
+    float hMax = 0.0f, uMax = 0.0f;
+    uint32_t wet = 0;
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            if (!m_h.IsResident(tx, ty) || size_t(ty) * pitch + size_t(tx + 1) * 16 > raw.size()) continue;
+            uint32_t v[4];
+            memcpy(v, &raw[size_t(ty) * pitch + size_t(tx) * 16], 16);
+            float hm = 0.0f, um = 0.0f;
+            memcpy(&hm, &v[1], 4);
+            memcpy(&um, &v[2], 4);
+            memcpy(&vol[size_t(ty) * tX + tx], &v[3], 4);
+            if (!(v[0] & 1u)) continue;
+            ++wet;
+            hMax = (std::max)(hMax, hm);
+            uMax = (std::max)(uMax, um);
+            want[size_t(ty) * tX + tx] = 1;
+            // the ring: water on an edge wants the tile across it
+            if ((v[0] & 2u) && ty > 0) want[size_t(ty - 1) * tX + tx] = 1;
+            if ((v[0] & 4u) && ty + 1 < tY) want[size_t(ty + 1) * tX + tx] = 1;
+            if ((v[0] & 8u) && tx > 0) want[size_t(ty) * tX + tx - 1] = 1;
+            if ((v[0] & 16u) && tx + 1 < tX) want[size_t(ty) * tX + tx + 1] = 1;
+        }
+    }
+    // THE STEP, from the live water: the fastest gravity wave plus the fastest current, at the Courant
+    // number the solver has always run at (0.45).
+    if (wet > 0) {
+        const float c = std::sqrt(m_cb.gravity * (std::max)(hMax, 0.5f)) + uMax;
+        m_dt = 0.45f * (std::min)(m_cb.dx, m_cb.dy) / c;
+        m_cb.dt = m_dt;
+    }
+    uint32_t mapped = 0, released = 0;
+    double releasedM3 = 0.0;
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            const size_t i = size_t(ty) * tX + tx;
+            if (want[i] || m_keep[i]) {
+                m_dryFor[i] = 0.0;
+                if (!m_h.IsResident(tx, ty)) {
+                    m_h.RequestMap(tx, ty);
+                    ++mapped;
+                }
+            } else if (m_h.IsResident(tx, ty)) {
+                m_dryFor[i] += dtS;
+                if (m_dryFor[i] >= m_releaseS) {
+                    m_h.RequestUnmap(tx, ty);
+                    releasedM3 += double(vol[i]) * m_dom.dx * m_dom.dy;
+                    m_dryFor[i] = 0.0;
+                    ++released;
+                }
+            }
+        }
+    }
+    if (mapped == 0 && released == 0) return;
+    std::vector<uint32_t> fresh;
+    m_h.CommitMappings(gpu, &fresh);
+    m_freshH.insert(m_freshH.end(), fresh.begin(), fresh.end());
+    m_released += releasedM3;
+    CoverState(gpu);
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) m_live[size_t(ty) * tX + tx] = m_h.IsResident(tx, ty) ? 1u : 0u;
+    }
+    DeriveGradResidency(gpu);
+    Log("[swe] the water's residency: +%u / -%u state tiles (%u hold water; %u resident), %.2f m^3 given up "
+        "with the released; the step %.3f s (deepest %.1f m, fastest %.2f m/s)",
+        mapped, released, wet, m_h.ResidentCount(), releasedM3, double(m_dt), double(hMax), double(uMax));
+}
+
+void SweSolver::CoverState(Gpu& gpu) {
+    const auto cover = [&](auto& bank, std::vector<uint32_t>* freshOut) {
+        for (uint32_t ty = 0; ty < bank.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < bank.TilesX(); ++tx) {
+                const uint32_t x0 = tx * bank.TileW(), y0 = ty * bank.TileH();
+                const uint32_t x1 = x0 + bank.TileW() - 1, y1 = y0 + bank.TileH() - 1;
+                bool live = false;
+                for (uint32_t hy = y0 / m_h.TileH(); hy <= y1 / m_h.TileH() && hy < m_h.TilesY() && !live; ++hy) {
+                    for (uint32_t hx = x0 / m_h.TileW(); hx <= x1 / m_h.TileW() && hx < m_h.TilesX(); ++hx) {
+                        if (m_h.IsResident(hx, hy)) {
+                            live = true;
+                            break;
+                        }
+                    }
+                }
+                if (live && !bank.IsResident(tx, ty)) bank.RequestMap(tx, ty);
+                if (!live && bank.IsResident(tx, ty)) bank.RequestUnmap(tx, ty);
+            }
+        }
+        std::vector<uint32_t> fresh;
+        bank.CommitMappings(gpu, &fresh);
+        if (freshOut) freshOut->insert(freshOut->end(), fresh.begin(), fresh.end());
+    };
+    cover(m_bed, nullptr);
+    cover(m_soil, nullptr);
+    cover(m_eta, nullptr);
+    cover(m_flux, &m_freshF);
+    cover(m_velA, nullptr);
+    cover(m_velB, nullptr);
+    cover(m_waveA, nullptr);
+    cover(m_waveB, nullptr);
+    cover(m_lim, nullptr);
+    cover(m_uvBank, nullptr);
+}
+
+void SweSolver::DeriveGradResidency(Gpu& gpu) {
+    // M9h: THE CAYLEY CLOSURE DECIDES THE DERIVED FIELD'S RESIDENCY -- the flow's tiles, dilated by the
+    // stencil's apron (Init's note).
+    const uint32_t tX = m_eta.TilesX(), tY = m_eta.TilesY();
+    std::vector<uint8_t> flowSig(size_t(tX) * tY, 0), nablaSig(size_t(tX) * tY, kG1);
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            if (m_eta.IsResident(tx, ty)) flowSig[size_t(ty) * tX + tx] = kG1;
+        }
+    }
+    const TilePolicy derived = policy::Derived(flowSig, nablaSig, tX);
+    std::vector<uint8_t> want(size_t(tX) * tY, 0);
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            if (!derived(tx, ty)) continue;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int ax = int(tx) + dx, ay = int(ty) + dy;
+                    if (ax < 0 || ay < 0 || ax >= int(tX) || ay >= int(tY)) continue;
+                    want[size_t(ay) * tX + ax] = 1;
+                }
+            }
+        }
+    }
+    m_velGrad.SetPolicy(policy::Mask(want, tX));
+    m_velGrad.Update(gpu);
+    m_velGrad.EnsureCoarseMapped(gpu);
+}
+
+uint32_t SweSolver::DryWaiting() const {
+    uint32_t n = 0;
+    for (uint32_t ty = 0; ty < m_h.TilesY(); ++ty) {
+        for (uint32_t tx = 0; tx < m_h.TilesX(); ++tx) {
+            if (m_h.IsResident(tx, ty) && m_dryFor[size_t(ty) * m_h.TilesX() + tx] > 0.0) ++n;
+        }
+    }
+    return n;
+}
+
+void SweSolver::LedgerOn(Gpu& gpu) {
+    m_ledgerOn = true;
+    m_ledgerBase = 0.0;
+    m_ledgerBase = LedgerIn(gpu);
+    m_released = 0.0;
+}
+
+double SweSolver::LedgerIn(Gpu& gpu) {
+    GpuTexture wrap = m_ledgerTex;
+    wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> raw = gpu.ReadbackTexture(wrap, &pitch);
+    float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (raw.size() >= 16) memcpy(v, raw.data(), 16);
+    return double(v[0]) - double(v[1]) - m_ledgerBase;
+}
+
+void SweSolver::Volumes(Gpu& gpu, double& columns, double& soil, std::vector<float>* hOut) {
+    columns = soil = 0.0;
+    const auto readR32 = [&](TileAtlas2D& bank, std::vector<float>& out) {
+        GpuTexture wrap;
+        wrap.res = bank.Res();
+        wrap.format = DXGI_FORMAT_R32_FLOAT;
+        wrap.width = bank.TilesX() * bank.TileW();
+        wrap.height = bank.TilesY() * bank.TileH();
+        wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        uint32_t pitch = 0;
+        const std::vector<uint8_t> raw = gpu.ReadbackTexture(wrap, &pitch);
+        out.assign(size_t(m_cb.nx) * m_cb.ny, 0.0f);
+        for (uint32_t y = 0; y < m_cb.ny && size_t(y) * pitch + size_t(m_cb.nx) * 4 <= raw.size(); ++y) {
+            memcpy(&out[size_t(y) * m_cb.nx], &raw[size_t(y) * pitch], size_t(m_cb.nx) * 4);
+        }
+    };
+    std::vector<float> h, w, bed;
+    readR32(m_h, h);
+    readR32(m_soil, w);
+    readR32(m_bed, bed);
+    // the exterior cells are the boundary's (pinned), not the domain's: the kernel's test (Swe.hlsl
+    // ExteriorLevel) on the bed it cached
+    std::vector<uint8_t> ext(size_t(m_cb.nx) * m_cb.ny, 0);
+    for (int side = 0; side < 4; ++side) {
+        const int len = side < 2 ? int(m_cb.nx) : int(m_cb.ny);
+        for (int a = 0; a < len; ++a) {
+            const size_t i = m_dom.EdgeCell(side, a);
+            bool river = false;
+            for (const SweDomain::FaceCells& F : m_dom.faces) {
+                river = river || (F.side == side && a >= F.c0 && a <= F.c1 && bed[i] < 2.0f);
+            }
+            // a corner answers its first side (N, S, W, E), as the kernel's
+            const int x = int(i % m_cb.nx), y = int(i / m_cb.nx);
+            const int first = (y == 0) ? 0 : (y == int(m_cb.ny) - 1) ? 1 : (x == 0) ? 2 : 3;
+            const bool sea = first == side && ((((m_dom.openSides >> side) & 1u) != 0u) || bed[i] < 0.0f);
+            if (river || sea) ext[i] = 1;
+        }
+    }
+    for (size_t i = 0; i < h.size(); ++i) {
+        if (ext[i]) continue;
+        columns += double(h[i]);
+        soil += double(w[i]);
+    }
+    columns *= m_dom.dx * m_dom.dy;
+    soil *= m_dom.dx * m_dom.dy;
+    if (hOut) *hOut = std::move(h);
+}
+
+// THE STATELESS COLUMN (a reset: the spin-up's first instant, a scrub): each column refills to the
+// water the tide plane stands over it and is still. Recorded inside Record, after the bed is cached
+// and with its root and table bound.
+void SweSolver::RecordReset(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS hList, UINT hCount,
+                            D3D12_GPU_VIRTUAL_ADDRESS fList, UINT fCount) {
+    PixScope scope(cmd.Native(), "swe.reset (each column -> the stateless column)");
+    cmd.ComputeSrvAt(1, hList);
+    cmd.Pipeline(m_resetK.Get());
+    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hCount);
+
+    cmd.ComputeSrvAt(1, fList);
     cmd.Pipeline(m_clearFlux.Get());
-    cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
+    cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fCount);
 
     // Full-surface uv clear (fresh texture memory is undefined; NULL-region texels must read
     // invalid so the sea falls back to the analytic jet there).
     cmd.Pipeline(m_uvClear.Get());
     cmd.Dispatch((m_cb.nx + 15) / 16, (m_cb.ny + 15) / 16, 1);
 
-    // Three UAV barriers in ONE call, in this order (M12 step 3f: the context's multi-barrier
-    // form issues the same three in one ResourceBarrier, as this site wrote them).
-    cmd.UavBarriers({m_eta.Res(), m_flux.Res(), m_uvBank.Res()});
+    cmd.UavBarriers({m_h.Res(), m_soil.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
+    cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res(), m_uvBank.Res()});
+}
+
+void SweSolver::OceanBoundary(float tideNavd, float tideRate) {
+    for (float& v : m_cb.oceanEta) v = 0.0f;
+    m_cb.oceanU = 0.0f;
+    const double nx = double(m_cb.nx), ny = double(m_cb.ny);
+    // the scripted surge (SetSurge), and its rate
+    const double ts = (m_simTime - m_surgePeak) / m_surgeTau;
+    const double surge = m_surgeA * std::exp(-ts * ts);
+    const double surgeRate = -2.0 * ts / m_surgeTau * surge;
+    double section = 0.0;
+    for (int s = 0; s < 4; ++s) {
+        const double len = s < 2 ? nx : ny;
+        bool any = false;
+        for (int i = 0; i < int(len) && !any; ++i) any = m_dom.SeaFaceCell(s, i);
+        if (!any) continue;
+        // The manager's Level at four points along the side, on its exterior cells' line.
+        double y[4];
+        for (int k = 0; k < 4; ++k) {
+            const double a = len * k / 3.0;
+            const double tx = s == 2 ? 0.5 : s == 3 ? nx - 0.5 : a;
+            const double ty = s == 0 ? 0.5 : s == 1 ? ny - 0.5 : a;
+            double la = 0.0, lo = 0.0;
+            m_dom.LatLonOf(tx, ty, la, lo);
+            const double v = m_levelAt ? m_levelAt(la, lo, m_simTime) : double(tideNavd);
+            y[k] = (std::isfinite(v) ? v - double(tideNavd) : 0.0) + surge;
+            m_cb.oceanEta[4 * s + k] = static_cast<float>(y[k]);
+        }
+        // The side's live section under that Level (the kernel's cubic, Swe.hlsl OceanEtaAt).
+        const double cellL = s < 2 ? double(m_cb.dx) : double(m_cb.dy);
+        for (int i = 0; i < int(len); ++i) {
+            const double a = (i + 0.5) / len * 3.0;
+            const double l0 = -(a - 1.0) * (a - 2.0) * (a - 3.0) / 6.0, l1 = a * (a - 2.0) * (a - 3.0) / 2.0;
+            const double l2 = -a * (a - 1.0) * (a - 3.0) / 2.0, l3 = a * (a - 1.0) * (a - 2.0) / 6.0;
+            const double lvl = double(tideNavd) + l0 * y[0] + l1 * y[1] + l2 * y[2] + l3 * y[3];
+            const float e = m_dom.elev[m_dom.EdgeCell(s, i)];
+            if (m_dom.SeaFaceCell(s, i)) section += (std::max)(lvl - double(e), 0.0) * cellL;
+        }
+    }
+    // THE PRISM BY CONTINUITY: the open sea brings what the stateless tide says the domain must hold
+    // -- its wet area at the plane times the plane's rate -- less what the rivers bring; Flather's
+    // radiation carries every departure from it. (The river faces' law: radiation alone cannot carry
+    // a prism.) The clamp is a sanity rail, as theirs.
+    double q = WetAreaAt(tideNavd + surge) * (double(tideRate) + surgeRate);
+    for (int f = 0; f < FaceCount(); ++f) q -= double(m_faceQ[f]);
+    m_cb.oceanU = section > 1.0 ? static_cast<float>(std::clamp(q / section, -1.5, 1.5)) : 0.0f;
 }
 
 int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd) {
@@ -823,6 +1316,12 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     // The region readback: what this slot's previous frame copied is an answer now (the frame
     // ring waited on that frame's fence before this one began). Frame ring only.
     if (cmd.Who() == hal::Owner::Frame) CollectRegions(gpu);
+    // C2: the frame ring's water statistics, when their readback has come back.
+    if (cmd.Who() == hal::Owner::Frame && m_rbStats.Pending() && gpu.ReadbackReady(m_rbStats) && m_testH.empty()) {
+        const uint32_t pitch = m_rbStats.rowPitch;
+        const std::vector<uint8_t> raw = gpu.ReadbackTake(m_rbStats);
+        UpdateResidency(gpu, raw, pitch);
+    }
     etaTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     uvTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -832,8 +1331,9 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     // continuous, boundary-forced by the current tide -- and just re-anchors the clock, i.e.
     // time-dilated hydrodynamics instead of a visible reset flicker.
     const double drift = std::abs(simUnix - m_simTime);
+    bool reset = false;
     if (m_pendingReset || drift > 3600.0) {
-        RecordReset(cmd, gpu);
+        reset = true;
         m_simTime = simUnix;
         m_pendingReset = false;
         m_lastTideTime = 0;   // no rate across a reset
@@ -842,10 +1342,9 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         m_lastTideTime = 0;
     }
 
-    // M6r, the prism source: the tide plane's rate of rise, finite-differenced across batch
-    // starts on the SIM clock. Booked as per-substep debt in the height kernel so the basin's
-    // filling volume must arrive through the gap instead of appearing by construction.
-    // Clamp: M2 at this range peaks near 2.2e-4 m/s; anything past 6e-4 is a scrub artifact.
+    // The tide plane's rate of rise, finite-differenced across batch starts on the SIM clock: the
+    // open sea's prism (OceanBoundary). Clamp: M2 at this range peaks near 2.2e-4 m/s; anything past
+    // 6e-4 is a scrub artifact.
     float tideRate = 0.0f;
     if (m_lastTideTime > 0 && m_simTime > m_lastTideTime + 1.0e-6) {
         tideRate = std::clamp(
@@ -854,7 +1353,6 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     }
     m_lastTideNavd = tideNavd;
     m_lastTideTime = m_simTime;
-    m_cb.tideRate = tideRate;
 
     int n = static_cast<int>((simUnix - m_simTime) / m_dt);
     n = (std::max)(0, (std::min)(n, maxSub));
@@ -872,32 +1370,92 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         m_cb.faceB[4 * f + 2] = m_cb.faceB[4 * f + 3] = 0.0f;
         m_faceArea[f] = area;
     }
+    OceanBoundary(tideNavd, tideRate);   // C1: the open sea's Level and its transport
+    SeaBoundary();                       // C4: the sea there, whose waves push
 
     cmd.ComputeRoot(m_rs.Get());
     LogCbFingerprint();
     cmd.ComputeConstants(0, m_cb);
     cmd.ComputeTable(2, m_table.Base());
-    const auto& el = m_eta.ResidentList();
-    const auto& fl = m_flux.ResidentList();
-    const D3D12_GPU_VIRTUAL_ADDRESS elVa = gpu.PushConstants(el.data(), el.size() * 4);
+    cmd.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
+    const auto& hl = m_testH.empty() ? m_h.ResidentList() : m_testH;
+    const auto& fl = m_testF.empty() ? m_flux.ResidentList() : m_testF;
+    const D3D12_GPU_VIRTUAL_ADDRESS hlVa = gpu.PushConstants(hl.data(), hl.size() * 4);
     const D3D12_GPU_VIRTUAL_ADDRESS flVa = gpu.PushConstants(fl.data(), fl.size() * 4);
 
+    // C2: the tiles the water's residency mapped since the last Record hold nothing yet.
+    if (!m_freshH.empty() || !m_freshF.empty()) {
+        if (!m_freshH.empty()) {
+            cmd.ComputeSrvAt(1, gpu.PushConstants(m_freshH.data(), m_freshH.size() * 4));
+            cmd.Pipeline(m_clearTileK.Get());
+            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(m_freshH.size()));
+        }
+        if (!m_freshF.empty()) {
+            cmd.ComputeSrvAt(1, gpu.PushConstants(m_freshF.data(), m_freshF.size() * 4));
+            cmd.Pipeline(m_clearFlux.Get());
+            cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(m_freshF.size()));
+        }
+        cmd.UavBarriers({m_h.Res(), m_soil.Res(), m_eta.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
+        cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
+        m_freshH.clear();
+        m_freshF.clear();
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS ledVa =
+        m_ledgerOn ? gpu.PushConstants(m_ledgerFaces.data(), m_ledgerFaces.size() * 4) : 0;
+
+    // THE COLUMN'S BED, a frame: the stack read once a cell, where it was read eight times a cell a
+    // substep.
+    cmd.ComputeSrvAt(1, hlVa);
+    cmd.Pipeline(m_bedFillK.Get());
+    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
+    cmd.UavBarrier(m_bed.Res());
+    if (reset) RecordReset(cmd, hlVa, static_cast<UINT>(hl.size()), flVa, static_cast<UINT>(fl.size()));
+    // C4: THE SEA IN THE COLUMNS, a few sweeps a batch (an even number: the solve reads the bank they end on).
+    if (m_cb.sea[3] > 0.0f) {
+        cmd.ComputeSrvAt(1, hlVa);
+        cmd.Pipeline(m_wavesK.Get());
+        for (int s = 0; s < kWaveSweeps; ++s) {
+            cmd.ComputeTable(2, m_waveTable[s & 1].Base());
+            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
+            cmd.UavBarriers({m_waveA.Res(), m_waveB.Res()});
+        }
+        cmd.ComputeTable(2, m_table.Base());
+    }
+
     for (int i = 0; i < n; ++i) {
+        // The substeps take turns: read the newest velocities (u7), write the other bank (u10).
+        cmd.ComputeTable(2, (m_velNew ? m_tableB : m_table).Base());
         cmd.ComputeSrvAt(1, flVa);
         cmd.Pipeline(m_fluxK.Get());
         cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
-        cmd.UavBarrier(m_flux.Res());
+        cmd.UavBarriers({m_flux.Res(), m_velA.Res(), m_velB.Res()});
+        m_velNew ^= 1;
+        cmd.ComputeSrvAt(1, hlVa);
+        cmd.Pipeline(m_limitK.Get());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
+        cmd.UavBarrier(m_lim.Res());
+        if (m_ledgerOn) {
+            cmd.ComputeSrvAt(1, ledVa);
+            cmd.Pipeline(m_ledgerK.Get());
+            cmd.Dispatch(1, 1, 1);
+            cmd.UavBarrier(m_ledgerTex.res.Get());
+        }
 
-        cmd.ComputeSrvAt(1, elVa);
+        cmd.ComputeSrvAt(1, hlVa);
         cmd.Pipeline(m_heightK.Get());
-        cmd.Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
-        cmd.UavBarrier(m_eta.Res());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
+        cmd.UavBarrier(m_h.Res());
     }
     m_simTime += n * m_dt;
 
-    cmd.ComputeSrvAt(1, elVa);
+    cmd.ComputeTable(2, m_table.Base());
+    cmd.ComputeSrvAt(1, hlVa);
     cmd.Pipeline(m_deriveK.Get());
-    cmd.Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
+    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
+    // C2: the water, tile by tile (the residency's and the step's), once the derive's currents stand.
+    cmd.UavBarrier(m_uvBank.Res());
+    cmd.Pipeline(m_statsK.Get());
+    cmd.Dispatch(1, 1, static_cast<UINT>(hl.size()));
 
     // M9h: grad(flow), dispatched over the DERIVED bank's own resident list -- the eta list
     // dilated by the stencil apron. uv must be readable by this kernel first, and the write
@@ -919,6 +1477,13 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
 
     // This frame's region requests, copied from the state just stepped (frame ring only).
     if (cmd.Who() == hal::Owner::Frame) ServeRegions(cmd, gpu, etaTo, uvTo);
+    // C2: on the frame ring, the statistics go back on their own list every few seconds of the sim (the
+    // copy runs ahead of this frame's list, so it reads the frame before's: the ring is a tile wide).
+    if (cmd.Who() == hal::Owner::Frame && !m_rbStats.Pending() && m_simTime - m_statsAt >= 8.0) {
+        GpuTexture wrap = m_statsTex;
+        wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        m_rbStats = gpu.ReadbackTextureBegin(wrap);
+    }
 
     // Leave eta + uv sampleable by the domain and pixel shaders.
     etaTo(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
@@ -927,9 +1492,9 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     char s[96];
-    snprintf(s, sizeof(s), "swe %ut %.0f/%.0fMB %dss", m_eta.ResidentCount() + m_flux.ResidentCount(),
-             (m_eta.ResidentBytes() + m_flux.ResidentBytes()) / 1048576.0,
-             (m_eta.VirtualBytes() + m_flux.VirtualBytes()) / 1048576.0, n);
+    snprintf(s, sizeof(s), "swe %ut %.0f/%.0fMB %dss", ResidentTiles(), ResidentBytes() / 1048576.0,
+             (m_h.VirtualBytes() + m_bed.VirtualBytes() + m_eta.VirtualBytes() + m_flux.VirtualBytes() +
+              m_velA.VirtualBytes() + m_velB.VirtualBytes()) / 1048576.0, n);
     stats = s;
     return n;
 }
@@ -937,7 +1502,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
 std::vector<uint8_t> SweSolver::ReadFluxRaw(Gpu& gpu, uint32_t* outW, uint32_t* outH,
                                             uint32_t* outPitch) {
     GpuTexture wrap;
-    wrap.res = m_flux.Res();
+    wrap.res = FluxNew().Res();   // the newest substep's
     wrap.format = DXGI_FORMAT_R32G32_FLOAT;
     wrap.width = m_flux.TilesX() * m_flux.TileW();
     wrap.height = m_flux.TilesY() * m_flux.TileH();
@@ -956,7 +1521,8 @@ bool SweSolver::TraceFace(Gpu& gpu, std::vector<FaceRow>& rows) {
         m_faceRs = hal::RootLayout{}
                        .Cbv(0)
                        .Srv(0)
-                       .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4), hal::UavRange(5, 1)})
+                       .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4), hal::UavRange(5, 11)})
+                       .Srv(3)
                        .Build(gpu, "swe.facetrace");
         m_faceRs->SetName(L"swe face trace root signature");
         m_faceK = hal::BuildCompute(gpu, m_faceRs.Get(),
@@ -968,15 +1534,27 @@ bool SweSolver::TraceFace(Gpu& gpu, std::vector<FaceRow>& rows) {
                                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                         L"swe.facetrace (the Flather face's terms)");
-        m_faceTable = hal::Table::Alloc(gpu, 7, "swe.facetrace");
+        m_faceTable = hal::Table::Alloc(gpu, 17, "swe.facetrace");
+        m_faceTable.Uav2D(16, m_lim.Res(), DXGI_FORMAT_R32_FLOAT);
+        m_faceTable.Uav2D(12, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        m_faceTable.Uav2D(13, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        m_faceTable.Uav2D(14, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        m_faceTable.Uav2D(15, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         m_faceTable.SrvArray(0, m_bedArr, m_bedArr->GetDesc().Format, 0, UINT32_MAX, m_bedMips);
         m_faceTable.SrvArray(1, m_bedRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
         m_faceTable.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT);
-        m_faceTable.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
         m_faceTable.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
         m_faceTable.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
         m_faceTable.Uav2D(6, m_faceTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        m_faceTable.Uav2D(7, m_h.Res(), DXGI_FORMAT_R32_FLOAT);
+        m_faceTable.Uav2D(9, m_bed.Res(), DXGI_FORMAT_R32_FLOAT);
+        m_faceTable.Uav2D(10, m_soil.Res(), DXGI_FORMAT_R32_FLOAT);
     }
+    // The trace reads the newest velocities as the substep before (u7) and writes nothing of the
+    // state (u1 and u10 are bound, never written).
+    m_faceTable.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
+    m_faceTable.Uav2D(8, (m_velNew ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
+    m_faceTable.Uav2D(11, (m_velNew ? m_velA : m_velB).Res(), DXGI_FORMAT_R32G32_FLOAT);
     {
         hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
         up.BindHeaps();
@@ -993,6 +1571,7 @@ bool SweSolver::TraceFace(Gpu& gpu, std::vector<FaceRow>& rows) {
         const auto& fl = m_flux.ResidentList();
         up.ComputeSrvAt(1, gpu.PushConstants(fl.data(), fl.size() * 4));
         up.ComputeTable(2, m_faceTable.Base());
+        up.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
         up.Pipeline(m_faceK.Get());
         up.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
         gpu.EndUpload();
@@ -1159,6 +1738,412 @@ void SweSolver::ReadProbes(Gpu& gpu, const float* cellPairs, int count, Probe* o
         out[i].v = HalfToFloat(px[1]);
         out[i].valid = HalfToFloat(px[3]) > 0.5f;
     }
+}
+
+namespace {
+
+// Ritter's dam break onto a dry flat bed: the depth at x (m from the dam, + downstream) at time t.
+double RitterH(double x, double t, double hL, double g) {
+    const double c0 = std::sqrt(g * hL);
+    const double xi = x / t;
+    if (xi <= -c0) return hL;
+    if (xi >= 2.0 * c0) return 0.0;
+    const double a = 2.0 * c0 - xi;
+    return a * a / (9.0 * g);
+}
+
+// Stoker's dam break onto a wet flat bed (hR > 0): the middle state (h_m, u_m) and the shock's speed.
+void StokerState(double hL, double hR, double g, double& hm, double& um, double& s) {
+    const double cL = std::sqrt(g * hL);
+    const auto f = [&](double h) {
+        const double uRare = 2.0 * (cL - std::sqrt(g * h));
+        const double uShock = (h - hR) * std::sqrt(g * (h + hR) / (2.0 * h * hR));
+        return uRare - uShock;
+    };
+    double lo = hR, hi = hL;
+    for (int k = 0; k < 200; ++k) {
+        const double mid = 0.5 * (lo + hi);
+        if (f(mid) > 0.0) lo = mid;
+        else hi = mid;
+    }
+    hm = 0.5 * (lo + hi);
+    um = 2.0 * (cL - std::sqrt(g * hm));
+    s = hm * um / (hm - hR);
+}
+
+double StokerH(double x, double t, double hL, double hR, double g, double hm, double um, double s) {
+    const double cL = std::sqrt(g * hL), cm = std::sqrt(g * hm);
+    const double xi = x / t;
+    if (xi <= -cL) return hL;
+    if (xi <= um - cm) {
+        const double a = 2.0 * cL - xi;
+        return a * a / (9.0 * g);
+    }
+    if (xi <= s) return hm;
+    return hR;
+}
+
+}  // namespace
+
+bool SweSolver::RunSchemeTests(Gpu& gpu) {
+    if (!m_ready || !m_sc || !m_bedBound) return false;
+    // The square: the largest k x k block (k <= 4) of resident state tiles wholly inside the lattice.
+    const uint32_t tw = m_h.TileW(), th = m_h.TileH();
+    uint32_t bx = 0, by = 0, bk = 0;
+    for (uint32_t k = 4; k >= 1 && !bk; --k) {
+        for (uint32_t ty = 0; ty + k <= m_h.TilesY() && !bk; ++ty) {
+            for (uint32_t tx = 0; tx + k <= m_h.TilesX() && !bk; ++tx) {
+                if ((tx + k) * tw > m_cb.nx || (ty + k) * th > m_cb.ny) continue;
+                bool all = true;
+                for (uint32_t j = ty; j < ty + k && all; ++j) {
+                    for (uint32_t i = tx; i < tx + k && all; ++i) all = m_h.IsResident(i, j);
+                }
+                if (all) {
+                    bx = tx;
+                    by = ty;
+                    bk = k;
+                }
+            }
+        }
+    }
+    if (!bk || tw != th) {
+        Log("[swe-test] no square of resident tiles to test in");
+        return false;
+    }
+    const int x0 = int(bx * tw), y0 = int(by * th), side = int(bk * tw);
+    Log("[swe-test] the square: cells (%d, %d) .. (%d, %d), %d a side (%.0f x %.0f m); dt %.3f s",
+        x0, y0, x0 + side - 1, y0 + side - 1, side, side * double(m_cb.dx), side * double(m_cb.dy), double(m_dt));
+
+    hal::Pso bedT = hal::BuildCompute(gpu, m_rs.Get(),
+                                      m_sc->Compile(m_shaderDir + L"/Swe.hlsl", L"CsSweBedFill", L"cs_6_0", {L"SWE_TEST=1"}),
+                                      "swe.test.bed");
+    hal::Pso resetT = hal::BuildCompute(gpu, m_rs.Get(),
+                                        m_sc->Compile(m_shaderDir + L"/Swe.hlsl", L"CsSweReset", L"cs_6_0", {L"SWE_TEST=1"}),
+                                        "swe.test.reset");
+    hal::Pso wavesT = hal::BuildCompute(gpu, m_rs.Get(),
+                                        m_sc->Compile(m_shaderDir + L"/Swe.hlsl", L"CsSweWaves", L"cs_6_0", {L"SWE_TEST=1"}),
+                                        "swe.test.waves");
+    hal::Pso clearT = hal::BuildCompute(gpu, m_rs.Get(),
+                                        m_sc->Compile(m_shaderDir + L"/Swe.hlsl", L"CsSweClearFlux", L"cs_6_0", {L"SWE_TEST=1"}),
+                                        "swe.test.clear");
+    if (!bedT || !resetT || !wavesT || !clearT) return false;
+    std::swap(m_bedFillK, bedT);
+    std::swap(m_resetK, resetT);
+    std::swap(m_wavesK, wavesT);
+    std::swap(m_clearFlux, clearT);
+    const SweCbData saved = m_cb;
+    const double savedT = m_simTime;
+    // Only the square steps: its tiles are the lists and the only live tiles (outside it, walls).
+    const std::vector<uint32_t> savedLive = m_live;
+    std::fill(m_live.begin(), m_live.end(), 0u);
+    for (uint32_t j = by; j < by + bk; ++j) {
+        for (uint32_t i = bx; i < bx + bk; ++i) {
+            m_testH.push_back(j * m_h.TilesX() + i);
+            m_live[size_t(j) * m_h.TilesX() + i] = 1u;
+        }
+    }
+    for (uint32_t j = 0; j < m_flux.TilesY(); ++j) {
+        for (uint32_t i = 0; i < m_flux.TilesX(); ++i) {
+            const uint32_t cx = i * m_flux.TileW(), cy = j * m_flux.TileH();
+            if (cx >= uint32_t(x0) && cx < uint32_t(x0 + side) && cy >= uint32_t(y0) && cy < uint32_t(y0 + side)) {
+                m_testF.push_back(j * m_flux.TilesX() + i);
+            }
+        }
+    }
+    // GAGAME_SWETEST: the cases to run (lake, ledger, ritter, stoker; all when unset).
+    const char* only = std::getenv("GAGAME_SWETEST");
+    const auto wants = [only](const char* name) { return !only || std::strstr(only, name) != nullptr; };
+
+    const auto readR32 = [&](TileAtlas2D& bank, std::vector<float>& out) {
+        GpuTexture wrap;
+        wrap.res = bank.Res();
+        wrap.format = DXGI_FORMAT_R32_FLOAT;
+        wrap.width = bank.TilesX() * bank.TileW();
+        wrap.height = bank.TilesY() * bank.TileH();
+        wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        uint32_t pitch = 0;
+        const std::vector<uint8_t> raw = gpu.ReadbackTexture(wrap, &pitch);
+        out.assign(size_t(m_cb.nx) * m_cb.ny, 0.0f);
+        for (uint32_t y = 0; y < m_cb.ny && size_t(y) * pitch + size_t(m_cb.nx) * 4 <= raw.size(); ++y) {
+            memcpy(&out[size_t(y) * m_cb.nx], &raw[size_t(y) * pitch], size_t(m_cb.nx) * 4);
+        }
+    };
+    const double g = double(m_cb.gravity), dx = double(m_cb.dx), dy = double(m_cb.dy);
+    std::vector<float> h0, h1, bed;
+    double elapsed = 0.0;
+    // One case: the first instant (a Record of no substeps: the bed, the reset, the derive), then
+    // `seconds` of substeps on the closed square.
+    float seaHs = 0.0f;
+    const auto run = [&](int kind, float hL, float hR, float level, float cd, float damp, double seconds) {
+        m_cb = saved;
+        m_cb.openSides = 0.0f;
+        m_cb.faceCount = 0.0f;
+        m_cb.cd = cd;
+        m_cb.damp = damp;
+        m_cb.soil[3] = 0.0f;   // the scheme alone: no soil takes the water
+        for (float& v : m_cb.sea) v = 0.0f;   // and no sea, unless the case states one (seaHs)
+        if (seaHs > 0.0f) {
+            m_cb.sea[0] = seaHs;
+            m_cb.sea[1] = 2.0f * 3.14159265f / 8.0f;   // an 8 s sea
+            m_cb.sea[2] = seaHs * seaHs / 16.0f;
+            m_cb.sea[3] = 1.0f;
+            m_cb.sea2[0] = 1.0f;   // travelling east
+            m_cb.sea2[1] = 0.0f;
+        }
+        const float a[4] = {float(kind), float(x0), float(y0), float(side)};
+        const float b[4] = {hL, hR, level, 0.0f};
+        memcpy(m_cb.testA, a, sizeof(a));
+        memcpy(m_cb.testB, b, sizeof(b));
+        m_simTime = 1.0e9;
+        m_pendingReset = true;
+        {
+            hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+            Record(up, gpu, m_simTime, level, 0);
+            gpu.EndUpload();
+        }
+        readR32(m_h, h0);
+        readR32(m_bed, bed);
+        const double t0 = m_simTime;
+        const auto zero = [](int, double) { return 0.0; };
+        AdvanceTo(gpu, t0 + seconds, [level](double) { return double(level); }, zero, zero);
+        readR32(m_h, h1);
+        elapsed = m_simTime - t0;
+    };
+    const auto at = [&](int i, int j) { return size_t(j) * m_cb.nx + size_t(i); };
+    bool pass = true;
+
+    // 1. A LAKE AT REST: the surface flat to 1 mm after an hour, over a rough bed with an island out of it.
+    if (wants("lake")) {
+        run(0, 0.0f, 0.0f, 0.0f, saved.cd, saved.damp, 3600.0);
+        double dev = 0.0;
+        int wet = 0, flipped = 0;
+        for (int j = y0; j < y0 + side; ++j) {
+            for (int i = x0; i < x0 + side; ++i) {
+                const float hh = h1[at(i, j)];
+                if ((h0[at(i, j)] > m_cb.wetEps) != (hh > m_cb.wetEps)) ++flipped;
+                if (hh <= m_cb.wetEps) continue;
+                ++wet;
+                dev = (std::max)(dev, std::abs(double(bed[at(i, j)]) + double(hh)));
+            }
+        }
+        const bool ok = dev < 1.0e-3 && flipped == 0;
+        pass = pass && ok;
+        Log("[swe-test] lake at rest, %.0f s: %d wet columns, max |surface - level| %.2e m, %d changed wetness -- %s "
+            "(gate 1 mm)", elapsed, wet, dev, flipped, ok ? "PASS" : "FAIL");
+    }
+    // 2. THE LEDGER: a hump on the same lake, an hour sloshing in a closed basin: the water conserved.
+    if (wants("ledger")) {
+        run(3, 0.0f, 0.0f, 0.0f, saved.cd, saved.damp, 3600.0);
+        double v0 = 0.0, v1 = 0.0;
+        for (int j = y0; j < y0 + side; ++j) {
+            for (int i = x0; i < x0 + side; ++i) {
+                v0 += double(h0[at(i, j)]);
+                v1 += double(h1[at(i, j)]);
+            }
+        }
+        v0 *= dx * dy;
+        v1 *= dx * dy;
+        const double rel = std::abs(v1 - v0) / (std::max)(v0, 1.0);
+        const bool ok = rel < 1.0e-5;
+        pass = pass && ok;
+        Log("[swe-test] ledger, %.0f s: volume %.6e -> %.6e m^3, relative change %.2e -- %s (gate 1e-5)", elapsed, v0,
+            v1, rel, ok ? "PASS" : "FAIL");
+    }
+    // 3 and 4. THE DAM BREAKS along x on a flat bed, frictionless: the middle row against the solutions.
+    const int jm = y0 + side / 2;
+    const double xDam = double(x0) + 0.5 * side;
+    const auto profile = [&](const char* name, int kind, double hL, double hR, double seconds) {
+        run(kind, float(hL), float(hR), 0.0f, 0.0f, 1.0f, seconds);
+        const double T = elapsed;
+        double hm = 0.0, um = 0.0, s = 0.0;
+        if (hR > 0.0) StokerState(hL, hR, g, hm, um, s);
+        const auto exact = [&](double x) {
+            return hR > 0.0 ? StokerH(x, T, hL, hR, g, hm, um, s) : RitterH(x, T, hL, g);
+        };
+        const double c0 = std::sqrt(g * hL);
+        const double xa = -1.5 * c0 * T, xb = (hR > 0.0 ? 1.5 * s : 3.0 * c0) * T;
+        double l1 = 0.0, l1n = 0.0, front = -1e9, atDam = 0.0;
+        const double edge = hR > 0.0 ? 0.5 * (hm + hR) : 0.01;
+        for (int i = x0; i < x0 + side; ++i) {
+            const double x = (i + 0.5 - xDam) * dx;
+            const double hh = double(h1[at(i, jm)]);
+            if (x >= xa && x <= xb) {
+                l1 += std::abs(hh - exact(x));
+                l1n += exact(x);
+            }
+            if (hh > edge) front = (std::max)(front, x + 0.5 * dx);
+            if (std::abs(x) < 0.6 * dx) atDam += 0.5 * hh;
+        }
+        const double frontExact = hR > 0.0 ? s * T : 2.0 * c0 * T;
+        const double rel = l1 / (std::max)(l1n, 1e-9);
+        const double frontErr = (front - frontExact) / dx;
+        if (hR > 0.0) {
+            const double xPl = 0.5 * ((um - std::sqrt(g * hm)) + s) * T;   // the middle of the middle state
+            const int ip = int(std::floor(xPl / dx + xDam));
+            const double hPl = (ip >= x0 && ip < x0 + side) ? double(h1[at(ip, jm)]) : -1.0;
+            const bool ok = rel < 0.05 && std::abs(frontErr) <= 3.0 && std::abs(hPl - hm) < 0.03 * hm;
+            pass = pass && ok;
+            Log("[swe-test] %s (hL %.2f, hR %.2f), %.1f s: L1 %.2f %%; the shock at %+.1f m against %+.1f (%+.1f "
+                "cells); the plateau %.4f m against %.4f; at the dam %.4f -- %s (gates 5 %%, 3 cells, 3 %%)",
+                name, hL, hR, T, 100.0 * rel, front, frontExact, frontErr, hPl, hm, atDam, ok ? "PASS" : "FAIL");
+        } else {
+            const bool ok = rel < 0.05 && std::abs(atDam - 4.0 / 9.0 * hL) < 0.03 * hL;
+            pass = pass && ok;
+            Log("[swe-test] %s (hL %.2f, dry), %.1f s: L1 %.2f %%; the front (1 cm) at %+.1f m against %+.1f "
+                "(%+.1f cells); at the dam %.4f m against %.4f -- %s (gates 5 %%, 3 %% of hL at the dam; the front "
+                "is reported)",
+                name, hL, T, 100.0 * rel, front, frontExact, frontErr, atDam, 4.0 / 9.0 * hL, ok ? "PASS" : "FAIL");
+        }
+        // the row, for plots: x, the solver's h, the exact h
+        char p[96];
+        snprintf(p, sizeof(p), "out/swe_test_%s.csv", name);
+        FILE* f = nullptr;
+        fopen_s(&f, p, "w");
+        if (f) {
+            fprintf(f, "x,h,exact\n");
+            for (int i = x0; i < x0 + side; ++i) {
+                const double x = (i + 0.5 - xDam) * dx;
+                fprintf(f, "%.2f,%.5f,%.5f\n", x, double(h1[at(i, jm)]), exact(x));
+            }
+            fclose(f);
+        }
+    };
+    if (wants("ritter")) profile("ritter", 1, 2.0, 0.0, 120.0);
+    if (wants("stoker")) profile("stoker", 2, 2.0, 0.5, 120.0);
+
+    // 5. C4, THE SETUP ON A PLANAR BEACH: a 2 m, 8 s sea entering from the west over 8 m of water, the bed
+    // rising 1 in 437 to the shore 3.5 km in; an hour of the waves' push. The rise of the mean surface from
+    // offshore to the shoreline against (5 gamma / 16) H_b (gamma = 0.60, the breaking law's, on Hs; H_b
+    // the highest Hs along the row) and the field's 0.16 Hs offshore.
+    if (wants("setup")) {
+        seaHs = 2.0f;
+        run(4, 0.0f, 0.0f, 0.0f, saved.cd, saved.damp, 3600.0);
+        seaHs = 0.0f;
+        std::vector<uint8_t> waveRaw;
+        uint32_t wpitch = 0;
+        {
+            GpuTexture wrap;
+            wrap.res = m_waveB.Res();
+            wrap.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            wrap.width = m_waveB.TilesX() * m_waveB.TileW();
+            wrap.height = m_waveB.TilesY() * m_waveB.TileH();
+            wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            waveRaw = gpu.ReadbackTexture(wrap, &wpitch);
+        }
+        const auto hsAt = [&](int i, int j) {
+            const size_t at8 = size_t(j) * wpitch + size_t(i) * 8;
+            if (at8 + 8 > waveRaw.size()) return 0.0;
+            uint16_t e = 0;
+            memcpy(&e, &waveRaw[at8], 2);
+            return 4.0 * std::sqrt((std::max)(double(HalfToFloat(e)), 0.0));
+        };
+        double off = 0.0, hb = 0.0, xb = 0.0;
+        int nOff = 0, last = -1;
+        for (int i = x0; i < x0 + side; ++i) {
+            const size_t k = at(i, jm);
+            if (h1[k] > m_cb.wetEps) last = i;
+            const double x = (i - x0 + 0.5) * dx;
+            if (x > 300.0 && x < 1200.0 && h1[k] > m_cb.wetEps) {
+                off += double(bed[k]) + double(h1[k]);
+                ++nOff;
+            }
+            const double hs = hsAt(i, jm);
+            if (hs > hb) {
+                hb = hs;
+                xb = x;
+            }
+        }
+        off /= (std::max)(nOff, 1);
+        double shore = 0.0;
+        int nS = 0;
+        for (int i = (std::max)(last - 2, x0); i <= last && last >= 0; ++i) {
+            shore += double(bed[at(i, jm)]) + double(h1[at(i, jm)]);
+            ++nS;
+        }
+        shore /= (std::max)(nS, 1);
+        // (5 gamma / 16) H_b is one wave's law (H = gamma h through the surf); the breaking law limits the
+        // sea's Hs (gamma 0.60 on Hs), so read in one measure -- the rms wave carrying the sea's energy,
+        // gamma_rms = 0.60 / sqrt 2, H_b,rms = H_b / sqrt 2 -- it is (5 x 0.60 / 16) H_b / 2. Both stated.
+        const double setup = shore - off, theory = 5.0 * 0.60 / 16.0 * hb / 2.0, theoryHs = 5.0 * 0.60 / 16.0 * hb;
+        const bool ok = std::abs(setup - theory) <= 0.15 * theory;
+        pass = pass && ok;
+        Log("[swe-test] setup, %.0f s: the sea's highest Hs %.3f m at %.0f m (H_b); the mean surface %+.4f m offshore, "
+            "%+.4f m at the shoreline (%.0f m): setup %.3f m against (5 gamma / 16) H_b in the rms wave's measure "
+            "%.3f m (%+.0f %%); read on Hs %.3f m; the field's 0.16 Hs offshore %.3f -- %s (gate 15 %%, rms)",
+            elapsed, hb, xb, off, shore, (last - x0 + 0.5) * dx, setup, theory, 100.0 * (setup - theory) / theory,
+            theoryHs, 0.16 * 2.0, ok ? "PASS" : "FAIL");
+        char p[96];
+        snprintf(p, sizeof(p), "out/swe_test_setup.csv");
+        FILE* f = nullptr;
+        fopen_s(&f, p, "w");
+        if (f) {
+            fprintf(f, "x,bed,h,surface,hs\n");
+            for (int i = x0; i < x0 + side; ++i) {
+                const size_t k = at(i, jm);
+                fprintf(f, "%.2f,%.4f,%.5f,%.5f,%.4f\n", (i - x0 + 0.5) * dx, double(bed[k]), double(h1[k]),
+                        double(bed[k]) + double(h1[k]), hsAt(i, jm));
+            }
+            fclose(f);
+        }
+    }
+
+    // 6. C5, RUN-UP: Synolakis's solitary wave onto a plane beach (1987; NTHMP's BP1, the run-up law his
+    // Carrier--Greenspan solution gives, R / d = 2.831 sqrt(cot beta) (H / d)^(5/4), non-breaking). The beach
+    // 1 in 19.85 from the square's middle, H / d = 0.019, frictionless; at d = 50 m and at d = 100 m (the
+    // run-up's tongue 9 and 18 cells long: the grid's own convergence), the step held to 0.15 s.
+    for (const double d : {50.0, 100.0}) {
+        if (!wants("runup")) break;
+        const double cot = 19.85, H = 0.019 * d;
+        m_cb.testB[0] = 0.0f;
+        run(5, float(d), float(cot), 0.0f, 0.0f, 1.0f, 0.0);
+        // the case's own rows: d, cot and H ride testB (run() set hL, hR, level); state them and start again
+        m_cb.testB[0] = float(d);
+        m_cb.testB[1] = float(cot);
+        m_cb.testB[3] = float(H);
+        m_cb.dt = 0.15f;
+        m_simTime = 1.0e9;
+        m_pendingReset = true;
+        {
+            hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+            Record(up, gpu, m_simTime, 0.0f, 0);
+            gpu.EndUpload();
+        }
+        readR32(m_bed, bed);
+        // the run-up: the highest bed any column has wetted (1 cm), stepped to the wave's arrival and back
+        double runup = -1e9;
+        const double t0 = m_simTime;
+        const auto zero = [](int, double) { return 0.0; };
+        const float dtSaved = m_dt;
+        m_dt = 0.15f;
+        for (int k = 0; k < 300; ++k) {
+            AdvanceTo(gpu, t0 + 2.0 * (k + 1), [](double) { return 0.0; }, zero, zero);
+            readR32(m_h, h1);
+            for (int i = x0; i < x0 + side; ++i) {
+                const size_t c = at(i, jm);
+                if (h1[c] > m_cb.wetEps) runup = (std::max)(runup, double(bed[c]) + double(h1[c]));
+            }
+        }
+        m_dt = dtSaved;
+        const double law = 2.831 * std::sqrt(cot) * std::pow(H / d, 1.25) * d;
+        const bool ok = std::abs(runup - law) <= 0.10 * law;
+        pass = pass && ok;
+        Log("[swe-test] run-up (a solitary wave, H/d %.3f, onto 1 in %.2f; d %.0f m), %.0f s: the highest wetted "
+            "surface %+.3f m against Synolakis's %.3f m (%+.0f %%) -- %s (gate 10 %%)",
+            H / d, cot, d, m_simTime - t0, runup, law, 100.0 * (runup - law) / law, ok ? "PASS" : "FAIL");
+    }
+
+    std::swap(m_bedFillK, bedT);
+    std::swap(m_resetK, resetT);
+    std::swap(m_wavesK, wavesT);
+    std::swap(m_clearFlux, clearT);
+    m_live = savedLive;
+    m_testH.clear();
+    m_testF.clear();
+    m_cb = saved;
+    m_simTime = savedT;
+    m_pendingReset = true;
+    Log("[swe-test] %s", pass ? "ALL PASS" : "SOME FAIL");
+    return pass;
 }
 
 WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, const uint8_t* faceMask,
