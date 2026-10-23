@@ -21,6 +21,7 @@
   "views": [
     {"name": "bar_low", "at": {"lat": 42.8135, "lon": -70.8085, "alt": 0, "heading": 234, "tilt": 80, "range": 300}, "fovY": 55, "gauge": "root"},
     {"name": "entrance_east", "at": {"lat": 42.8183, "lon": -70.8130, "alt": 0, "heading": 80, "tilt": 78, "range": 220}, "fovY": 55, "gauge": "root"},
-    {"name": "entrance_west", "at": {"lat": 42.8186, "lon": -70.8080, "alt": 0, "heading": 260, "tilt": 78, "range": 220}, "fovY": 55, "gauge": "root"}
+    {"name": "entrance_west", "at": {"lat": 42.8186, "lon": -70.8080, "alt": 0, "heading": 260, "tilt": 78, "range": 220}, "fovY": 55, "gauge": "root"},
+    {"name": "entrance_above", "at": {"lat": 42.8190, "lon": -70.8060, "alt": 0, "heading": 0, "tilt": 0, "range": 1400}, "fovY": 55, "gauge": "root"}
   ]
 }
