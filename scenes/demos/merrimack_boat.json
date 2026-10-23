@@ -2,8 +2,8 @@
   "_readme": [
     "THE BOAT AT THE MERRIMACK'S ENTRANCE (2026-10-23, WATER_V2 12.12-12.13): the RHIB just seaward of the",
     "ridge off the south jetty's tip -- the shoal the drawn sea used to sink over -- pointing in at the",
-    "entrance. The water runs on its data's own time (time.start is 'now'); the sun is held at local noon on",
-    "its own clocks (merrimack_bar.json), so the boat can be judged in daylight whatever the tide is doing.",
+    "entrance. The clocks are merrimack_bar.json's: the water at 2026-10-23T18:59:47Z (the scene's clock, the",
+    "data bound to it), the sun held at local noon on its own -- every run is the same sea, in daylight.",
     "",
     "Launch from the repo root:  build/bin/gagame.exe scenes/demos/merrimack_boat.json",
     "",

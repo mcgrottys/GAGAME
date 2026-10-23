@@ -120,8 +120,10 @@ const Schema& TimeSchema() {
 
 const Schema& ClockSchema(const char* name, ClockProps& p) {
     Schema* sc = new Schema(name, &p);
-    sc->Bind("start", p.start, "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the scene's time.start", R)
-        .Bind("rate", p.rate, Q::Dimensionless, "1", "its pace against the scene's clock (1 = the same, 0 = held)", R);
+    sc->Bind("start", p.start, "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the bound clock's", R)
+        .Bind("rate", p.rate, Q::Dimensionless, "1", "its pace against the bound clock's (1 = the same, 0 = held)", R)
+        .Bind("bind", p.bind, "the clock it follows (scene/SceneClocks.h): time, water.clock, sun.clock or sun.earth.clock; \"\" = time", R)
+        .Bind("offset", p.offset, "added to its instant: seconds or a run of number+unit (\"-3h\", \"1h30m\", \"2d\")", R);
     return *sc;
 }
 
@@ -254,7 +256,9 @@ const Schema& WaterSectionSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.water;
         Schema* sc = new Schema("water", &p);
-        sc->Bind("pixelWater", p.pixelWater, "shade the water per pixel (--no-pixel-water)", R)
+        sc->Nest("clock", ClockSchema("water.clock", p.clock), &p.clock,
+                 "the data's clock: the tide, the solver, the currents, the sea state, the wind, the cascades")
+            .Bind("pixelWater", p.pixelWater, "shade the water per pixel (--no-pixel-water)", R)
             .Bind("foam", p.foam, Q::Dimensionless, "1", "sea-mode whitecap intensity (--foam)", H)
             .Bind("edgePx", p.edgePx, Q::Dimensionless, "px", "tessellated edge target (--edge-px)", H)
             .Bind("heightScale", p.heightScale, Q::Dimensionless, "1", "wave vertical exaggeration (--height-scale)", H)

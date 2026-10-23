@@ -117,12 +117,15 @@ struct TimeSection {
     bool paused = false;
     double windowDays = 7.0;
 };
-// A CLOCK OF ITS OWN (docs: the collage binds a clock per producer). An instant and a pace,
-// read against the scene's clock: t = start + rate (scene time - the scene's start). start "" is
-// the scene's own time.start; rate 1 keeps the scene's pace, 0 holds the instant.
+// A CLOCK OF ITS OWN (docs: the collage binds a clock per producer; scene/SceneClocks.h resolves it).
+// A constant or a binding: t = anchor + offset + rate (B(scene time) - B(the scene's start)), B the
+// clock it binds ("" = the scene's own, `time`), the anchor its start ("" = B at the scene's start).
+// rate 1 keeps B's pace, 0 holds the instant. A cycle of bindings is refused at load.
 struct ClockProps {
     std::string start;
     double rate = 1.0;
+    std::string bind;     // time | water.clock | sun.clock | sun.earth.clock ("" = time)
+    std::string offset;   // seconds or a run of number+unit: "-3h", "1h30m", "2d"
 };
 // THE EARTH, PLACED AROUND A SUN THAT IS A LIGHT AT THE ORIGIN. Position in metres (the sun is
 // at 0,0,0), and a turn of `spin` degrees about `axis`. Nothing here reads the clock: a scene can
@@ -185,6 +188,9 @@ struct BankProps {
     float columnTexel = 0.3f;   // the finest texel the column ladder reaches (m): rings under ring 0, resident under a fold
 };
 struct WaterSection {
+    // THE DATA'S CLOCK (scene/SceneClocks.h): the tide, the solver, the currents, the sea state's hour,
+    // the wind and the cascades read it. Unset, it is the scene's own.
+    ClockProps clock;
     bool pixelWater = true;
     float foam = 1.0f, edgePx = 12.0f, heightScale = 1.15f;
     SweProps swe;

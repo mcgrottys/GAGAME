@@ -79,6 +79,7 @@
 #include "scene/Route.h"
 #include "scene/WaterComponent.h"
 #include "scene/SceneReload.h"
+#include "scene/SceneClocks.h"
 #include "scene/WorldTable.h"
 #include "sim/Ephemeris.h"   // M13: the one light, kept for every viewpoint
 #include "sim/SimClock.h"
@@ -272,7 +273,12 @@ private:
     scene::Rail m_rail;
     scene::Rail m_diveProbeRail;
     const scene::Rail* m_diveRail = nullptr;
+    // THE CLOCKS (scene/SceneClocks.h). m_sceneUnix is the scene's own clock -- the one that runs, paced
+    // by time.timeScale, nudged by the keys, stepped a frame at a time headless; m_simUnix is the DATA's
+    // (water.clock resolved from it, once a frame), which every producer reads; the sun reads its own.
     double m_simUnix = 0.0;
+    double m_sceneUnix = 0.0, m_sceneStartUnix = 0.0;
+    scene::SceneClocks m_clocks;
     SimClock m_simClock;
     VesselRegistry m_vesselReg;
     // M12 step 5e: THE HULLS ARE ENTITY NODES (scene/Entity.h), one per `entities` element,

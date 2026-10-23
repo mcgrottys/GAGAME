@@ -1,10 +1,12 @@
 {
   "_readme": [
-    "THE MERRIMACK'S ENTRANCE BAR IN DAYLIGHT, THE WATER ON ITS DATA'S OWN TIME (WATER_V2 section 12).",
-    "The water -- the tide, the forecast sea, the solver -- runs on the scene's clock, time.start, which is",
-    "'now': the data's time. The sun is held at local noon on its own two clocks (sun.clock, the season;",
-    "sun.earth.clock, the time of day; rate 0 holds them), so the bar can be judged in daylight whatever",
-    "the tide is doing. The two are not coupled: change one and the other stays.",
+    "THE MERRIMACK'S ENTRANCE BAR IN DAYLIGHT, ON CLOCKS THE SCENE STATES (WATER_V2 section 12; scene/SceneClocks.h).",
+    "The scene's clock starts at 2026-10-23T18:59:47Z (time.start) and the DATA's clock -- the tide, the solver,",
+    "the currents, the sea state, the wind, the cascades -- is bound to it (water.clock), so every run is the same",
+    "water. The sun is held at local noon on its own two clocks (sun.clock, the season; sun.earth.clock, the time",
+    "of day; rate 0 holds them), so the bar can be judged in daylight whatever the tide is doing. A clock is a",
+    "constant ({start, rate}) or a binding ({bind, offset, rate}: {\"bind\": \"time\", \"offset\": \"-6h\"} puts the",
+    "water six hours before the scene's clock); the window's title shows each one resolved.",
     "",
     "Launch from the repo root:  build/bin/gagame.exe scenes/demos/merrimack_bar.json",
     "",
@@ -14,6 +16,8 @@
   ],
   "base": "scenes/merrimack.json",
   "scene": {"name": "merrimack-bar", "view": "bar_low"},
+  "time": {"start": "2026-10-23T18:59:47Z"},
+  "water": {"clock": {"bind": "time"}},
   "sun": {
     "clock": {"start": "2026-10-23T16:00:00Z", "rate": 0},
     "earth": {"clock": {"start": "2026-10-23T16:00:00Z", "rate": 0}}

@@ -125,15 +125,6 @@ static double ChordM(double R, double lat0, double lon0, double lat1, double lon
     return 2.0 * R * std::sqrt((std::min)((std::max)(hav, 0.0), 1.0));
 }
 
-// A producer's own clock (SceneSchema.h ClockProps) at the scene's instant: its start, else the
-// scene's, carried at its rate from the scene's start. "now" is the session's first instant, read
-// once, so the clock runs at its rate and not at the wall's as well.
-double ClockAt(const scene::ClockProps& c, double simUnix, double sceneStartUnix) {
-    static const double kSessionNow = NowUnix();
-    const double t0 = c.start.empty() ? sceneStartUnix : c.start == "now" ? kSessionNow : ParseStartTime(c.start);
-    return t0 + c.rate * (simUnix - sceneStartUnix);
-}
-
 void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool paused,
                  const TideModel& model, const TideLayer& tide, double windowDays,
                  const SeaLayer* sea, const char* gulfInfo,
@@ -643,6 +634,7 @@ std::optional<int> FrameLoop::Session() {
     auto& poseMotor = m_poseMotor;
     auto& motorPose = m_motorPose;
     auto& simUnix = m_simUnix;
+    auto& sceneUnix = m_sceneUnix;
     auto& simClock = m_simClock;
     auto& vesselReg = m_vesselReg;
     auto& startUnix = m_startUnix;
@@ -1106,11 +1098,23 @@ std::optional<int> FrameLoop::Session() {
     // M12 step 5d: `time.start` -- "now" (the sentinel), a civil UTC stamp, or unix seconds;
     // ParseStartTime is the flag's own reader, so the two spellings land on the same instant.
     const double sceneStart = (S.time.start == "now") ? -1.0 : ParseStartTime(S.time.start);
-    simUnix = (sceneStart > 0) ? sceneStart : NowUnix();
-    // The playable clock (sim/SimClock.h). Headless keeps its own frame-indexed formula
-    // below -- that path was already fixed-step, which is why rails reproduce and sessions
+    sceneUnix = (sceneStart > 0) ? sceneStart : NowUnix();
+    // The playable clock (sim/SimClock.h) is the SCENE's. Headless keeps its own frame-indexed
+    // formula below -- that path was already fixed-step, which is why rails reproduce and sessions
     // did not.
-    simClock.Reset(simUnix);
+    simClock.Reset(sceneUnix);
+    m_sceneStartUnix = sceneUnix;
+    // THE CLOCKS (scene/SceneClocks.h): the data's, the season's and the day's, each a constant or a
+    // binding, resolved once here; a cycle is refused and said.
+    {
+        const std::string why = m_clocks.Configure(S.water.clock, S.sun.clock, S.sun.earth.clock, sceneUnix,
+                                                   NowUnix(), [](const std::string& t) { return ParseStartTime(t); });
+        if (!why.empty()) Log("%s", why.c_str());
+        Log("[clock] the scene's clock (time) starts %s UTC; %s; %s; %s", scene::SceneClocks::Stamp(sceneUnix).c_str(),
+            m_clocks.Describe(scene::SceneClocks::kWater).c_str(), m_clocks.Describe(scene::SceneClocks::kSun).c_str(),
+            m_clocks.Describe(scene::SceneClocks::kSunEarth).c_str());
+    }
+    simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);   // the data's instant
 
     // ==================================================================================
     //  M9bq THE BOAT -- M12 step 5e: an ENTITY node per hull (scene/Entity.h). A vessel
@@ -2654,6 +2658,7 @@ bool FrameLoop::Frame() {
     auto& motorPose = m_motorPose;
     auto& rail = m_rail;   // M12 step 5e: the rail as data (scene/Rail.h)
     auto& simUnix = m_simUnix;
+    auto& sceneUnix = m_sceneUnix;
     auto& simClock = m_simClock;
     auto& wavePending = m_wavePending;
     auto& wavePrefillDone = m_wavePrefillDone;
@@ -2913,14 +2918,15 @@ bool FrameLoop::Frame() {
         if (in.keyPressed[VK_UP]) timeScale = std::min(timeScale * 10.0, 864000.0);
         if (in.keyPressed[VK_DOWN]) timeScale = std::max(timeScale / 10.0, 1.0);
         const double nudge = in.keyDown[VK_SHIFT] ? 86400.0 : 3600.0;
-        if (in.keyPressed[VK_LEFT]) simUnix -= nudge;
-        if (in.keyPressed[VK_RIGHT]) simUnix += nudge;
-        if (in.keyPressed[VK_HOME] || in.keyPressed['N']) simUnix = NowUnix();
+        if (in.keyPressed[VK_LEFT]) sceneUnix -= nudge;
+        if (in.keyPressed[VK_RIGHT]) sceneUnix += nudge;
+        if (in.keyPressed[VK_HOME] || in.keyPressed['N']) sceneUnix = NowUnix();
         // A deliberate jump re-bases the clock; the partial quantum does not smear
         // across the discontinuity.
         if (in.keyPressed[VK_LEFT] || in.keyPressed[VK_RIGHT] ||
             in.keyPressed[VK_HOME] || in.keyPressed['N']) {
-            simClock.SetTo(simUnix);
+            simClock.SetTo(sceneUnix);
+            simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);
             // THE CLOCK POLICY, which a stateful body needs and nothing else in this
             // engine does. Everything else here is f(simUnix) and simply re-evaluates;
             // a hull carries momentum, so jumping an hour teleports the sea out from
@@ -2984,7 +2990,8 @@ bool FrameLoop::Frame() {
         // `for (int i = 0; i < simSteps; ++i) Step(SimClock::kDt)` hangs here.
         if (!paused) {
             simSteps = simClock.Advance(dt, timeScale);
-            simUnix = simClock.Now();
+            sceneUnix = simClock.Now();
+            simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);   // the data's instant
 
             // ---- THE HELM. Reading the controls is the only part of the boat that
             // is windowed-only; the STEP itself is shared with the headless path below,
@@ -3043,7 +3050,8 @@ bool FrameLoop::Frame() {
         // solid frame's crests, which is the second reason not to move it.
         const bool heldFrame = (opt.dumpBoth || settling) && S.capture.frames && recFrame >= S.capture.frames;
         if (heldFrame) recFrame = S.capture.frames - 1u;
-        simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+        sceneUnix = m_sceneStartUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+        simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);   // the data's instant
         // The headless clock is frame-indexed, so a frame is worth exactly
         // timeScale/30 seconds of world; the boat owes that many whole quanta. Rounding
         // rather than truncating keeps the owed time from drifting slow over a long
@@ -3116,8 +3124,8 @@ bool FrameLoop::Frame() {
         const sun::SolarSystem ss =
             (S.sun.source == Scene::kEarth)
                 ? sun::BuildEarth(S.sun.earth.at, S.sun.earth.axis, S.sun.earth.spin)
-                : sun::Build(ClockAt(S.sun.clock, simUnix, startUnix),
-                             ClockAt(S.sun.earth.clock, simUnix, startUnix));
+                : sun::Build(m_clocks.At(scene::SceneClocks::kSun, sceneUnix),
+                             m_clocks.At(scene::SceneClocks::kSunEarth, sceneUnix));
         m_solar = ss;
         m_solarValid = true;
         const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
@@ -4712,6 +4720,22 @@ bool FrameLoop::Frame() {
                     gulf ? gulf->validation.c_str() : nullptr,
                     globe ? globe->stats.c_str() : nullptr,
                     (mode == 1 && altV > 60000.0) ? 3 : mode);   // title by altitude
+        {
+            // THE CLOCKS, resolved (scene/SceneClocks.h): what this run's data, season and day are on,
+            // and the scene's own clock where the data's is bound away from it.
+            using SC = scene::SceneClocks;
+            const std::string w = SC::Stamp(simUnix);
+            const std::string se = SC::Stamp(m_clocks.At(SC::kSun, sceneUnix));
+            const std::string dy = SC::Stamp(m_clocks.At(SC::kSunEarth, sceneUnix));
+            wchar_t tail[256];
+            if (std::fabs(simUnix - sceneUnix) > 0.5) {
+                swprintf(tail, 256, L"  |  clocks: water %hs (scene %hs), season %hs, day %hs", w.c_str(),
+                         SC::Stamp(sceneUnix).c_str(), se.c_str(), dy.c_str());
+            } else {
+                swprintf(tail, 256, L"  |  clocks: water %hs, season %hs, day %hs", w.c_str(), se.c_str(), dy.c_str());
+            }
+            wcsncat_s(title, 512, tail, _TRUNCATE);
+        }
         window.SetTitle(title);
     }
 

@@ -115,6 +115,29 @@ evaluator in the kernel: η(x, t) = Σ_terms ⟨P_term(x) R_term(t)⟩₀.
 Each producer binds a clock in the scene (the collage rule): the real now, a scene time, or an EVENT's own
 t = 0 ("a sunny sky over a hurricane of months ago"). A tsunami is a producer whose clock starts at impact.
 
+*Built 2026-10-23* (Mark: "the times for data should either be scene constants or bound to another
+variable like xaml data binding works"; `scene/SceneClocks.h`).
+
+**The clocks.** One clock runs: the scene's (`time.start`, paced by `time.timeScale`, nudged by the
+keys). Every other clock is stated in the scene file as one of:
+* a **constant**, `{"start": "2026-10-23T18:59:47Z", "rate": 1}`;
+* a **binding**, `{"bind": "sun.earth.clock", "offset": "-3h", "rate": 1}`. That is the bound clock's
+  instant plus the offset, at rate times its pace: XAML's Binding with an affine converter;
+* **neither**, which is the scene's own clock.
+
+**What a scene can name:**
+* `water.clock` is the data's: the tide, the solver and its faces, the currents, the sea state's hour,
+  the wind and the cascades. Everything that reads the frame's `simUnix` reads it.
+* `sun.clock` is the season.
+* `sun.earth.clock` is the time of day.
+
+**The guarantees:**
+* A cycle is refused at load: it is logged, and the clock that closes it reads the scene's clock.
+* `[clock]` in the log states every clock.
+* The window's title shows each one resolved.
+* The scene selftest's `[clock]` checks pin the semantics.
+* An event's own t = 0 (the tsunami) is the next clock to add: a binding with an event as its anchor.
+
 ### 2.6 Identity (the "mostly static" bed and everything that depends on it)
 
 Identity is content (the compositor's law). The bed's identity is per tile (the tile tree's). Every product
