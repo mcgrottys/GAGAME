@@ -402,6 +402,31 @@ float4 WavePageSample(float2 uv, uint plane, out bool prev) {
     return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip) + (0.5f / 255.0f);
 }
 
+// THE SOLVER'S SURFACE IS ITS WET CELLS' (2026-10-23, Mark: "the water dips in like a dimple" over the
+// Merrimack's entrance shoal). The solver books the tide's rise as debt in EVERY cell (Swe.hlsl, the
+// prism term), so a dry cell's stored deviation sinks under its own bed. Nothing in the solver reads it
+// there (SurfaceAt answers the bed), but a plain bilinear read drew the water funnelling down into every
+// dry hump, a cell wide. A dry cell has no opinion here (absence, not a value): the deviation is its wet
+// corners' (the derived plane's w: 5 cm of water, outside the sponge), each by its bilinear weight; only
+// where no corner is wet does the stored value stand -- under the bed, where the shore draws land.
+// The twin: SweSolver.cpp Reconstruct.
+float SolverSurfaceDev(float2 texel) {
+    const float2 tf = texel - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    float raw = 0.0f, sw = 0.0f, se = 0.0f;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(gSweDims.xy) - int2(1, 1));
+        const float w = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
+        const float e = gT[gSlotsA.w][tc].x;
+        const float wet = (gT[gSlotsB.x][tc].w > 0.5f) ? 1.0f : 0.0f;
+        raw += w * e;
+        sw += w * wet;
+        se += w * wet * e;
+    }
+    return lerp(raw, se / max(sw, 1e-6f), saturate(sw * 20.0f));
+}
+
 float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
     const float2 tf = texel - 0.5f;
     const float2 t0 = floor(tf);
@@ -601,7 +626,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             min(min(texel.x, gSvO.x - texel.x), min(texel.y, gSvO.y - texel.y));
         const float wDom = smoothstep(0.0f, 1.0f, eCells);
         if (wDom > 0.0f) {
-            const float dEta = LoadBilinearClamp(gSlotsA.w, texel, gSweDims.xy).x;
+            const float dEta = SolverSurfaceDev(texel);   // the wet cells' surface (above)
             lvl = lerp(level, gSweB.x + dEta, wDom);
             const float4 s = LoadBilinearClamp(gSlotsB.x, texel, gSweDims.xy);
             if (s.w > 0.5f) cur = s.xy;
@@ -1097,6 +1122,19 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         steepFoam = max(steepFoam, smoothstep(0.352f, 0.528f, wakeAk));
     }
     d *= dry * gPatch.w;
+    // WATER CANNOT STAND BELOW ITS OWN BED (2026-10-23, Mark: "the water dips in like a dimple ... a
+    // mismatch in height/depth", on the Merrimack's entrance bar). Every term above is a law of its own --
+    // the orbit, the crest's fall to the trough, the wakes, the exaggeration -- and none asked how much
+    // water there is under the trough: on the bar a trough reached past the bed and the sand showed
+    // through it, a row of holes along the crest. The drawn excursion below the level saturates onto the
+    // water column, dy -> -D tanh(-dy / D), D the depth: unchanged where the trough is small against the
+    // water, never reaching the bed, the flat trough of a shallow sea. Not a cap on the height: a crest is
+    // untouched. The mirror of the shore's "water cannot stand above its own surface".
+    // TreeWater::Finish is its twin.
+    if (d.y < 0.0f) {
+        const float colD = max(depth, 1e-3f);
+        d.y = -colD * tanh(-d.y / colD);
+    }
 
     // THE SHORE STOP (2026-10-19, Mark's jetty): the lateral term carried wet labels onto the
     // riprap -- the orbit and the crest's throw never asked whether the water the particle moves

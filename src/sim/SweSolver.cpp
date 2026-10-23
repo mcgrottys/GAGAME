@@ -629,24 +629,35 @@ void SweSolver::RequestRegion(double latDeg, double lonDeg, double radiusM) {
 
 namespace {
 
-// THE ONE RECONSTRUCTION (WaterBank.hlsl LoadBilinearClamp at texel (u Nx, (1 - v) Ny)), over any
-// store: `at(ix, iy, eta, uv4)` answers one grid texel or says it does not hold it.
+// THE ONE RECONSTRUCTION (WaterBank.hlsl SolverSurfaceDev and LoadBilinearClamp at texel (u Nx, (1 - v) Ny)),
+// over any store: `at(ix, iy, eta, uv4)` answers one grid texel or says it does not hold it.
+// THE SOLVER'S SURFACE IS ITS WET CELLS' (2026-10-23, Mark: "the water dips in like a dimple" over the
+// Merrimack's entrance shoal). The solver books the tide's rise as debt in EVERY cell (Swe.hlsl, the
+// prism term), so a dry cell's stored deviation sinks under its own bed. Nothing in the solver reads it
+// there (SurfaceAt answers the bed), but a plain bilinear read drew the water funnelling down into every
+// dry hump, a cell wide. A dry cell has no opinion here (absence, not a value): the deviation is its wet
+// corners' (the derived plane's w: 5 cm of water, outside the sponge), each by its bilinear weight; only
+// where no corner is wet does the stored value stand -- under the bed, where the shore draws land.
 template <class At>
 bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolver::Deviation& out) {
     const double fx = tx - 0.5, fy = ty - 0.5;
     const double bx = std::floor(fx), by = std::floor(fy);
     const double frx = fx - bx, fry = fy - by;
-    double eta = 0.0, uv[4] = {0.0, 0.0, 0.0, 0.0};
+    double eta = 0.0, sw = 0.0, se = 0.0, uv[4] = {0.0, 0.0, 0.0, 0.0};
     for (int k = 0; k < 4; ++k) {
         const int ix = std::clamp(int(bx) + (k & 1), 0, int(nx) - 1);
         const int iy = std::clamp(int(by) + (k >> 1), 0, int(ny) - 1);
         float e = 0.0f, c[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         if (!at(ix, iy, e, c)) return false;
         const double w = ((k & 1) ? frx : 1.0 - frx) * ((k >> 1) ? fry : 1.0 - fry);
+        const double wet = (c[3] > 0.5f) ? 1.0 : 0.0;
         eta += w * double(e);
+        sw += w * wet;
+        se += w * wet * double(e);
         for (int j = 0; j < 4; ++j) uv[j] += w * double(c[j]);
     }
-    out.dEta = float(eta);
+    const double a = std::clamp(sw * 20.0, 0.0, 1.0);
+    out.dEta = float(eta + (se / (std::max)(sw, 1e-6) - eta) * a);
     out.u = float(uv[0]);
     out.v = float(uv[1]);
     out.currentValid = uv[3] > 0.5;   // the kernel's `s.w > 0.5`

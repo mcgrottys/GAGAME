@@ -571,6 +571,23 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     // rides the sea the renderer draws, uncut.
     double eta = k * dispY;
     double sx = k * slopeX, sz = k * slopeZ;
+    // WATER CANNOT STAND BELOW ITS OWN BED (2026-10-23, Mark: "the water dips in like a dimple ... a
+    // mismatch in height/depth", on the Merrimack's entrance bar). Every term above is a law of its own --
+    // the orbit, the crest's fall to the trough, the wakes, the exaggeration -- and none asked how much
+    // water there is under the trough: on the bar a trough reached past the bed and the sand showed
+    // through it, a row of holes along the crest. The drawn excursion below the level saturates onto the
+    // water column, dy -> -D tanh(-dy / D), D the depth: unchanged where the trough is small against the
+    // water, never reaching the bed, the flat trough of a shallow sea. Not a cap on the height: a crest is
+    // untouched. The mirror of the shore's "water cannot stand above its own surface".
+    // The kernel's twin (WaterBank.hlsl, after `d *= dry * gPatch.w`); the slope takes the map's
+    // derivative, sech^2, as the kernel's normals take it from the planes.
+    if (eta < 0.0) {
+        const double colD = (std::max)(depth, 1e-3);
+        const double c = std::cosh(eta / colD);
+        sx /= c * c;
+        sz /= c * c;
+        eta = -colD * std::tanh(-eta / colD);
+    }
     s.dx = k * dispX;
     s.dz = k * dispZ;
     // THE SHORE STOP (2026-10-19; WaterBank.hlsl, after `d *= dry * gPatch.w`, which says why):
