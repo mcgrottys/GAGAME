@@ -141,7 +141,8 @@ cbuffer BankCb : register(b0) {
     // sin), turned on the CPU in doubles (w t runs to 10^4 rad). Appended at the END on both sides.
     float4 gTideRot[9];
     // THE MEAN-LEVEL MOMENT per cascade, xyz (OceanCpu::LiftMoment): E[s.y div s.xz] of the unit
-    // texture as synthesized, m -- the lift's cascade term (CsBankFill, THE LIFT). Appended at the END.
+    // texture as synthesized, m -- the lift's cascade term (CsBankFill, THE LIFT); w the texture's chop
+    // (lambda: the drawn orbit over the height's, the crest law's). Appended at the END.
     float4 gBandLift;
 };
 
@@ -557,6 +558,36 @@ float CardPattern(float2 uv) {
     return v;
 }
 
+// THE CREST LAW, ONE FOR EVERY DESCRIPTION OF THE SEA (2026-10-23, Mark: "give the cascades the solved
+// field's crest law"; WaterTerms.h CrestLaw is its twin and says what it is). On one description's
+// displacement d at a label (x east, y up, z north; its orbit already on the amplitude the depth lets
+// stand): at the crest alone, the throw toward the landing by the crest's own excess where the bed's
+// slope says it plunges, the lip's fall the flight's boost back, bounded by the trough. gradEta the
+// description's slope, dBar its travel, aEnv its significant amplitude, excRaw the sea's rms_raw /
+// rms_limit (unclamped), kBar and cothBar its wavenumber in this depth and orbit factor, aH its DRAWN
+// lateral amplitude, tanBeta the bed's slope. Returns q1, the crest's throw share (the spray reads it).
+float CrestExcessShare(float eta, float aEnv, float excRaw) {
+    const float eCr = excRaw * max(eta / aEnv, 0.0f);
+    return 1.0f - 1.0f / max(eCr * eCr, 1.0f);
+}
+float CrestLaw(inout float3 d, float2 gradEta, float2 dBar, float aEnv, float excRaw, float kBar,
+               float cothBar, float aH, float tanBeta, float depth) {
+    const float wCr = saturate(0.5f + 0.5f * d.y / aEnv);
+    const float Hc = aEnv + max(d.y, 0.0f);   // this crest's height over the trough
+    const float aLoop = LipReach(kBar, cothBar, Hc, depth);
+    const float share = CrestExcessShare(d.y, aEnv, excRaw);
+    const float plunge = (share > 0.0f) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0f;
+    const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * share * plunge;
+    d.xz *= 1.0f + q1 * wCr;   // the orbit grows; the throw is the flight's, below
+    const float ePast = max(aH * (1.0f + q1 * wCr) - 1.0f / max(kBar, 1e-4f), 0.0f);
+    const float fall = LipFall(ePast, kBar, cothBar, Hc, depth);
+    const float3 tau = LipFlightTau(dBar, gradEta, q1 * wCr * aH, fall);
+    const float yWas = d.y;
+    d = MotorPoint(float4(1.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.5f * tau), d);
+    d.y = max(d.y, min(yWas, -aEnv));
+    return q1;
+}
+
 [numthreads(16, 16, 1)]
 void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const uint texels = (uint)gMisc.x;
@@ -742,6 +773,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float blockFoam = 0.0f;   // union over bands of current-blocking foam
     float liftE = 0.0f;       // E[eta div D] of the cascades as drawn (THE LIFT, below)
     float wDrawn[3];          // each band's share drawn as geometry here: its fold x the window's yield
+    float cothArr[3];         // each band's orbit factor in this depth (the crest law's coth, amplitude-weighted)
+    float2 gradC = 0.0f;      // the cascades' drawn slope (the deriv fiber's hx, hz): the throw's launch
     // Per-band gains -> the detail plane. Band 1 has fed the PS sparkle since M7a; M8
     // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
     // Jacobian and Laplacian it assembles from the cascade derivative textures
@@ -858,28 +891,28 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
             dv = LoadBilinearWrapMip(gSlotsE[c], cuv, cmip);
         }
-        // THE CREST LAW (the rolling-wave work, 2026-10-19; docs/WATER_VOLUME.md section 7). The
-        // breaking factor brk bounds the sea's HEIGHT -- the clipped Rayleigh sea, what the depth
-        // allows to stand. The horizontal excursion is not height and the depth does not bound it:
-        // a crest that cannot rise goes FORWARD. So the lateral term keeps the band's RAW amplitude,
-        // amp / brk, and the vertical the clipped one -- the kinematic criterion in Lagrangian
-        // dress: at the limit the crest particle outruns the phase speed and the sheet folds, which
-        // the column plane carries. Where nothing breaks brk = 1 and the two are one orbit, as
-        // before; no new constant, the limiter's own ratio inverted.
-        // ...and THE ORBIT IS THE DEPTH'S (the same day): a particle's horizontal excursion in
-        // water of depth h is coth(kh) times its vertical (Airy's ellipse at the surface), 1 in
-        // deep water and growing as the wave shoals -- the lateral term had carried the deep-water
-        // ratio everywhere. Measured without it: the storm's crests at the throat stood at
-        // det(1 + J) = 0.33 at their tightest and never folded. The k is the band's IN THIS DEPTH
-        // (Jet.hlsli ShoaledKh: the cascades are synthesized at the deep-water k, and coth of THAT
-        // k reached 113 on the 213 m band in the shallows, 52 m of slosh, a torn sheet). The depth
-        // floor is 0.3 m; the dry weight below takes the geometry out before it.
+        // THE ORBIT IS THE DELIVERED ONE (2026-10-23, Mark: "give the cascades the solved field's crest
+        // law"; CrestLaw above). The lateral rides the band's delivered amplitude, what the depth lets
+        // stand, as the solved field's orbit always has. Since 2026-10-19 it had kept the RAW amplitude
+        // ("a crest that cannot rise goes forward", amp / brk): that put the sea mid-plunge at every
+        // phase -- ALGEBRA.md priors 53 (c), retired for the solved field then and for the cascades now
+        // -- and spent the energy the depth takes twice, since the solver turns it into the push and the
+        // setup (WATER_V2 12.12: orbits of 11.8 m in Salisbury's surf). A crest's going forward is
+        // CrestLaw's throw, at the crest alone, by its own excess, where the bed says it plunges.
+        // ...and THE ORBIT IS THE DEPTH'S (2026-10-19): a particle's horizontal excursion in water of
+        // depth h is coth(kh) times its vertical (Airy's ellipse at the surface), 1 in deep water and
+        // growing as the wave shoals. The k is the band's IN THIS DEPTH (Jet.hlsli ShoaledKh: the
+        // cascades are synthesized at the deep-water k, and coth of THAT k reached 113 on the 213 m
+        // band in the shallows, 52 m of slosh, a torn sheet). The depth floor is 0.3 m; the dry weight
+        // below takes the geometry out before it.
         const float cothC = OrbitCoth(gBandK[c], depth);   // the band's k IN THIS DEPTH (Jet.hlsli)
+        cothArr[c] = cothC;
         d.y += s.y * (w * amp);
-        d.xz += s.xz * (w * amp * cothC / max(brk, 1e-3f));
+        d.xz += s.xz * (w * amp * cothC);
+        gradC += dv.xy * (w * amp);
         // this band's share of E[eta div D]: its vertical gain times its lateral gain times the
         // texture's own moment (bands are uncorrelated; the charts' blend keeps the norm)
-        liftE += (w * amp) * (w * amp * cothC / max(brk, 1e-3f)) * gBandLift[c];
+        liftE += (w * amp) * (w * amp * cothC) * gBandLift[c];
         // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
         // the old additive term here read it and contributed nothing since M7).
         // Monahan-gated: the Jacobian says WHERE a whitecap sits, the wind says HOW MANY
@@ -892,61 +925,58 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         sig2 += (1.0f - w) * amp * amp *
                 (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f));
     }
-    // THE LATERAL BOUND (2026-10-19, the chips along the jetty): Airy's orbit is the depth's,
-    // coth(kh) times the vertical, and in half a metre of water that is six times a half-metre
-    // wave -- the sheet's particles cross on every crest and the column reads a tube at every
-    // rock. Linear theory has no such water: a particle thrown past a quarter wavelength is a
-    // bore (the crest law's own bound, section 7, k A_h <= pi/2), so the cascades' summed lateral
-    // term is held to it here on the sea's energy wavenumber IN THIS DEPTH and its raw lateral
-    // amplitude (the envelope over the limiter, times coth). One min; in deep water it is 1.
-    // TreeWater::Finish applies the same factor to its lateral gains.
-    // THE SEA THESE LAWS JUDGE IS THE ONE DRAWN HERE (2026-10-23, Mark at the jetty tip: "something is
-    // up with that shoal ... and it's affecting the mesh"). The block read the WHOLE sea's raw envelope
-    // and wavenumber -- but inside the solved window the cascades draw only what the window leaves them
-    // (bands 0 and 1 yield by wCas, as `amp` above says), so the crest weight below compared the chop's
-    // elevation against the swell's envelope, sat at 1/2 at every phase, and the lip's fall came off
-    // the sheet as a smooth offset wherever the swell's reach passed the cusp: a hollow 0.95 m deep
-    // where the ebb jet crosses the ridge off the south jetty (measured with GAGAME_TWIN_GRID: -0.29 m
-    // mean over the 1-2 m water, the solver's own setup buried under it). Three corrections, each a
-    // normalization: (1) the envelope and wavenumber are the DRAWN bands', the yield applied; (2) the
-    // lateral amplitude is the raw orbit ONCE -- the loop draws amp coth / brk, which is the raw gain
-    // times coth, and the bound divided by brk a second time, overstating the reach wherever the depth
-    // limits the sea; (3) the units are d's own, physical -- gRmsRef carries the exaggeration, which
-    // `d *= dry * gPatch.w` applies to everything at the end, so the envelope is taken back out of it.
-    // "Drawn" is each band's fold weight too: on a coarse ring the chop leaves geometry for sigma^2,
-    // and an envelope that kept it put the crest weight back at 1/2 over a flat drawn sea (measured on
-    // ring 2 over the same ridge: -0.12 m median before the fold joined the yield).
-    float fB = 1.0f;
+    // THE CREST LAW ON THE CASCADES (2026-10-23, Mark: "give the cascades the solved field's crest law
+    // (orbit on the delivered amplitude, the crest-local throw by the crest's excess and the Iribarren
+    // gate from the bank's own bed slope)"). CrestLaw above, the solved field's own, on the sea the
+    // cascades DRAW here: each band's fold times the window's yield (inside the window only the chop is
+    // drawn, and a law judged on the swell's envelope pressed a 0.95 m hollow into the jetty-tip ridge:
+    // ALGEBRA.md priors 54), in d's own physical units (gRmsRef carries the exaggeration, applied to
+    // everything at `d *= dry * gPatch.w`). Its excess is the DRAWN sea's against the depth, which inside
+    // the window is the chop's and throws nothing: the swell's crest is the solved field's to throw. The
+    // old block -- the raw orbit held to the landing, the lip's fall at every crest past the cusp -- and
+    // its bound are gone with the raw orbit.
     {
         const float hB = max(depth, 0.3f);
         const float eD0 = e0 * wDrawn[0] * wDrawn[0], eD1 = e1 * wDrawn[1] * wDrawn[1];
         const float eD2 = e2 * wDrawn[2] * wDrawn[2];
         const float eD = eD0 + eD1 + eD2;
-        const float envD = sqrt(eD) / max(gPatch.w, 1e-3f);
-        // the drawn sea's energy-weighted wavenumber (the whole sea's where nothing is drawn: 0 / 0)
+        const float envD = sqrt(eD) / max(gPatch.w, 1e-3f);   // the drawn bands' raw envelope, physical
+        // the drawn sea's energy-weighted wavenumber (the whole sea's where nothing is drawn: 0 / 0), in
+        // this depth; its amplitude-weighted orbit factor, as the solved field's sums make theirs
         const float kD = (eD0 * gBandK.x + eD1 * gBandK.y + eD2 * gBandK.z + 1e-12f * kEff) / (eD + 1e-12f);
         const float kSh = ShoaledKh(kD, hB) / hB;
-        const float cothE = OrbitCoth(kD, depth);
-        const float aH = 1.4142136f * envD * cothE;   // the drawn lateral amplitude: raw x coth, once
-        // the bound is the landing (Jet.hlsli LipReach), on the drawn sea's significant crest-to-trough
-        const float aEnvC = max(1.4142136f * envD * brk, 1e-3f);
-        const float aReach = LipReach(kSh, cothE, 2.0f * aEnvC, hB);
-        fB = min(1.0f, aReach / max(aH, 1e-4f));
-        d.xz *= fB;
-        // THE LIP FALLS on the cascades' sea too (2026-10-20, Mark: "so every place rolls"). The
-        // cascades' lateral term is the raw orbit at every phase, held to the loop's bound; a
-        // crest's water reaches that far, and past the cusp (1 / k) it has left the face. The crest
-        // is the sea's, as the solved law has it: w = 1/2 + eta / (2 A_env), 1 at the crest and 0 in
-        // the trough, so the excursion past the cusp is the crest's alone. The fall is Jet.hlsli's
-        // LipFall, bounded by the trough. d and the envelope are both physical here (above);
-        // TreeWater::Finish carries the same.
-        const float reach = min(aH, aReach);
-        const float wCrC = saturate(0.5f + 0.5f * d.y / aEnvC);
-        const float ePastC = max(reach - 1.0f / max(kSh, 1e-4f), 0.0f) * wCrC;
-        const float fallC = LipFall(ePastC, kSh, cothE, aEnvC + max(d.y, 0.0f), hB);
-        d.y = max(d.y - fallC, min(d.y, -aEnvC));
+        const float a0 = sqrt(eD0), a1 = sqrt(eD1), a2 = sqrt(eD2);
+        const float cothBarC = (a0 * cothArr[0] + a1 * cothArr[1] + a2 * cothArr[2] + 1e-6f * OrbitCoth(kD, depth)) /
+                               (a0 + a1 + a2 + 1e-6f);
+        const float aEnvC = max(1.4142136f * envD * brk, 1e-3f);   // its significant amplitude, delivered
+        const float excD = envD * 2.8284271f / BreakHmax(kD, depth);   // its raw Hs over the depth's limit
+        if (depth > 0.05f && eD > 1e-12f) {
+            // THE BED'S SLOPE for the Iribarren gate, read only where a crest is over its limit: the
+            // bank's own bed one wave-radian (1 / k in this depth, never under a texel) east and north --
+            // the face a breaking crest runs up, not a rock, as the solve's +-4 cells are (WaveField's env
+            // slice) -- by forward differences; the corner lerp's own slope where no tenant is resident.
+            float tanB = 0.0f;
+            if (gDebugA.x == 0.0f && CrestExcessShare(d.y, aEnvC, excD) > 0.0f) {
+                const float dS = max(1.0f / max(kSh, 1e-4f), t.texelM);
+                float gx, gz;
+                if (gSlotsD.x != 0xFFFFFFFFu) {
+                    const float2 pe = TilePlace(t, exz + float2(dS, 0.0f)) * 0.01745329252f;
+                    const float2 pn = TilePlace(t, exz + float2(0.0f, dS)) * 0.01745329252f;
+                    const float3 dE = float3(cos(pe.x) * cos(pe.y), sin(pe.x), cos(pe.x) * sin(pe.y));
+                    const float3 dN = float3(cos(pn.x) * cos(pn.y), sin(pn.x), cos(pn.x) * sin(pn.y));
+                    gx = (HpHeightChain(gTA[gSlotsD.x], gTA[gSlotsD.y], dE, wcT, t.texelM) - bed) / dS;
+                    gz = (HpHeightChain(gTA[gSlotsD.x], gTA[gSlotsD.y], dN, wcT, t.texelM) - bed) / dS;
+                } else {
+                    const float span = max(gMisc.x * t.texelM, 1e-3f);
+                    gx = lerp(t.bed10 - t.bed00, t.bed11 - t.bed01, f.y) / span;
+                    gz = lerp(t.bed01 - t.bed00, t.bed11 - t.bed10, f.x) / span;
+                }
+                tanB = min(length(float2(gx, gz)), 1.0f);
+            }
+            const float2 dBarC = (gPeakDir.z > 0.5f) ? gPeakDir.xy : float2(0.0f, 0.0f);
+            CrestLaw(d, gradC, dBarC, aEnvC, excD, kSh, cothBarC, gBandLift.w * aEnvC * cothBarC, tanB, depth);
+        }
     }
-    liftE *= fB;   // the bound holds the whole lateral term, so the moment rides it
 
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield): per-cell a, k, and the
     // integrated phase spinor, advanced by the rotor e^{-i sigma t} and folded by THIS
@@ -1099,59 +1129,13 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float kBar = sumAK / sumA;
             const float cothBar = sumACoth / sumA;
             const float2 dBar = sumADir / max(length(sumADir), 1e-6f);
-            const float aH = gWaveB.z * aEnv * cothBar;   // the sea's horizontal amplitude
-            // THE CREST'S STEEPNESS CLIMBS TO THE CUSP (2026-10-19 late, Mark: "adjustments to the
-            // shallow/beach waves"). The first cut's gain was the limiter's ratio itself, lipQ - 1,
-            // which at a 7 m reef under a 5 m swell is 0.2: a tongue 5 cm thick thrown a metre
-            // (measured at Mavericks' bowl: lips 0.3 m over the face at the median, 2.7 m wide at
-            // the 90th). Linear theory's orbit in shallow water is k A_h = (H / 2h) <= 0.3 whatever
-            // the wave does, so no ratio of heights reaches the cusp (k A_h = 1, the crest's water
-            // at the phase speed) or the loop (pi / 2). The energy the depth cannot carry is what
-            // carries the crest forward: the share of the raw variance above the limit, 1 - 1/lipQ^2
-            // (the clipped Rayleigh sea's own measure, WaterTerms.h BreakFactor), takes the crest's
-            // excursion from the sea's own, A_h, toward the loop's limit, pi / 2k. At lipQ = 1
-            // nothing is added; at 1.5 the crest stands at the cusp; past 2 it overturns; the bound
-            // is never crossed. One law, no corner, the twin WaveField::ProbeAt's.
-            // THE SET WAVE (the same night): the limiter's excess is the SEA's, Hs against the depth,
-            // and the crest weight w saturates at the significant amplitude, so every crest above it
-            // was thrown alike and the set waves -- 1.5 to 2 times the significant crest, the ones
-            // that tube -- got an average crest's throw (measured: 1,401 folds on ring 0 and lips
-            // 0.2 m over the face). The excess that folds THIS crest is the sea's times this crest's
-            // height over the significant amplitude: a crest twice the significant one stands at
-            // twice the sea's excess against the depth. Below the significant crest the share falls
-            // with it; in the trough it is nothing (w is too).
-            // THE SEA'S EXCESS UNCLAMPED (2026-10-23, gating the jetty-tip fix): the product was taken
-            // on max(excess, 1), which forgot how far UNDER its limit a sea stands -- every crest over
-            // the significant one read as over the depth's limit, and in 17 m of water off the jetties
-            // a 2 m set crest of a 2.2 m sea was thrown 14.9 m and folded the sheet, where nothing
-            // breaks (and the hull's twin, which runs the law only where the sea is over its limit,
-            // never felt it). The crest's own excess is the sea's ratio times the crest's height over
-            // the significant amplitude, whichever side of 1 the ratio is: unchanged wherever the sea
-            // breaks (excess >= 1), nothing thrown where neither it nor the crest reaches the limit.
-            // the reach is the landing (Jet.hlsli LipReach): the cusp plus the flight to the trough,
-            // on THIS crest's height over it
-            const float aLoop = LipReach(kBar, cothBar, aEnv + max(dW.y, 0.0f), depth);
-            const float eCr = excRaw * max(dW.y / aEnv, 0.0f);
-            const float excessShare = 1.0f - 1.0f / max(eCr * eCr, 1.0f);
-            // which crests plunge (Jet.hlsli PlungeShare): the bed's slope, carried by the solve, against
-            // this crest's height -- a spilling bar keeps its steep face and its foam, a reef its barrel
-            const float plunge = PlungeShare(env.w * env.w, aEnv + max(dW.y, 0.0f), kBar, depth);
-            const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * excessShare * plunge;
-            dW.xz *= 1.0f + q1 * wCr;   // the orbit grows; the throw is the flight's, below
-            // THE LIP FALLS (2026-10-20, Mark: "we get lip but it doesn't seem to roll into the
-            // wave"). The law above carries the crest forward and leaves it at its height: a shelf.
-            // Water thrown past the cusp (e, the spray's own measure, 1 / k) has left the face and
-            // falls (Jet.hlsli LipFall: the jet's measured fall, the crest's speed with amplitude);
-            // most at the crest's water thrown farthest -- the lip's tip curls down in front of the
-            // face -- and bounded where water meets water, the trough. WaveField::ProbeAt carries it.
-            // THE FLIGHT, one translator (Jet.hlsli LipFlightTau): the throw along the sheet in the
-            // free-fall frame, the fall the boost back; bounded where the water meets the trough.
-            const float ePast = max(aH * (1.0f + q1 * wCr) - 1.0f / max(kBar, 1e-4f), 0.0f);
-            const float fall = LipFall(ePast, kBar, cothBar, aEnv + max(dW.y, 0.0f), depth);
-            const float3 tau = LipFlightTau(dBar, gradEta, q1 * wCr * aH, fall);
-            const float yWas = dW.y;
-            dW = MotorPoint(float4(1.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.5f * tau), dW);
-            dW.y = max(dW.y, min(yWas, -aEnv));
+            const float aH = gWaveB.z * aEnv * cothBar;   // the sea's horizontal amplitude, at its chop
+            // THE CREST LAW (CrestLaw above; its history: 2026-10-19 the crest climbs to the cusp by the
+            // share of the raw variance over the limit, the set wave's own excess; 2026-10-20 the lip falls
+            // and the flight is one translator; 2026-10-22 the Iribarren gate; 2026-10-23 the sea's excess
+            // unclamped -- a 2 m set crest in 17 m of water was thrown 14.9 m on max(excess, 1) -- and the
+            // law made one, the cascades' too). The bed's slope is the solve's, per cell (env.w^2).
+            const float q1 = CrestLaw(dW, gradEta, dBar, aEnv, excRaw, kBar, cothBar, aH, env.w * env.w, depth);
             // THE SPRAY's quantities (the spawn stands after the shore stop below): the crest's
             // excursion past the CUSP (1 / k) is a loop's water, the plunging lip's -- that is what
             // leaves the sheet as spray, at a crest texel (w > 3/4); the summed k and travel for

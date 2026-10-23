@@ -452,8 +452,9 @@ m, Tp 9 s): before, the drawn sea stood **0.058 m under** the level in 5–8 m o
 predicts 0.075); after, within **±0.01 m** inside the solved window (two instants, 125k labels a bin),
 and outside it the lift cancels the measured E[η ∇·D] to 87–100 % in every deep bin (Salisbury Beach,
 cascades only: +0.074 → +0.011 m in 3–5 m). Not counted: the crest law's throw and fall (crest-local,
-beyond second order) and the trough bound -- in the inner surf, where they reshape the crests, the
-moment overshoots by 2–5 cm. Code: `WaterBank.hlsl` THE LIFT, `TreeWater::Finish` its twin, `WaveField::Probe::lift`.
+beyond second order) and the trough bound -- where the crest law throws hard (Mavericks' bowl under a
+5 m, 17 s swell, the sheet folding) the moment and the measured E[η ∇·D] agree only to 0.8–1.4× in
+the large bins and 3.3× in the bowl. Code: `WaterBank.hlsl` THE LIFT, `TreeWater::Finish` its twin, `WaveField::Probe::lift`.
 
 Independent verification: `proofs/inlet_storm.py` runs these same closed forms on the
 engine's exported fields (numpy, no engine code); the match report holds the kernel to it
@@ -1791,6 +1792,14 @@ SUM, not on the terms; the inversion of a sheet belongs to the structure that al
     it. And both twins had carried the same hollow, so the twin could never have seen that either.
     Law: a twin gate checks the parts of the answer that read each input it is given, and is handed
     the place the way the reader it stands for is (`Entity.cpp`'s `SetChart`).
+56. **A law retired in one description lives on in another** (2026-10-23; WATER_V2 §12.13). Prior: the
+    crest law of priors 53 is the water's. Measured: it was the SOLVED field's; the cascades kept the
+    raw amplitude in the orbit at every phase, which 53 (c) had retired, and their own bound and fall.
+    Once their bound's double ÷brk was gone, the surf's orbit at Salisbury reached 11.8 m, and their
+    fall sank the inner surf 0.17 m below the solver's setup. Given the solved field's law (one
+    function, `CrestLaw`, called by both descriptions on both processors) the sink and the orbits went,
+    with no fold. Law: a phenomenon has ONE law, written once a processor and called by every
+    description of the sea; a description that cannot run it says why, in code.
 
 ## verification — The gate map: which algebra is pinned where
 

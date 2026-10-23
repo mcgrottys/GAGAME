@@ -441,34 +441,13 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             if (c != 2) gain[c] *= 1.0 - wWin;
         }
-        // THE CREST LAW for the cascades (the kernel's cascade loop): the breaking factor bounds the
-        // height; the lateral term keeps the raw amplitude, amp / brk; and THE ORBIT IS THE DEPTH'S,
-        // coth(k h) on each band's k -- the lateral channels' own gain, handed to the sampler beside
-        // the height's.
+        // THE ORBIT IS THE DELIVERED ONE (2026-10-23; the kernel's cascade loop says why): each band's
+        // lateral rides its delivered gain times the depth's orbit, coth(k h) on the band's k -- the lateral
+        // channels' own gain, handed to the sampler beside the height's. The crest's throw is CrestLaw's,
+        // after the sum.
         double latGain[OceanCpu::kCascades];
-        // THE LATERAL BOUND (the kernel's, after its cascade loop: the landing on the sea's energy
-        // wavenumber in this depth), judged on THE SEA DRAWN HERE (2026-10-23, the jetty-tip hollow;
-        // WaterBank.hlsl says why): the drawn bands' raw envelope and wavenumber -- 0 and 1 yield by
-        // wWin, as `gain` does above -- the raw orbit once, and physical metres (dispY is, until the
-        // exaggeration below). (rmsRaw and kEff stay the whole sea's: the breaking factor's.)
-        const double hB = std::max(depth, 0.3);
-        double eD = 0.0, eDk = 0.0;
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
-            const double gr = gain[c] / std::max(brk, 1e-3) * m_bandRms[c];   // the drawn band's raw rms
-            eD += gr * gr;
-            eDk += gr * gr * m_ocean->BandK(c);
-        }
-        const double envD = std::sqrt(eD);
-        const double kD = (eDk + 1e-12 * kEff) / (eD + 1e-12);   // the whole sea's where nothing is drawn
-        const double kSh = ShoaledKh(kD, hB) / hB;
-        const double cothE = OrbitCoth(kD, depth);
-        const double aH = 1.4142135623730951 * envD * cothE;   // the drawn lateral: raw x coth, once
-        // the bound is the landing (the kernel's; WaterTerms.h LipReach), on the significant crest-to-trough
-        const double aEnvB = std::max(1.4142135623730951 * envD * brk, 1e-3);
-        const double aReach = LipReach(kSh, cothE, 2.0 * aEnvB, hB);
-        const double fB = std::min(1.0, aReach / std::max(aH, 1e-4));
-        for (int c = 0; c < OceanCpu::kCascades; ++c) {
-            latGain[c] = fB * (1.0 / std::max(brk, 1e-3)) * OrbitCoth(m_ocean->BandK(c), depth);
+            latGain[c] = OrbitCoth(m_ocean->BandK(c), depth);
             // THE LIFT's cascade term (the kernel's liftE): vertical gain x lateral gain x the texture's
             // own E[h div D] (OceanCpu::LiftMoment, signed)
             liftPhys -= gain[c] * (gain[c] * latGain[c]) * m_ocean->LiftMoment(c);
@@ -482,7 +461,9 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         const int nCh = p.nCh;
         const WaveChart::Chart* ch = p.ch;
         const double norm = p.norm;
-        const double y0 = dispY, sx0 = slopeX, sz0 = slopeZ;   // the solved part: the fall is the cascades'
+        // the solved part, so the crest law below reads the cascades' own surface
+        const double y0 = dispY, dx0 = dispX, dz0 = dispZ, sx0 = slopeX, sz0 = slopeZ;
+        const double jxx0 = jacXX, jxz0 = jacXZ, jzz0 = jacZZ;
         for (int i = 0; i < nCh; ++i) {
             if (ch[i].w < WaveChart::kSkip) continue;   // the law's own skip; the norm keeps it
             OceanSample o;
@@ -511,34 +492,47 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             jacXZ += w * (a * R[2] + b * R[3]);
             jacZZ += w * (c2 * R[2] + d2 * R[3]);
         }
-        // THE LIP FALLS on the cascades' sea (the kernel's, after its lateral bound; the law at
-        // WaterTerms.h LipFall): the crest's water past the cusp, w the sea's crest weight, bounded
-        // by the trough. Physical metres, the drawn sea's envelope (above), as the kernel's.
-        {
-            const double yC = dispY - y0, sxC = slopeX - sx0, szC = slopeZ - sz0;
-            const double aEnvC = aEnvB;
-            const double reach = std::min(aH, aReach);
-            const double wRaw = 0.5 + 0.5 * yC / aEnvC;
-            const double wCr = std::min(std::max(wRaw, 0.0), 1.0);
-            const double eUnit = std::max(reach - 1.0 / std::max(kSh, 1e-4), 0.0);
-            const double ePast = eUnit * wCr;
-            const double HC = aEnvC + std::max(yC, 0.0);
-            const double fall = LipFall(ePast, kSh, cothE, HC, hB);
-            if (fall > 0.0) {
-                const double free = yC - fall, floorY = std::min(yC, -aEnvC);
-                double yN = free, sxN = sxC, szN = szC;
-                if (free >= floorY) {
-                    const bool inBand = wRaw > 0.0 && wRaw < 1.0;
-                    const double dd = inBand ? LipFallDe(ePast, kSh, cothE, HC, hB) * eUnit * 0.5 / aEnvC : 0.0;
-                    sxN = sxC - dd * sxC;
-                    szN = szC - dd * szC;
-                } else {
-                    yN = floorY;
-                    sxN = szN = 0.0;
+        // THE CREST LAW ON THE CASCADES (the kernel's, after its cascade loop; WaterTerms.h CrestLaw, the
+        // solved field's own): on the sea the cascades draw here -- 0 and 1 yield by wWin, as `gain` does;
+        // the twin has no ring, so no fold -- in physical metres, its excess the drawn sea's against the
+        // depth, the bed's slope one wave-radian east and north where a crest is over its limit.
+        if (depth > 0.05) {
+            const double hB = std::max(depth, 0.3);
+            double eD = 0.0, eDk = 0.0, sA = 0.0, sAC = 0.0;
+            for (int c = 0; c < OceanCpu::kCascades; ++c) {
+                const double gr = gain[c] / std::max(brk, 1e-3) * m_bandRms[c];   // the drawn band's raw rms
+                eD += gr * gr;
+                eDk += gr * gr * m_ocean->BandK(c);
+                sA += gr;
+                sAC += gr * latGain[c];
+            }
+            const double envD = std::sqrt(eD);
+            if (eD > 1e-12) {
+                const double kD = (eDk + 1e-12 * kEff) / (eD + 1e-12);   // the whole sea's where nothing is drawn
+                const double kSh = ShoaledKh(kD, hB) / hB;
+                const double cothBar = sAC / sA;
+                const double aEnvC = std::max(1.4142135623730951 * envD * brk, 1e-3);
+                const double excD = envD * 2.8284271247461903 / BreakHmax(kD, depth);
+                CrestState st;
+                st.eta = dispY - y0; st.dx = dispX - dx0; st.dz = dispZ - dz0;
+                st.sx = slopeX - sx0; st.sz = slopeZ - sz0;
+                st.jxx = jacXX - jxx0; st.jxz = jacXZ - jxz0; st.jzz = jacZZ - jzz0;
+                double tanB = 0.0;
+                if (CrestExcessShare(st.eta, aEnvC, excD) > 0.0) {
+                    const double dS = std::max(1.0 / std::max(kSh, 1e-4), m_sampleM);   // the twin's texel
+                    double laE = 0.0, loE = 0.0, laN = 0.0, loN = 0.0;
+                    PlaceOf(wx + dS, wz, laE, loE);
+                    PlaceOf(wx, wz + dS, laN, loN);
+                    const double gx = (BedAt(q, laE, loE) - s.bedNavd) / dS;
+                    const double gz = (BedAt(q, laN, loN) - s.bedNavd) / dS;
+                    tanB = std::min(std::sqrt(gx * gx + gz * gz), 1.0);
                 }
-                dispY = y0 + yN;
-                slopeX = sx0 + sxN;
-                slopeZ = sz0 + szN;
+                const double dBx = m_peakValid ? m_peakDirX : 0.0, dBz = m_peakValid ? m_peakDirZ : 0.0;
+                CrestLaw(st, dBx, dBz, aEnvC, excD, kSh, cothBar, m_ocean->Lambda() * aEnvC * cothBar, 1.0,
+                         tanB, depth);
+                dispY = y0 + st.eta; dispX = dx0 + st.dx; dispZ = dz0 + st.dz;
+                slopeX = sx0 + st.sx; slopeZ = sz0 + st.sz;
+                jacXX = jxx0 + st.jxx; jacXZ = jxz0 + st.jxz; jacZZ = jzz0 + st.jzz;
             }
         }
     }

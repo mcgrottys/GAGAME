@@ -359,7 +359,8 @@ private:
         // a row: cos, sin of constituent 2j, then of 2j + 1. Appended at the END on both sides.
         float tideRot[36];
         // THE MEAN-LEVEL MOMENT per cascade (OceanCpu::LiftMoment, the texture's E[h div D], m):
-        // the Lagrangian lift's cascade term (gBandLift). Appended at the END on both sides.
+        // the Lagrangian lift's cascade term (gBandLift); [3] the texture's chop, lambda. Appended at
+        // the END on both sides.
         float bandLift[4];
     };
     struct BankTile {

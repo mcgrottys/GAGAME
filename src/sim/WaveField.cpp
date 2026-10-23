@@ -2235,75 +2235,24 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         jxzS -= aKC * dX * dZ;
         jzzS -= aKC * dZ * dZ;
     }
-    // THE CREST THROWS FORWARD, THE TROUGH STAYS (WaterBank.hlsl's solved loop, after its
-    // components -- the law and its reasons are there). On the sum: the sea's crest weight from
-    // its elevation against its envelope, the lateral term grown by q1 there and the crest
-    // carried forward by the same share of the sea's horizontal amplitude along its travel; the
-    // throw bounded by the wavelength (k A_h <= pi/2, A_h chopped). The Jacobian follows by the
-    // product rule, grad(w) = grad(eta) / (2 A_env) inside the saturate and 0 outside; the
-    // (x, z) term is symmetrized, as the stored Jacobian is.
+    // THE CREST LAW (WaterTerms.h CrestLaw, the one law every description of the sea runs; the kernel's
+    // twin is WaterBank.hlsl CrestLaw): on the sum, the crest thrown toward the landing by its own excess
+    // where the bed plunges, the lip's fall bounded by the trough, the slope and the offset's Jacobian
+    // carried through. Here the lateral is at chop 1 (the caller's lq carries the chop): post = chopM.
     if (depthM > 0.0 && sumA > 1e-9) {
         const double rmsNow = bil(t.envSlice, 0) * double(t.envMax);
         const double aEnv = (std::max)(1.4142135623730951 * rmsNow, 1e-3);
-        const double wRaw = 0.5 + 0.5 * eta / aEnv;
-        const double wCr = (std::min)((std::max)(wRaw, 0.0), 1.0);
-        const bool inBand = wRaw > 0.0 && wRaw < 1.0;
         const double kBar = sumAK / sumA;
         const double cothBar = sumACoth / sumA;
         const double dLen = std::sqrt(sumADx * sumADx + sumADz * sumADz);
         const double dBx = dLen > 1e-9 ? sumADx / dLen : 0.0, dBz = dLen > 1e-9 ? sumADz / dLen : 0.0;
-        const double aH1 = aEnv * cothBar;                 // the sea's horizontal amplitude, chop 1
-        // THE CREST'S STEEPNESS CLIMBS TO THE CUSP (WaterBank.hlsl, the crest law, 2026-10-19 late):
-        // the share of the raw variance above the limit takes the crest's excursion from the sea's own
-        // toward the loop's limit pi / 2k (the chopped amplitude is what the kernel bounds).
-        // the reach is the landing (WaterTerms.h LipReach), on this crest's height over the trough
-        const double aLoop = LipReach(kBar, cothBar, aEnv + (std::max)(eta, 0.0), depthM > 0.0 ? depthM : 1.0e9);
-        // the set wave (the kernel's): the crest's own excess, the sea's (unclamped) times eta over
-        // the significant amplitude (eta / aEnv = 2 wRaw - 1)
-        const double eCr = excRaw * (std::max)(eta / aEnv, 0.0);
-        const double excessShare = 1.0 - 1.0 / (std::max)(eCr * eCr, 1.0);
-        // which crests plunge (WaterTerms.h PlungeShare): the bed's slope against this crest's height
-        const double sqB = bil(t.envSlice, 3);
-        const double plunge = PlungeShare(sqB * sqB, aEnv + (std::max)(eta, 0.0), kBar, depthM > 0.0 ? depthM : 1.0e9);
-        const double q1c = (std::max)(aLoop / (std::max)(aH1 * chopM, 1e-3) - 1.0, 0.0) * excessShare * plunge;
-        const double g = 1.0 + q1c * wCr;
-        const double wx = inBand ? 0.5 * sxS / aEnv : 0.0;   // grad(w) (sxS is grad(eta) so far)
-        const double wz = inBand ? 0.5 * szS / aEnv : 0.0;
-        // THE FLIGHT (WaterBank.hlsl's solved loop; the law at WaterTerms.h LipFlightTau): the throw
-        // along the sheet, the fall the boost back, one translator; bounded by the trough. Per unit
-        // of w the throw is q1c aH u (u the launch direction along the sheet): its horizontal part
-        // rides the lateral channels at chop 1 (the caller's lq carries the chop), its vertical part
-        // the elevation at the chop (the kernel throws aH at its chop).
-        const double m = dBx * sxS + dBz * szS;
-        const double r = 1.0 / std::sqrt(1.0 + m * m);
-        const double shX = q1c * aH1 * dBx * r, shZ = q1c * aH1 * dBz * r;   // the throw per unit of w
-        const double shY = q1c * aH1 * chopM * m * r;
-        const double tx = q1c * dxS + shX, tz = q1c * dzS + shZ;     // d(D_new)/d(w)
-        jxxS = jxxS * g + tx * wx;
-        jzzS = jzzS * g + tz * wz;
-        jxzS = jxzS * g + 0.5 * (tx * wz + tz * wx);
-        const double aHc = aH1 * chopM;
-        const double ePast = (std::max)(aHc * g - 1.0 / (std::max)(kBar, 1e-4), 0.0);
-        const double hF = depthM > 0.0 ? depthM : 1.0e9;
-        const double HF = aEnv + (std::max)(eta, 0.0);
-        const double fall = LipFall(ePast, kBar, cothBar, HF, hF);
-        // the flight's translator on the label's point (x: the lateral at chop 1, y: the elevation)
-        const double tau[3] = {shX * wCr, shY * wCr - fall, shZ * wCr};
-        double px = dxS * g, py = eta, pz = dzS * g;
-        Motor::Translation(tau[0], tau[1], tau[2]).TransformPoint(px, py, pz);
-        const double floorY = (std::min)(eta, -aEnv);
-        if (py >= floorY) {
-            // the slope through w: the rise along the sheet up, the fall down (d(fall)/d(w))
-            const double dd = shY - LipFallDe(ePast, kBar, cothBar, HF, hF) * aHc * q1c;
-            sxS += dd * wx;
-            szS += dd * wz;
-            eta = py;
-        } else {
-            sxS = szS = 0.0;
-            eta = floorY;
-        }
-        dxS = px;
-        dzS = pz;
+        const double sqB = bil(t.envSlice, 3);   // sqrt(tan beta), the solve's bed slope
+        CrestState st;
+        st.eta = eta; st.dx = dxS; st.dz = dzS; st.sx = sxS; st.sz = szS;
+        st.jxx = jxxS; st.jxz = jxzS; st.jzz = jzzS;
+        CrestLaw(st, dBx, dBz, aEnv, excRaw, kBar, cothBar, aEnv * cothBar * chopM, chopM, sqB * sqB, depthM);
+        eta = st.eta; dxS = st.dx; dzS = st.dz; sxS = st.sx; szS = st.sz;
+        jxxS = st.jxx; jxzS = st.jxz; jzzS = st.jzz;
     }
     p.eta = float(eta);
     p.dx = float(dxS);

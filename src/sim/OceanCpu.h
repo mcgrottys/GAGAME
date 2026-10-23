@@ -338,6 +338,9 @@ public:
     // of that sign flips the Jacobian rows and this with them. The bank lifts its labels by the
     // negative of this times its gains (WaterBank.hlsl gBandLift; TreeWater::Finish the twin).
     double LiftMoment(int cascade) const { return m_lift[cascade]; }
+    // The choppy displacement's scale (CsAssemble's fLambda): the drawn lateral orbit is lambda times
+    // the height's, the crest law's aH on the cascades (WaterTerms.h CrestLaw).
+    double Lambda() const { return m_lambda; }
 
 private:
     // One retained conjugate pair. Exactly 64 bytes -- one cache line, and the query loop is

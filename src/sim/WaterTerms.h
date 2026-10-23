@@ -260,6 +260,73 @@ inline double LipFallDe(double ePast, double k, double coth, double H, double h)
     return kJetFallRatio * k * coth * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));
 }
 
+// THE CREST LAW, ONE FOR EVERY DESCRIPTION OF THE SEA (2026-10-23, Mark: "give the cascades the solved
+// field's crest law"; WaterBank.hlsl CrestLaw is its twin, WATER_V2 12.13). It was the solved field's
+// alone (WaveField::ProbeAt); the cascades ran an older law, the raw amplitude in the orbit at every
+// phase -- the "sea mid-plunge at every phase" ALGEBRA.md priors 53 (c) retired for the solved field,
+// and it spent the energy the depth takes twice: the solver already turns it into the push and the
+// setup. The law, on one description's surface at a label:
+//   - the ORBIT is the description's own, on the amplitude the depth lets stand (the caller's);
+//   - at the CREST alone (w = 1/2 + eta / 2 A_env), the throw toward the landing (LipReach) by the
+//     crest's own excess -- the sea's raw ratio, unclamped, times the crest over the significant
+//     amplitude -- where the bed's slope says the crest plunges (PlungeShare, the Iribarren band);
+//   - the lip's fall the flight's boost back (LipFall, LipFlightTau), bounded by the trough.
+// The state is the description's surface at the label: eta, its lateral offset (dx, dz) in the units
+// the caller holds it -- `post` is the factor the caller multiplies the lateral by afterwards (the
+// solved field's chop in ProbeAt, 1 where the lateral is already drawn) -- its slope and the offset's
+// Jacobian, carried through by the product rule (grad w = grad eta / 2 A_env inside the band). aH is
+// the DRAWN lateral amplitude of the sea (chop x A_env x coth), excRaw the sea's rms_raw / rms_limit.
+// The translator's sandwich on a point is its shift (Pga.h's Motor::Translation): p + tau.
+struct CrestState {
+    double eta = 0.0, dx = 0.0, dz = 0.0, sx = 0.0, sz = 0.0, jxx = 0.0, jxz = 0.0, jzz = 0.0;
+};
+// The share of the crest's variance over the depth's limit: 0 below it, the plunge's gate.
+inline double CrestExcessShare(double eta, double aEnv, double excRaw) {
+    const double eCr = excRaw * wt::Max(eta / aEnv, 0.0);
+    return 1.0 - 1.0 / wt::Max(eCr * eCr, 1.0);
+}
+inline void CrestLaw(CrestState& s, double dBx, double dBz, double aEnv, double excRaw, double kBar,
+                     double cothBar, double aH, double post, double tanBeta, double depth) {
+    const double wRaw = 0.5 + 0.5 * s.eta / aEnv;
+    const double wCr = wt::Clamp(wRaw, 0.0, 1.0);
+    const bool inBand = wRaw > 0.0 && wRaw < 1.0;
+    const double Hc = aEnv + wt::Max(s.eta, 0.0);   // this crest's height over the trough
+    const double aLoop = LipReach(kBar, cothBar, Hc, depth);
+    const double share = CrestExcessShare(s.eta, aEnv, excRaw);
+    const double plunge = (share > 0.0) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0;
+    const double q1 = wt::Max(aLoop / wt::Max(aH, 1e-3) - 1.0, 0.0) * share * plunge;
+    const double g = 1.0 + q1 * wCr;
+    const double wx = inBand ? 0.5 * s.sx / aEnv : 0.0;   // grad(w) (s.sx is grad(eta) so far)
+    const double wz = inBand ? 0.5 * s.sz / aEnv : 0.0;
+    // the flight (LipFlightTau): the throw per unit of w along the sheet, horizontal in the state's
+    // units, vertical as drawn
+    const double m = dBx * s.sx + dBz * s.sz;
+    const double r = 1.0 / std::sqrt(1.0 + m * m);
+    const double aHu = aH / wt::Max(post, 1e-6);
+    const double shX = q1 * aHu * dBx * r, shZ = q1 * aHu * dBz * r;
+    const double shY = q1 * aH * m * r;
+    const double tx = q1 * s.dx + shX, tz = q1 * s.dz + shZ;   // d(D_new)/d(w)
+    s.jxx = s.jxx * g + tx * wx;
+    s.jzz = s.jzz * g + tz * wz;
+    s.jxz = s.jxz * g + 0.5 * (tx * wz + tz * wx);
+    const double ePast = wt::Max(aH * g - 1.0 / wt::Max(kBar, 1e-4), 0.0);
+    const double fall = LipFall(ePast, kBar, cothBar, Hc, depth);
+    const double px = s.dx * g + shX * wCr, py = s.eta + shY * wCr - fall, pz = s.dz * g + shZ * wCr;
+    const double floorY = wt::Min(s.eta, -aEnv);
+    if (py >= floorY) {
+        // the slope through w: the rise along the sheet up, the fall down (d(fall)/d(w))
+        const double dd = shY - LipFallDe(ePast, kBar, cothBar, Hc, depth) * aH * q1;
+        s.sx += dd * wx;
+        s.sz += dd * wz;
+        s.eta = py;
+    } else {
+        s.sx = s.sz = 0.0;
+        s.eta = floorY;
+    }
+    s.dx = px;
+    s.dz = pz;
+}
+
 inline double ShoalFactor(double kBand, double depth) {
     const double kh = kBand * wt::Max(depth, kDepthFloorM);
     const double th = std::tanh(kh);

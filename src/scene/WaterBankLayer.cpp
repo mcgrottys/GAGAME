@@ -1191,7 +1191,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // the texture's mean-level moment per band, from the CPU twin's walk of the same h0 grid (0
     // until it is ready: no lift is the old surface)
     for (int c = 0; c < 3; ++c) cb.bandLift[c] = float(m_sea->Ocean().LiftMoment(c));
-    cb.bandLift[3] = 0.0f;
+    cb.bandLift[3] = float(m_sea->Ocean().Lambda());   // the chop: the crest law's drawn orbit
     cb.sweB[0] = m_tidePlane;   // the solver is truth: its level is this plane plus its deviation
     cb.sweB[1] = cb.sweB[2] = cb.sweB[3] = 0.0f;
     static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");

@@ -182,7 +182,7 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WaterManager& weather,
                     const std::unique_ptr<WaveField>& waveField, double classifierNavd,
-                    const Space::Anchor& chart) {
+                    const Space::Anchor& chart, const PlaceField* bed) {
     LogBankGrid(gpu, waterBank, weather, simUnix, chart);
     LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, classifierNavd, chart);
     weather.RefreshMirrorsTo(gpu, simUnix);
@@ -196,6 +196,7 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
     // came out 1.6x apart at the camera.
     tw.SetChart(&chart);
     tw.SetRootChart(&chart);
+    tw.SetBed(bed);   // the bed a hull reads (Entity.cpp), so the crest law's Iribarren gate sees a slope
     const double bandRms[3] = {sea->BandRmsPhysical(0), sea->BandRmsPhysical(1), sea->BandRmsPhysical(2)};
     tw.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale(), bandRms);
     Log("[twin] %s", tw.Describe(cam.px, cam.pz, simUnix).c_str());

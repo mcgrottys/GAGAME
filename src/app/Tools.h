@@ -30,6 +30,7 @@ class ColorSource;
 class Compositor;
 class ExposureSource;
 class GisVectorMask;
+class PlaceField;
 class HeightTree;
 class GlobeLayer;
 class GlobeModel;
@@ -180,7 +181,7 @@ void RunTwinSurface(const Options& opt, Gpu& gpu, const SeaState& seaState, SeaL
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WaterManager& weather,
                     const std::unique_ptr<WaveField>& waveField, double classifierNavd,
-                    const Space::Anchor& chart);
+                    const Space::Anchor& chart, const PlaceField* bed = nullptr);
 // THE THREE LEVELS THAT MUST AGREE at the camera (the startup transient's measurement): the
 // classifier's, the bank's and the CPU's. RunTwinSurface prints it first; --bed-trace prints it
 // at its readings. Reads back and waits.

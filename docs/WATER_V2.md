@@ -923,6 +923,71 @@ cascades' moment is the texture's own, `OceanCpu::LiftMoment` (λ Σ 2k(|A|² + 
   1.3 % of pixels past 8 levels. Neither scene's instant has breaking surf in view, so neither tests the
   rolling crests.
 
+(The first two were answered the same day by §12.13.)
+
+### 12.13 One crest law (2026-10-23)
+
+Mark: "give the cascades the solved field's crest law (orbit on the delivered amplitude, the crest-local
+throw by the crest's excess and the Iribarren gate from the bank's own bed slope), GPU and CPU twin."
+
+**Why this one.** Both open items of §12.12 had one cause: the cascades ran an older crest law than the
+solved field.
+* That law put the raw amplitude in the orbit at every phase. ALGEBRA.md priors 53 (c) retired exactly
+  that for the solved field ("a sea mid-plunge at every phase").
+* It spent the energy the depth takes twice, because the solver already turns it into the push and the
+  setup.
+
+The solved field's law is the architecture's own:
+* the orbit on what the depth lets stand;
+* the throw at the crest alone, by that crest's excess, where the bed says it plunges;
+* the fall as the flight's boost back, bounded by the trough.
+
+**What it is now.** One function on each side, `CrestLaw` in `WaterBank.hlsl` and its twin in
+`WaterTerms.h`. It is called by:
+* the solved block;
+* the cascades;
+* `WaveField::ProbeAt`;
+* `TreeWater::Finish`.
+
+For the cascades:
+* the orbit rides the delivered gain times coth(kh);
+* the law is judged on the sea they draw (yield × fold), with that sea's own excess against the depth.
+  Inside the window that is the chop's, so the cascades throw nothing there; the swell's crest is the
+  solved field's.
+
+The Iribarren gate reads the bank's bed one wave-radian (1/k, never under a texel) east and north. It
+reads only where a crest is over its limit, so open water pays nothing. The CPU twin reads the hull's bed
+(`SetBed`, now handed to the twin tool too).
+
+The old block is gone: the raw orbit held to the landing, the lip's fall at every crest past the cusp,
+the bound. The change is net-neutral in lines (+241 / −240).
+
+**Gates** (16:00Z Oct 22, Hs 2.2 m, one binary; pushed = c34f7ee):
+
+| Euler mean (lateral mean / max) | HEAD | pushed | one law |
+|---|---|---|---|
+| Salisbury, 0.5–1 m | −0.194 (0.4 / 1.9 m) | −0.190 (2.7 / 8.7 m) | **−0.011 / +0.013** (0.8 / 3.0 m) |
+| Salisbury, 1–2 m | −0.368 (1.2 / 3.7 m) | −0.134 (3.8 / **11.8** m) | **−0.002 / −0.010** (1.1 / 3.0 m) |
+| Salisbury, 2–3 m (a strip under one phase) | −0.274 | −0.086 | −0.092 / +0.071 at +4 s |
+| Salisbury, 8 m+ | +0.025 | −0.022 | −0.022 / +0.019 |
+| the jetty tip, every bin | (§12.12) | — | the pushed values to the millimetre |
+| Mavericks bowl (5 m, 17 s), every bin | 3–5 m **−1.15** | — | the pushed values to the millimetre |
+
+**What the gates say:**
+* *Salisbury* (cascades only): the inner-surf sink and the 11.8 m orbits are gone. No bin folds, and
+  every bin's two-instant mean is within ±0.02 m of the level.
+* *The jetty tip and Mavericks* are solved-owned, so moving the solved law into the shared function
+  changed nothing there. At Mavericks, §12.12's fix had already taken out a hollow of −1.15 m over the
+  reef (3–5 m).
+
+**At Mavericks the lift is approximate where the crest law throws hard.** The bowl's crests are thrown up
+to 35 m and the sheet folds in 13 % of its 2–3 m water, the same as at HEAD. There the measured E[η ∇·D]
+and the lift agree to 0.8–1.4× in the large bins, and 3.3× in the bowl itself. The drawn mean's departures
+there (+0.16, −0.23, −0.05, +0.10 m) are mostly the patch's own phase: a 600 m square holds three
+wavelengths of a 5 m, 17 s swell.
+
+Selftest passes: cb parity, the solved field's water parity, oceancpu.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);
