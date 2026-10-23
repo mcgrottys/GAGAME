@@ -324,7 +324,7 @@ the classifier calls a bar land at low tide).
 | **1a** | The mip ramp (D1) and the NULL-read climb (D2), the no-bytes fill (F6), the time-based retry (F8); one stated exaggeration | a descent rail: max per-frame pixel difference down, no frame with a snap; `[restest]` aniso rows 0; `[stuck]` 0. **Done 2026-10-22.** `[restest]` "then the climb" 8x anisotropic: 0 of 473,088 (the clamp alone: 1,606). A frozen-clock hold at the inlet (`--scale 0`, one pose, 12 s from boot; only landings move), `streaming.fadeTurns` 0 vs 6 on one binary: 98,423 fade steps; over the trickle after the load burst the largest 32×32-block luma change a frame 7.2 → 3.5, p99 4.6 → 2.1, frames over 4× the median 12 → 3. What the fade does NOT reach, seen in the burst's largest jumps (≈ 22 in both runs): the town's buildings appearing at once (the building layer's LOD) and the marsh's flooded extent moving as finer heights land (physics reads the finest held mip by law). The descent clip with the sea moving cannot see the fade at all (its holds read alike): the frozen hold is the instrument. |
 | **1b** | Music as the first new producer (§10): band table, scene bindings, Media Foundation + XAudio2 playback | the water and a light term follow the file's bands at a place; two runs agree frame for frame |
 | **2** | One term table: the bank kernel and `TreeWater` loop over terms; tides evaluated on the GPU from the atlas phasors (no per-tile CPU corner params) | stills identical to stage 1 within the declared tolerance; frame time not worse; the hull probe. **2a built 2026-10-22:** the ring corners carry the tide's 18 phasors (asked once per lattice point when a ring moves), the kernel turns them by this frame's rotors (`WaterAtlas::Rotors`, doubles on the CPU: w t runs to 10^4 rad). `--twin-surface`'s LEVEL rows identical to 0.1 mm at 0/500/2000/8000 m; the bank's CPU tile list **15.7 → 0.43 ms a frame**; the fill +0.04 ms at p50. Engine +95 / −15. **The generic term loop waits** for its third level producer (the Packet, stage 5): the level has two terms today (the harmonic tide, SUMMED; the solver window, REPLACING over its weight), and the hull already composes it through stage 1's registry loop — a table with no third consumer would be an abstraction without a reader. |
-| **2b** | **The water as columns (§12):** wet is the column holding water; the solver holds the column, not a departure from a plane; residency follows the water; the waves push (setup); the tide and a tsunami enter at Flather ocean faces | §12.5's C1–C5: the stations, a lake at rest, a scripted surge, the bar awash under 2 m, Monai valley |
+| **2b** | **The water as columns (§12):** wet is the column holding water; the solver holds the column, not a departure from a plane; residency follows the water; the waves push (setup); the tide and a tsunami enter at Flather ocean faces | §12.5's C1–C5: the stations, a lake at rest, a scripted surge, the bar awash under 2 m, Monai valley. **Built 2026-10-23 (§12.10):** lake, ledger, Ritter, Stoker, planar setup pass; the bar awash; the surge floods the platforms with the ledger closed to 6 × 10⁻⁶; run-up −10 % at the finer grid; Salisbury Point and one current cell worse; Monai not fetched |
 | **3** | Harmonic playback: the SWE window fits its cycle online and plays back; steps only for departures | levels at the stations and the inlet current vs the stepping solver over one tide (rms, lag); frame time with the solver idle |
 | **4** | Series in time: the grid's hours blended (no respectrum pop) | a 4 h clip across an hour boundary, no visible step; the spectrum's moments continuous |
 | **5** | The basin rung + `Impact` producer as a Packet; the time-domain cross-check | travel time vs √(gh) integrals; decay vs Ward & Asphaug's fits; the two methods agree on arrival and first-crest amplitude in deep water |
@@ -636,6 +636,161 @@ blind spot. A disagreement between two of them is a finding to read, not a verdi
    for the drawn sea, the solver and the boat (§12.3).
 4. **The judges:** "Can't we get a few to trust? ... be careful with the word 'only'." Six, each with its
    blind spot (§12.6). None alone.
+
+### 12.10 Built (2026-10-23, overnight: Mark, "complete all of section 12")
+
+Every number below is from a run in this checkout; the commands are in §12.11. Where a gate failed or the
+plan changed, it says so.
+
+**C1, the solver holds columns** (`shaders/Swe.hlsl`, `src/sim/SweSolver.{h,cpp}`).
+
+* **The state** is the water each column holds, `h` (its own R32F bank: a NULL tile holds none), over the
+  bed cached once a frame per cell from the stack (`CsSweBedFill`; it was read eight times a cell a
+  substep), and the faces' velocities in two banks that take turns (the advection reads the substep
+  before). No plane, no debt, no ±6 m clamp, no 100 m wall: a NULL neighbour is a wall through the live
+  mask until the residency maps it.
+* **Published** for the readers: `m_eta` = the column's surface less the frame's tide plane (a dry column
+  publishes its bed), and the fibre `(u, v, h, wet)` (wet = `h` > 1 cm). *Deviation from §12.3:* the plan
+  said the bank publishes `Δh = h − max(L − b, 0)`. The surface plus the wet flag says the same to every
+  reader and keeps "a NULL tile reads the stateless water" (a departure of 0) without a per-cell Level in
+  the solver.
+* **The scheme:** Stelling and Duinmeijer in their velocity form: the momentum-conservative advection
+  where the flow decelerates, the energy head where it accelerates, the face depth upwind; the pressure
+  the hydrostatic reconstruction at the sill. Two first tries failed their own tests and are recorded:
+  the advection applied to stored fluxes with the current upwind depth (a 4.35 m spike ran ahead of
+  Stoker's shock), and the discharge form with momentum everywhere (Stoker passed; Ritter's rarefaction
+  rang with spurious jumps — S&D's own reason for the energy head).
+* **Positivity:** Bollermann et al.'s limit, all of a column's outgoing faces scaled together to the
+  water it holds (`CsSweLimit`), in place of the quarter-of-the-donor clamp a face.
+* **The open sea:** Flather faces on the open sides, riding the tide atlas's Level at four points a side
+  (`SetLevelSource`; a cubic along the side), their `u_ext` the prism by continuity: the domain's wet area
+  at the plane (a priority flood's spill levels from the boundary, so a hollow behind a dune does not
+  count) times the plane's rate, less the rivers' transport, over the sides' live section. *Grown from the
+  plan:* every edge cell whose bed lies below mean sea is a sea face too (`OceanSideOf`,
+  `SweDomain::SeaFaceCell`): the Merrimack window's south edge cuts Plum Island Sound off from its own
+  inlet, and its tide had been coming from the sponge reaching 1.9 km in from the east side, across
+  Plum Island. Faces: 379 N, 180 S, 1174 E. The sponge is gone.
+
+| C1's analytic judges (`--tool swe-test`, a resident 512² square, walls round it) | result | gate |
+|---|---|---|
+| lake at rest, rough bed with an island out of it, 1 h | max \|surface − level\| **0.0**, no column changed wetness | 1 mm ✓ |
+| volume, a hump sloshing in the closed basin, 1 h | **1.3 × 10⁻⁷** | 10⁻⁵ ✓ |
+| Ritter (2 m onto dry, 120 s) | L1 **2.0 %**, 0.885 m at the dam against 0.889 | 5 % ✓ — the 1 cm tip lags 23 cells (reported) |
+| Stoker (2 m onto 0.5 m) | L1 **0.8 %**, the shock within **0.5 cell**, the plateau 1.102 against 1.104 m | 5 %, 3 cells, 3 % ✓ |
+
+| the stations (`--swe-cycle 13`, 2026-09-24 16Z; the current predictions end 2026-10-03) | before (pre-C1) | after (C1 + C2) |
+|---|---|---|
+| 8440452 Plum Island, entrance: rms / lag / range | 6.7 cm / +10 min / ×1.00 | **5.1 cm / +8 min / ×0.99** |
+| 8440466 Newburyport | 6.5 cm / +10 / ×1.00 | **6.5 cm / +8 / ×0.98** |
+| 8440273 Salisbury Point | 9.5 cm / +14 / ×0.98 | **15.9 cm / +22 / ×0.93** — worse; open (in the river, bed −8.6 m: the advection's losses in the bends against a drag coefficient tuned without them) |
+| 8440369 Merrimacport (by the river face) | 12.5 cm / −2 / ×1.16 | 11.6 cm / +12 / ×1.11 |
+| 8441241 Plum Island Sound (south) | 11.0 cm / +12 / ×0.91 (the sponge's) | 26.4 cm / +38 / ×0.88 (its own inlet; ×0.15 before the sea faces) |
+| ACT0816 entrance, the deepest cell by it: peak flood / ebb | +0.83 / −0.75 (pred. +0.88 / −0.64) | +0.18 / −0.47 — the jet moved off this cell: the six-point section across the throat *gained* (flood −0.33 → −0.40 m/s); open |
+| ACT0821 Newburyport | +0.66 / −0.66, lag +14 (pred. +0.62 / −0.62) | +0.49 / −0.54, lag **+6** |
+| ACT0826 Plum Island Sound entrance | +0.09 / −0.08 (pred. +0.62 / −0.67) | **+0.37 / −0.41** |
+
+**C2, residency follows the water; the step from it; the land soaks.**
+
+* **The rule:** each batch a kernel sums every resident tile's water (`CsSweTileStats`: which columns hold
+  water and which edges it touches, the deepest and fastest column, its volume). A tile stays while a
+  column holds water or water touches its edge from a neighbour (the ring). It is released after 30 min
+  dry, with the water it held booked in the ledger. The boundary's tiles always stay. The first residency
+  is the spill level under +1.2 m, not the bed under it.
+* **The step,** each batch: `0.45 min(dx, dy) / (√(g h_max) + |u|_max)`. Seen: 0.21–0.26 s.
+* **The soil** (Green–Ampt, a stated soil for now: 0.10 m capacity, 10⁻⁵ m/s, 0.05 m suction × deficit;
+  full under standing water at a reset).
+* **The ledger** on the GPU: every face an exterior cell shares with the interior, each substep (Kahan).
+* **Gate, a scripted surge** (`--swe-cycle-surge 2`: +2 m on the open sea, 3 h wide, peaking on the high
+  water; the open sea +3.07 m NAVD):
+  * The solver wets 758,550 cells, **226,471 above the old +1.2 m floor** — the marsh platforms and the
+    streets.
+  * Its water lies inside a static flood fill of the bed at that level but for 87 cells.
+  * The fill's other 138,152 cells are water a 3 h surge had not carried inland by its peak. "Within one
+    ring" holds only for an equilibrium the surge never reaches; the gate's wording was wrong, not the
+    water.
+  * Tiles 84 → 88 as the water came; none dry and waiting at the end.
+  * **The ledger closes to 6.0 × 10⁻⁶ of the tidal prism** over 13 h before the waves pushed: 8.69 × 10⁷
+    m³ in, the columns + 8.28 × 10⁷, the soil + 4.12 × 10⁶, 830 m³ unaccounted.
+  * A first version counted only each exterior cell's face toward the inside and missed 6.7 × 10⁻⁴: a
+    sea face's run also meets interior edge cells sideways.
+  * On the final build:
+    * The tide alone closes to **1.0 × 10⁻⁵**.
+    * With the waves pushing and the surge, it gains **3.6–7.2 × 10⁻⁵** from run to run. Part of that
+      was the `h ≥ 0` guard lifting rounding-negative columns the new limiter emptied exactly; it now
+      leaves a hair, 10⁻⁶ of the water.
+    * The rest is not found: open.
+
+**C3, the readers read columns** (`shaders/WaterBank.hlsl` `SolverSurfaceDev`, its twin
+`SweSolver.cpp` `Reconstruct`). The surface is the wet columns', by their bilinear weights. Where no
+corner holds water the level stands under the solver's own published bed by the bank's dry band (0.65 m),
+so the dry weight reads 0 and the classifier reads land. A first version stood it under each *reader's*
+bed, and the hull's and the ring's beds differ in grain: the twin's LEVEL rows read 0.62 m at 500 m. The
+solver's bed is one value for both. A second version let that level climb the dunes (+3 to +5 m beside
+0.1 m water); interpolated between a ring's texels it made cliffs of water metres high (LEVEL 1.7 m at
+8 km, the hull's waves 2.6 m rms on nonsense depths). The dry level is now capped at the frame's
+waterline: a dune is land under the waterline as surely as under its crest.
+
+| `--twin-surface`, the entrance camera, Oct 22 noon: LEVEL max / rms (m) | 0 m | 500 m | 2000 m | 8000 m |
+|---|---|---|---|---|
+| before (pre-C1) | 0.0001 / 0.0000 | 0.066 / 0.008 | 0.126 / 0.022 | 0.076 / 0.030 |
+| after (C1–C4) | 0.0005 / 0.0001 | **0.399 / 0.050** | **0.382 / 0.055** | 0.076 / 0.030 |
+
+The gate said "unchanged": it holds at the camera and at 8 km, and not between them. The difference is at
+shore points: a dry column's level now steps down at the water's edge (the column says no water), and the
+hull and the drawn rings interpolate that step at different grains. Open. *Not done:* the classifier still
+reads the level, not `h` directly. It reads land wherever the solver says no water, which is the
+statement, but the fibre's `h` is not yet in the globe's planes.
+
+**C4, the waves push.**
+
+* *Changed from the plan:* the wave solve (`WaveField`) does not publish the force yet. The solver
+  carries its own sea: a steady balance of the wave energy flux marched shoreward one cell a sweep, four
+  sweeps a batch (`CsSweWaves`), from the global wave grid's sea at the domain's open water
+  (`SetSeaSource`: GFS-Wave's Hs, Tp and direction, the plan's "fallback" made the source). It does:
+  * **shoaling** (the flux conserved along the ray);
+  * **refraction** (Snell at the local contour);
+  * **shelter** (dry ground passes nothing on);
+  * **breaking as a dissipation per metre** (Baldock et al. 1998: Battjes and Janssen made explicit, with
+    the bank's breaking height read for one wave as √2 of its Hs limit).
+* The force on each face is `−∇·S`.
+* It is eye-independent and at the solver's grain, so the design's reason holds: one setup for the drawn
+  water, the solver and the hull. But the waves that push and the waves that are drawn are two models of
+  one sea, broken by one height law. Publishing `WaveField`'s planes over a nested window is the open step.
+* A first version applied the bank's clipped-Rayleigh factor cell by cell. It compounds (a sea loses energy
+  every cell even in deep water) and gave half the setup.
+
+| C4's judges | result |
+|---|---|
+| planar beach (8 m deep, 1 in 437, Hs 2 m, 8 s, 1 h) | setup **0.167 m**, against (5γ/16) H_b read in one wave's measure (γ_rms = 0.60/√2, H_b,rms) **0.184 m (−9 %) ✓ 15 %**. Read on Hs as written in §12.5: 0.367 m — that mixes the Hs limit into a one-wave law. The field's 0.16 Hs₀: 0.32 m (on steeper beaches) |
+| a calm day (Hs → 0) | no force: the push is off below 1 cm of Hs, so the solve is the C1–C3 one (by construction) |
+| the entrance bar under the 2.1 m sea, Oct 22 noon | **the islands are gone** — awash with the push, standing out without it (`out/review/c4/bar_three.png`) |
+| the setup at the entrance camera | the drawn and the hull's level +0.050 m with the push off, **+0.159 m** with it (Hs 2.1 m, Tp 9 s, from 98°) |
+| two eyes | not run with the minimap. The solver's sea has no camera input (the open water's grid value), so one eye's twin stands for both: at the camera the hull and the drawn level agree to 0.5 mm |
+
+**The cost** (`--rail-zoom` over the inlet with `--gpu-time`, the wave cache warm):
+* The solver's GPU time is 0.57 ms at p50 (0.24 before), 0.65 mean (0.35); the render p50 7.7 ms (6.7).
+* The first run after the change stalled 32 s: the CPU wave field re-solved twice because the solved
+  current it hashes had changed (the known cache miss), not the solver.
+
+**C5, run-up.** Synolakis's solitary wave on a plane beach (NTHMP BP1: the run-up law of his
+Carrier–Greenspan solution, `R/d = 2.831 √(cot β) (H/d)^{5/4}`), H/d 0.019 on 1 in 19.85, frictionless.
+At d = 50 m (the run-up's tongue nine cells long) **−16 %**; at d = 100 m (eighteen cells) **−10 %**,
+against a 10 % gate. It converges with the grid at first order. **Monai** (BP7) needs NTHMP's data
+downloaded: not fetched, asked of Mark. The HLL face flux was not built; the hybrid has not needed it.
+
+### 12.11 The judges' commands
+
+* The scheme (C1, C4's setup, C5's run-up), on analytic beds in one resident square, walls round it:
+  `gagame.exe out/review/fp/entrance_low.json --tool swe-test --headless --set streaming.offline=true`.
+  `GAGAME_SWETEST=lake,ledger,ritter,stoker,setup,runup` picks cases; rows land in `out/swe_test_*.csv`.
+* The stations, the currents, the ledger and the water from above (C1, C2):
+  `gagame.exe out/review/fp/entrance_low.json --swe-cycle 13 --set time.start=2026-09-24T16:00:00Z --set
+  streaming.offline=true`, plus `--swe-cycle-surge 2` for the scripted surge. It writes
+  `out/swe_judges_<pid>.csv` and `out/swe_water_{highwater,surge}_<pid>.png`. The current predictions
+  (`currents.json`) end 2026-10-03, so the currents are judged on 2026-09-24.
+* The push's A/B: `GAGAME_SWE_NOSEA=1` turns the waves' force off (the calm day's gate is the same switch).
+* Before tonight: `build/bin/gagame_c0.exe` with `--shaders out/review/c0/shaders`; `gagame_c0j.exe` is
+  the same solver with the judges.
 
 ## Sources
 
