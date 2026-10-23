@@ -1560,7 +1560,7 @@ WaveField::GpuTable WaveField::DisplayTable(const GpuTable& raw) const {
         for (int c = 0; c < kMaxComp; ++c) t.aMax[c] *= e;
         t.envMax *= e;    // the envelope shades what the geometry shows
         // excMax is not scaled: the excess is a RATIO (rms_raw / rms_limit), the same at any
-        // exaggeration, and the GPU decodes it at the raw 2.5 (WaterBank.hlsl's lipQ, excW). Scaling
+        // exaggeration, and the GPU decodes it at the raw 2.5 (WaterBank.hlsl's excRaw, excW). Scaling
         // it here made ProbeAt's crest law and foam read the excess e times the drawn one.
     }
     return t;
@@ -2166,8 +2166,12 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
     // THE CREST LAW's ratio, read before the components: the solver's raw-over-limited excess
     // at this point (the envelope slice; 1 where nothing breaks). With depthM <= 0 (the
     // instruments' deep-water read) the orbit is Airy's and the crest is not thrown.
-    const double q1 = (depthM > 0.0) ? (std::max)(bil(t.envSlice, 1) * double(t.excMax), 1.0) - 1.0 : 0.0;
+    // (2026-10-23: the ratio UNCLAMPED, and the law run wherever the kernel runs it -- the kernel never
+    // gated on the sea's excess, and this twin did, so a set crest the kernel threw in deep water the
+    // hull never felt. WaterBank.hlsl's solved loop, THE SEA'S EXCESS UNCLAMPED, says why.)
+    const double excRaw = (depthM > 0.0) ? bil(t.envSlice, 1) * double(t.excMax) : 0.0;
     double sumA = 0.0, sumAK = 0.0, sumACoth = 0.0, sumADx = 0.0, sumADz = 0.0;
+    double liftS = 0.0;   // -E[eta div D], chop 1 (Probe::lift)
     double vxS = 0.0, vyS = 0.0, vzS = 0.0;
     double jxxS = 0.0, jxzS = 0.0, jzzS = 0.0;
     for (uint32_t c = 0; c < t.nUsed && c < uint32_t(kMaxComp); ++c) {
@@ -2220,6 +2224,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         sumACoth += aC0 * coth;
         sumADx += aC0 * dX;
         sumADz += aC0 * dZ;
+        liftS += 0.5 * k * aC0 * aC0 * coth;         // -E[eta div D] = k a a coth / 2 (the mean lift)
         sxS -= aS * k * dX;                          // grad eta = -a k sin(theta) d^
         szS -= aS * k * dZ;                          //   (the k is the term: a slope is 1/L)
         vxS += sig * aC * dX;                        // u = +sigma a cos(theta) d^  (crest
@@ -2237,7 +2242,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
     // throw bounded by the wavelength (k A_h <= pi/2, A_h chopped). The Jacobian follows by the
     // product rule, grad(w) = grad(eta) / (2 A_env) inside the saturate and 0 outside; the
     // (x, z) term is symmetrized, as the stored Jacobian is.
-    if (q1 > 0.0 && sumA > 1e-9) {
+    if (depthM > 0.0 && sumA > 1e-9) {
         const double rmsNow = bil(t.envSlice, 0) * double(t.envMax);
         const double aEnv = (std::max)(1.4142135623730951 * rmsNow, 1e-3);
         const double wRaw = 0.5 + 0.5 * eta / aEnv;
@@ -2249,15 +2254,13 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         const double dBx = dLen > 1e-9 ? sumADx / dLen : 0.0, dBz = dLen > 1e-9 ? sumADz / dLen : 0.0;
         const double aH1 = aEnv * cothBar;                 // the sea's horizontal amplitude, chop 1
         // THE CREST'S STEEPNESS CLIMBS TO THE CUSP (WaterBank.hlsl, the crest law, 2026-10-19 late):
-        // the share of the raw variance above the limit, 1 - 1/lipQ^2 with lipQ = q1 + 1, takes the
-        // crest's excursion from the sea's own toward the loop's limit pi / 2k (the chopped
-        // amplitude is what the kernel bounds).
-        const double lipQ = q1 + 1.0;
+        // the share of the raw variance above the limit takes the crest's excursion from the sea's own
+        // toward the loop's limit pi / 2k (the chopped amplitude is what the kernel bounds).
         // the reach is the landing (WaterTerms.h LipReach), on this crest's height over the trough
         const double aLoop = LipReach(kBar, cothBar, aEnv + (std::max)(eta, 0.0), depthM > 0.0 ? depthM : 1.0e9);
-        // the set wave (the kernel's): the crest's own excess, the sea's times eta over the
-        // significant amplitude (eta / aEnv = 2 wRaw - 1)
-        const double eCr = lipQ * (std::max)(eta / aEnv, 0.0);
+        // the set wave (the kernel's): the crest's own excess, the sea's (unclamped) times eta over
+        // the significant amplitude (eta / aEnv = 2 wRaw - 1)
+        const double eCr = excRaw * (std::max)(eta / aEnv, 0.0);
         const double excessShare = 1.0 - 1.0 / (std::max)(eCr * eCr, 1.0);
         // which crests plunge (WaterTerms.h PlungeShare): the bed's slope against this crest's height
         const double sqB = bil(t.envSlice, 3);
@@ -2313,6 +2316,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
     p.jxx = float(jxxS);
     p.jxz = float(jxzS);
     p.jzz = float(jzzS);
+    p.lift = float(liftS);
     p.rms = float(bil(t.envSlice, 0) * double(t.envMax));
     p.excess = float(bil(t.envSlice, 1) * double(t.excMax));
     p.valid = true;

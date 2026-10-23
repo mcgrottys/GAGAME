@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 
@@ -66,16 +68,134 @@ void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, d
         q.levelSrc, spread);
 }
 
+// THE DRAWN SHEET OVER A PATCH (2026-10-23, Mark at the jetty tip: "something is up with that
+// shoal ... and it's affecting the mesh"). GAGAME_TWIN_GRID = "latC,lonC,halfM,stepM,file.csv": the
+// bank read on a square of labels, each beside the one bed and level a hull reads (WaterManager::
+// Query), written whole to the CSV and summarised by depth. A label's drawn point is its place plus
+// (dispX, dispZ) at level + dispY, so the surface an eye sees over a patch is the labels' heights
+// weighted by the area each label's cell is carried onto, det(1 + grad d) -- the Eulerian mean;
+// the plain mean of dispY is the Lagrangian one, and the two differ by the lateral term's own
+// deficit (a trochoid stands k a_v a_h / 2 below its orbit centres). Folds (det < 0) are counted.
+static void LogBankGrid(Gpu& gpu, WaterBankLayer* waterBank, WaterManager& weather,
+                        double simUnix, const Space::Anchor& chart) {
+    const char* spec = std::getenv("GAGAME_TWIN_GRID");
+    if (!spec || !waterBank) return;
+    double latC = 0, lonC = 0, half = 0, step = 0;
+    char file[260] = {0};
+    if (sscanf_s(spec, "%lf,%lf,%lf,%lf,%259s", &latC, &lonC, &half, &step, file,
+                 unsigned(sizeof(file))) < 4 || step <= 0.0 || half <= 0.0) {
+        Log("[grid] GAGAME_TWIN_GRID='%s' -- want latC,lonC,halfM,stepM[,file.csv]", spec);
+        return;
+    }
+    double cx = 0, cz = 0;
+    if (!chart.FlatOf(latC, lonC, cx, cz)) { Log("[grid] the centre is off the chart"); return; }
+    const int n = int(std::floor(2.0 * half / step)) + 1;
+    std::vector<double> pts(size_t(n) * n * 2);
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            pts[(size_t(j) * n + i) * 2 + 0] = cx - half + i * step;
+            pts[(size_t(j) * n + i) * 2 + 1] = cz - half + j * step;
+        }
+    }
+    weather.RefreshMirrorsTo(gpu, simUnix);
+    std::vector<WaterBankLayer::BankPoint> bp(size_t(n) * n);
+    waterBank->ReadBankPoints(gpu, pts.data(), int(bp.size()), bp.data());
+    std::vector<WeatherSample> ws(bp.size());
+    for (size_t k = 0; k < bp.size(); ++k) {
+        double lat = 0, lon = 0;
+        chart.LatLonOf(pts[k * 2], pts[k * 2 + 1], lat, lon);
+        ws[k] = weather.Query(lat, lon, simUnix, 1.0);
+    }
+    // det(1 + grad d) by central differences on the labels' own lattice
+    std::vector<double> det(bp.size(), 1.0);
+    std::vector<char> hasDet(bp.size(), 0);
+    for (int j = 1; j + 1 < n; ++j) {
+        for (int i = 1; i + 1 < n; ++i) {
+            const size_t k = size_t(j) * n + i;
+            const auto& e = bp[k + 1]; const auto& w = bp[k - 1];
+            const auto& nn = bp[k + n]; const auto& s = bp[k - n];
+            if (!(bp[k].valid && e.valid && w.valid && nn.valid && s.valid)) continue;
+            const double xx = 1.0 + (double(e.dispX) - w.dispX) / (2.0 * step);
+            const double xz = (double(nn.dispX) - s.dispX) / (2.0 * step);
+            const double zx = (double(e.dispZ) - w.dispZ) / (2.0 * step);
+            const double zz = 1.0 + (double(nn.dispZ) - s.dispZ) / (2.0 * step);
+            det[k] = xx * zz - xz * zx;
+            hasDet[k] = 1;
+        }
+    }
+    if (file[0]) {
+        if (FILE* f = std::fopen(file, "w")) {
+            std::fprintf(f, "i,j,lat,lon,x,z,ring,texel,level,dispX,dispY,dispZ,foam,dry,gain0,gain1,"
+                            "gain2,det,cpuLevel,bed,depth,hs,u,v\n");
+            for (int j = 0; j < n; ++j) {
+                for (int i = 0; i < n; ++i) {
+                    const size_t k = size_t(j) * n + i;
+                    double lat = 0, lon = 0;
+                    chart.LatLonOf(pts[k * 2], pts[k * 2 + 1], lat, lon);
+                    const auto& b = bp[k];
+                    std::fprintf(f, "%d,%d,%.7f,%.7f,%.2f,%.2f,%d,%.3f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,"
+                                    "%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                                 i, j, lat, lon, pts[k * 2], pts[k * 2 + 1], b.valid ? b.ring : -1,
+                                 b.texelM, b.level, b.dispX, b.dispY, b.dispZ, b.foam, b.dry, b.gain0,
+                                 b.gain1, b.gain2, hasDet[k] ? det[k] : 0.0, ws[k].levelNavd,
+                                 ws[k].bedNavd, ws[k].depthM, ws[k].hs, ws[k].u, ws[k].v);
+                }
+            }
+            std::fclose(f);
+            Log("[grid] wrote %s (%d x %d labels, %.1f m apart)", file, n, n, step);
+        }
+    }
+    // by depth: the Lagrangian mean of dispY, the Eulerian, the level's departure from the hull's
+    constexpr int kBins = 8;
+    const double edge[kBins + 1] = {-1e9, 0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 1e9};
+    for (int b = 0; b < kBins; ++b) {
+        int cnt = 0, folds = 0, nd = 0;
+        double sY = 0, sY2 = 0, sYd = 0, sD = 0, sL = 0, sLat = 0, sLatMax = 0, sDry = 0, sTex = 0;
+        for (size_t k = 0; k < bp.size(); ++k) {
+            const double dep = ws[k].depthM;
+            if (!bp[k].valid || dep < edge[b] || dep >= edge[b + 1]) continue;
+            ++cnt;
+            const double y = bp[k].dispY;
+            sY += y; sY2 += y * y;
+            sL += double(bp[k].level) - ws[k].levelNavd;
+            const double lat = std::hypot(double(bp[k].dispX), double(bp[k].dispZ));
+            sLat += lat; sLatMax = (std::max)(sLatMax, lat);
+            sDry += bp[k].dry; sTex += bp[k].texelM;
+            if (hasDet[k]) {
+                ++nd;
+                if (det[k] < 0.0) ++folds;
+                const double a = (std::max)(det[k], 0.0);
+                sYd += y * a; sD += a;
+            }
+        }
+        if (cnt == 0) continue;
+        Log("[grid] depth %5.1f..%-5.1f m: n %5d | dispY mean %+.4f rms %.4f | Euler mean %+.4f | "
+            "bank level - hull level %+.4f | lateral mean %.3f max %.3f | dry %.2f | folds %.1f%% | "
+            "texel %.2f m",
+            (std::max)(edge[b], -99.0), (std::min)(edge[b + 1], 99.0), cnt, sY / cnt,
+            std::sqrt(sY2 / cnt), (sD > 0) ? sYd / sD : 0.0, sL / cnt, sLat / cnt, sLatMax,
+            sDry / cnt, nd ? 100.0 * folds / nd : 0.0, sTex / cnt);
+    }
+}
+
 void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer* sea,
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WaterManager& weather,
                     const std::unique_ptr<WaveField>& waveField, double classifierNavd,
                     const Space::Anchor& chart) {
+    LogBankGrid(gpu, waterBank, weather, simUnix, chart);
     LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, classifierNavd, chart);
     weather.RefreshMirrorsTo(gpu, simUnix);
     TreeWater tw;
     tw.Configure(&weather, waveField.get(), &sea->Ocean(), &seaState,
                  sea->heightScale, waterScene.wfExag, waterScene.wfChop);
+    // THE CHART, as a hull's water is given it (Entity.cpp): without it TreeWater::PlaceOf answers
+    // (0, 0) and the twin's CPU read its bed, its sea-state scale and its exposure in the Gulf of
+    // Guinea -- invisible to the vertical comparison inside the solved window (the solved field's
+    // height does not read the depth), found 2026-10-23 when the mean-level lift, which does (coth kh),
+    // came out 1.6x apart at the camera.
+    tw.SetChart(&chart);
+    tw.SetRootChart(&chart);
     const double bandRms[3] = {sea->BandRmsPhysical(0), sea->BandRmsPhysical(1), sea->BandRmsPhysical(2)};
     tw.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale(), bandRms);
     Log("[twin] %s", tw.Describe(cam.px, cam.pz, simUnix).c_str());
@@ -112,6 +232,8 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
         // single total error number cannot tell a tide offset from a wave phase
         // error, and they have opposite fixes.
         double maxL = 0.0, sumSqL = 0.0, maxW = 0.0, sumSqW = 0.0;
+        double sumW = 0.0;   // signed: an offset (a mean-level law) against a phase or gain error
+        double sumLift = 0.0, sumG = 0.0;   // the CPU's lift, the GPU's dispY (a lift A/B reads it)
         // The two fields' own rms, and their correlation. Together these say
         // WHICH kind of wrong: equal rms with zero correlation is a phase
         // error, unequal rms is an amplitude or gain error, and they have
@@ -142,6 +264,9 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
             sumSqL += dL * dL;
             maxW = (std::max)(maxW, std::abs(dW));
             sumSqW += dW * dW;
+            sumW += dW;
+            sumLift += cs.lift;
+            sumG += double(bp[idx].dispY);
             const double cw = cs.heightNavd - cpuLevel, gw = double(bp[idx].dispY);
             sqC += cw * cw;
             sqG += gw * gw;
@@ -154,12 +279,14 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
         worstAll = (std::max)(worstAll, maxD);
         if (nCmp > 0) {
             Log("[twin]   %5.0f m: n=%2d  TOTAL max %+.4f rms %.4f | "
-                "LEVEL max %+.4f rms %.4f | WAVES max %+.4f rms %.4f | "
+                "LEVEL max %+.4f rms %.4f | WAVES max %+.4f rms %.4f mean %+.4f | "
                 "wWin %.3f ring %d (no bank %d)",
                 kRangeM[r], nCmp, maxD, std::sqrt(sumSq / nCmp),
                 maxL, std::sqrt(sumSqL / nCmp),
-                maxW, std::sqrt(sumSqW / nCmp),
+                maxW, std::sqrt(sumSqW / nCmp), sumW / nCmp,
                 wSum / nCmp, ringUsed, nNoBank);
+            Log("[twin]            mean-level lift: CPU %+.4f m | GPU dispY mean %+.4f", sumLift / nCmp,
+                sumG / nCmp);
             const double rc = std::sqrt(sqC / nCmp), rg = std::sqrt(sqG / nCmp);
             Log("[twin]            wave rms: CPU %.4f  GPU %.4f  ratio %.3f  "
                 "correlation %+.3f",

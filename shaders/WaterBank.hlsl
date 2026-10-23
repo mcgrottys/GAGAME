@@ -140,6 +140,9 @@ cbuffer BankCb : register(b0) {
     // WATER V2, STAGE 2: the tide's rotors of this instant, two constituents a row (cos, sin, cos,
     // sin), turned on the CPU in doubles (w t runs to 10^4 rad). Appended at the END on both sides.
     float4 gTideRot[9];
+    // THE MEAN-LEVEL MOMENT per cascade, xyz (OceanCpu::LiftMoment): E[s.y div s.xz] of the unit
+    // texture as synthesized, m -- the lift's cascade term (CsBankFill, THE LIFT). Appended at the END.
+    float4 gBandLift;
 };
 
 // The ladder's ring under k: its texel over ring 0's, its mapped set.
@@ -737,6 +740,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // REMEMBERED, max-composited below.
     float steepFoam = 0.0f;   // union over bands of Jacobian foam (the deriv fiber)
     float blockFoam = 0.0f;   // union over bands of current-blocking foam
+    float liftE = 0.0f;       // E[eta div D] of the cascades as drawn (THE LIFT, below)
+    float wDrawn[3];          // each band's share drawn as geometry here: its fold x the window's yield
     // Per-band gains -> the detail plane. Band 1 has fed the PS sparkle since M7a; M8
     // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
     // Jacobian and Laplacian it assembles from the cascade derivative textures
@@ -825,6 +830,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // M8: inside the solved window the cascades' structure bands stand down -- the
         // solved field carries shoaling/refraction/limiting per cell, not per band.
         if (c != 2) amp *= 1.0f - wCas;   // M9by: the DELIVERED weight, not the window
+        wDrawn[c] = w * ((c != 2) ? 1.0f - wCas : 1.0f);
         const float cmip = CascadeMip(c, t.texelM);
         // ---- M13 step 2: THE BAND IS READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h). Where
         // this used to be frac(xz / L) on the root's tangent plane -- one plane for a planet,
@@ -871,6 +877,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float cothC = OrbitCoth(gBandK[c], depth);   // the band's k IN THIS DEPTH (Jet.hlsli)
         d.y += s.y * (w * amp);
         d.xz += s.xz * (w * amp * cothC / max(brk, 1e-3f));
+        // this band's share of E[eta div D]: its vertical gain times its lateral gain times the
+        // texture's own moment (bands are uncorrelated; the charts' blend keeps the norm)
+        liftE += (w * amp) * (w * amp * cothC / max(brk, 1e-3f)) * gBandLift[c];
         // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
         // the old additive term here read it and contributed nothing since M7).
         // Monahan-gated: the Jacobian says WHERE a whitecap sits, the wind says HOW MANY
@@ -891,28 +900,53 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // term is held to it here on the sea's energy wavenumber IN THIS DEPTH and its raw lateral
     // amplitude (the envelope over the limiter, times coth). One min; in deep water it is 1.
     // TreeWater::Finish applies the same factor to its lateral gains.
+    // THE SEA THESE LAWS JUDGE IS THE ONE DRAWN HERE (2026-10-23, Mark at the jetty tip: "something is
+    // up with that shoal ... and it's affecting the mesh"). The block read the WHOLE sea's raw envelope
+    // and wavenumber -- but inside the solved window the cascades draw only what the window leaves them
+    // (bands 0 and 1 yield by wCas, as `amp` above says), so the crest weight below compared the chop's
+    // elevation against the swell's envelope, sat at 1/2 at every phase, and the lip's fall came off
+    // the sheet as a smooth offset wherever the swell's reach passed the cusp: a hollow 0.95 m deep
+    // where the ebb jet crosses the ridge off the south jetty (measured with GAGAME_TWIN_GRID: -0.29 m
+    // mean over the 1-2 m water, the solver's own setup buried under it). Three corrections, each a
+    // normalization: (1) the envelope and wavenumber are the DRAWN bands', the yield applied; (2) the
+    // lateral amplitude is the raw orbit ONCE -- the loop draws amp coth / brk, which is the raw gain
+    // times coth, and the bound divided by brk a second time, overstating the reach wherever the depth
+    // limits the sea; (3) the units are d's own, physical -- gRmsRef carries the exaggeration, which
+    // `d *= dry * gPatch.w` applies to everything at the end, so the envelope is taken back out of it.
+    // "Drawn" is each band's fold weight too: on a coarse ring the chop leaves geometry for sigma^2,
+    // and an envelope that kept it put the crest weight back at 1/2 over a flat drawn sea (measured on
+    // ring 2 over the same ridge: -0.12 m median before the fold joined the yield).
+    float fB = 1.0f;
     {
         const float hB = max(depth, 0.3f);
-        const float kSh = ShoaledKh(kEff, hB) / hB;
-        const float aH = 1.4142136f * envRmsRaw * OrbitCoth(kEff, depth) / max(brk, 1e-3f);
-        // the bound is the landing (Jet.hlsli LipReach), on the sea's significant crest-to-trough
-        const float aEnvC = max(1.4142136f * envRmsRaw * brk, 1e-3f);
-        const float cothE = OrbitCoth(kEff, depth);
+        const float eD0 = e0 * wDrawn[0] * wDrawn[0], eD1 = e1 * wDrawn[1] * wDrawn[1];
+        const float eD2 = e2 * wDrawn[2] * wDrawn[2];
+        const float eD = eD0 + eD1 + eD2;
+        const float envD = sqrt(eD) / max(gPatch.w, 1e-3f);
+        // the drawn sea's energy-weighted wavenumber (the whole sea's where nothing is drawn: 0 / 0)
+        const float kD = (eD0 * gBandK.x + eD1 * gBandK.y + eD2 * gBandK.z + 1e-12f * kEff) / (eD + 1e-12f);
+        const float kSh = ShoaledKh(kD, hB) / hB;
+        const float cothE = OrbitCoth(kD, depth);
+        const float aH = 1.4142136f * envD * cothE;   // the drawn lateral amplitude: raw x coth, once
+        // the bound is the landing (Jet.hlsli LipReach), on the drawn sea's significant crest-to-trough
+        const float aEnvC = max(1.4142136f * envD * brk, 1e-3f);
         const float aReach = LipReach(kSh, cothE, 2.0f * aEnvC, hB);
-        d.xz *= min(1.0f, aReach / max(aH, 1e-4f));
+        fB = min(1.0f, aReach / max(aH, 1e-4f));
+        d.xz *= fB;
         // THE LIP FALLS on the cascades' sea too (2026-10-20, Mark: "so every place rolls"). The
         // cascades' lateral term is the raw orbit at every phase, held to the loop's bound; a
         // crest's water reaches that far, and past the cusp (1 / k) it has left the face. The crest
         // is the sea's, as the solved law has it: w = 1/2 + eta / (2 A_env), 1 at the crest and 0 in
         // the trough, so the excursion past the cusp is the crest's alone. The fall is Jet.hlsli's
-        // LipFall, bounded by the trough. (d and the envelope are commensurate here: gRmsRef carries
-        // the exaggeration. TreeWater::Finish carries the same.)
+        // LipFall, bounded by the trough. d and the envelope are both physical here (above);
+        // TreeWater::Finish carries the same.
         const float reach = min(aH, aReach);
         const float wCrC = saturate(0.5f + 0.5f * d.y / aEnvC);
         const float ePastC = max(reach - 1.0f / max(kSh, 1e-4f), 0.0f) * wCrC;
         const float fallC = LipFall(ePastC, kSh, cothE, aEnvC + max(d.y, 0.0f), hB);
         d.y = max(d.y - fallC, min(d.y, -aEnvC));
     }
+    liftE *= fB;   // the bound holds the whole lateral term, so the moment rides it
 
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield): per-cell a, k, and the
     // integrated phase spinor, advanced by the rotor e^{-i sigma t} and folded by THIS
@@ -920,6 +954,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // slope variance (0.5 (a k)^2) to sigma^2 instead of aliasing. eta = sum a cos(phi -
     // sigma t): the reference's surface, wearing our live gains through the window blend.
     float rmsW = 0.0f, excW = 0.0f;
+    float liftWin = 0.0f;   // the solved field's share of THE LIFT (below), drawn weights applied
     // THE SPRAY's spawn quantities, set in the solved block, spent after the shore stop
     float sprayExcess = 0.0f, sprayK = 0.0f;
     float2 sprayDir = 0.0f;
@@ -933,8 +968,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // below).
         bool envPrev;
         const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
-        const float lipQ = max(env.y * 2.5f, 1.0f);
+        const float excRaw = env.y * 2.5f;   // rms_raw / rms_limit, unclamped: how far over (or under)
         float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f;
+        float sumLift = 0.0f;   // -E[eta div D] at chop 1: sum k a^2 coth / 2 (WaveField::Probe::lift)
         float2 sumADir = 0.0f;
         float2 gradEta = 0.0f;   // the sheet's slope, grad eta = -sum a k sin(phi - sigma t) d (the flight's launch)
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
@@ -1040,6 +1076,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             sumA += wFc * aW;
             sumAK += wFc * aW * kW;
             sumACoth += wFc * aW * cothW;
+            sumLift += 0.5f * kW * (wFc * aW) * (wFc * aW) * cothW;
             sumADir += wFc * aW * dir2;
             gradEta -= wFc * aW * kW * sT * dir2;
         }
@@ -1083,10 +1120,18 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             // height over the significant amplitude: a crest twice the significant one stands at
             // twice the sea's excess against the depth. Below the significant crest the share falls
             // with it; in the trough it is nothing (w is too).
+            // THE SEA'S EXCESS UNCLAMPED (2026-10-23, gating the jetty-tip fix): the product was taken
+            // on max(excess, 1), which forgot how far UNDER its limit a sea stands -- every crest over
+            // the significant one read as over the depth's limit, and in 17 m of water off the jetties
+            // a 2 m set crest of a 2.2 m sea was thrown 14.9 m and folded the sheet, where nothing
+            // breaks (and the hull's twin, which runs the law only where the sea is over its limit,
+            // never felt it). The crest's own excess is the sea's ratio times the crest's height over
+            // the significant amplitude, whichever side of 1 the ratio is: unchanged wherever the sea
+            // breaks (excess >= 1), nothing thrown where neither it nor the crest reaches the limit.
             // the reach is the landing (Jet.hlsli LipReach): the cusp plus the flight to the trough,
             // on THIS crest's height over it
             const float aLoop = LipReach(kBar, cothBar, aEnv + max(dW.y, 0.0f), depth);
-            const float eCr = lipQ * max(dW.y / aEnv, 0.0f);
+            const float eCr = excRaw * max(dW.y / aEnv, 0.0f);
             const float excessShare = 1.0f - 1.0f / max(eCr * eCr, 1.0f);
             // which crests plunge (Jet.hlsli PlungeShare): the bed's slope, carried by the solve, against
             // this crest's height -- a spilling bar keeps its steep face and its foam, a reef its barrel
@@ -1118,6 +1163,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         rmsW = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;   // the solver's envelope, sheltered like its comps
         excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
         d += dW * wWin;
+        liftWin = gWaveB.z * sumLift * wWin * wWin;   // the lateral at its chop, both halves by wWin
         // Storm-sea mss ceiling on the solved shed (default ~ hurricane Cox-Munk): past
         // it the surface is breaking, and breaking is foam's business, not the glint's.
         sig2 += wWin * min(sigW, gFoamA.z) * gPatch.w * gPatch.w;
@@ -1250,6 +1296,28 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // Stern turbulence: a thin aerated tail (the reference's 0.42 weight; the PS
     // noise textures it with everything else).
     foam = max(foam, sternF * 0.42f);
+
+    // THE LIFT: THE DRAWN SEA'S MEAN IS THE WATER'S LEVEL (2026-10-23, Mark: "so the drawn sea's mean
+    // equals the solver's level"). The mesh carries each label L to L + D(L) at height lvl + eta(L), so
+    // over a patch the surface an eye sees stands at the labels' heights weighted by the area each
+    // label's cell is carried onto, det(1 + grad D): its mean is E[eta] + E[eta div D] to second order.
+    // E[eta] is zero (a linear sea), E[eta div D] is not: a component of amplitude a drawn with a
+    // lateral orbit a_h has E[eta div D] = -/+ k a a_h / 2 as its offset gathers the labels toward its
+    // crests or away from them. So the labels are lifted by -E[eta div D] -- the Lagrangian mean level
+    // of the surface particles (Stokes; Longuet-Higgins 1953: a surface particle's mean height stands
+    // k a^2 / 2 above the mean water level in deep water, coth(kh) times the orbit here) -- and the
+    // drawn surface's mean is lvl, the solver's level, to second order in the steepness. Measured before:
+    // the drawn sea stood 0.058 m under the level in 5-8 m of water at the inlet (16:00Z Oct 22, Hs 2.2
+    // m; k coth chop var predicted 0.075). The solved field's components carry Gerstner's sign (lift
+    // up); the cascades' carry their texture's own (OceanCpu::LiftMoment, signed: + while their chop
+    // points away from the crests). Both terms ride the weights their halves were drawn with -- the
+    // dry weight and the exaggeration on both halves, the shore stop on the lateral. Not counted: the
+    // crest law's throw and fall (third order and beyond, crest-local) and the trough bound. Added
+    // after the foam's crest gate, which judges the wave's own elevation.
+    {
+        const float wDraw = dry * gPatch.w;
+        d.y += (liftWin - liftE) * wDraw * wDraw * dryL;
+    }
 
     // NO CAP ON THE HEIGHT (the owner, 2026-10-04: the flat-topped sea at Haulover was the
     // depth-limited breaking clamp |eta| <= 0.55 h, a min on the displacement). The surface is

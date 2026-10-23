@@ -817,6 +817,112 @@ downloaded: not fetched, asked of Mark. The HLL face flux was not built; the hyb
 * Before tonight: `build/bin/gagame_c0.exe` with `--shaders out/review/c0/shaders`; `gagame_c0j.exe` is
   the same solver with the judges.
 
+### 12.12 The shoal at the jetty tip: the drawn sea's normalization (2026-10-23)
+
+Mark, at the ridge off the south jetty's tip: "the bar is sponging up water when it should already be
+over saturated", "shouldn't the water be getting pushed up there?", and then "really review your physics
+and normalization of water. Something is up with that shoal/bar at the tip of the jetty and it's
+affecting the mesh."
+
+**The instrument.** `GAGAME_TWIN_GRID=latC,lonC,halfM,stepM,file.csv` on `--twin-surface` reads the bank
+on a square of labels (`ReadBankPoints`, the mesh's own reconstruction). Each label is written beside the
+bed and level a hull reads, then summarised by depth:
+* the labels' mean `dispY` (Lagrangian);
+* the surface an eye sees, each label weighted by det(1 + ∇D) (Eulerian);
+* the bank level against the hull level;
+* folds.
+
+The scratch scene is `out/review/shoal/shoal.json` (views `shoal_above`, `shoal_low`, `deep_in`, `deep_out`).
+
+**What it found** (16:00Z Oct 22, Hs 2.2 m, Tp 9 s, from 99°; the ebb jet 0.9 m/s across the ridge):
+
+| | before | after |
+|---|---|---|
+| the level (bank − hull) | 0.000 everywhere | 0.000 |
+| the drawn mean, 1–2 m of water | **−0.29 m** (−0.24 at 14:00Z Oct 23) | +0.03 to +0.05 (one instant, a 400 m square) |
+| the hollow's deepest | **−0.95 m**, where the jet crosses the ridge | gone |
+| the drawn mean, 5–8 m inside the window (125k labels, two instants) | Euler **−0.058** | **+0.008** |
+| the drawn mean, 8 m and deeper outside the window (cascades only) | Euler about +0.025 (inferred: the after run's Euler − Lagrangian, the chop's sign) | **−0.008** |
+| the largest lateral offset in 17 m of water | **14.9 m**, folding the sheet | 3.0 m, no fold |
+| the twin's lift at the camera (CPU / GPU) | — | **0.0760 / 0.0756 m** |
+
+The solver was right all along: over the shallows it stands +0.085 m mean and up to +0.21 m (setup, the
+water pushed up), and +0.04 to +0.18 m where the jet crosses the ridge. The drawn waves were pressing a
+hollow into the sheet five to ten times deeper than that.
+
+Two more A/Bs, each three kernels (HEAD, now, now with the lift off) on one binary and one wave cache:
+
+| Euler mean | HEAD | now | lift off |
+|---|---|---|---|
+| shoal, 14:00Z Oct 23 (high tide +1.04 m), 1–2 m | **−0.255** | +0.026 | −0.010 |
+| shoal, 14:00Z Oct 23, 5–8 m (104k labels) | −0.032 | **−0.002** | −0.036 |
+| Salisbury Beach (cascades only), 1–2 m | **−0.368** | −0.134 | −0.084 |
+| Salisbury, 0.5–1 m | −0.194 | −0.190 | −0.170 |
+| Salisbury, 3–5 m (78k) | +0.074 | **+0.011** | +0.074 |
+| Salisbury, 8 m+ (68k) | +0.025 | **−0.022** | +0.025 |
+
+* The hollow was not the jetty's alone: the same law sank Salisbury's surf (−0.37 m), and outside the
+  window the cascades' chop stood the deep sea 2–7 cm *above* the level (their sign).
+* In every deep bin the lift cancels the measured E[η ∇·D] to 87–100 %. What remains is the patch's
+  own wave mean at one instant (a 600 m square holds three of band 0's wavelengths).
+* A run of the same instant whose solved pages had not landed (the cascades owned the inlet) read the
+  bar top at +0.11 to +0.22 m. Residency at frame 300 is not deterministic (priors 9); the A/B above
+  has the solved field in all three arms.
+
+**The causes, each a normalization** (`WaterBank.hlsl` CsBankFill; `TreeWater::Finish` and
+`WaveField::ProbeAt` the twins):
+1. *The cascade crest law judged the sea it does not draw.* Inside the solved window the cascades draw
+   only the chop (bands 0 and 1 yield by wCas). The block's envelope was the whole sea's, so the crest
+   weight compared the chop's elevation against the swell's envelope and sat at ½ at every phase. The
+   lip's fall then came off as a smooth offset wherever the swell's reach passed the cusp. Now the
+   envelope and wavenumber are the drawn bands': the window's yield and each band's fold (on a coarse
+   ring the chop leaves geometry for σ², and the same fault came back).
+2. *The lateral amplitude was divided by the breaking factor twice.* The loop draws `amp coth / brk`,
+   which is the raw gain times coth. The bound divided by brk again, overstating the reach exactly where
+   the depth limits the sea. Now it is the raw orbit, once.
+3. *Units.* `gRmsRef` carries the 1.15 exaggeration while `d` is physical until `d *= dry * gPatch.w`.
+   The envelope is now taken back to physical. The CPU twin had done the law in drawn units, so the two
+   twins disagreed by the exaggeration there; both are physical now.
+4. *The solved field's set-crest excess was clamped before it multiplied.* `max(excess, 1) × crest /
+   envelope` forgot how far under its limit a sea stands. Any crest over the significant one read as
+   over the depth's limit, even in 17 m of water. Now it is `excess × crest / envelope`, unchanged
+   wherever the sea breaks (excess ≥ 1). The CPU twin ran the law only where the sea broke, so the hull
+   never felt those throws; it now runs wherever the kernel does.
+
+**The lift** (Mark: "so the drawn sea's mean equals the solver's level"). The sheet is Lagrangian, so its
+surface stands E[η ∇·D] below its labels' mean. That is −½ k a a_h a component for Gerstner's sign (the
+solved field) and +½ k a a_h for the cascades' texture, whose chop points away from the crests (the
+2026-09-08 sign finding, still open). Every label is lifted by Λ = −E[η ∇·D], at the weights it is drawn
+with. The derivation and the measurement are in ALGEBRA.md, physics: "The drawn sea's mean level". The
+cascades' moment is the texture's own, `OceanCpu::LiftMoment` (λ Σ 2k(|A|² + |B|²)), sent as `gBandLift`.
+
+**Found on the way, not changed:**
+* *The twin tool stood at (0°, 0°).* `--twin-surface` never gave its TreeWater a chart, so its CPU read
+  the Gulf of Guinea's bed (−4935 m). The vertical comparison inside the window could not see it, because
+  the solved field's height does not read the depth; the lift's coth(kh) could, and came out 1.6× apart.
+  Fixed in the tool (`SetChart`, `SetRootChart`, as `Entity.cpp` does for a hull). With the CPU at the
+  real place, the far rings compare honestly for the first time:
+  * correlation 0.62 at 500 m and 0.41 at 2000 m;
+  * the blue-water checks at 120 and 400 km read a bed of **exactly 0.0 with coverage claimed**, the
+    absent-height signature the check exists to catch. Open.
+* The dry band `smoothstep(0.05, 0.65, depth)` and the trough's tanh bound are still rules. Neither
+  moved the mean measurably here.
+
+**Open, for Mark:**
+* *The lip's fall is a sink.* It lowers crests and raises nothing, so wherever it fires as the law means
+  it to, the drawn mean drops. In Salisbury's inner surf (0.5–1 m) that is −0.17 to −0.19 m, under water
+  the solver says should be set up. The lift overshoots there by 2–5 cm as well, because the fall and the
+  trough bound reshape the crests the moment assumes. A conservative fall puts the lip's water into the
+  trough ahead.
+* *The surf's orbit.* With the double ÷brk gone, the cascades' lateral in cascade-owned surf is the raw
+  orbit the crest law asks for, bounded by the landing: at Salisbury, 1–2 m of water, mean 1.2 → 3.8 m,
+  max 3.7 → 11.8 m, no folds. From 450 m it does not show (`out/review/shoal/sal_before_after.png`);
+  close in it will. The alternative is the orbit of the broken wave (the lateral on the delivered
+  amplitude): broken energy is dissipated, not turned sideways.
+* Stills at Mavericks (bowl) and the Newburyport surf, before and after: mean |ΔL| 0.57 and 0.75, under
+  1.3 % of pixels past 8 levels. Neither scene's instant has breaking surf in view, so neither tests the
+  rolling crests.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

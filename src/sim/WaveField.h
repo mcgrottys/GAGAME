@@ -324,6 +324,11 @@ public:
         // Jacobian the displaced surface's tangents carry (the water match, step 3: TreeWater::At
         // stands the hull on the surface the mesh draws, which is displaced).
         float jxx = 0.0f, jxz = 0.0f, jzz = 0.0f;
+        // THE MEAN-LEVEL LIFT (2026-10-23; WaterBank.hlsl's solved loop): -E[eta div D] of the
+        // components at chop 1, sum k a^2 coth(kh) / 2 (Gerstner's sign: the offset gathers labels
+        // toward the crests, so the drawn sea stands this much below its labels' mean). The caller
+        // lifts by it times the vertical and lateral weights it gives the field.
+        float lift = 0.0f;
         float a[kMaxComp] = {}, k[kMaxComp] = {}, phase[kMaxComp] = {};
     };
     // depthM: the water's depth at the point, for the depth's orbit (the lateral term coth(kh) per

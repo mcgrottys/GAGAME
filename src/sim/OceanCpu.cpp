@@ -252,8 +252,12 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
         std::stable_sort(all.begin(), all.end(),
                          [&](const Bin& a, const Bin& b) { return energy(a) > energy(b); });
 
-        double total = 0.0;
-        for (const Bin& b : all) total += energy(b);
+        double total = 0.0, lift = 0.0;
+        for (const Bin& b : all) {
+            total += energy(b);
+            lift += 2.0 * energy(b) / b.invK;   // 2 k (|A|^2 + |B|^2): LiftMoment, before lambda
+        }
+        m_lift[c] = m_lambda * lift;
 
         // Adaptive N: take pairs until the tail left behind is under kResidualTarget of the
         // cascade's own variance, capped at kMaxBins. One law, no branch on sea state -- a calm
@@ -285,10 +289,12 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
     ++m_epoch;   // F21: the memo's key moves with the bins
     m_ready = true;
     Log("[oceancpu] %d partitions, seed %08x: retained %d/%d/%d pairs, residual %.3f/%.3f/%.3f%%, "
-        "Hs %.3f m", n, seed, RetainedBins(0), RetainedBins(1), RetainedBins(2),
+        "Hs %.3f m, mean-level moment E[h div D] %+.4f/%+.4f/%+.4f m", n, seed, RetainedBins(0),
+        RetainedBins(1), RetainedBins(2),
         100.0 * ResidualVarianceFraction(0), 100.0 * ResidualVarianceFraction(1),
         100.0 * ResidualVarianceFraction(2),
-        4.0 * std::sqrt(std::max(Variance(0) + Variance(1) + Variance(2), 0.0)));
+        4.0 * std::sqrt(std::max(Variance(0) + Variance(1) + Variance(2), 0.0)), m_lift[0],
+        m_lift[1], m_lift[2]);
 }
 
 // The truncated direct sum. Per retained pair this is one rotor (the same e^{-iwt} CsModulate

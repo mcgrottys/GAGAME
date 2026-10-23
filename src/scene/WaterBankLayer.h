@@ -358,6 +358,9 @@ private:
         // WATER V2, STAGE 2: THE TIDE'S ROTORS of this instant (WaterAtlas::Rotors), two constituents
         // a row: cos, sin of constituent 2j, then of 2j + 1. Appended at the END on both sides.
         float tideRot[36];
+        // THE MEAN-LEVEL MOMENT per cascade (OceanCpu::LiftMoment, the texture's E[h div D], m):
+        // the Lagrangian lift's cascade term (gBandLift). Appended at the END on both sides.
+        float bandLift[4];
     };
     struct BankTile {
         float orgXZ[2];

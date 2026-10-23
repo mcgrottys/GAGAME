@@ -53,6 +53,8 @@ struct SurfaceSample {
     double depthM = 0.0;            // heightNavd - bedNavd; <= 0 is dry
     float  foam = 0.0f;             // 0..1, for spray and wake seeding
     float  sigma2 = 0.0f;           // sub-texel slope variance -- the unresolved sea
+    double lift = 0.0;              // of heightNavd, the waves' mean-level lift (the labels' mean
+                                    // over the level, -E[eta div D]; TreeWater::Finish), m
 
     // THE COVERAGE GATE, and it is not a formality. Compositor::SampleHeightStack starts at
     // h = 0 and skips layers with zero weight, so a point no layer covers comes back as NAVD 0 --

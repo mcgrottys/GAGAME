@@ -400,6 +400,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     double slopeX = 0.0, slopeZ = 0.0;
     double orbX = 0.0, orbY = 0.0, orbZ = 0.0;
     double jacXX = 0.0, jacXZ = 0.0, jacZZ = 0.0;   // d(dispX, dispZ)/d(x, z)
+    double liftPhys = 0.0;   // THE LIFT, -E[eta div D] of the waves as summed here (the kernel's)
 
     if (wGeom > 0.001 && m_wave) {
         const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix, depth, m_waveChop);   // the depth's orbit, the throw's bound
@@ -422,6 +423,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             jacXX += lq * double(p.jxx);  // the offset's gradient carries its chop and the law
             jacXZ += lq * double(p.jxz);
             jacZZ += lq * double(p.jzz);
+            liftPhys += wS * lq * double(p.lift);   // the solved field's: its vertical x lateral weights
         }
     }
     lap(s_cycProbe);
@@ -444,18 +446,32 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         // coth(k h) on each band's k -- the lateral channels' own gain, handed to the sampler beside
         // the height's.
         double latGain[OceanCpu::kCascades];
-        // THE LATERAL BOUND (the kernel's, after its cascade loop: k A_h <= pi/2 on the sea's
-        // energy wavenumber in this depth; the drawn amplitude carries the exaggeration, as the
-        // kernel's envelope does)
+        // THE LATERAL BOUND (the kernel's, after its cascade loop: the landing on the sea's energy
+        // wavenumber in this depth), judged on THE SEA DRAWN HERE (2026-10-23, the jetty-tip hollow;
+        // WaterBank.hlsl says why): the drawn bands' raw envelope and wavenumber -- 0 and 1 yield by
+        // wWin, as `gain` does above -- the raw orbit once, and physical metres (dispY is, until the
+        // exaggeration below). (rmsRaw and kEff stay the whole sea's: the breaking factor's.)
         const double hB = std::max(depth, 0.3);
-        const double kSh = ShoaledKh(kEff, hB) / hB;
-        const double aH = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / std::max(brk, 1e-3);
+        double eD = 0.0, eDk = 0.0;
+        for (int c = 0; c < OceanCpu::kCascades; ++c) {
+            const double gr = gain[c] / std::max(brk, 1e-3) * m_bandRms[c];   // the drawn band's raw rms
+            eD += gr * gr;
+            eDk += gr * gr * m_ocean->BandK(c);
+        }
+        const double envD = std::sqrt(eD);
+        const double kD = (eDk + 1e-12 * kEff) / (eD + 1e-12);   // the whole sea's where nothing is drawn
+        const double kSh = ShoaledKh(kD, hB) / hB;
+        const double cothE = OrbitCoth(kD, depth);
+        const double aH = 1.4142135623730951 * envD * cothE;   // the drawn lateral: raw x coth, once
         // the bound is the landing (the kernel's; WaterTerms.h LipReach), on the significant crest-to-trough
-        const double aEnvB = std::max(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
-        const double aReach = LipReach(kSh, OrbitCoth(kEff, depth), 2.0 * aEnvB, hB);
+        const double aEnvB = std::max(1.4142135623730951 * envD * brk, 1e-3);
+        const double aReach = LipReach(kSh, cothE, 2.0 * aEnvB, hB);
         const double fB = std::min(1.0, aReach / std::max(aH, 1e-4));
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             latGain[c] = fB * (1.0 / std::max(brk, 1e-3)) * OrbitCoth(m_ocean->BandK(c), depth);
+            // THE LIFT's cascade term (the kernel's liftE): vertical gain x lateral gain x the texture's
+            // own E[h div D] (OceanCpu::LiftMoment, signed)
+            liftPhys -= gain[c] * (gain[c] * latGain[c]) * m_ocean->LiftMoment(c);
         }
         // THE CASCADES ARE READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h), which is the one
         // term of this water that needs a plane at all. Up to four charts touch a place; each is
@@ -497,13 +513,10 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         }
         // THE LIP FALLS on the cascades' sea (the kernel's, after its lateral bound; the law at
         // WaterTerms.h LipFall): the crest's water past the cusp, w the sea's crest weight, bounded
-        // by the trough. The kernel's d and envelope are the drawn sea's (gRmsRef carries the
-        // exaggeration); here the sum is physical and the drawn sea is it times m_heightScale.
+        // by the trough. Physical metres, the drawn sea's envelope (above), as the kernel's.
         {
-            const double hs = std::max(m_heightScale, 1e-3);
-            const double yC = (dispY - y0) * hs, sxC = (slopeX - sx0) * hs, szC = (slopeZ - sz0) * hs;
-            const double aEnvC = std::max(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
-            const double cothE = OrbitCoth(kEff, depth);
+            const double yC = dispY - y0, sxC = slopeX - sx0, szC = slopeZ - sz0;
+            const double aEnvC = aEnvB;
             const double reach = std::min(aH, aReach);
             const double wRaw = 0.5 + 0.5 * yC / aEnvC;
             const double wCr = std::min(std::max(wRaw, 0.0), 1.0);
@@ -523,9 +536,9 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
                     yN = floorY;
                     sxN = szN = 0.0;
                 }
-                dispY = y0 + yN / hs;
-                slopeX = sx0 + sxN / hs;
-                slopeZ = sz0 + szN / hs;
+                dispY = y0 + yN;
+                slopeX = sx0 + sxN;
+                slopeZ = sz0 + szN;
             }
         }
     }
@@ -613,6 +626,11 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         s.dx *= dryL;
         s.dz *= dryL;
     }
+    // THE LIFT (WaterBank.hlsl, after the foam: the drawn sea's mean is the water's level): the labels
+    // stand -E[eta div D] above the level, both halves of the moment at the drawn weights -- the dry
+    // weight and the exaggeration on each, the shore stop on the lateral.
+    s.lift = k * k * dryL * liftPhys;
+    eta += s.lift;
     s.vx += k * orbX;
     s.vy += k * orbY;
     s.vz += k * orbZ;
