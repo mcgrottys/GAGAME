@@ -827,6 +827,10 @@ struct VsOut {
     // the mesh drew it above the water -- a quay's face, which the mask (a map: it has no say on a
     // vertical face) read as sea partway down. 0 on the VS fallback, which mixes no geometry.
     float dry : TEXCOORD7;
+    // THE WATER'S OWN LEVEL HERE (m NAVD88, 2026-10-23): the frame's waterline plus the bank's
+    // departure where a ring texel holds one -- the level the shore is classified against, at the
+    // vertex and, interpolated, at the pixel (GlobeMesh.hlsl: Mark's footprint in the entrance).
+    float wl : TEXCOORD8;
 };
 
 #ifndef GA_MESH_PATH
@@ -873,6 +877,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     o.geo = dirT * gGlo.x - gCamAbs.xyz;
     o.wcol = WaterVertexColor(dir, o.rel, h);   // M9bg: the sea, shaded here and nowhere else
     o.dry = 0.0f;
+    o.wl = gWavesB.w;
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
@@ -1631,7 +1636,7 @@ float4 PsSurface(VsOut i, out float land) {
     float editLandPx = 0.0f, wet = 0.0f;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : ComposedLandnessEdit(up, pA CS_WC, hp, gWavesB.w, saturate(i.dry / dryBand),
+                            : ComposedLandnessEdit(up, pA CS_WC, hp, i.wl, saturate(i.dry / dryBand),
                                                    dryBand, editLandPx, wet);
     land = landness;
     float3 n = upT;
