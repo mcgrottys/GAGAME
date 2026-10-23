@@ -1559,7 +1559,9 @@ WaveField::GpuTable WaveField::DisplayTable(const GpuTable& raw) const {
     if (e > 0.0f && e != 1.0f) {
         for (int c = 0; c < kMaxComp; ++c) t.aMax[c] *= e;
         t.envMax *= e;    // the envelope shades what the geometry shows
-        t.excMax *= e;
+        // excMax is not scaled: the excess is a RATIO (rms_raw / rms_limit), the same at any
+        // exaggeration, and the GPU decodes it at the raw 2.5 (WaterBank.hlsl's lipQ, excW). Scaling
+        // it here made ProbeAt's crest law and foam read the excess e times the drawn one.
     }
     return t;
 }

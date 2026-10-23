@@ -34,9 +34,10 @@
 //  that does not know where the bottom is must say so, not guess zero.
 //
 //  THE EXAGGERATION, DECIDED AND STATED. The engine draws the sea taller than physics:
-//  SeaLayer::heightScale (1.15) scales the whole bank displacement, and WaveFieldConfig::
-//  displayExag (1.15) is folded into the solved field's dequant tables -- so inside the window
-//  the drawn sea is ~1.32x physics and outside it ~1.15x. The hull rides the DISPLAYED surface,
+//  SeaLayer::heightScale (1.15) scales the whole bank displacement, the solved field with it, and
+//  WaveFieldConfig::displayExag (wavefield.exag, 1 since 2026-10-22; scenes said 1.6, a 1.84x sea
+//  inside the window) is folded into the solved field's dequant tables on top -- so the drawn sea
+//  is 1.15x physics inside the window and out. The hull rides the DISPLAYED surface,
 //  because a boat floating visibly above its own wave is the one error a player cannot unsee,
 //  and because `the scene runs a 1.15x sea` is a single stated number rather than a fudge in two
 //  places. `--height-scale 1.0 --exagg 1.0` is then the physics-truth run, and that is the one to

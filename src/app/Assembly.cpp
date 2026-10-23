@@ -852,6 +852,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         resMgr.pagesEvery = opt.pagesEvery;
         resMgr.auditEvery = S.capture.residencyAudit;   // the scene's (--res-audit N)
         resMgr.poolCapTiles = (std::max)(S.streaming.poolTiles, 1024u);   // streaming.poolTiles: the reserve (384) and a few chunks at least
+        resMgr.fadeTurns = static_cast<uint8_t>((std::min)(S.streaming.fadeTurns, 15u));   // streaming.fadeTurns (F2/D1)
         resMgr.starvePlant = opt.starvePlant;           // the watchdog's plant (0 = off)
         int surf = -1, norm = -1;
         if (marsMode) {

@@ -77,7 +77,7 @@ struct WaveFieldConfig {
     double tideBucketM = 0.25;         // re-solve quantization
     double currentBucketMs = 0.10;
     float featherM = 120.0f;           // window edge blend into the cascades (scene cfg)
-    float displayExag = 1.15f;         // M8g: display exaggeration, applied to the dequant
+    float displayExag = 1.0f;          // M8g: display exaggeration, applied to the dequant
                                        // tables at ADOPTION (upload) -- the cache and the
                                        // bucket key stay raw physics; ProbeAt reads the
                                        // same scaled table, so 9b/9c agree with the GPU

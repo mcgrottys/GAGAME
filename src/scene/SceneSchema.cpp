@@ -306,6 +306,9 @@ const Schema& StreamingSchema() {
         Schema* sc = new Schema("streaming", &p);
         sc->Bind("tileBudget", p.tileBudget, Q::Dimensionless, "1", "hard cap on Google fetches per run (--tile-budget)", R)
             .Bind("poolTiles", p.poolTiles, Q::Dimensionless, "1", "the residency pool's ceiling in 64 KB tiles (32768 = 2 GB); smaller, the order's cut releases sooner", R)
+            .Bind("fadeTurns", p.fadeTurns, Q::Dimensionless, "1",
+                  "the turns a landing tile takes to come into focus: its map byte steps from its parent's "
+                  "level to its own, and trilinear blends the two held mips (0 = the snap; at most 15)", R)
             .Bind("dayTiles", p.dayTiles, Q::Dimensionless, "1",
                   "cap on Google requests a UTC day, every request sent counted whatever came "
                   "back, every engine on the machine together (cache/google/day_<date>.json); "

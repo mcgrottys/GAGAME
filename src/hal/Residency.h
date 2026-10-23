@@ -79,6 +79,13 @@ public:
     // the cut releases every turn and the discard-and-replace path runs on a moving camera.
     uint32_t poolCapTiles = kPoolCapTiles;
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
+    // THE FADE (residency audit 2026-10-22, F2/D1). A landing tile's map byte steps from its parent's
+    // level to its own over this many turns instead of in one: the pixel sampler's min-LOD clamp passes
+    // through fractional levels and trilinear blends the two held mips, so a tile comes into focus over
+    // ~100 ms at 60 fps instead of snapping. A stated choice, not physics (streaming.fadeTurns; 0 is
+    // the snap). The fade stays below the tile's mip + 1, so every reader that floors the byte (the
+    // kernels, the CPU, the audit) reads the finest held mip at once: no reader of physics fades.
+    uint8_t fadeTurns = 6;
     // ---- THE SAMPLERS (M13) -------------------------------------------------------------
     // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
     // and can be named: a view's walk, a subject whose surroundings stay resident, a gate's
@@ -512,7 +519,8 @@ public:
         uint32_t landedUnowned = 0;   // ... landed for a coordinate the tile no longer owns
         uint32_t lagMin = 0, lagMax = 0;   // turns from a batch's Submit to its fence, this turn
         uint32_t batch = 0, direct = 0, ring = 0;   // the mapped batch, by fill path
-        uint32_t ringNoBytes = 0;   // ring fills of a tile with no bytes: a garbage fill
+        uint32_t ringNoBytes = 0;   // ring fills of a tile with no bytes: let go, never copied (F6)
+        uint32_t waitLanding = 0;   // F6: loaded tiles whose bytes are on disk, held back: no landing slot
         uint32_t evicted = 0;
         uint32_t reclaimed = 0;     // of `evicted`, the ones the headroom pass took unasked
         uint32_t landedOnly = 0;    // 1: tiles landed and no batch was mapped this turn
@@ -877,6 +885,7 @@ private:
         TileState state = TileState::Seen;
         bool predicted = false;
         uint8_t retries = 0;             // M7w: failed loads retry, then go honestly NULL
+        uint8_t rounds = 0;              // F8: rounds of those tries that failed (kRetryRounds at most)
         // PHASE A4: the tree answered it as the level above, magnified (g_tileMagnified): it holds
         // no bytes and is never mapped -- the Failed state's law, "honestly NULL so consumers fall
         // back to the coarser REAL mip", which is what it is -- and the ledger counts it apart.
@@ -892,6 +901,7 @@ private:
         // Step 5: its bytes are on the GPU -- the boot's fill, a ring fill with a
         // whole tile, a DirectStorage batch whose fence signalled. HELD = Mapped and landed.
         bool landed = false;
+        uint8_t fade = 0, fadeOf = 0; // F2/D1: turns of its fade left (0 in focus), of how many
         uint32_t firstP = 0;          // the last pass that placed it among the first P
         uint32_t rec = UINT32_MAX;    // step 5 E: its record in m_rec
         // The watchdog: since when it has been starved (1) or in flight (2), the turn last seen
@@ -1119,6 +1129,14 @@ private:
         m_edgeNotes.push_back({tenant, r});   // H2's closure, by events
     }
     void ApplyChanged();
+    // F2/D1: the tiles fading in (tenant, address). A fade steps once a turn while the tile is seen --
+    // every tile above it held, so its footprint speaks -- and its footprint is written again (the map
+    // only: its bytes did not change, so the max lanes are not told). m_fadeSteps: this turn's steps
+    // (a settled still is not exact while a fade moves).
+    std::vector<std::pair<int, TileRequest>> m_fading;
+    uint32_t m_fadeSteps = 0;
+    uint64_t fadeStepsTotal = 0, waitLandingTotal = 0;   // the stats line's: the fade's steps; F6's waits
+    void StepFades();
     // The max lanes' jobs from the turn's changed slots (before ApplyChanged clears them): each
     // held slot that changed, every alias of its address, the tiles beside it (their blocks' rims
     // read its texels), and every held ancestor -- up the slice's mips, across a rank's floor to the
@@ -1261,6 +1279,17 @@ private:
     uint64_t m_repeatsOf[kMaxSamplers] = {};
     uint64_t m_stHash[kMaxSamplers] = {}, m_stHashLatest[kMaxSamplers] = {};
     std::vector<std::pair<int, TileRequest>> m_failedKeys;   // failed or not whole, for the pass
+    // F8 (residency audit 2026-10-22): a tile that failed its four quick tries is asked again a glance
+    // later, kRetryRounds rounds at most -- a read that failed for a moment (an archive another run
+    // was writing, a disk hiccup) is not a hole for the run. Queued by the pass, in turn order.
+    static constexpr uint8_t kRetryRounds = 4;
+    struct RetryAt {
+        uint32_t turn;
+        int tenant;
+        TileRequest req;
+    };
+    std::deque<RetryAt> m_retryAt;
+    uint64_t retriedTotal = 0;
     void OrderNote(Tenant& t, uint32_t rec, int tenant, int sid, uint32_t stampFrame, uint32_t face,
                    uint32_t m, uint32_t x, uint32_t y, size_t idx, float nearM, float fu, float fv);
     void RecApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits) const;

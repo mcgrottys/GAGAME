@@ -218,7 +218,9 @@ whole window, the Merrimack-shaped current proxy (x ≤ 800 m, 105/285°, ×3.0)
 
 **Exaggeration.** `wavefield.exag` is 1.6 in 38 of 39 scenes (the doc says 1.15): with `heightScale` 1.15
 the solved sea is drawn **1.84× physics**, while the depth laws (dry weight, land floor, landness) are not
-scaled. It makes every breaking artefact taller than its own depth allows.
+scaled. It makes every breaking artefact taller than its own depth allows. **Done (stage 1a, Mark: "do the
+exaggeration"):** `wavefield.exag` is 1 in the code and every scene, so the whole sea is drawn at the one
+stated `heightScale` 1.15; the CPU twin no longer scales the excess (a ratio) — drift 1 below is closed.
 
 **What a tsunami meets today.** No basin state; the solver's open sides are a sponge (an arrival is
 absorbed, never admitted); its deviation is clamped ±6 m; a scrub over 1 h resets it; and the waterline
@@ -317,7 +319,7 @@ the classifier calls a bar land at low tide).
 |---|---|---|
 | **0** | The crest law's throw weighted by the surf-similarity share (§7), GPU and both CPU twins (`TreeWater`, `WaveField::ProbeAt`); residency fixes from the audit (§9) | the bar pose before/after (walls gone at the Merrimack); the Mavericks lineup still barrels; drawn-vs-felt probe unchanged at the hull; selftest |
 | **1** | The declarations: `Quantity`, `Reach`, `Grain`/`Fold`, `TimeForm`, `Clock`, `Identity`, `Producer`; today's producers wrapped behind them; `WaterManager` = `WeatherManager` + the registry. No behaviour change. | frozen-clock stills byte-identical on the gate scenes; line count of the water code DOWN (the roadmap ledger) |
-| **1a** | The mip ramp (D1) and the NULL-read climb (D2), the no-bytes fill (F6), the time-based retry (F8) | a descent rail: max per-frame pixel difference down, no frame with a snap; `[restest]` aniso rows 0; `[stuck]` 0 |
+| **1a** | The mip ramp (D1) and the NULL-read climb (D2), the no-bytes fill (F6), the time-based retry (F8); one stated exaggeration | a descent rail: max per-frame pixel difference down, no frame with a snap; `[restest]` aniso rows 0; `[stuck]` 0. **Done 2026-10-22.** `[restest]` "then the climb" 8x anisotropic: 0 of 473,088 (the clamp alone: 1,606). A frozen-clock hold at the inlet (`--scale 0`, one pose, 12 s from boot; only landings move), `streaming.fadeTurns` 0 vs 6 on one binary: 98,423 fade steps; over the trickle after the load burst the largest 32×32-block luma change a frame 7.2 → 3.5, p99 4.6 → 2.1, frames over 4× the median 12 → 3. What the fade does NOT reach, seen in the burst's largest jumps (≈ 22 in both runs): the town's buildings appearing at once (the building layer's LOD) and the marsh's flooded extent moving as finer heights land (physics reads the finest held mip by law). The descent clip with the sea moving cannot see the fade at all (its holds read alike): the frozen hold is the instrument. |
 | **1b** | Music as the first new producer (§10): band table, scene bindings, Media Foundation + XAudio2 playback | the water and a light term follow the file's bands at a place; two runs agree frame for frame |
 | **2** | One term table: the bank kernel and `TreeWater` loop over terms; tides evaluated on the GPU from the atlas phasors (no per-tile CPU corner params) | stills identical to stage 1 within the declared tolerance; frame time not worse; the hull probe |
 | **3** | Harmonic playback: the SWE window fits its cycle online and plays back; steps only for departures | levels at the stations and the inlet current vs the stepping solver over one tide (rms, lag); frame time with the solver idle |
@@ -333,14 +335,14 @@ map monotonic and conservative — and these, ranked by what a player sees at a 
 
 | # | finding | status |
 |---|---|---|
-| F2 | **The pop is by construction.** A landing tile's map byte drops a whole mip in one turn ((m+1)·16 → m·16) and every sampler's min-LOD clamp with it: each tile snaps into focus, a descent is a patchwork of snaps. The ×16 byte has room for a ramp (D1): write the fractional bytes over 4–8 turns; trilinear blends m and m+1, both held by law. | **next (D1)** — your call on a 4–8 frame fade-in |
-| F1 | Finding 61 open: the colour's anisotropic sampler reads NULL tiles past the gather's clamp (measured 1,606 of 473,088 probe points, up to 36 % zero): dark streaks at tile frontiers at grazing angles. Fix: `CheckAccessFullyMapped` on the sample, re-sample one mip coarser in the quads that touched a NULL tile (proven on this GPU in `ResidencyFloor.hlsl`). | next (D2) |
+| F2 | **The pop is by construction.** A landing tile's map byte drops a whole mip in one turn ((m+1)·16 → m·16) and every sampler's min-LOD clamp with it: each tile snaps into focus, a descent is a patchwork of snaps. The ×16 byte has room for a ramp (D1): write the fractional bytes over 4–8 turns; trilinear blends m and m+1, both held by law. | **fixed (stage 1a)**: a landing tile's level steps from its parent's to its own over `streaming.fadeTurns` (6) turns, short of its mip + 1, so every reader that floors the byte (kernels, CPU, audit) reads the finest held mip at once; a tile held under a gap keeps its fade until it is seen; a settled still is not exact while a fade moves |
+| F1 | Finding 61 open: the colour's anisotropic sampler reads NULL tiles past the gather's clamp (measured 1,606 of 473,088 probe points, up to 36 % zero): dark streaks at tile frontiers at grazing angles. Fix: `CheckAccessFullyMapped` on the sample, re-sample one mip coarser in the quads that touched a NULL tile (proven on this GPU in `ResidencyFloor.hlsl`). | **fixed (stage 1a)**: `PageSampleClimb` for the colour and the buildings, a level above the level READ (clamp or the hardware's LOD), twice at most, a window never past its floor (a rank still touching NULL leaves the pixel to the rank above). `[restest]` "then the climb": **0** of 473,088 (a climb from the clamp alone left 486) |
 | F3 | A tree's "not now" that was not a stop or a permit refusal was handed over as 64 KB of zeros, mapped and claimed: a flat or black tile standing until an Invalidate. | **fixed**: answered not whole, nothing mapped, asked again when the tree changes (no retry spent); counted (`N not now` in the tree's stats) |
-| F4 | Finding 9 open: kernel bilinear taps cross a tile frontier under a one-byte floor and read a NULL neighbour (a seam line in the water while the neighbour is coarser). | next (D2's `Load` form) |
+| F4 | Finding 9 open: kernel bilinear taps cross a tile frontier under a one-byte floor and read a NULL neighbour (a seam line in the water while the neighbour is coarser). | **fixed (stage 1a)**: `PageLoad4` reads each tap's status; a NULL tap re-reads the four a level up, twice at most, within the array's mips; no whole level, the first read stands |
 | F5 | A refused refresh left a held tile stale AND pending forever: `PendingCount()` never 0, no settle closes. | **fixed**: stale (its version bit is the truth of its bytes) but not pending |
-| F6 | A DirectStorage tile with no landing slot is mapped, filled with stale staging bytes and never landed: a leaked slot and a rectangle that never sharpens. The 512 slots are reachable at 96 tiles a turn with a 2-turn fence lag. | next (decide the path before mapping) |
+| F6 | A DirectStorage tile with no landing slot is mapped, filled with stale staging bytes and never landed: a leaked slot and a rectangle that never sharpens. The 512 slots are reachable at 96 tiles a turn with a 2-turn fence lag. | **fixed (stage 1a)**: the gather maps a disk tile only with a landing slot for it this turn (else it stays Loaded, `waitLanding`); a tile that still reaches the fill without bytes copies nothing and is let go with its unlanded aliases |
 | F7 | `TileAtlas2D::FlushResidencyMap` has no caller: the velgrad lens reads an Init-time map. | debug lens only |
-| F8 | Four retries in four turns, then a permanent hole for the run. | next (time-based retry) |
+| F8 | Four retries in four turns, then a permanent hole for the run. | **fixed (stage 1a)**: a failure is asked again a glance (60 turns) later, 4 rounds at most |
 | F9 | Four reader slots per record; a fifth standing reader evicts a pin. | count first |
 | F10 | A 255 byte clamps to mip 7 and reads NULL in the kernels. | no change: the bed's "none" is also 0 m |
 
@@ -380,10 +382,9 @@ file. Mark's d3 visualizer (link to come) is the reference for the band mapping 
 
 ## 11. Questions for Mark
 
-1. **The exaggeration.** The solved sea is drawn at 1.6 × 1.15 = 1.84× physics in nearly every scene. Keep
-   it, bring `wavefield.exag` to 1.0 (the sea as measured), or one stated number for the whole water?
-2. **The mip ramp (F2/D1).** Detail fading in over 4–8 frames (~100 ms) after a tile lands, in place of the
-   snap. Yes?
+1. ~~**The exaggeration.**~~ Answered (2026-10-22): one stated number — `wavefield.exag` 1, the sea at
+   `heightScale` 1.15 everywhere.
+2. ~~**The mip ramp (F2/D1).**~~ Answered: yes — built in stage 1a, 6 turns (`streaming.fadeTurns`).
 3. **The stages' order.** 0 (done) → 1 declarations → 2 one term table → 3 harmonic playback → 4 series in
    time → 5 basin + impact → 6 shelf + nesting, with music after 1. Anything you want earlier?
 4. **The tsunami's first form.** The frequency-domain Packet (stateless, dispersive, what rays give) first,

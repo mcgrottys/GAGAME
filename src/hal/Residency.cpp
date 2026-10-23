@@ -44,6 +44,7 @@ std::map<const void*, RunningLoad> g_running;
 }  // namespace
 
 void ResidencyManager::Shutdown() {
+    if (!stats.empty()) Log("[residency] the run: %s", stats.c_str());   // stage 1a's counts among them
     {
         std::lock_guard<std::mutex> lk(g_runningMx);
         const auto now = std::chrono::steady_clock::now();
@@ -1093,6 +1094,10 @@ uint64_t ResidencyManager::GroundKey(int tenant, const TileRequest& r) const {
 
 // 4.7: a tile's bytes landed: it is held, and so is every other slot mapped to its address.
 void ResidencyManager::Landed(Tracked* tile) {
+    if (!tile->landed && fadeTurns) {   // F2/D1: new to its slot, it comes into focus over fadeTurns
+        tile->fade = tile->fadeOf = fadeTurns;
+        m_fading.push_back({tile->tenant, tile->req});
+    }
     tile->landed = true;
     if (tile->rec != UINT32_MAX) m_rec[tile->rec].flags |= kHeldBit;
     NoteChanged(tile->tenant, tile->req);
@@ -1103,6 +1108,10 @@ void ResidencyManager::Landed(Tracked* tile) {
     it->second.landed = true;
     for (Tracked* s : it->second.slots) {
         if (s == tile || s->landed || s->state != TileState::Mapped) continue;
+        if (fadeTurns) {   // F2/D1: an alias is new to its slot too
+            s->fade = s->fadeOf = fadeTurns;
+            m_fading.push_back({s->tenant, s->req});
+        }
         s->landed = true;
         if (s->rec != UINT32_MAX) m_rec[s->rec].flags |= kHeldBit;
         NoteChanged(s->tenant, s->req);
@@ -1256,6 +1265,27 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                     continue;
                 }
                 if (tr->state == TileState::Mapped) q.push_back(a);
+            }
+        }
+        // F8: the failed tiles whose glance has passed are asked again, as Again reopens a refusal.
+        if (!m_retryAt.empty() && m_retryAt.front().turn <= m_frame) {
+            std::lock_guard<std::mutex> lkRetry(m_mx);   // a load's result is written under it
+            while (!m_retryAt.empty() && m_retryAt.front().turn <= m_frame) {
+                const RetryAt a = m_retryAt.front();
+                m_retryAt.pop_front();
+                Tracked* tr = Find(a.tenant, a.req);
+                if (!tr || tr->state != TileState::Failed || tr->incomplete || tr->magnified) continue;
+                tr->state = TileState::Seen;
+                tr->retries = 0;
+                if (tr->rec != UINT32_MAX) m_rec[tr->rec].flags &= uint8_t(~kDeadBit);
+                ++m_failEvents;
+                reopened = true;
+                if (++retriedTotal <= 12) {
+                    Log("[residency] %S f%u m%u (%u,%u): failed four tries %u time(s); asked again a "
+                        "glance later (F8)",
+                        m_tenants[a.tenant].name.c_str(), a.req.face, a.req.mip, a.req.x, a.req.y,
+                        unsigned(tr->rounds));
+                }
             }
         }
         // A reader's standing statement was made while the tile was refused, and names neither it
@@ -1525,6 +1555,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     // not staged.
     turn.changed = static_cast<uint32_t>(m_changed.size());
     RecordLanes(gpu, cl);   // the max lanes, from the slots that changed (before they are cleared)
+    StepFades();      // F2/D1: the fading tiles' footprints, one step on (after the lanes: no lane job)
     ApplyChanged();   // law 1: every footprint that changed, from the held set
     uint64_t mapStage = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536;
     for (auto& t : m_tenants) {
@@ -1574,10 +1605,11 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         for (const auto& t : m_tenants) {
             if (t.resDirty) settleTurn.exact = false;
         }
+        if (m_fadeSteps) settleTurn.exact = false;   // F2/D1: a tile still coming into focus
     }
 
     // ---- stats
-    char s[256];
+    char s[384];
     uint64_t bytes = 0;
     for (const auto& tr : m_mapped) {
         (void)tr;
@@ -1585,13 +1617,17 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     }
     snprintf(s, sizeof(s),
              "streams %zu res (%zu t, %.0f MB, %u fetches, %llu direct/%llu ring, landing: %llu "
-             "landed-only turns, %llu no-bytes fills, %llu unowned claims%s)",
+             "landed-only turns, %llu no-bytes fills, %llu unowned claims, %llu fade steps (%zu fading), "
+             "%llu landing waits, %llu retried%s)",
              m_tenants.size(), m_mapped.size(), bytes / 1048576.0, fetchesThisRun,
              static_cast<unsigned long long>(m_directTiles),
              static_cast<unsigned long long>(m_ringTiles),
              static_cast<unsigned long long>(landedOnlyTurns),
              static_cast<unsigned long long>(ringNoBytesTotal),
              static_cast<unsigned long long>(landedUnownedTotal),
+             static_cast<unsigned long long>(fadeStepsTotal), m_fading.size(),
+             static_cast<unsigned long long>(waitLandingTotal),
+             static_cast<unsigned long long>(retriedTotal),
              m_failedLoads ? " FAILED-TILES" : "");
     stats = s;
     for (const auto& f : m_fields) {
@@ -1776,7 +1812,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     // THE VERSION LAW'S SWAP: a refill writes the replacement's whole bytes into the held tile's own
     // pool slot through the ring, recorded at the head of this frame's list like every fill: the
     // frame that reads it reads the new version; no frame reads neither.
-    std::vector<std::shared_ptr<Tracked>> direct;
+    std::vector<std::shared_ptr<Tracked>> direct, noBytes;
     for (const auto& tile : toFill) {
         Tenant& t = m_tenants[tile->tenant];
         const D3D12_TILED_RESOURCE_COORDINATE coord{
@@ -1816,29 +1852,55 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         const size_t n = tile->data.size() < 65536 ? tile->data.size() : 65536;
         ++turn.ring;
         if (n < 65536) {
-            // Step 28, counted: a ring fill of a tile that has no bytes (an archived tile
-            // that found no landing slot, or whose OpenFile failed) copies the slab's stale
-            // bytes into a mapped tile.
+            // Step 28, counted: a tile that has no bytes here (an archived tile whose read was
+            // refused, or a load that left none). F6: nothing is copied -- the slab's stale bytes
+            // never enter a mapped tile -- and the tile is let go below, its slot asked again at its
+            // reader's next walk (mapped and never landed, no turn would let it go).
             ++turn.ringNoBytes;
             ++ringNoBytesTotal;
             if (traceTurn) {
                 Log("[res-turn]   NO BYTES: %S f%u m%u (%u,%u) -> pool %u, %zu of 65536 bytes "
-                    "(loc %d, landing slots free %zu)",
+                    "(loc %d, landing slots free %zu): let go",
                     t.name.c_str(), tile->req.face, tile->req.mip, tile->req.x, tile->req.y,
                     tile->pool, n, int(tile->loc.Valid()), m_stageFree.size());
             }
+            noBytes.push_back(tile);
+            phase(8);
+            continue;
         }
         memcpy(ring.cpu + off, tile->data.data(), n);
         cl->CopyTiles(t.res.Get(), &coord, &size, ring.res.Get(), off,
                       D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
-        // Step 5: a ring fill is readable when this frame's list executes -- held, if it carried
-        // a whole tile. A fill without bytes is garbage and the map never names it.
-        if (n == 65536) Landed(tile.get());
+        // Step 5: a ring fill is readable when this frame's list executes: held.
+        Landed(tile.get());
         off += 65536;
         ++m_ringTiles;
         tile->data.clear();
         tile->data.shrink_to_fit();
         phase(8);
+    }
+    // F6: the tiles without bytes let go, with every slot mapped to their address that has not
+    // landed (an alias of bytes that will never come); each NULL-mapped once its overlap passes.
+    for (const auto& tile : noBytes) {
+        Tenant& t = m_tenants[tile->tenant];
+        std::vector<Tracked*> slots{tile.get()};
+        if (tile->gkey) {
+            const auto it = t.held.find(tile->gkey);
+            if (it != t.held.end() && it->second.pool == tile->pool) {
+                for (Tracked* s : it->second.slots) {
+                    if (s != tile.get() && !s->landed) slots.push_back(s);
+                }
+            }
+        }
+        for (Tracked* s : slots) {
+            if (s->pos == UINT32_MAX || s->dropped) continue;
+            const std::shared_ptr<Tracked> keep = t.tracked[s->pos];   // outlives Untrack
+            Untrack(t, s);
+            DropOne(keep);
+        }
+    }
+    if (!noBytes.empty()) {
+        std::erase_if(m_mapped, [](const std::shared_ptr<Tracked>& p) { return p->dropped; });
     }
     // 4.7: an alias of an address whose bytes have landed is held from this turn (the mapping
     // above lands when this frame's list executes, as a ring fill does).

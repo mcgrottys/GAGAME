@@ -198,6 +198,8 @@ struct StreamingSection {
     // The residency pool's ceiling in 64 KB tiles (ResidencyManager::kPoolCapTiles = 32768, 2 GB):
     // smaller, the order's cut releases sooner -- a test's way to make the discard-and-replace path run.
     uint32_t poolTiles = 32768;
+    // F2/D1: the turns a landing tile takes to come into focus (ResidencyManager::fadeTurns); 0 snaps.
+    uint32_t fadeTurns = 6;
     // THE DAY'S CAP on Google, every engine on the machine together, per UTC day, whichever is
     // met first (core/DayLedger.h): dayTiles bounds the requests SENT, whatever came back;
     // dayBytes the bytes landed. Zero is no request that day, not "no limit".
