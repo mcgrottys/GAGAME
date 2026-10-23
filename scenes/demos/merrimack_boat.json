@@ -1,0 +1,39 @@
+{
+  "_readme": [
+    "THE BOAT AT THE MERRIMACK'S ENTRANCE (2026-10-23, WATER_V2 12.12-12.13): the RHIB just seaward of the",
+    "ridge off the south jetty's tip -- the shoal the drawn sea used to sink over -- pointing in at the",
+    "entrance. The water runs on its data's own time (time.start is 'now'); the sun is held at local noon on",
+    "its own clocks (merrimack_bar.json), so the boat can be judged in daylight whatever the tide is doing.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/merrimack_boat.json",
+    "",
+    "THE HELM (docs/VEHICLES.md): W / S both throttles ahead / astern, A / D the outboards, Q / E the levers",
+    "apart (a pivot), SHIFT / CTRL trim out / in. F frees the camera (the boat keeps the throttle and helm",
+    "it was given): W A S D fly, Q / E down / up, hold the right mouse button to look; F again returns to the",
+    "boat. T / Y take the next / previous form: the drone (recovery: flip the boat, T, fly, T back), the car."
+  ],
+  "base": "scenes/demos/merrimack_bar.json",
+  "scene": {"name": "merrimack-boat", "view": "helm"},
+  "hud": {"fps": true},
+  "entities": [
+    {
+      "name": "vehicle",
+      "forms": [
+        {"vessel": "rhib.novurania18"},
+        {"vessel": "drone.recovery"},
+        {
+          "vessel": "car.baja",
+          "mesh": "D:/Assets/subaru-baja/source/Subaru Baja.glb",
+          "meshScale": 0.01
+        }
+      ],
+      "at": {"x": 760, "alt": 0, "z": -260, "az": 265},
+      "controller": "helm"
+    }
+  ],
+  "views": [
+    {"name": "helm", "follow": {"target": "vehicle"}, "interests": [{"name": "vehicle"}]},
+    {"name": "entrance_above", "at": {"lat": 42.8190, "lon": -70.8060, "alt": 0, "heading": 0, "tilt": 0, "range": 1400}, "fovY": 55, "gauge": "root"}
+  ],
+  "interests": [{"name": "vehicle", "target": "vehicle", "radius": 200}]
+}
