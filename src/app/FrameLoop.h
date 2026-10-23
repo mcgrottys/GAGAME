@@ -90,7 +90,7 @@
 #include "sim/VesselSpec.h"
 #include "sim/WaveField.h"
 #include "sim/WaveFieldSource.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <array>
 #include <atomic>
@@ -521,7 +521,7 @@ private:
     RiverFaceClock m_rivers;
     std::function<double(int, double)> m_faceAt;
     std::function<double(int, double)> m_faceQAt;
-    WeatherManager m_weather;
+    WaterManager m_weather;
     std::function<WaveFieldConfig(const WaterSceneConfig&)> m_sceneToWaveCfg;
     std::unique_ptr<WaveField> m_waveField;
     ExitMark m_exitWaveField{"frame loop: ~WaveField -- it waits for its own solve job, which the "

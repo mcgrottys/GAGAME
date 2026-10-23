@@ -1085,17 +1085,6 @@ bool SweSolver::ReadFieldsReady(const Gpu& gpu) const {
     return m_rbEta.Pending() && m_rbUv.Pending() && gpu.ReadbackReady(m_rbUv);
 }
 
-void SweSolver::ReadFieldsTake(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
-                               uint32_t& etaH, std::vector<float>& uv4Out, uint32_t& uvW,
-                               uint32_t& uvH) {
-    etaW = etaH = uvW = uvH = 0;
-    if (!ReadFieldsReady(gpu)) return;
-    const uint32_t etaPitch = m_rbEta.rowPitch, uvPitch = m_rbUv.rowPitch;
-    const std::vector<uint8_t> etaData = gpu.ReadbackTake(m_rbEta);
-    const std::vector<uint8_t> uvData = gpu.ReadbackTake(m_rbUv);
-    UnpackFields(m_cb.nx, m_cb.ny, etaData, etaPitch, uvData, uvPitch, etaOut, etaW, etaH, uv4Out, uvW, uvH);
-}
-
 void SweSolver::UnpackFields(uint32_t nx, uint32_t ny, const std::vector<uint8_t>& etaData,
                              uint32_t etaPitch, const std::vector<uint8_t>& uvData, uint32_t uvPitch,
                              std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,

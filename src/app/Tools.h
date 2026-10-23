@@ -45,7 +45,7 @@ class WaterAtlas;
 class WaterBankLayer;
 class VesselLayer;
 class WaveField;
-class WeatherManager;
+class WaterManager;
 struct SurfaceFrame;
 struct WaterSceneConfig;
 namespace scene {
@@ -115,7 +115,7 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
                                  double simUnix, const std::function<double(double)>& oceanAt,
                                  const std::function<double(int, double)>& faceAt,
                                  const std::function<double(int, double)>& faceQAt,
-                                 WeatherManager& weather);
+                                 WaterManager& weather);
 // PHASE C1: THE TOOLS' GRID. The solver's cells are its own chart (SweDomain); the tools' points still
 // stand in world.flat (their keys are C4's), so a tool takes a point to its place through the flat
 // chart and then to the solver's cell, and back. The one place the tools meet both charts.
@@ -173,23 +173,23 @@ void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
 
 // --dump-water-state: the inlet box's fields as ws_*.f32 + ws_meta.json for proofs/.
 void RunDumpWaterState(const Options& opt, Gpu& gpu, SeaLayer* sea, double simUnix,
-                       WeatherManager& weather, const Space::Anchor& chart);
+                       WaterManager& weather, const Space::Anchor& chart);
 // --twin-surface: the keystone gate -- CPU TreeWater against the GPU bank at range rings.
 // `classifierNavd` is the level the surface classifier holds the bed against (the tide plane).
 void RunTwinSurface(const Options& opt, Gpu& gpu, const SeaState& seaState, SeaLayer* sea,
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
-                    const Camera& cam, double simUnix, WeatherManager& weather,
+                    const Camera& cam, double simUnix, WaterManager& weather,
                     const std::unique_ptr<WaveField>& waveField, double classifierNavd,
                     const Space::Anchor& chart);
 // THE THREE LEVELS THAT MUST AGREE at the camera (the startup transient's measurement): the
 // classifier's, the bank's and the CPU's. RunTwinSurface prints it first; --bed-trace prints it
 // at its readings. Reads back and waits.
 void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, double simUnix,
-                       WeatherManager& weather, double classifierNavd, const Space::Anchor& chart);
+                       WaterManager& weather, double classifierNavd, const Space::Anchor& chart);
 // --trace lat,lon: one sample through the state diagram, eleven steps to the GPU texel.
 void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& compositor, int hgtCh,
               const WaterAtlas& waterAtlas, WaterBankLayer* waterBank, GlobeLayer* globe,
-              const ResidencyManager& resMgr, double simUnix, WeatherManager& weather,
+              const ResidencyManager& resMgr, double simUnix, WaterManager& weather,
               const Space::Anchor& chart);
 // --sea-verify: rendered Hs from the displacement textures against the model's.
 void RunSeaVerify(const Options& opt, Gpu& gpu, SeaLayer* sea);
@@ -223,7 +223,7 @@ void RunHullProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double planet
 class BedTracer {
 public:
     // What the residency manager CLAIMS over the solver's domain: its own map, by mip, and the
-    // samples taken (WeatherManager::ClaimedMips). Printed beside what the kernel read.
+    // samples taken (WaterManager::ClaimedMips). Printed beside what the kernel read.
     using ClaimFn = std::function<uint64_t(uint64_t hist[16])>;
     // The throat's cross-section, found once on the CPU bed, which is geometry here and nothing
     // else (the count reads the trace): the narrowest run of wet-capable cells that crosses the

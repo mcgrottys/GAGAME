@@ -87,7 +87,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 #include "app/Assembly.h"
 #include "app/FramePipe.h"
 #include "app/Options.h"
@@ -1268,6 +1268,50 @@ std::optional<int> FrameLoop::Session() {
                                  [clock, tm](int f, double t) { return clock->DEta(*tm, f, t); },
                                  [clock, tm](int f, double t) { return clock->Q(*tm, f, t); });
     }
+    // WATER V2 (sim/WaterProducer.h): the producers the manager does not evaluate, declared with their
+    // readers, so the manifest (LogProducers, below) is every input the water reads.
+    {
+        using Q = water::Quantity;
+        using Su = water::Support;
+        using T = water::TimeForm;
+        const auto declare = [&weather](const char* name, Q q, Su su, T f, double grainM,
+                                        const char* reader) {
+            water::Producer p;
+            p.name = name;
+            p.q = q;
+            p.support = su;
+            p.form = f;
+            p.grainM = grainM;
+            p.reader = reader;
+            weather.Declare(std::move(p));
+        };
+        declare("tide stations (CO-OPS harmonics)", Q::Level, Su::Point, T::Harmonic, 0.0,
+                "the waterline, the solvers' forcing plane, the atlas's station rung");
+        declare("rivers (gauged discharge, face tides)", Q::Current, Su::Point, T::Harmonic, 0.0,
+                "the solvers' river faces (Flather)");
+        if (haveCurrents) {
+            declare("tidal current stations", Q::Current, Su::Point, T::Series, 0.0,
+                    "the wave solve's current proxy and its key");
+        }
+        if (sea) {
+            declare("buoys (observed Hs over the grid's)", Q::Sea, Su::Point, T::Series, 0.0,
+                    "the eye's spectrum (SeaLayer::BuoyGainAt)");
+            declare("wind sea (Young & Verhagen, the walked fetch)", Q::Sea, Su::Point, T::Series,
+                    0.0, "the eye's spectrum (SeaLayer::PartsOfHour)");
+            if (sea->StormOn()) {
+                declare("sea.storm (the scene's)", Q::Sea, Su::Analytic, T::Static, 0.0,
+                        "the eye's spectrum");
+            }
+            declare("cascades (3 FFT patches of the eye's spectrum)", Q::Sea, Su::Analytic,
+                    T::Stochastic, 0.18, "the bank kernel; the hull (OceanCpu)");
+            declare("swell exposure (the bed's lee)", Q::Sea, Su::Tree, T::Static, 76.0,
+                    "the bank kernel's shelter; the hull (ExposureAt)");
+            declare("churn (foam memory)", Q::Memory, Su::Window, T::Transient, 2.0,
+                    "the bank kernel's foam");
+        }
+        declare("vessels (Kelvin wakes)", Q::Sea, Su::Point, T::Transient, 0.0,
+                "the bank kernel (the hull's twin is not fed: TreeWater::SetBoats has no caller)");
+    }
     // PHASE B2 (D4): every solver binds the standing window (it reads it where the window holds its
     // cells, the cube elsewhere), and the pin and the whole-bed wait ask for its tiles. PHASE C1: this
     // stood inside the Boston block, so a scene without Boston's station (Haulover's tides) had no
@@ -1338,13 +1382,23 @@ std::optional<int> FrameLoop::Session() {
         waveField->Configure(wcfg, &compositor, hgtCh,
                              &waterAtlas, &model, entSta,
                              haveCurrents ? &currents : nullptr, wfCtSta);
+        {
+            water::Producer p;   // WATER V2: the solved field, a harmonic window
+            p.name = "wave.field (the solved BVP, 32 components)";
+            p.q = water::Quantity::Sea;
+            p.support = water::Support::Window;
+            p.form = water::TimeForm::Harmonic;
+            p.grainM = wcfg.cellM;
+            p.reader = "the bank kernel; the hull (WaveField::ProbeAt)";
+            weather.Declare(std::move(p));
+        }
         // M8 flows into waves: the SWE's SOLVED current drives the dispersion when
         // resident (the bent jet, the tip shear); the ACT proxy is the fallback.
         if (swe.Ready() && sea) {
             waveField->SetSweCurrent(&swe, sea->sweCurrentGain);
         }
         // The owned windows (Boston) step on the frame's list too, when a hull asks them
-        // (WeatherManager::Simulate), in the sea layer's simulate pass beside the external one.
+        // (WaterManager::Simulate), in the sea layer's simulate pass beside the external one.
         if (sea) {
             sea->onSimulate = [this](const FrameContext& ctx) {
                 if (ctx.cmd && ctx.gpu) m_weather.Simulate(*ctx.cmd, *ctx.gpu, m_simUnix);
@@ -1393,6 +1447,7 @@ std::optional<int> FrameLoop::Session() {
                 waveT, uint32_t(WaveField::kMaxComp) + 1u);
         }
     }
+    weather.LogProducers();   // WATER V2: the manifest, every producer the water reads
     // M9bi: --sun pins the pre-ephemeris art direction; sunPlaced stays false and the
     // renderer keeps using these two constants, exactly as every earlier baseline did.
     if (S.sun.source == Scene::kPinned) {
@@ -1470,7 +1525,7 @@ std::optional<int> FrameLoop::Session() {
         // asked, so the kernel reads the manager's own map (the coarsest mip) -- a diagnostic.
         bool bedWhole = false;
         if (S.water.swe.bedWait == 2 && S.water.swe.spinupH > 0) {
-            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            const WaterManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
             bedWhole = bw.done;
             Log("[swe] bed wait: %u window(s), %u tiles mapped in %u residency turns, %.2f s -- %s "
                 "(%llu of %llu cells read the page at mip 0)",
@@ -5159,7 +5214,7 @@ bool FrameLoop::Frame() {
         // same turns, the same trace as its test -- and read once more; every reading of the run
         // is then held against it.
         if (opt.bedTraceEvery > 0 && m_bedTracer.Configured() && !marsMode) {
-            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            const WaterManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
             Log("[bedtrace] the domain made whole at the run's end: %u tiles mapped in %u turns, "
                 "%.2f s -- %s",
                 bw.tiles, bw.turns, bw.seconds, bw.done ? "whole" : "NOT whole (see the reading)");

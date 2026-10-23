@@ -1,6 +1,7 @@
 #include "compose/WaterAtlas.h"
 
 #include "core/Common.h"
+#include "sim/WaterProducer.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -167,15 +168,10 @@ struct Eot20Source : FieldSource {
 // A STATION REACHES ONLY SO FAR (2026-10-21, the world's stations). The station field and the MSL
 // surface were inverse-distance sums over EVERY station -- 20 New England stations, then 1,256 of the
 // world's: a tile's texel summed them all, though a station in Hawaii says nothing of the Merrimack. A
-// station's weight is 1 / d^2 tapered to nought at kStationReachM (smoothstep from the coverage's 90 km,
-// three times it at the far end), so the sum is local and continuous; the stations are found through a
-// grid of 1-degree cells.
-constexpr double kStationReachM = 270000.0;
-double StationWeight(double d2) {
-    const double d = std::sqrt(d2);
-    const double t = std::clamp((d - 90000.0) / (kStationReachM - 90000.0), 0.0, 1.0);
-    return (1.0 - t * t * (3.0 - 2.0 * t)) / d2;
-}
+// station's weight is 1 / d^2 times the point's reach (water::PointTaper: nought at kStationReachM), so
+// the sum is local and continuous; the stations are found through a grid of 1-degree cells.
+constexpr double kStationReachM = water::kPointReachM;
+double StationWeight(double d2) { return water::PointTaper(std::sqrt(d2)) / d2; }
 struct StationGrid {
     std::unordered_map<int64_t, std::vector<uint32_t>> cells;
     static int64_t Key(int cy, int cx) { return int64_t(cy + 90) * 400 + (cx + 200); }
@@ -242,8 +238,7 @@ struct StationFieldSource : FieldSource {
         if (wsum <= 0.0) return 0.0f;
         out[0] = static_cast<float>(re / wsum);
         out[1] = static_cast<float>(im / wsum);
-        const double t = (dminM - 20000.0) / 70000.0;   // 20 km full -> 90 km gone
-        return static_cast<float>(1.0 - std::clamp(t, 0.0, 1.0));
+        return static_cast<float>(water::PointCoverage(dminM));   // 20 km full -> 90 km gone
     }
 };
 
@@ -614,28 +609,6 @@ bool RunWaterSelfTest() {
     return ok;
 }
 
-double WaveAtlasNavdDelta(const TideModel* tides, double latDeg, double lonDeg) {
-    // The regional NAVD-MSL offset at a place: the NEAREST station on the open coast carrying a
-    // published link (Assembly.cpp NavdAboveMsl's law, 2026-10-21: delta = -mllwMinusNavd - meanMllw;
-    // a station up a river stands on a river's mean). The smallest |delta| anywhere was this rule
-    // while the stations were New England's alone; over a wider set it picks another coast's.
-    double best = 0.0, bestD2 = 0.0;
-    bool found = false;
-    const double cl = std::cos(latDeg * kD2R);
-    for (size_t i = 0; i < tides->Count(); ++i) {
-        const TideStation& s = tides->S(i);
-        if (s.mllwMinusNavdM < -900.0 || s.riverKm > 0.0) continue;
-        const double dLat = s.lat - latDeg, dLon = (s.lon - lonDeg) * cl;
-        const double d2 = dLat * dLat + dLon * dLon;
-        if (!found || d2 < bestD2) {
-            bestD2 = d2;
-            best = -s.mllwMinusNavdM - s.meanMllwM;
-        }
-        found = true;
-    }
-    return best;
-}
-
 double WaterAtlas::MslNavd(double latDeg, double lonDeg) const {
     // Station-IDW of MSL in NAVD88. M8 datum fix: stations WITHOUT a published NAVD
     // link contribute through the regional MSL transfer (msl_navd = -delta) instead of
@@ -643,7 +616,8 @@ double WaterAtlas::MslNavd(double latDeg, double lonDeg) const {
     // msl +0.43 from river slope) dominate the entrance by distance and bias the
     // solver's level +0.46 m. With the transfer, the entrance's own station answers
     // for the entrance. Beyond the survey the geoid stands in for MSL (0).
-    const double delta = WaveAtlasNavdDelta(m_tides, latDeg, lonDeg);
+    double delta = 0.0;
+    m_tides->NavdAboveMsl(latDeg, lonDeg, &delta);
     double acc = 0, wsum = 0, dmin = 1e18;
     const double kx = 111320.0 * std::cos(latDeg * kD2R), ky = 110574.0;
     m_impl->stations.Near(latDeg, lonDeg, [&](uint32_t i) {
@@ -661,8 +635,7 @@ double WaterAtlas::MslNavd(double latDeg, double lonDeg) const {
         wsum += w;
     });
     if (wsum <= 0.0) return 0.0;
-    const double t = std::clamp((dmin - 20000.0) / 70000.0, 0.0, 1.0);
-    return (acc / wsum) * (1.0 - t);
+    return (acc / wsum) * water::PointCoverage(dmin);
 }
 
 }  // namespace ga

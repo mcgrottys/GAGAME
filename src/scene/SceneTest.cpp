@@ -105,7 +105,7 @@
 #include "sim/GlobeModel.h"
 #include "sim/VesselSpec.h"
 #include "sim/WaterSurfaceTree.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -2011,8 +2011,8 @@ bool RunSceneSelfTest() {
             g.True(!e.Active() && !e.Helming(), "[entity] a node without a hull is inert");
             g.True(EntitySchema().Find("mirrorCadence") == nullptr,
                    "[entity] the entities section has no mirror cadence: the hull reads the solver by region every frame");
-            WeatherManager wm;
-            g.Same(wm.SolverAsOf(), WeatherManager::kNeverRead, "[entity] no solver has answered: asOf is never");
+            WaterManager wm;
+            g.Same(wm.SolverAsOf(), WaterManager::kNeverRead, "[entity] no solver has answered: asOf is never");
             FrameInfo fi;
             g.True(fi.asOf == 0.0 && fi.quanta == 0, "[entity] FrameInfo carries asOf and the clock's quanta");
             TreeWater tw;

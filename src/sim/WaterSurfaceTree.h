@@ -8,7 +8,7 @@
 //  IT IS THE CPU TWIN OF CsBankFill (shaders/WaterBank.hlsl), and it is assembled in that
 //  kernel's order so the two can be diffed term by term rather than argued about:
 //
-//      mean state   WeatherManager::Query   tide atlas + SWE window refinement, the one bed,
+//      mean state   WaterManager::Query   tide atlas + SWE window refinement, the one bed,
 //                                           the surface current, the 10 m wind
 //      solved sea   WaveField::ProbeAt      inside the solve window, weighted by wWin (x the shadow)
 //      cascade sea  OceanCpu::SampleForHull everywhere, one gain per cascade -- the kernel's band
@@ -17,7 +17,7 @@
 //      wake         WaterTerms WakeOne      the fleet's Kelvin wakes, closed form
 //      over all     the dry weight, the display exaggeration, the depth-limited amplitude cap
 //
-//  WHY THE MEAN STATE IS NOT RE-DERIVED HERE. WeatherManager::Query is already the tree's point
+//  WHY THE MEAN STATE IS NOT RE-DERIVED HERE. WaterManager::Query is already the tree's point
 //  evaluator: it composes the height stack, refines the level inside a resident solver window,
 //  falls back from the solver's current to GoMOFS, and carries the 10 m wind. Rewriting that
 //  here would be a second description of the same physics that nothing ever checks against the
@@ -57,7 +57,7 @@
 #include "sim/WaveScale.h"
 #include "sim/WaveChart.h"
 #include "sim/WaveField.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 #include "core/Space.h"
 
 #include <string>
@@ -78,7 +78,7 @@ public:
     // All four may be null; each absence removes a term and is REPORTED by Describe() rather
     // than silently substituting zero. A TreeWater with no weather manager answers `valid =
     // false` everywhere, which is the honest reading of `I have no tree attached`.
-    void Configure(const WeatherManager* wx, const WaveField* wave, const OceanCpu* ocean,
+    void Configure(const WaterManager* wx, const WaveField* wave, const OceanCpu* ocean,
                    const SeaState* sea, double heightScale, double waveExag, double waveChop);
 
     // The fleet, for the wake term. Copied, not referenced: this is read from the physics tick
@@ -210,7 +210,7 @@ private:
                  double gain[OceanCpu::kCascades], double* brkOut = nullptr,
                  double* rmsRawOut = nullptr, double* kEffOut = nullptr) const;
 
-    const WeatherManager* m_wx = nullptr;
+    const WaterManager* m_wx = nullptr;
     const WaveField* m_wave = nullptr;
     const OceanCpu* m_ocean = nullptr;
     const SeaState* m_sea = nullptr;
@@ -238,7 +238,7 @@ private:
 
     // ---- THE SLOW FIELD, MEMOISED. --------------------------------------------------------
     // A hull asks this evaluator ~120 times per physics step, once per station and per tube
-    // slice, and WeatherManager::Query is not cheap: six height layers, eighteen tide
+    // slice, and WaterManager::Query is not cheap: six height layers, eighteen tide
     // constituents each a compositor sample, the current, the wave grid and the wind. Measured
     // at 27 us a call it was 28 ms a frame, and the boat cost more than the entire renderer.
     //
@@ -248,7 +248,7 @@ private:
     // evaluated per station regardless. So the mean state is fetched once per cell and reused --
     // all but the SOLVER's surface (the water match, step 1): the throat's jet and the basin's
     // gradient vary within a cell, and reading a delivered region is cheap, so each point is
-    // refined by the solver on its own (WeatherManager::SolverRefine) and the hull's level is as
+    // refined by the solver on its own (WaterManager::SolverRefine) and the hull's level is as
     // continuous as the kernel's.
     //
     // The cell is 8 m and the memo is one entry, which is all a single hull needs (its stations

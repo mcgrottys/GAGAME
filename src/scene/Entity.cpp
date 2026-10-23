@@ -16,7 +16,7 @@
 #include "sim/SimClock.h"
 #include "sim/VesselSpec.h"
 #include "sim/WaveField.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <algorithm>
 #include <atomic>
@@ -668,7 +668,7 @@ void Entity::Update(const FrameInfo& fi) {
     auto& telTick = m_telTick;
     const int quanta = fi.quanta;
     const double simUnix = fi.simUnix;
-    WeatherManager* weather = m_o.weather;
+    WaterManager* weather = m_o.weather;
     const WaveField* waveField = m_o.waveField;
     SeaLayer* sea = m_o.sea;
     const SeaState* seaState = m_o.seaState;
@@ -789,7 +789,7 @@ void Entity::Update(const FrameInfo& fi) {
             // The snapshot the hull reads, and its age: what answered, and the instant the
             // solver's answers are coherent at (the frame's asOf, declared before this step).
             char asOf[48];
-            if (fi.asOf <= WeatherManager::kNeverRead) snprintf(asOf, sizeof(asOf), "never");
+            if (fi.asOf <= WaterManager::kNeverRead) snprintf(asOf, sizeof(asOf), "never");
             else snprintf(asOf, sizeof(asOf), "t=%.0f", fi.asOf);
             Log("[entity] '%s' reads %s (the frame's declared asOf: %s)", m_props.name.c_str(),
                 boatSea.Describe(bp0[0], bp0[2], simUnix).c_str(), asOf);

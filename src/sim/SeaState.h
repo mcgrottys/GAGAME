@@ -96,10 +96,6 @@ public:
     // partitions and sandbox overrides (--storm) go through identical math.
     static PartParam MakePartition(double hs, double tp, double fromDeg, bool windsea);
 
-    // M9a: the FULLY-DEVELOPED wind sea for a wind speed (Pierson-Moskowitz), for the hours
-    // where the forecast's partitioning reports no wind sea at all -- see SeaLayer::SetTime.
-    // False when the wind is too light to raise anything above the 0.02 m partition floor.
-    static bool WindSeaPm(double wind10Ms, double* hsOut, double* tpOut);
     // B4 (docs/REVIEW_2026-10-21.md): the wind sea a wind raises over its FETCH (m, upwind to land) in
     // water of a DEPTH (m; <= 0 or huge = deep), Young & Verhagen 1996: one law whose limits are
     // JONSWAP's growth at short fetch, the depth's ceiling in shallow water, and Pierson-Moskowitz's

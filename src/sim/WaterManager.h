@@ -1,5 +1,5 @@
 // ================================================================================================
-//  WeatherManager - M6x: THE GLOBAL WEATHER/PHYSICS MANAGER -- the Vatican client for water
+//  WaterManager - M6x: THE GLOBAL WEATHER/PHYSICS MANAGER -- the Vatican client for water
 //  and near-surface weather. ONE query surface over every product the monasteries publish:
 //
 //      Query(lat, lon, t, groundResM) -> { level, current, waves, wind, bed, depth }
@@ -15,6 +15,11 @@
 //  "NOAA carries the state, the GPU carries the phase": the manager is overwhelmingly a
 //  stateless evaluator; the solver windows are the sparse exception, and their absence is
 //  not an error -- it is the tide plane being exactly right.
+//
+//  WATER V2, STAGE 1 (docs/WATER_V2.md section 3): the WATER manager, and every input a PRODUCER
+//  (sim/WaterProducer.h) in one registry. Query is one loop: each producer that answers at the
+//  place is composed by its quantity's law. The rest are declared with their readers, so the
+//  manifest at boot is every datum the water reads, its reach, grain and time.
 // ================================================================================================
 #pragma once
 
@@ -27,6 +32,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
+#include "sim/WaterProducer.h"
 
 #include <cmath>
 #include <functional>
@@ -58,8 +64,11 @@ struct WeatherSample {
     bool currentSolved = false;
 };
 
-class WeatherManager {
+class WaterManager {
 public:
+    WaterManager() = default;
+    WaterManager(const WaterManager&) = delete;   // the registry's producers hold `this`
+    WaterManager& operator=(const WaterManager&) = delete;
     void Init(Compositor* comp, int heightChannel, const WaterAtlas* atlas,
               const TideModel* tides, const GlobeModel* globe, const SeaState* sea,
               const CurrentModel* currents);
@@ -69,7 +78,18 @@ public:
     // when the camera enters their footprint below the activation altitude.
     // PHASE C1: a window stands where its solver's domain does (its lat/lon box); no world.flat.
     // PHASE C2: the scene's sea-state sources (SeaLayer::Sources), for Query's period and direction.
-    void SetSeaSources(const std::vector<const SeaState*>& s) { m_seaSources = s; }
+    void SetSeaSources(const std::vector<const SeaState*>& s) {
+        m_seaSources = s;
+        Register();
+    }
+    // ---- THE REGISTRY (Water V2 stage 1). Init, SetSeaSources and the windows build the producers
+    // the manager answers for; Declare adds one it does not evaluate (its owner and reader named).
+    void Declare(water::Producer p) {
+        m_declared.push_back(std::move(p));
+        Register();
+    }
+    const std::vector<water::Producer>& Producers() const { return m_producers; }
+    void LogProducers() const;   // the manifest
     void AddExternalWindow(const char* name, SweSolver* solver,
                            std::function<double(double)> oceanAt);
     // A dormant window's river faces (cfg.faces) ride faceAt / faceQAt (sim/RiverModel.h
@@ -227,6 +247,8 @@ private:
     bool m_pinLogged = false;
 
     const Window* WindowAt(double latDeg, double lonDeg) const;
+    void Register();
+    std::vector<water::Producer> m_producers, m_declared;
 
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;

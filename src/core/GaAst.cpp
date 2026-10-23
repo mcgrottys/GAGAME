@@ -281,7 +281,7 @@ void RegisterKnownWaterEdges() {
     Register({"water.atlas", "window.field", "tide phasors x18 (M8i)", latlonW, mercPxW,
               true, "phasor re/im", "RG16F tiles", 1.0, "Compositor::WindowField paint"});
     Register({"water.atlas", "weather.mgr", "level rotors", latlonW, latlonW, false,
-              "m NAVD", "+-3", 1.0, "WeatherManager::Query h(t)=msl+Re[P e^iwt]"});
+              "m NAVD", "+-3", 1.0, "WaterManager::Query h(t)=msl+Re[P e^iwt]"});
     // M8g THE ORIGIN PLANES: the datum envelope (synodic-month min/max of the same
     // rotor sum, NAVD) -- MLLW/MHHW generalized between gauges. First consumer: the
     // edit-land geometry floor (absolute crest, so high water drowns the outer jetty).
@@ -289,10 +289,10 @@ void RegisterKnownWaterEdges() {
               atlasN, false, "m NAVD lo/hi", "containment + width 2.4..3.6 (watertest 7)",
               1.0, "WaterAtlas::EnvelopeNavd -> gBankE.w edit floor"});
     Register({"gfswave.grid", "weather.mgr", "hs/tp/dir", rowS, latlonW, true,
-              "m / s / deg", "0..15 m", 1.0, "WeatherManager wave grid (lat1-lat row)"});
+              "m / s / deg", "0..15 m", 1.0, "WaterManager wave grid (lat1-lat row)"});
     Register({"weather.mgr", "compose.stack", "corner params feed", latlonW, worldM,
               false, "level/bed/hs", "query rungs", 1.0,
-              "WeatherManager::Query -> CornerParams"});
+              "WaterManager::Query -> CornerParams"});
     // M9bg: `gfswave.grid -> globe.ps` (far-field whitening) and `gfs.wind -> globe.ps` (the
     // Cox-Munk sigma^2 from U10) retired. Both still reach the water, but through the BANK:
     // Hs sets the corner params below, the wind raises the FFT's sea, and the vertex reads

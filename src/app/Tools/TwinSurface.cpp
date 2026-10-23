@@ -12,7 +12,7 @@
 #include "sim/SeaState.h"
 #include "sim/WaterSurfaceTree.h"
 #include "sim/WaveField.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -46,10 +46,10 @@ namespace ga::app::tools {
 // THE THREE LEVELS THAT MUST AGREE at the camera (the startup transient, measured 2026-09-10):
 // the classifier's -- the scalar the surface classifier holds the bed against, the tide plane --
 // the bank's -- the level plane the GPU draws, which inside a solver's domain carries the
-// solver's deviation -- and the CPU's -- what a hull reads, WeatherManager::Query, the solver
+// solver's deviation -- and the CPU's -- what a hull reads, WaterManager::Query, the solver
 // being truth. A basin the solver holds below the tide splits the first from the other two.
 void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, double simUnix,
-                       WeatherManager& weather, double classifierNavd, const Space::Anchor& chart) {
+                       WaterManager& weather, double classifierNavd, const Space::Anchor& chart) {
     weather.RefreshMirrorsTo(gpu, simUnix);
     const double xz[2] = {cam.px, cam.pz};
     WaterBankLayer::BankPoint bp{};
@@ -68,7 +68,7 @@ void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, d
 
 void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer* sea,
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
-                    const Camera& cam, double simUnix, WeatherManager& weather,
+                    const Camera& cam, double simUnix, WaterManager& weather,
                     const std::unique_ptr<WaveField>& waveField, double classifierNavd,
                     const Space::Anchor& chart) {
     LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, classifierNavd, chart);

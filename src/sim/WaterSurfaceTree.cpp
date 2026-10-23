@@ -15,18 +15,7 @@
 
 namespace ga {
 
-namespace {
-
-// HLSL's smoothstep, so the window feather is the same curve on both processors.
-double SmoothStep(double e0, double e1, double x) {
-    if (e1 <= e0) return (x < e0) ? 0.0 : 1.0;
-    const double t = (std::min)((std::max)((x - e0) / (e1 - e0), 0.0), 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
-
-}  // namespace
-
-void TreeWater::Configure(const WeatherManager* wx, const WaveField* wave, const OceanCpu* ocean,
+void TreeWater::Configure(const WaterManager* wx, const WaveField* wave, const OceanCpu* ocean,
                           const SeaState* sea, double heightScale, double waveExag,
                           double waveChop) {
     m_wx = wx;
@@ -190,7 +179,7 @@ double TreeWater::WindowWeight(double wx, double wz) const {
     const double eCells = (std::min)((std::min)(cx, double(t.nx) - cx),
                                      (std::min)(cz, double(t.ny) - cz));
     const double eM = eCells / double(t.invCell);
-    return SmoothStep(0.0, (std::max)(double(t.feather), 1.0), eM);
+    return wt::Smoothstep(0.0, (std::max)(double(t.feather), 1.0), eM);   // HLSL's, as the kernel's feather
 }
 
 const WeatherSample& TreeWater::SlowAt(double wx, double wz, double simUnix) const {
@@ -699,11 +688,11 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     PlaceOf(wx, wz, latDeg, lonDeg);
     const WeatherSample q = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
     // THE AGE IT READS. Inside a solver's domain the level and the current are the solver's, as of
-    // the region it last delivered (WeatherManager::RequestRegion); this says that instant, or that
+    // the region it last delivered (WaterManager::RequestRegion); this says that instant, or that
     // no solver has answered yet -- in which case a point the solver owns reports no level at all.
     const double asOf = m_wx->SolverAsOf();
     char age[96];
-    if (asOf <= WeatherManager::kNeverRead) {
+    if (asOf <= WaterManager::kNeverRead) {
         snprintf(age, sizeof(age), "no solver has answered (its domain reports no level yet)");
     } else {
         snprintf(age, sizeof(age), "solver answers as of t=%.0f, %.1f s old", asOf, simUnix - asOf);

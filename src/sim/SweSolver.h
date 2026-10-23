@@ -263,8 +263,6 @@ public:
     bool ReadFieldsBegin(Gpu& gpu);
     bool ReadFieldsPending() const { return m_rbEta.Pending(); }
     bool ReadFieldsReady(const Gpu& gpu) const;
-    void ReadFieldsTake(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,
-                        std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
     // ...and the same read handed to ANOTHER THREAD: Detach gives the two finished readbacks
     // away (the solver forgets them); Unpack maps and unpacks them wherever it is called -- the
     // map and the half-to-float loop are 100 ms the frame need not pay. Only the grid's size is
@@ -298,12 +296,6 @@ public:
     };
     bool TraceFace(Gpu& gpu, std::vector<FaceRow>& rows);
     float FaceArea(int f) const { return m_faceArea[f]; }   // the live section u_ext was last divided by
-    Probe ReadProbe(Gpu& gpu, float tx, float ty) {
-        const float p[2] = {tx, ty};
-        Probe out{};
-        ReadProbes(gpu, p, 1, &out);
-        return out;
-    }
 
     // ---- THE BED THE KERNEL READS (the bed trace: an instrument, never on the frame path). The
     // solver's own BedAt over its whole lattice, through the rule and the residency map the flux
@@ -331,7 +323,7 @@ public:
 
     // ---- THE SOLVER, READ WITHOUT A STALL (the water match, step 1 -- Mark, 2026-09-15: the
     // solver is truth). A hull reads the surface the solver holds, not the tide plane it was forced
-    // by, and it may not stop the renderer to do it (Gpu::WaitIdle is 18-27 ms: WeatherManager.h).
+    // by, and it may not stop the renderer to do it (Gpu::WaitIdle is 18-27 ms: WaterManager.h).
     // So a consumer ASKS for a region -- the eta and current texels within radiusM of a point of
     // the flat frame, plus the one-texel apron the bilinear reconstruction reads -- and Record, on
     // the frame ring only, copies it through hal::RegionReadback; the answer arrives

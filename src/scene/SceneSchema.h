@@ -442,7 +442,7 @@ struct ToolProps {
     std::string name;
     std::string args;
 };
-// A SOLVER ASLEEP UNTIL THE EYE COMES (sim/WeatherManager.h AddDormantWindow): its domain a lat/lon
+// A SOLVER ASLEEP UNTIL THE EYE COMES (sim/WaterManager.h AddDormantWindow): its domain a lat/lon
 // box of nx x ny cells, its bed the height stack at those cells, its open sea held to the tide of
 // `station` (a tide station's id in data.tides) on NAVD88, a river entering by `river`.
 struct SolverProps {

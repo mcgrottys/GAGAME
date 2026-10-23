@@ -133,40 +133,7 @@ std::vector<RasterEntry> CompositeTiers(const scene::SourceProps& s) {
 // M5c: the MLLW -> NAVD88 join from CO-OPS station datums instead of a hand constant. Use the
 // focus station's own NAVD link when CO-OPS publishes one; otherwise transfer via the relation
 // NAVD88 = local MSL + delta, calibrated from the NEAREST station on the open coast that carries
-// both datums (NavdAboveMsl).
-
-// M9n: NAVD88 zero above LOCAL MSL, in metres, from published CO-OPS station datums -- the same
-// staff carries MSL and NAVD88, so their difference is data, not an assumption. Boston: MSL
-// 2.660, NAVD88 2.752 -> +0.092. Returns false when no station in the table publishes both.
-//
-// The bed's ETOPO layers are MSL-referenced and need the NEGATIVE of this to reach NAVD88; the
-// tide's MLLW link is a different offset from the same table. One derivation, two consumers.
-//
-// WHICH STATION (2026-10-21, the one atlas): the link is regional -- NAVD88 departs from local MSL by
-// a few centimetres that change along a coast (Boston +0.09 m, Sewells Point -0.08) -- so it is the
-// NEAREST witness to the place that publishes both, on the open coast: a station up a river
-// (riverKm > 0) stands on a river's mean, which drifts with the discharge. The table was New
-// England's alone until the stations became one global set; "the smallest |delta|" it chose by then
-// picked Virginia's for the Merrimack.
-bool NavdAboveMsl(const TideModel& model, double latDeg, double lonDeg, double* outM, std::string* from) {
-    constexpr double kD2R = 3.14159265358979323846 / 180.0;
-    double bestD2 = 0.0, best = 0.0;
-    bool got = false;
-    for (size_t i = 0; i < model.Count(); ++i) {
-        const TideStation& s = model.S(i);
-        if (s.mllwMinusNavdM <= -900.0 || s.riverKm > 0.0) continue;
-        const double dLat = s.lat - latDeg, dLon = (s.lon - lonDeg) * std::cos(latDeg * kD2R);
-        const double d2 = dLat * dLat + dLon * dLon;
-        if (!got || d2 < bestD2) {
-            bestD2 = d2;
-            best = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD88 zero above local MSL
-            got = true;
-            if (from) *from = s.name;
-        }
-    }
-    if (got && outM) *outM = best;
-    return got;
-}
+// both datums (TideModel::NavdAboveMsl).
 
 // THE CAPTURE LEVEL ON THE ENGINE'S FRAME (compose/Sources.h LevelGateSource): a scene source's
 // `captureLevel` metres above its `captureDatum`, resolved at the place as the tides are -- MLLW by
@@ -208,7 +175,7 @@ float ResolveDatum(const TideModel& model) {
     }
     double delta = 0.0;
     std::string from = "NAVD=MSL assumption";
-    NavdAboveMsl(model, fs.lat, fs.lon, &delta, &from);
+    model.NavdAboveMsl(fs.lat, fs.lon, &delta, &from);
     const float off = static_cast<float>(-(fs.meanMllwM + delta));
     Log("[datum] no NAVD link at %s; MLLW - NAVD88 = %+.3f m via NAVD=MSL%+.3f (from %s)",
         fs.name.c_str(), off, delta, from.c_str());
@@ -535,7 +502,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // -- CO-OPS carries MSL and NAVD88 on one station staff -- so it is derived, logged, and
     // handed to the ETOPO sources, which means the CORRECTION REACHES EVERY CONSUMER of the
     // stack rather than only the products that happen to know about it.
-    haveMslLink = NavdAboveMsl(model, S.place.anchor[1], S.place.anchor[0], &navdAboveMsl, &datumFrom);
+    haveMslLink = model.NavdAboveMsl(S.place.anchor[1], S.place.anchor[0], &navdAboveMsl, &datumFrom);
     mslToNavd = haveMslLink ? -navdAboveMsl : 0.0;
     if (haveMslLink) {
         Log("[datum] height stack: MSL -> NAVD88 = %+.3f m, from CO-OPS published datums at "
