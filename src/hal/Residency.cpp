@@ -1264,7 +1264,11 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                     reopened = true;
                     continue;
                 }
-                if (tr->state == TileState::Mapped) q.push_back(a);
+                // A held tile is asked again only while its replacement waits (stale: refused, or on the
+                // way). One that is current was never refused: asked as a change asks, it would be made
+                // stale for nothing -- and on a versioned tenant read by the table before until it is
+                // read again (a refusal said after its tile was answered: the wave field's Again, F3).
+                if (tr->state == TileState::Mapped && tr->stale) q.push_back(a);
             }
         }
         // F8: the failed tiles whose glance has passed are asked again, as Again reopens a refusal.

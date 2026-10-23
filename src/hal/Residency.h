@@ -341,9 +341,10 @@ public:
     // parent); the version law (old bytes held until the replacement lands) is for a repaint.
     void Invalidate(int tenant, const TileRequest& r, bool moved = false);
     // ASK AGAIN (2026-10-14): what a source that answered "not now" can now answer (a Google tile
-    // landed, core/TileProviders.h). A tile held back not whole goes back to Seen where it stands --
-    // tracked, its record alive -- for the order to load; a held tile's replacement refused not whole
-    // is asked as Invalidate asks (the version law). Invalidate on the held-back tile untracked it,
+    // landed, core/TileProviders.h; the wave field's solve, sim/WaveFieldSource.h Reopen). A tile held
+    // back not whole goes back to Seen where it stands -- tracked, its record alive -- for the order to
+    // load; a held tile's replacement refused not whole is asked as Invalidate asks (the version law),
+    // and a held tile that is current is left as it is. Invalidate on the held-back tile untracked it,
     // and a parent no reader names itself was never tracked again: its children waited on it for
     // good (a z17 still, 12 tiles "waiting on a parent not held"). Safe from any thread -- it queues.
     void Again(int tenant, const TileRequest& r) {

@@ -110,6 +110,9 @@ public:
     // bucket moved before it finished. Note EndTile compares VALUES, not exchange events: Set()
     // exchanges every frame but writes the same packed word unless the bucket really rolled, so
     // a still scene rejects nothing.
+    //   A refused tile needs no Again of its own (F3's reopen, 2026-10-23): its refusal says the bucket
+    // moved, the Set that moved it returned true, and the frame loop's roll then drops the tenant whole
+    // (resMgr.Drop) -- every tile, the refused and those under it, is asked anew from the new tree.
     void BeginTile() const override { expo_detail::t_tile = m_params.load(); }
     bool EndTile() const override {
         const uint64_t painted = expo_detail::t_tile;

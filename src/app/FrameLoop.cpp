@@ -3637,6 +3637,7 @@ bool FrameLoop::Frame() {
                     (waveT < 0 || resMgr.StaleHeld(waveT) == 0)) {
                     std::atomic_store(waveTree.get(), wavePending);
                     resMgr.Reload(waveT);   // F13: the held tiles hold until their replacements land
+                    waveSrc->ForgetRefused();   // F3: Reload has asked every refused tile anew
                     m_waveStaleSince = frame;   // the instrument: how long old pages stay drawn
                     m_waveStaleAt = simUnix;
                     waveField->PublishKey(wavePendingKey);   // ONE SWAP: the twin and the bank's table flip with
@@ -3682,6 +3683,21 @@ bool FrameLoop::Frame() {
                         wavePending = fresh;
                         wavePrefillDone.store(true, std::memory_order_release);
                     });
+                }
+                // F3'S AGAIN: the tiles the node answered "not now" are asked again once the solve
+                // they were asked for is there -- their children no longer wait for the next swap.
+                if (waveSrc && waveT >= 0) {
+                    uint32_t asked = 0;
+                    waveSrc->Reopen([&](int t, const TileRequest& r) {
+                        resMgr.Again(t, r);
+                        ++asked;
+                    });
+                    if (asked) {
+                        Log("[wave] frame %llu: %u tile(s) the field answered \"not now\" asked again -- the "
+                            "solve of key %016llx is here (F3's Again)",
+                            static_cast<unsigned long long>(frame), asked,
+                            static_cast<unsigned long long>(waveSrc->Key()));
+                    }
                 }
                 if (m_waveStaleSince != UINT64_MAX && waveT >= 0) {
                     const uint32_t st = resMgr.StaleHeld(waveT);
