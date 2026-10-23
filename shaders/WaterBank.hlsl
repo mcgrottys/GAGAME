@@ -137,6 +137,9 @@ cbuffer BankCb : register(b0) {
     float4 gSprayA;
     // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2. Appended at the END on both sides.
     float4 gPlanet;
+    // WATER V2, STAGE 2: the tide's rotors of this instant, two constituents a row (cos, sin, cos,
+    // sin), turned on the CPU in doubles (w t runs to 10^4 rad). Appended at the END on both sides.
+    float4 gTideRot[9];
 };
 
 // The ladder's ring under k: its texel over ring 0's, its mapped set.
@@ -171,7 +174,7 @@ struct BankTile {
     float texelM;       // this tile's texel size (mip ladder)
     uint dstX;          // atlas texel origin of the tile slot
     uint dstY;
-    float lvl00, lvl10, lvl01, lvl11;   // tide level at corners (atlas stack, CPU rotors)
+    float msl00, msl10, msl01, msl11;   // MSL in NAVD88 at the corners (the tide's own datum)
     float bed00, bed10, bed01, bed11;   // bed at corners (the one height stack)
     float hs00, hs10, hs01, hs11;       // local Hs / reference Hs at corners (sim/WaveScale.h)
     // M13 step 2: THE TILE'S PLACE, ADDRESSED ONCE (WaterBankLayer.h's BankTile says how they
@@ -196,8 +199,21 @@ struct BankTile {
     float4 pointA;
     float4 pointX;
     float4 pointZ;
+    // WATER V2, STAGE 2: the corners' tide phasors (re, im; two constituents a row), corner k at
+    // rows 9k..9k+8 -- the tide as a function of time, turned here by gTideRot.
+    float4 tide[36];
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
+// THE TIDE AT CORNER k OF TILE t (a HARMONIC term, docs/WATER_V2.md 2.4): MSL + sum_c Re[P_c R_c].
+float TideAtCorner(uint ti, uint k, float msl) {
+    float h = msl;
+    [unroll] for (uint j = 0; j < 9u; ++j) {
+        const float4 p = gTiles[ti].tide[9u * k + j];
+        const float4 r = gTideRot[j];
+        h += (p.x * r.x - p.y * r.y) + (p.z * r.z - p.w * r.w);
+    }
+    return h;
+}
 
 // THE PLACE OF A TEXEL, from its own metres inside the tile: the tile's rows, exact at its origin
 // and second-order over the tile (PHASE C5: the anchor-linear fallback and its gGeoA row are gone;
@@ -529,7 +545,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // corner-lerp quantized the surf geography to ~600 m patches that CUT at tile edges
     // (the data lens showed it; the user called it). M7q: per-texel bed from the COMPOSED
     // HEIGHT WINDOW, residency-clamped, corner-lerp as the out-of-window fallback.
-    const float level = lerp(lerp(t.lvl00, t.lvl10, f.x), lerp(t.lvl01, t.lvl11, f.x), f.y);
+    const float level = lerp(lerp(TideAtCorner(id.z, 0u, t.msl00), TideAtCorner(id.z, 1u, t.msl10), f.x),
+                             lerp(TideAtCorner(id.z, 2u, t.msl01), TideAtCorner(id.z, 3u, t.msl11), f.x), f.y);
     float bed = lerp(lerp(t.bed00, t.bed10, f.x), lerp(t.bed01, t.bed11, f.x), f.y);
     // The local sea-state scale: one law with the hull's twin (sim/WaveScale.h), continuous across
     // the tile and across the wave grid's nodes (it was one value per tile, read off one node).

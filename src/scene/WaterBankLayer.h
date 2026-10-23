@@ -355,12 +355,15 @@ private:
         // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (Jet.hlsli, the spray, the
         // wakes). Appended at the END on both sides.
         float planet[4];
+        // WATER V2, STAGE 2: THE TIDE'S ROTORS of this instant (WaterAtlas::Rotors), two constituents
+        // a row: cos, sin of constituent 2j, then of 2j + 1. Appended at the END on both sides.
+        float tideRot[36];
     };
     struct BankTile {
         float orgXZ[2];
         float texelM;
         uint32_t dstX, dstY;
-        float lvl[4];
+        float msl[4];   // MSL in NAVD88 at the corners (the tide's own datum, WaterAtlas::MslNavd)
         float bed[4];
         float hs[4];   // the local sea-state scale at the corners (sim/WaveScale.h)
         // M13 step 2: THE TILE'S PLACE, ADDRESSED ONCE. The kernel used to turn every texel's
@@ -392,7 +395,20 @@ private:
         float pointA[4];
         float pointX[4];
         float pointZ[4];
+        // WATER V2, STAGE 2: THE TIDE AS A FUNCTION OF TIME at the corners -- each corner's 18
+        // constituent phasors (re, im), two a row; the kernel turns them by this frame's rotors. They
+        // are a place's and never change with t, so the ring's lattice asks the atlas once per point
+        // (TideLattice), not every frame.
+        float tide[4][36];
     };
+    // The tide's phasors at a ring's lattice points, asked when the ring's origin moves.
+    struct TideLattice {
+        float orgX = 0.0f, orgZ = 0.0f;
+        bool ok = false;
+        float msl[(kRingTiles + 1) * (kRingTiles + 1)];
+        float p[(kRingTiles + 1) * (kRingTiles + 1)][36];
+    };
+    TideLattice m_tideLat[kMips];
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
     // A tile carries waves where the mask calls any of it water, or the height under it is low.
@@ -400,7 +416,8 @@ private:
     static bool MaskAnswer(const class GisVectorMask& mask, const double box[4]);
     void AskMask(int m, const std::vector<std::pair<int, std::array<double, 4>>>& tiles);
     bool HeightWet(double wx0, double wz0, double spanM, bool& provisional) const;
-    void CornerParams(double wx, double wz, float& lvl, float& bed) const;
+    void CornerParams(double wx, double wz, float& bed) const;
+    void CornerTide(double wx, double wz, float& msl, float p[36]) const;
     // M13 step 2: the place of a ring point, and the tile rows above. Both go through the
     // surface's chart where it carries the renderer's rows; without them (a bank built before a
     // surface, or Mars) they are the anchor-linear law, as everything here was.

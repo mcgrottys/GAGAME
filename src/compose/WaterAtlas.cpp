@@ -360,6 +360,15 @@ void WaterAtlas::Phasor(int c, double latDeg, double lonDeg, double groundResM,
                                    out);
 }
 
+void WaterAtlas::Rotors(double unixT, float out[kCon][2]) const {
+    const double tau = unixT - m_tides->EpochUnix();
+    for (int c = 0; c < kCon; ++c) {
+        const double wt = OmegaRadS(c) * tau;
+        out[c][0] = static_cast<float>(std::cos(wt));
+        out[c][1] = static_cast<float>(std::sin(wt));
+    }
+}
+
 double WaterAtlas::Level(double latDeg, double lonDeg, double unixT, double groundResM) const {
     const double tau = unixT - m_tides->EpochUnix();
     double h = 0.0;

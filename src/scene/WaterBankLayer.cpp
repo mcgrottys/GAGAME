@@ -439,14 +439,18 @@ bool WaterBankLayer::HeightWet(double wx0, double wz0, double spanM, bool& provi
     return false;
 }
 
-void WaterBankLayer::CornerParams(double wx, double wz, float& lvl, float& bed) const {
+// WATER V2, STAGE 2: the tide at a corner as a function of time -- its MSL and its constituents'
+// phasors at 500 m, the atlas's own grain for the bank (the kernel turns them: Re[P R(t)]).
+void WaterBankLayer::CornerTide(double wx, double wz, float& msl, float p[36]) const {
     double lat = 0.0, lon = 0.0;
     PlaceOfRing(wx, wz, lat, lon);
-    lvl = 0.0f;
-    if (m_atlas && m_atlas->Ready()) {
-        lvl = static_cast<float>(m_atlas->MslNavd(lat, lon) +
-                                 m_atlas->Level(lat, lon, m_simUnix, 500.0));
-    }
+    msl = static_cast<float>(m_atlas->MslNavd(lat, lon));
+    for (int c = 0; c < WaterAtlas::kCon; ++c) m_atlas->Phasor(c, lat, lon, 500.0, &p[2 * c]);
+}
+
+void WaterBankLayer::CornerParams(double wx, double wz, float& bed) const {
+    double lat = 0.0, lon = 0.0;
+    PlaceOfRing(wx, wz, lat, lon);
     bed = (m_comp && m_hgtCh >= 0)
               ? m_comp->SampleHeightResident(m_hgtCh, lat * kD2R, lon * kD2R, 100.0)
               : -30.0f;
@@ -928,17 +932,37 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         // reads (1.5 ms of a 1.9 ms list on the storm rail), and the tiles asked it at positions a
         // float's rounding apart, so two tiles need not have agreed on their shared corner. Now
         // the lattice point is the tile origin's own spelling, float(org + i span), asked once.
-        float cLvl[kRingTiles + 1][kRingTiles + 1], cBed[kRingTiles + 1][kRingTiles + 1];
+        float cBed[kRingTiles + 1][kRingTiles + 1];
         bool cHave[kRingTiles + 1][kRingTiles + 1] = {};
-        auto corner = [&](int i, int j, float& lvl, float& bed) {
+        auto corner = [&](int i, int j, float& bed) {
             if (!cHave[j][i]) {
                 CornerParams(static_cast<float>(m_orgX[m] + i * tileSpan),
-                             static_cast<float>(m_orgZ[m] + j * tileSpan), cLvl[j][i], cBed[j][i]);
+                             static_cast<float>(m_orgZ[m] + j * tileSpan), cBed[j][i]);
                 cHave[j][i] = true;
             }
-            lvl = cLvl[j][i];
             bed = cBed[j][i];
         };
+        // WATER V2, STAGE 2: THE TIDE'S PHASORS AT THE RING'S LATTICE, asked when the ring moves (a
+        // place's phasors never change with t; the per-frame sum of 18 constituents at every lattice
+        // point is the kernel's now, by this frame's rotors). No atlas: zero phasors, the plane MSL 0.
+        TideLattice& tl = m_tideLat[m];
+        const bool atlasOn = m_atlas && m_atlas->Ready();
+        if (!tl.ok || tl.orgX != m_orgX[m] || tl.orgZ != m_orgZ[m]) {
+            for (int j = 0; j <= kRingTiles; ++j) {
+                for (int i = 0; i <= kRingTiles; ++i) {
+                    const int k = j * (kRingTiles + 1) + i;
+                    tl.msl[k] = 0.0f;
+                    for (float& v : tl.p[k]) v = 0.0f;
+                    if (atlasOn) {
+                        CornerTide(static_cast<float>(m_orgX[m] + i * tileSpan),
+                                   static_cast<float>(m_orgZ[m] + j * tileSpan), tl.msl[k], tl.p[k]);
+                    }
+                }
+            }
+            tl.orgX = m_orgX[m];
+            tl.orgZ = m_orgZ[m];
+            tl.ok = atlasOn;
+        }
         for (int ty = 0; ty < kRingTiles; ++ty) {
             for (int tx = 0; tx < kRingTiles; ++tx) {
                 if (!m_wet[m][ty * kRingTiles + tx]) continue;
@@ -951,7 +975,10 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 for (int k = 0; k < 4; ++k) {
                     const double cx = t.orgXZ[0] + (k & 1) * tileSpan;
                     const double cz = t.orgXZ[1] + ((k >> 1) & 1) * tileSpan;
-                    corner(tx + (k & 1), ty + ((k >> 1) & 1), t.lvl[k], t.bed[k]);
+                    corner(tx + (k & 1), ty + ((k >> 1) & 1), t.bed[k]);
+                    const int lk = (ty + ((k >> 1) & 1)) * (kRingTiles + 1) + tx + (k & 1);
+                    t.msl[k] = tl.msl[lk];
+                    std::memcpy(t.tide[k], tl.p[lk], sizeof(t.tide[k]));
                     // M8: under a --storm override the grid is STALE by definition -- the
                     // law answers 1 (the storm IS the reference). M7j/THE LOST LINE: every
                     // corner is written unconditionally; a tile that shipped 0 once flattened
@@ -1349,6 +1376,11 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     }
     cb.planet[0] = static_cast<float>(PlanetGWave());   // the planet's gravity (core/Planet.h)
     cb.planet[1] = cb.planet[2] = cb.planet[3] = 0.0f;
+    {   // WATER V2, STAGE 2: this instant's rotors for the corners' phasors (WaterAtlas::Rotors)
+        float r[WaterAtlas::kCon][2] = {};
+        if (m_atlas && m_atlas->Ready()) m_atlas->Rotors(m_simUnix, r);
+        std::memcpy(cb.tideRot, r, sizeof(cb.tideRot));
+    }
     cb.colN[0] = m_ringsUnder;
     cb.colN[1] = (column && m_ringsUnder) ? 1u : 0u;
     cb.colN[2] = (column && m_foldUav) ? m_foldUav : 0u;

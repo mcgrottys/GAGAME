@@ -67,6 +67,11 @@ public:
 
     // The per-constituent phasor from the composed stack (exchange-frame query).
     void Phasor(int c, double latDeg, double lonDeg, double groundResM, float out[2]) const;
+    // WATER V2 (a HARMONIC producer, docs/WATER_V2.md 2.4): the level is sum_c Re[P_c(x) R_c(t)].
+    // The rotors R_c = e^{i w_c (t - epoch)} of an instant, in DOUBLES before the cast -- w t runs to
+    // 10^4 rad, past what a float cosine can carry -- so a reader holding a place's phasors (the
+    // bank's ring corners, once per lattice point) turns them each frame with no per-place sum.
+    void Rotors(double unixT, float out[kCon][2]) const;
 
     // Audit hooks (the selftest walks these).
     const TideModel* Tides() const { return m_tides; }
