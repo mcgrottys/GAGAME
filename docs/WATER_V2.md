@@ -324,6 +324,7 @@ the classifier calls a bar land at low tide).
 | **1a** | The mip ramp (D1) and the NULL-read climb (D2), the no-bytes fill (F6), the time-based retry (F8); one stated exaggeration | a descent rail: max per-frame pixel difference down, no frame with a snap; `[restest]` aniso rows 0; `[stuck]` 0. **Done 2026-10-22.** `[restest]` "then the climb" 8x anisotropic: 0 of 473,088 (the clamp alone: 1,606). A frozen-clock hold at the inlet (`--scale 0`, one pose, 12 s from boot; only landings move), `streaming.fadeTurns` 0 vs 6 on one binary: 98,423 fade steps; over the trickle after the load burst the largest 32×32-block luma change a frame 7.2 → 3.5, p99 4.6 → 2.1, frames over 4× the median 12 → 3. What the fade does NOT reach, seen in the burst's largest jumps (≈ 22 in both runs): the town's buildings appearing at once (the building layer's LOD) and the marsh's flooded extent moving as finer heights land (physics reads the finest held mip by law). The descent clip with the sea moving cannot see the fade at all (its holds read alike): the frozen hold is the instrument. |
 | **1b** | Music as the first new producer (§10): band table, scene bindings, Media Foundation + XAudio2 playback | the water and a light term follow the file's bands at a place; two runs agree frame for frame |
 | **2** | One term table: the bank kernel and `TreeWater` loop over terms; tides evaluated on the GPU from the atlas phasors (no per-tile CPU corner params) | stills identical to stage 1 within the declared tolerance; frame time not worse; the hull probe. **2a built 2026-10-22:** the ring corners carry the tide's 18 phasors (asked once per lattice point when a ring moves), the kernel turns them by this frame's rotors (`WaterAtlas::Rotors`, doubles on the CPU: w t runs to 10^4 rad). `--twin-surface`'s LEVEL rows identical to 0.1 mm at 0/500/2000/8000 m; the bank's CPU tile list **15.7 → 0.43 ms a frame**; the fill +0.04 ms at p50. Engine +95 / −15. **The generic term loop waits** for its third level producer (the Packet, stage 5): the level has two terms today (the harmonic tide, SUMMED; the solver window, REPLACING over its weight), and the hull already composes it through stage 1's registry loop — a table with no third consumer would be an abstraction without a reader. |
+| **2b** | **The water as columns (§12):** wet is the column holding water; the solver holds the column, not a departure from a plane; residency follows the water; the waves push (setup); the tide and a tsunami enter at Flather ocean faces | §12.5's C1–C5: the stations, a lake at rest, a scripted surge, the bar awash under 2 m, Monai valley |
 | **3** | Harmonic playback: the SWE window fits its cycle online and plays back; steps only for departures | levels at the stations and the inlet current vs the stepping solver over one tide (rms, lag); frame time with the solver idle |
 | **4** | Series in time: the grid's hours blended (no respectrum pop) | a 4 h clip across an hour boundary, no visible step; the spectrum's moments continuous |
 | **5** | The basin rung + `Impact` producer as a Packet; the time-domain cross-check | travel time vs √(gh) integrals; decay vs Ward & Asphaug's fits; the two methods agree on arrival and first-crest amplitude in deep water |
@@ -391,9 +392,195 @@ file. Mark's d3 visualizer (link to come) is the reference for the band mapping 
    time → 5 basin + impact → 6 shelf + nesting, with music after 1. Anything you want earlier?
 4. **The tsunami's first form.** The frequency-domain Packet (stateless, dispersive, what rays give) first,
    with the time-domain basin run as its cross-check — or the time-domain run first?
-5. **The waterline.** Today one scalar for the planet. V2 makes the land/water line read the local level
-   (the bank's per-texel departure). It moves every shoreline a little (the tide's spatial variation along a
-   coast). OK to take that re-baseline?
+5. ~~**The waterline.**~~ Answered (2026-10-23, Mark: "wetness should be based off the solved water there
+   not just the tide"): the shore reads the bank's level at every vertex and pixel (dbd25c0). §12 takes the
+   next step: wet is the column holding water, with no level compared at all.
+6. **The water as columns (§12).** Its four questions are in §12.8.
+
+## 12. The water as columns
+
+*2026-10-23. Mark, looking at the Merrimack's entrance bar: "the water shouldn't drop a foot around and over
+the bar", "its like bars have a piecewise function", "wetness should be based off the solved water there
+not just the tide", and then: "I'm thinking the voxel model we have can actually make this more elegant
+than we are thinking. Especially if we want tsunamis."*
+
+What prompted it, measured that day: under a 2 m forecast swell the entrance bar draws a row of tiny
+islands, tan shore rims around dark pits, and the waves funnel down into each one. The drawn mean level is
+smooth: the ocean +0.09 m, the entrance +0.13 m and upriver +0.25 m NAVD at noon. The stations' own
+predictions are the open coast −0.15 to −0.03, the entrance +0.07, Newburyport +0.12 and Salisbury Point
++0.19, so inside the estuary the solver is right. The drawn ocean stands about 0.12 m high because the
+sponge pins the open sea to the entrance station's plane (+0.075), not the open coast's tide; that is one
+more reason for §12.3's ocean faces. What is wrong at the bar is the frame. The bar's bumps stand above the mean water, so every reader that compares a level
+with the bed calls them dry. The water that would cover them is the waves' setup, and nothing in the
+engine makes it.
+
+### 12.1 The object
+
+The water at a place is a **column**: the bed `b` (the one stack), the water the column holds `h ≥ 0`
+(volume per area), and how that water moves (its momentum, the face fluxes). The surface is `b + h`.
+**Wet is `h > 0`.** No reference level appears anywhere: not the planet's waterline, not a station's
+plane, not a threshold to classify against.
+
+As GA: the column is the interval of the up line from `b` to `b + h`, a 1-blade along `e_up` of length
+`h`; the water's volume element is `h` times the area bivector `e_east ∧ e_north`, a 3-blade. Volume
+conservation, `∂h/∂t = −∇·(h u)`, is the divergence theorem the face fluxes already discretise.
+
+The same object exists at three grains in the engine already:
+
+* **depth-integrated:** the shallow-water solver's cell (its volume and its face fluxes);
+* **resolved along the vertical:** the column plane (`docs/WATER_VOLUME.md`): the drawn sheet's crossings
+  of one column (face, lip underside, lip top) where a crest turns over;
+* **a full volume:** `TileAtlas3D` (the cloud's tenant), where topology needs it. This is Irving et al.'s
+  tall cells, a column with a resolved layer on top (SIGGRAPH 2006), made real-time by Chentanez and
+  Müller's restricted tall-cell grid (2011).
+
+Kass and Miller (SIGGRAPH 1990) drew water this way, as columns of a height field moving over dry terrain
+and receding from it. GeoClaw (LeVeque, George and Berger 2011) and Tsunami-HySEA (INGV's operational
+warning code) inundate the same way: a dry cell is a cell holding no water, and cells change between wet
+and dry as the flow comes and goes.
+
+### 12.2 Why today's water cannot say it
+
+1. **Wetness is three level comparisons, each a threshold.**
+   * The shore classifier, `ComposedLandnessEdit` (`Compose.hlsli:420`): the bed against a level, with
+     `over` a smoothstep over 0.4 m (`:435`). Since dbd25c0 that level is the bank's, not the planet's.
+   * The bank's dry weight, `smoothstep(0.05, 0.65, lvl − bed)` (`WaterBank.hlsl:640`).
+   * The solver's own wet/dry: `SurfaceAt` answers the water's surface if wet, else the bed
+     (`Swe.hlsl:110`), and the derived current calls `h < 0.05` dry (`:375`).
+
+   Three readers, three cutoffs, one bed. The bar's islands sit in the gaps between them.
+2. **The solver stores a departure from a moving plane, not the column.** `gEta` holds `η − tide(t)`
+   (`Swe.hlsl:1–8`, `:71`). Every resident cell books the plane's rise as debt (`THE PRISM TERM`, `:338`),
+   dry cells included, so a dry cell's stored value sinks under its own bed. 1ee0e89 had to make the bank
+   read around that. A NULL tile means "exactly the tide plane" (`:105`), not "no water".
+3. **Where the solver may hold water is fixed by the bed at init.** A tile is resident only if one of its
+   cells has a bed under +1.2 m NAVD (`SweSolver.cpp:382`). Ground above that can never be flooded: the
+   marsh platforms (+1.2 to +1.7 m), the dunes, the streets. A surge or a tsunami could not inundate
+   Newburyport by construction.
+4. **Bounds that are not physics.**
+   * The deviation is clamped to ±6 m (`Swe.hlsl:360`).
+   * `BedAt` answers a 100 m wall outside the lattice.
+   * The step is sized from the deepest water at init (`SweSolver.cpp:458`).
+   * A scrub of more than an hour snaps back to the plane (`:835`).
+5. **The open sea absorbs.** The sponge relaxes the deviation to zero in about 10 s (`SweSolver.cpp:474`,
+   `Swe.hlsl:122`), so an arrival is eaten, never admitted. The river faces already radiate (Flather,
+   `Swe.hlsl:270`). The ocean sides do not.
+6. **The waves never push the water.** Breaking is computed twice: the solved field's limiter keeps a
+   fraction `L` of each cell's rms (`WaveField.cpp:829–830`), and the bank's `BreakFactor` does the same
+   per texel. The momentum the broken waves give up never reaches the flow, so there is no setup. A bar
+   under a 2 m sea stays dry where the real one would be awash.
+
+### 12.3 The law
+
+**State per column:** the surface `η = b + h` (absolute, NAVD88) and the signed face fluxes. These are
+today's virtual-pipe faces, kept: they are the momentum on the faces.
+
+* **Mass:** `∂h/∂t + ∇·q = 0`. Today's `CsSweHeight` without the prism debt.
+* **Momentum,** per unit width: `∂(h u)/∂t = −g h_f ∇η − C_d |u| u + F_w/ρ`, where `h_f` is the face
+  depth and `F_w` the waves' force per area (below); a face's flux is this times its length. That is
+  today's `FaceUpdate` plus the one new term.
+* **Wet is `h > ε`,** one tolerance, the solver's own (1 cm; GeoClaw's "dry cells").
+* **Positivity:** no face ships more than its donor holds. Today's quarter-volume clamp (`Swe.hlsl:227`)
+  is the "limit the outgoing fluxes of draining cells" of Bollermann, Chen, Kurganov and Noelle (2013).
+* **Well-balanced:** a lake at rest stays at rest. The face depth is the hydrostatic reconstruction,
+  `h_f = max(η − max(b_L, b_R), 0)` (Audusse et al. 2004). That is today's `hface` (`Swe.hlsl:213`), kept.
+* **The tide enters only through the open sea,** as the rivers already do: Flather faces on the ocean
+  sides, `u_b = u_ext + √(g/h)(η − η_ext)`, with `η_ext` the manager's Level at the face. That Level is the
+  tide's phasors (stage 2a), plus the Packet's tsunami (stage 5), plus the setup of a sea no solver holds.
+  No moving plane and no debt; the prism arrives because the boundary rises.
+* **The waves push.** `F_w = −∇·S`, with `S` the radiation stress of the sea in the column:
+  `S_xx = E(n(1 + cos²θ) − ½)`, `S_yy = E(n(1 + sin²θ) − ½)`, `S_xy = E n sinθ cosθ`, where
+  `E = ρ g H_rms²/8` and `n = c_g/c` (Longuet-Higgins and Stewart 1964). In the surf zone this is the
+  breaking dissipation `D` over the phase speed along the travel, `F ≈ D k̂/c`; XBeach's longshore
+  forcing, `F_y = D_r sinθ / c`, is that form. The sea comes from the solved field where its window holds
+  it (each component's `a·L`, `k` and direction), and from the eye's spectrum through the bank's own
+  breaking law elsewhere. That is one law, read from the two sources the bank already composes.
+
+Setup, a bar going awash, overwash and run-up then come out of the solver. No setup law of our own is
+written. The magnitude to expect: at a planar shore the setup is about `(5γ/16) H_b`, and field data give
+about `0.16 H_s`, so about 0.3 m under today's 2 m sea. That covers the bar's bumps.
+
+**What the readers read.**
+
+* **The bank publishes the column's departure from the stateless column,**
+  `Δh = h − max(L(x, t) − b, 0)`, with `L` the manager's Level. A NULL tile reads 0, meaning "the
+  stateless water is right here" (the "NULL tile reads zero" rule). A dry cell outside the reach of the
+  stateless water has `h = 0` and a stateless `0`, so `Δh = 0` with no debt anywhere.
+* **The shore classifier's height witness becomes "does the column hold water":** wet is `h > ε` under
+  the point. The survey mask stays the witness where it is finer (unchanged), and the hand edits stay law.
+* **The bank's dry weight becomes the same smoothstep of `h`,** not of `lvl − bed`.
+* **The hull (`TreeWater`, `WaterManager::SolverRefine`) reads the column's surface `b + h`** and wet by
+  `h`: one water, two readers.
+* **The column plane composes on top unchanged.** The drawn sheet is the column's surface plus the
+  waves' displacement, and the trough bound of 1ee0e89 is the column's own statement: water cannot
+  stand below its bed.
+
+**Where the solver holds water: residency follows the water.** A tile is resident while any of its
+columns holds water, or while a neighbour's water can reach it within the next batch (a one-tile ring
+where wet columns touch a tile's edge). It is released after it has been dry for a while (hysteresis).
+The +1.2 m threshold goes. The literature does the same: GeoClaw refines where the surface departs from
+sea level; GPU flood codes compute fluxes only for the wet cells and their wet/dry interfaces, and grow
+that set as the inundation spreads (HydroMPM, *Water* 17(18); GeoSWE's compressed active cells; Brodtkorb et al.'s
+early exit for dry blocks). The tiled banks (`RequestMap`, `CommitMappings`) already do the mapping. What
+changes is the rule. The step is sized each batch from the live water, `max(√(g h) + |u|)` over the
+resident columns. The ±6 m clamp goes: `h ≥ 0` is the only bound, and positivity enforces it.
+
+### 12.4 What it touches
+
+| file | change |
+|---|---|
+| `shaders/Swe.hlsl` | the state from a departure to the absolute surface; the prism term goes; the ocean sides get Flather faces (the river faces' law); the wave force joins `FaceUpdate`; the ±6 m clamp goes |
+| `src/sim/SweSolver.cpp` | residency by the water (`mapWet` → the wet set plus a ring, per batch); the step per batch from the live water; the sponge → ocean faces; a scrub re-fills to the stateless column (`h = max(L − b, 0)`) and steps, instead of snapping to a plane |
+| `shaders/WaterBank.hlsl` | the level read becomes the column (`Δh` above); the dry weight on `h`; `SolverSurfaceDev` (1ee0e89) retires, since there is no debt to read around |
+| `shaders/Compose.hlsli`, `GlobeMesh.hlsl`, `Globe.hlsl` | the classifier's height witness becomes wet by `h` (`VsOut.wl` becomes the column's water) |
+| `src/sim/WaterManager.cpp`, `WaterSurfaceTree.cpp` | the hull reads `b + h` and wet by `h`; `Reconstruct` becomes the column's surface |
+| `src/sim/WaveField.cpp`, the bank | the sea the force reads: per-component `a·L`, `k` and direction in the window; the eye's spectrum through `BreakFactor` elsewhere |
+
+### 12.5 Steps, each with its gate
+
+| step | what | gate |
+|---|---|---|
+| **C1** | The solver holds columns: the absolute surface, no plane, no debt; the tide at Flather ocean faces from the manager's Level; wet is `h > 1 cm` | the levels at the three stations inside the window (Plum Island at the entrance, Newburyport, Salisbury Point: their official predictions) over a tide cycle, rms and lag no worse than today's; a lake at rest over the real bed stays flat to 1 mm for an hour; volume conserved to 10⁻⁵ of the prism |
+| **C2** | Residency follows the water; the +1.2 m threshold goes | a scripted surge (+2 m at the faces) floods the marsh platforms and recedes, with no tile left resident and dry past its hysteresis; the flooded area against a flood fill of the bed under the same level (`FloodWindow`, `SweSolver.cpp:1164`), within one ring of cells |
+| **C3** | The drawn water and the hull read columns: the bank's `Δh`, the classifier wet by `h`, `TreeWater` the same | `--twin-surface`'s LEVEL rows unchanged; frozen-clock stills at the entrance where only shore texels change |
+| **C4** | The waves push: the radiation-stress force from the solved field and the eye's sea | the setup on a planar test beach against `(5γ/16) H_b` within 15 %; the entrance bar awash under the 2 m sea (the islands gone); no change on a calm day (`H_s → 0`) |
+| **C5** | Run-up: the Monai valley benchmark (NTHMP BP7, the 1:400 tank) as a scene, then the asteroid through stages 5–6 | the maximum run-up in the valley within 10 % (NTHMP's standard for this test) |
+
+C1 changes the solver's state, so today's spin-up and the stations are its gate. C3 is what you will
+see at the bar. C4 is what makes the bar right.
+
+### 12.6 Cost (estimates, to be measured)
+
+* **The window:** 1788 × 1174 cells (2.1 M), a step of about 0.25 s, up to 16 substeps a frame.
+* **The force:** a handful of loads and multiply-adds a face; its sea is sampled from what the bank
+  already holds.
+* **Residency:** one reduction a batch, over the wet set's edge tiles.
+* **The step:** a reduction, instead of a constant.
+* **Expected net:** about today's cost. More resident tiles where water spreads, fewer where marsh dries.
+
+### 12.7 What it does not change
+
+* the tide as phasors (stage 2a);
+* the term loop's deferral (stage 2), though C1 makes the Level the solver's boundary, which is that
+  loop's first new reader;
+* the crest law;
+* the column plane's drawing;
+* the residency of the tile tree.
+
+### 12.8 Questions for Mark
+
+1. **The scheme.** Keep the virtual-pipe faces with the column state (the smallest step; its physics is
+   measured), or move to a Godunov (`h`, `hu`, `hv`) scheme with an HLL/HLLC solver, as GeoClaw and
+   Tsunami-HySEA use (sharper bores and run-up, a larger change)? Recommended: the pipes for C1–C4; revisit
+   at C5 if Monai misses.
+2. **The ocean side.** Flather faces (they admit an arrival and radiate the outgoing) or a sponge that
+   relaxes to the stateless Level (simpler; it partly reflects)? Recommended: Flather, the rivers' law
+   already in the solver.
+3. **The wave force's source.** The solver reads the sea itself from the planes the bank holds
+   (recommended: no new plane), or the wave solve publishes force planes per bucket (precomputed; about
+   13 MB a bucket at the window's 2 m)?
+4. **The re-baseline.** C1 moves the inlet's levels by whatever today's plane formulation gets wrong (the
+   debt, the clamp). OK to take the stations as the only judge?
 
 ## Sources
 
@@ -408,3 +595,31 @@ file. Mark's d3 visualizer (link to come) is the reference for the band mapping 
 - [TRITON-G, Arce Acuña & Aoki, NHESS 18, 2018](https://nhess.copernicus.org/articles/18/2561/2018/);
   [Celeris, Tavakkol & Lynett](https://arxiv.org/abs/1611.05984v1).
 - Battjes (1974), surf similarity; Iribarren & Nogales (1949).
+- §12, the water as columns:
+  - Kass & Miller, [Rapid, stable fluid dynamics for computer graphics](https://history.siggraph.org/?p=122046),
+    SIGGRAPH 1990: columns of a height field moving over dry terrain.
+  - Irving, Guendelman, Losasso & Fedkiw, [Efficient simulation of large bodies of water by coupling two and
+    three dimensional techniques](https://naml.us/paper/irving2006_rle.pdf), SIGGRAPH 2006 (tall cells);
+    Chentanez & Müller, [Real-time Eulerian water simulation using a restricted tall cell grid](https://history.siggraph.org/?p=114669),
+    SIGGRAPH 2011; Narita et al., [Quadtree tall cells](https://graphics.c.u-tokyo.ac.jp/hp/en/archives/3252).
+  - LeVeque, George & Berger, [Tsunami modelling with adaptively refined finite volume methods](https://faculty.washington.edu/rjl/pubs/AN2011/index.html),
+    Acta Numerica 2011; Berger, George, LeVeque & Mandli, [The GeoClaw software](https://ar5iv.arxiv.org/html/1008.0455)
+    (dry cells, wet/dry by depth, flagging where the surface departs from sea level); George,
+    [Augmented Riemann solvers for the shallow water equations over variable topography](https://bu.edu/pasi-tsunami/files/2012/11/George2008.pdf), 2008.
+  - Audusse et al., [hydrostatic reconstruction](https://www.math.ntnu.no/conservation/2003/044.html), 2004;
+    Bollermann, Chen, Kurganov & Noelle, [a well-balanced reconstruction of wet/dry fronts](https://ar5iv.labs.arxiv.org/html/1412.3580),
+    2013 (positivity by limiting the outgoing fluxes of draining cells).
+  - XBeach: [processes and model formulation](https://xbeach.readthedocs.io/en/latest/xbeach_manual.html)
+    (the wave action balance and roller drive the shallow-water equations through radiation-stress gradients;
+    `F_y = D_r sinθ / c`); McCall et al., [EGU 2009](https://meetingorganizer.copernicus.org/EGU2009/EGU2009-4934.pdf)
+    (flooding and drying in one scheme); Roelvink et al. 2018, [the non-hydrostatic XBeach](https://www.vliz.be/imisdocs/publications/330001.pdf).
+  - Radiation stress and setup: [SWAN, wave-induced set-up](https://swanmodel.sourceforge.io/online_doc/swantech/node30.html)
+    (Dingemans et al. 1987: setup from the rotation-free part of the force);
+    [Bosboom & Stive, wave-induced forces](https://geo.libretexts.org/Bookshelves/Oceanography/Coastal_Dynamics_(Bosboom_and_Stive)/05%253A_Coastal_hydrodynamics/5.05%253A_Wave-induced_set-up_and_currents/5.5.3%253A_Wave-induced_forces);
+    [Coastal Wiki, wave set-up](https://coastalwiki.org/wiki/Wave_set-up) (`η ≈ (5γ/16) H_b`; field `≈ 0.16 H_s`; bars need a model).
+  - Active-cell GPU flood codes: [HydroMPM (Water, MDPI)](https://www.mdpi.com/2073-4441/17/18/2662);
+    [GeoSWE](https://pypi.org/project/geoswe/); [a GPU implementation for 2D shallow water modelling](https://ar5iv.arxiv.org/html/1309.1230)
+    (Brodtkorb's early exit for dry blocks).
+  - Tsunami-HySEA: [an operational GPU model for tsunami early warning](https://riuma.uma.es/entities/publication/0073a3e0-2ceb-4ef0-ab32-7b7be570e73f);
+    NTHMP [benchmark problems](https://www.weather.gov/media/nthmp/MMS/Benchmarking/TsunamiInundationBenchmarkProblemsSummary.pdf)
+    (BP7, Monai valley: run-up within 10 %; BP9, Okushiri).
