@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <intrin.h>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
 namespace ga {
@@ -163,7 +164,10 @@ double TreeWater::CascadeTime(double simUnix) const {
     if (!m_sea) return 0.0;
     // The float cast is deliberate and is explained in the header: mirror the GPU's clock, do
     // not improve on it.
-    return static_cast<double>(static_cast<float>(simUnix - m_sea->CycleUnix()));
+    // the FFT's own origin (SeaLayer::CascadeCycleUnix: the wave grid's cycle when the grid feeds the
+    // sea), handed in with the cascade sea; the SeaState's only where none was
+    const double cycle = (m_cascadeCycle == m_cascadeCycle) ? m_cascadeCycle : m_sea->CycleUnix();
+    return static_cast<double>(static_cast<float>(simUnix - cycle));
 }
 
 double TreeWater::WindowWeight(double wx, double wz) const {
@@ -496,7 +500,8 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         // solved field's own): on the sea the cascades draw here -- 0 and 1 yield by wWin, as `gain` does;
         // the twin has no ring, so no fold -- in physical metres, its excess the drawn sea's against the
         // depth, the bed's slope one wave-radian east and north where a crest is over its limit.
-        if (depth > 0.05) {
+        static const bool noCascadeCrest = [] { const char* e = std::getenv("GAGAME_NO_CASCADE_CREST"); return e && e[0] == '1'; }();
+        if (depth > 0.05 && !noCascadeCrest) {   // the A/B switch (WaterBankLayer.cpp)
             const double hB = std::max(depth, 0.3);
             double eD = 0.0, eDk = 0.0, sA = 0.0, sAC = 0.0;
             for (int c = 0; c < OceanCpu::kCascades; ++c) {

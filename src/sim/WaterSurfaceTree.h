@@ -50,6 +50,7 @@
 #pragma once
 
 #include <atomic>
+#include <limits>
 #include "sim/OceanCpu.h"
 #include "sim/PlaceField.h"
 #include "sim/SeaState.h"
@@ -97,8 +98,12 @@ public:
     // there is no peak (the gain is 1, as the kernel's is without one) and no storm.
     // F7: ...and the unit-sea rms of each band, PHYSICAL (the kernel's gRmsRef with the vertical
     // exaggeration divided out), for the breaking law the twin applies as the kernel does.
+    // cycleUnix: the cascades' clock's origin, SeaLayer::CascadeCycleUnix() -- the FFT's own, so the
+    // hull samples the instant the GPU draws (NaN: the SeaState's, as before the grid fed the sea).
     void SetCascadeSea(double peakDirX, double peakDirZ, bool peakValid, const WaveScale& scale,
-                       const double bandRms[OceanCpu::kCascades]) {
+                       const double bandRms[OceanCpu::kCascades],
+                       double cycleUnix = std::numeric_limits<double>::quiet_NaN()) {
+        m_cascadeCycle = cycleUnix;
         m_peakDirX = peakDirX;
         m_peakDirZ = peakDirZ;
         m_peakValid = peakValid;
@@ -179,6 +184,7 @@ private:
     // matching it costs nothing while NOT matching it would show up in the twin as a drift that
     // grows with the forecast hour and look like a bug in this file.
     double CascadeTime(double simUnix) const;
+    double m_cascadeCycle = std::numeric_limits<double>::quiet_NaN();   // SetCascadeSea
     // At and AtLabel: one assembly; `displaced` stands the answer on the drawn surface.
     SurfaceSample Evaluate(double wx, double wz, double simUnix, bool displaced) const;
     struct Prep {

@@ -950,7 +950,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
                                (a0 + a1 + a2 + 1e-6f);
         const float aEnvC = max(1.4142136f * envD * brk, 1e-3f);   // its significant amplitude, delivered
         const float excD = envD * 2.8284271f / BreakHmax(kD, depth);   // its raw Hs over the depth's limit
-        if (depth > 0.05f && eD > 1e-12f) {
+        if (depth > 0.05f && eD > 1e-12f && gDebugA.z == 0.0f) {   // z: the A/B switch (WaterBankLayer.cpp)
             // THE BED'S SLOPE for the Iribarren gate, read only where a crest is over its limit: the
             // bank's own bed one wave-radian (1 / k in this depth, never under a texel) east and north --
             // the face a breaking crest runs up, not a rock, as the solve's +-4 cells are (WaveField's env

@@ -417,6 +417,10 @@ int64_t SeaLayer::EyeKey(double latDeg, double lonDeg, int hour) const {
     return int64_t(hour) | (tb & 0xFFFF) << 16 | (db & 0xFF) << 32 | (fb & 0xFF) << 40;
 }
 
+double SeaLayer::CascadeCycleUnix() const {
+    return (m_fromGrid && m_grid) ? m_grid->CycleUnix() : (m_sea ? m_sea->CycleUnix() : 0.0);
+}
+
 void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double camZ) {
     if (!m_sea || !m_sea->Ready()) return;
     m_seaLevel = static_cast<float>(seaLevelM);   // first: the fetch's walk (B4) ends at ground above it
@@ -458,7 +462,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             m_fieldActive = (std::max)(0, PartsAt(m_fieldLat, m_fieldLon, simUnix, m_fieldParts, logIt, nullptr,
                                                   &m_fieldPending));
         }
-        const double cycle = m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix();
+        const double cycle = CascadeCycleUnix();
         const uint32_t seed = static_cast<uint32_t>(cycle / 3600.0) * 2654435761u;
         m_fft.SetSeaState(parts, activeParts, seed);
         // M9bq: THE CPU TWIN IS FED FROM THE SAME CALL SITE, with the same partitions and the
@@ -687,7 +691,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         }
     }
 
-    m_tSec = static_cast<float>(simUnix - (m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix()));
+    m_tSec = static_cast<float>(simUnix - CascadeCycleUnix());
 
     // Representative wavenumber per cascade band (geometric mid of the same 60 m / 12 m cuts
     // OceanFft uses). The SHADER turns these into phase speeds at the local depth -- in deep

@@ -988,6 +988,44 @@ wavelengths of a 5 m, 17 s swell.
 
 Selftest passes: cb parity, the solved field's water parity, oceancpu.
 
+### 12.14 The boat rode another instant of the sea (2026-10-23)
+
+Mark, in `merrimack_boat.json` at a beach: "the water is not matching what the boat hits."
+
+**The measurement.** `--water-probe` with the boat in Salisbury's surf, where only the cascades draw:
+* drawn minus the hull's water swung −0.43 to +0.42 m near the hull, flipping with the wave period;
+* the hull's and the bank's waves were 0.8–0.99 correlated near the hull and unrelated 500 m out;
+* the gains were identical (`kernel 0.981 0.711 0.826 | hull 0.981 0.711 0.826`), and the raster drew
+  what the bank holds (drawn − bank ≤ 0.08 m).
+
+`GAGAME_NO_CASCADE_CREST=1` turns the cascades' crest law off on both processors (`gDebugA.z`), and it
+changed nothing. So the crest law was not the cause.
+
+`GAGAME_TWIN_GRID_CPU=1` writes the hull's water (`TreeWater::AtLabel`) beside the bank's on the grid.
+Over a 300 m square they had the same power at every wavelength but coherence 0.07–0.29 in every band:
+the same sea, another realization.
+
+**The cause.** The cascades' clock. The FFT is fed `simUnix − cycle` (`SeaLayer::SetTime`), and since the
+global wave grid feeds the sea (PR 107) that cycle is the GRID's. The hull's `TreeWater::CascadeTime` kept
+subtracting the `SeaState`'s, so the boat sampled the same cascades at another instant. The seed's own
+comment had warned of exactly this: "right Hs, wrong crests". It only shows where the cascades carry the
+swell, outside the solved window, which is why the inlet's twin never saw it.
+
+**The fix.** One expression, `SeaLayer::CascadeCycleUnix()`. The FFT, the seed and every CPU reader take
+it: `TreeWater` via `SetCascadeSea`, and the probe's orientation line.
+
+| Salisbury, 16:00Z Oct 22 | before | after |
+|---|---|---|
+| grid, 300 m square: corr / rms(gpu − cpu) | 0.27 / 0.60 m | **0.990 / 0.078 m** |
+| grid coherence (>60, 12–60, 2.4–12 m) | 0.29, 0.07, 0.11 | **0.98, 0.98, 0.97** |
+| twin 0 m / 500 m / 2000 m correlation | 0.93 / −0.06 / ≈0 | **0.993 / 0.989 / 0.928** |
+| hull probe, 0–10 m: drawn − hull mean | −0.43 … +0.42 | **−0.09 … +0.05** |
+
+**Also in the twin tool:** it now hands its TreeWater the swell shadow and the bed the hull gets.
+
+**Still apart:** the 8 km ring (ratio 1.78, correlation 0.63). The coarse ring folds the bands into σ²
+while the hull sums them, and that is by design.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

@@ -77,7 +77,7 @@ void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, d
 // the plain mean of dispY is the Lagrangian one, and the two differ by the lateral term's own
 // deficit (a trochoid stands k a_v a_h / 2 below its orbit centres). Folds (det < 0) are counted.
 static void LogBankGrid(Gpu& gpu, WaterBankLayer* waterBank, WaterManager& weather,
-                        double simUnix, const Space::Anchor& chart) {
+                        double simUnix, const Space::Anchor& chart, const TreeWater* tw) {
     const char* spec = std::getenv("GAGAME_TWIN_GRID");
     if (!spec || !waterBank) return;
     double latC = 0, lonC = 0, half = 0, step = 0;
@@ -106,6 +106,16 @@ static void LogBankGrid(Gpu& gpu, WaterBankLayer* waterBank, WaterManager& weath
         chart.LatLonOf(pts[k * 2], pts[k * 2 + 1], lat, lon);
         ws[k] = weather.Query(lat, lon, simUnix, 1.0);
     }
+    // GAGAME_TWIN_GRID_CPU=1: the hull's water at each label beside the bank's (TreeWater::AtLabel, the
+    // twin's own question), so the two fields can be cross-correlated -- a shift, a gain or a clock
+    std::vector<double> cpuY(bp.size(), 0.0);
+    const char* cpuOn = std::getenv("GAGAME_TWIN_GRID_CPU");
+    if (tw && cpuOn && cpuOn[0] == '1') {
+        for (size_t k = 0; k < bp.size(); ++k) {
+            const SurfaceSample cs = tw->AtLabel(pts[k * 2], pts[k * 2 + 1], simUnix);
+            cpuY[k] = cs.valid ? cs.heightNavd - ws[k].levelNavd : 0.0;
+        }
+    }
     // det(1 + grad d) by central differences on the labels' own lattice
     std::vector<double> det(bp.size(), 1.0);
     std::vector<char> hasDet(bp.size(), 0);
@@ -126,7 +136,7 @@ static void LogBankGrid(Gpu& gpu, WaterBankLayer* waterBank, WaterManager& weath
     if (file[0]) {
         if (FILE* f = std::fopen(file, "w")) {
             std::fprintf(f, "i,j,lat,lon,x,z,ring,texel,level,dispX,dispY,dispZ,foam,dry,gain0,gain1,"
-                            "gain2,det,cpuLevel,bed,depth,hs,u,v\n");
+                            "gain2,det,cpuLevel,bed,depth,hs,u,v,cpuY\n");
             for (int j = 0; j < n; ++j) {
                 for (int i = 0; i < n; ++i) {
                     const size_t k = size_t(j) * n + i;
@@ -134,11 +144,11 @@ static void LogBankGrid(Gpu& gpu, WaterBankLayer* waterBank, WaterManager& weath
                     chart.LatLonOf(pts[k * 2], pts[k * 2 + 1], lat, lon);
                     const auto& b = bp[k];
                     std::fprintf(f, "%d,%d,%.7f,%.7f,%.2f,%.2f,%d,%.3f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,"
-                                    "%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                                    "%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f\n",
                                  i, j, lat, lon, pts[k * 2], pts[k * 2 + 1], b.valid ? b.ring : -1,
                                  b.texelM, b.level, b.dispX, b.dispY, b.dispZ, b.foam, b.dry, b.gain0,
                                  b.gain1, b.gain2, hasDet[k] ? det[k] : 0.0, ws[k].levelNavd,
-                                 ws[k].bedNavd, ws[k].depthM, ws[k].hs, ws[k].u, ws[k].v);
+                                 ws[k].bedNavd, ws[k].depthM, ws[k].hs, ws[k].u, ws[k].v, cpuY[k]);
                 }
             }
             std::fclose(f);
@@ -182,8 +192,8 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WaterManager& weather,
                     const std::unique_ptr<WaveField>& waveField, double classifierNavd,
-                    const Space::Anchor& chart, const PlaceField* bed) {
-    LogBankGrid(gpu, waterBank, weather, simUnix, chart);
+                    const Space::Anchor& chart, const PlaceField* bed,
+                    const PlaceField* swellShadow) {
     LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, classifierNavd, chart);
     weather.RefreshMirrorsTo(gpu, simUnix);
     TreeWater tw;
@@ -197,9 +207,12 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
     tw.SetChart(&chart);
     tw.SetRootChart(&chart);
     tw.SetBed(bed);   // the bed a hull reads (Entity.cpp), so the crest law's Iribarren gate sees a slope
+    tw.SetSwellShadow(swellShadow);   // and the shelter it reads: the hull is handed both (Entity.cpp)
     const double bandRms[3] = {sea->BandRmsPhysical(0), sea->BandRmsPhysical(1), sea->BandRmsPhysical(2)};
-    tw.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale(), bandRms);
+    tw.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale(), bandRms,
+                     sea->CascadeCycleUnix());
     Log("[twin] %s", tw.Describe(cam.px, cam.pz, simUnix).c_str());
+    LogBankGrid(gpu, waterBank, weather, simUnix, chart, &tw);
 
     constexpr int kRings = 4, kPer = 64;
     const double kRangeM[kRings] = {0.0, 500.0, 2000.0, 8000.0};

@@ -5254,7 +5254,7 @@ bool FrameLoop::Frame() {
         if (S.Tool("twin-surface") && !marsMode && sea && waterBank) {
             tools::RunTwinSurface(opt, gpu, seaState, sea, waterScene, waterBank, cam,
                                   simUnix, weather, waveField, lastWaterNavd, m_A.surface.flat,
-                                  m_A.heightBed.get());
+                                  m_A.heightBed.get(), m_A.exposureShadow.get());
         }
         if (S.Tool("trace") && !marsMode && sea && waterBank) {
             tools::RunTrace(opt, gpu, sea, compositor, hgtCh, waterAtlas, waterBank, globe,

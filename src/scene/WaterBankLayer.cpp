@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <filesystem>
 #include <map>
@@ -1199,7 +1200,11 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     memcpy(cb.svU, m_sv, sizeof(m_sv));   // svU..svO, SweDomain::KernelRows' packing
     cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
     cb.debugA[1] = flatBedNavd;
-    cb.debugA[2] = cb.debugA[3] = 0.0f;
+    // GAGAME_NO_CASCADE_CREST=1: the cascades' crest law off, here and in TreeWater (the A/B that splits
+    // the hull's water from the drawn one in cascade-owned surf, 2026-10-23)
+    static const bool noCascadeCrest = [] { const char* e = std::getenv("GAGAME_NO_CASCADE_CREST"); return e && e[0] == '1'; }();
+    cb.debugA[2] = noCascadeCrest ? 1.0f : 0.0f;
+    cb.debugA[3] = 0.0f;
     // M8 wavefield: the solved field's window + per-component table. The time rotor
     // (cos, sin)(sigma t) is computed HERE in doubles and reduced mod 2 pi -- sigma t
     // at unix scale would shred float precision in the kernel (the phase never wraps
