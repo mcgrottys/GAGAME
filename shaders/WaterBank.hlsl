@@ -402,33 +402,46 @@ float4 WavePageSample(float2 uv, uint plane, out bool prev) {
     return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip) + (0.5f / 255.0f);
 }
 
-// THE SOLVER'S SURFACE IS ITS WET COLUMNS' (WATER_V2 12, C1, 2026-10-23; 1ee0e89's law, its debt gone).
-// The solver publishes each column's surface (b + h; a dry column's is its bed) and whether the column
-// holds water (the fibre's w: h > 1 cm). The surface here is the wet corners' by their bilinear
-// weights. Where no corner holds water the solver says NO WATER -- not a level -- and the level stands
-// under the solver's own bed (a dry column publishes its bed) by the bank's dry band (its dry weight,
-// smoothstep(0.05, 0.65, depth), reads zero there; the shore classifier reads land), and never above the
-// frame's waterline: a dune is land under the waterline as surely as under its crest, and a level that
-// climbed the dunes would be interpolated, between a ring's texels and a mesh's vertices, into cliffs of
-// water metres high beside the sea (the twin read 1.7 m at 8 km). A column's water is a statement about
-// the column, never a level for a finer bed to sit under. The solver's bed, not each reader's: the hull
-// and the drawn sea compose one level from the same texels.
+// THE WATER DECIDES (2026-10-23, Mark: "you are using rhetorical methods to decide how it treats the water,
+// instead of letting the water decide what it does when it hits or is over a bar"). The drawn level is the
+// surface of the water the solver's columns hold -- the wet ones' (the fibre's w: h > 1 cm), by their
+// bilinear weights -- and nothing else. A dry column has no surface to offer: where the four corners
+// about the point are dry, the water's level is that of the columns holding water one cell further out
+// (the ring of twelve about them, by a tent two cells wide), so a dry crest in the water is ground the
+// water's own level is held against: it shows where its bed stands above that level, at the reader's
+// grain, as the water would leave it. The rule it replaces dove the level under each dry column's bed,
+// and between a dry crest and its wet neighbours the drawn water fell into a pit -- the higher the bed,
+// the lower the water, the inverse of the height map (the bar's dimples). Only where no column within two
+// cells holds water is there no level to read: the level stands under the solver's own published bed by
+// the bank's dry band and never above the frame's waterline (a dune is land under the waterline as
+// surely as under its crest), so the dry weight reads zero and the classifier reads land. The hull and the
+// drawn sea compose one level from the same texels.
 // The twin: SweSolver.cpp Reconstruct.
 float SolverSurfaceDev(float2 texel) {
     const float2 tf = texel - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
-    float raw = 0.0f, sw = 0.0f, se = 0.0f;
-    [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(gSweDims.xy) - int2(1, 1));
-        const float w = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
-        const float e = gT[gSlotsA.w][tc].x;
-        const float wet = (gT[gSlotsB.x][tc].w > 0.5f) ? 1.0f : 0.0f;
-        raw += w * e;
-        sw += w * wet;
-        se += w * wet * e;
+    float raw = 0.0f, sw = 0.0f, se = 0.0f, rw = 0.0f, re = 0.0f;
+    [unroll] for (int j = -1; j <= 2; ++j) {
+        [unroll] for (int i = -1; i <= 2; ++i) {
+            const int2 tc = clamp(int2(t0) + int2(i, j), int2(0, 0), int2(gSweDims.xy) - int2(1, 1));
+            const float e = gT[gSlotsA.w][tc].x;
+            const float wet = (gT[gSlotsB.x][tc].w > 0.5f) ? 1.0f : 0.0f;
+            if (i >= 0 && i <= 1 && j >= 0 && j <= 1) {   // the four corners, bilinear
+                const float w = (i ? fr.x : 1.0f - fr.x) * (j ? fr.y : 1.0f - fr.y);
+                raw += w * e;
+                sw += w * wet;
+                se += w * wet * e;
+            } else {                                       // the ring about them, a tent two cells wide
+                const float w = max(2.0f - abs(float(i) - fr.x), 0.0f) * max(2.0f - abs(float(j) - fr.y), 0.0f);
+                rw += w * wet;
+                re += w * wet * e;
+            }
+        }
     }
-    return lerp(min(raw - 0.65f, 0.0f), se / max(sw, 1e-6f), saturate(sw * 20.0f));
+    if (sw > 0.0f) return se / sw;
+    if (rw > 0.0f) return re / rw;
+    return min(raw - 0.65f, 0.0f);
 }
 
 float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {

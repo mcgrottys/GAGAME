@@ -574,6 +574,28 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G faceAt, Q faceQAt,
     swe.LedgerOn(gpu);
     swe.Volumes(gpu, col0, soil0);
     Log("[ledger] start: %.6e m^3 in the columns, %.6e m^3 in the soil; %u state tiles", col0, soil0, swe.StateTiles());
+    // GAGAME_SWE_DUMP (an instrument): the kernel's bed and the columns' water at the cycle's start, raw f32
+    // rows (row 0 north), for reading the solved surface against the bed offline.
+    if (std::getenv("GAGAME_SWE_DUMP")) {
+        double c = 0.0, w = 0.0;
+        std::vector<float> hh;
+        swe.Volumes(gpu, c, w, &hh);
+        SweSolver::BedTrace bt;
+        if (swe.TraceBed(gpu, bt)) {
+            const unsigned long pid = static_cast<unsigned long>(GetCurrentProcessId());
+            char fp[96];
+            for (int k = 0; k < 2; ++k) {
+                snprintf(fp, sizeof(fp), "out/swe_dump_%s_%lu.f32", k ? "h" : "bed", pid);
+                FILE* df = nullptr;
+                fopen_s(&df, fp, "wb");
+                if (!df) continue;
+                const std::vector<float>& v = k ? hh : bt.bed;
+                fwrite(v.data(), sizeof(float), v.size(), df);
+                fclose(df);
+                Log("[swe-cycle] dumped %s (%dx%d f32, the open sea at %+.3f m NAVD)", fp, nx, ny, swe.OpenSeaLevel());
+            }
+        }
+    }
     const double surgePeak = surgeM != 0.0 ? startUnix + 10.0 * 3600.0 : -1.0;
     bool surgeJudged = false;
     double fSum = 0.0, fSq = 0.0, fMax = 0.0, fLo = 1e9, fHi = -1e9, pLo = 1e9, pHi = -1e9;

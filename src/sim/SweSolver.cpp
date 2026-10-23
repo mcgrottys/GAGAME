@@ -581,7 +581,8 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.soil[0] = cfg.soilCapM;      // C2: the land soaks (Swe.hlsl CsSweHeight)
     m_cb.soil[1] = cfg.soilKs;
     m_cb.soil[2] = cfg.soilSuctionM;
-    m_cb.soil[3] = cfg.soilCapM > 0.0f ? 1.0f : 0.0f;
+    // GAGAME_SWE_NOSOIL (an instrument: the soil's A/B)
+    m_cb.soil[3] = (cfg.soilCapM > 0.0f && !std::getenv("GAGAME_SWE_NOSOIL")) ? 1.0f : 0.0f;
     m_cb.cd = 0.0015f;      // the bed's drag (Swe.hlsl FaceUpdate)
     m_cb.gravity = static_cast<float>(PlanetGWave());   // the planet's (core/Planet.h)
     // M6r: A RIVER FACE IS FLATHER -- its exterior cells pinned to the river-tide data, the face
@@ -777,11 +778,11 @@ double SweSolver::WetAreaAt(double levelNavd) const {
 void SweSolver::RequestRegion(double latDeg, double lonDeg, double radiusM) {
     double tx = 0.0, ty = 0.0;
     if (!TexelOf(latDeg, lonDeg, tx, ty) || !(radiusM >= 0.0)) return;
-    // The texels a bilinear read of any point within the radius touches: floor(t - 0.5) and the
-    // one past it, at both ends.
+    // The texels the reconstruction of any point within the radius touches: floor(t - 0.5) and the
+    // one past it, and the ring about those (the water's level over a dry crest), at both ends.
     const double rx = radiusM / double(m_cb.dx), ry = radiusM / double(m_cb.dy);
-    const double lx0 = std::floor(tx - 0.5 - rx), lx1 = std::floor(tx - 0.5 + rx) + 1.0;
-    const double ly0 = std::floor(ty - 0.5 - ry), ly1 = std::floor(ty - 0.5 + ry) + 1.0;
+    const double lx0 = std::floor(tx - 0.5 - rx) - 1.0, lx1 = std::floor(tx - 0.5 + rx) + 2.0;
+    const double ly0 = std::floor(ty - 0.5 - ry) - 1.0, ly1 = std::floor(ty - 0.5 + ry) + 2.0;
     const double nx = double(m_cb.nx), ny = double(m_cb.ny);
     if (lx1 < 0.0 || ly1 < 0.0 || lx0 > nx - 1.0 || ly0 > ny - 1.0) return;   // nowhere on the grid
     RegionRect r;
@@ -821,39 +822,49 @@ namespace {
 
 // THE ONE RECONSTRUCTION (WaterBank.hlsl SolverSurfaceDev and LoadBilinearClamp at texel (u Nx, (1 - v) Ny)),
 // over any store: `at(ix, iy, eta, uv4)` answers one grid texel or says it does not hold it.
-// THE SOLVER'S SURFACE IS ITS WET COLUMNS' (WATER_V2 12, C1, 2026-10-23; 1ee0e89's law, its debt gone).
-// The solver publishes each column's surface (b + h; a dry column's is its bed) and whether the column
-// holds water (the fibre's w: h > 1 cm). The surface here is the wet corners' by their bilinear
-// weights. Where no corner holds water the solver says NO WATER -- not a level -- and the level stands
-// under the solver's own bed (a dry column publishes its bed) by the bank's dry band (its dry weight,
-// smoothstep(0.05, 0.65, depth), reads zero there; the shore classifier reads land), and never above the
-// frame's waterline: a dune is land under the waterline as surely as under its crest, and a level that
-// climbed the dunes would be interpolated, between a ring's texels and a mesh's vertices, into cliffs of
-// water metres high beside the sea (the twin read 1.7 m at 8 km). A column's water is a statement about
-// the column, never a level for a finer bed to sit under. The solver's bed, not each reader's: the hull
-// and the drawn sea compose one level from the same texels.
-// Here: dEta is that composed level less the tide plane, and `wet` the corners' wet share.
+// THE WATER DECIDES (2026-10-23, Mark: "you are using rhetorical methods to decide how it treats the water,
+// instead of letting the water decide what it does when it hits or is over a bar"). The drawn level is the
+// surface of the water the solver's columns hold -- the wet ones' (the fibre's w: h > 1 cm), by their
+// bilinear weights -- and nothing else. A dry column has no surface to offer: where the four corners
+// about the point are dry, the water's level is that of the columns holding water one cell further out
+// (the ring of twelve about them, by a tent two cells wide), so a dry crest in the water is ground the
+// water's own level is held against: it shows where its bed stands above that level, at the reader's
+// grain, as the water would leave it. The rule it replaces dove the level under each dry column's bed,
+// and between a dry crest and its wet neighbours the drawn water fell into a pit -- the higher the bed,
+// the lower the water, the inverse of the height map (the bar's dimples). Only where no column within two
+// cells holds water is there no level to read: the level stands under the solver's own published bed by
+// the bank's dry band and never above the frame's waterline (a dune is land under the waterline as
+// surely as under its crest), so the dry weight reads zero and the classifier reads land. The hull and the
+// drawn sea compose one level from the same texels.
+// Here: dEta is that level less the tide plane, and `wet` the corners' wet share.
 template <class At>
 bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolver::Deviation& out) {
     const double fx = tx - 0.5, fy = ty - 0.5;
     const double bx = std::floor(fx), by = std::floor(fy);
     const double frx = fx - bx, fry = fy - by;
-    double eta = 0.0, sw = 0.0, se = 0.0, uv[4] = {0.0, 0.0, 0.0, 0.0};
-    for (int k = 0; k < 4; ++k) {
-        const int ix = std::clamp(int(bx) + (k & 1), 0, int(nx) - 1);
-        const int iy = std::clamp(int(by) + (k >> 1), 0, int(ny) - 1);
-        float e = 0.0f, c[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        if (!at(ix, iy, e, c)) return false;
-        const double w = ((k & 1) ? frx : 1.0 - frx) * ((k >> 1) ? fry : 1.0 - fry);
-        const double wet = (c[3] > 0.5f) ? 1.0 : 0.0;
-        eta += w * double(e);
-        sw += w * wet;
-        se += w * wet * double(e);
-        for (int j = 0; j < 4; ++j) uv[j] += w * double(c[j]);
+    double eta = 0.0, sw = 0.0, se = 0.0, rw = 0.0, re = 0.0, uv[4] = {0.0, 0.0, 0.0, 0.0};
+    for (int j = -1; j <= 2; ++j) {
+        for (int i = -1; i <= 2; ++i) {
+            const int ix = std::clamp(int(bx) + i, 0, int(nx) - 1);
+            const int iy = std::clamp(int(by) + j, 0, int(ny) - 1);
+            float e = 0.0f, c[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            if (!at(ix, iy, e, c)) return false;
+            const double wet = (c[3] > 0.5f) ? 1.0 : 0.0;
+            if (i >= 0 && i <= 1 && j >= 0 && j <= 1) {
+                const double w = (i ? frx : 1.0 - frx) * (j ? fry : 1.0 - fry);
+                eta += w * double(e);
+                sw += w * wet;
+                se += w * wet * double(e);
+                for (int k = 0; k < 4; ++k) uv[k] += w * double(c[k]);
+            } else {
+                const double w = (std::max)(2.0 - std::abs(double(i) - frx), 0.0) *
+                                 (std::max)(2.0 - std::abs(double(j) - fry), 0.0);
+                rw += w * wet;
+                re += w * wet * double(e);
+            }
+        }
     }
-    const double a = std::clamp(sw * 20.0, 0.0, 1.0);
-    const double dry = (std::min)(eta - 0.65, 0.0);
-    out.dEta = float(dry + (se / (std::max)(sw, 1e-6) - dry) * a);
+    out.dEta = float(sw > 0.0 ? se / sw : rw > 0.0 ? re / rw : (std::min)(eta - 0.65, 0.0));
     out.wet = float(sw);
     out.u = float(uv[0]);
     out.v = float(uv[1]);

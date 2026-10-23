@@ -735,9 +735,34 @@ waterline: a dune is land under the waterline as surely as under its crest.
 | before (pre-C1) | 0.0001 / 0.0000 | 0.066 / 0.008 | 0.126 / 0.022 | 0.076 / 0.030 |
 | after (C1–C4) | 0.0005 / 0.0001 | **0.399 / 0.050** | **0.382 / 0.055** | 0.076 / 0.030 |
 
-The gate said "unchanged": it holds at the camera and at 8 km, and not between them. The difference is at
-shore points: a dry column's level now steps down at the water's edge (the column says no water), and the
-hull and the drawn rings interpolate that step at different grains. Open. *Not done:* the classifier still
+The gate said "unchanged": it held at the camera and at 8 km, and not between them -- a dry column's level
+stepped down at the water's edge and the two readers interpolated the step at different grains.
+
+**Then the water decides** (Mark: "you are using rhetorical methods to decide how it treats the water,
+instead of letting the water decide what it does when it hits or is over a bar"):
+* The drawn level is the surface of the columns that hold water, and nothing else.
+* Where the four corners about a point are dry, it is the surface of those holding water one cell further
+  out (a tent two cells wide). A dry crest in the water is then ground that the water's own level is held
+  against.
+* The dive under the dry column's bed is gone. Only where no column within two cells holds water does a
+  "no water" level remain.
+* The twin, same instant:
+
+| LEVEL max / rms (m) | 0 m | 500 m | 2000 m | 8000 m |
+|---|---|---|---|---|
+| the water decides | 0.0005 / 0.0001 | **0.0003 / 0.0001** | **0.085 / 0.012** | 0.18 / 0.039 |
+
+The bar's ovals at 3 pm on Oct 22 (an hour before low water):
+* They are not this law: both laws draw them alike.
+* They are not the soil (an A/B, `GAGAME_SWE_NOSOIL`).
+* They are not the land classifier: `--lens mix` reads them as water.
+* They are not the drawn surface's height: `debug.view height` at 5 cm contours shows no dip.
+* With the bed under the water held at plain sand they mostly go, so the dark centres are the aerial
+  photo seen through shallow water. The faint rest is the bar's bumps as shallower water, the right way
+  round. What the seabed's colour should be is the footprint question, still Mark's.
+
+The solver's own surface over the shoals rises with the bed (noon Oct 22: +0.08 m over −2.5 m to +0.24 m
+over 0 m with the waves pushing). *Not done:* the classifier still
 reads the level, not `h` directly. It reads land wherever the solver says no water, which is the
 statement, but the fibre's `h` is not yet in the globe's planes.
 
