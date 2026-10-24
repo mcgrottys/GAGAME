@@ -100,6 +100,20 @@ float LipReach(float k, float coth, float Hc, float h) {
 // offshore. L0 the deep-water wavelength of the band or component, 2 pi coth(kh) / k on its k in depth.
 // The orbit so raised is held to the landing reach, the cascades' bound since 2026-10-19 (a particle
 // thrown past it is a bore; the chips along the jetty): WaterTerms.h SwashShare is its twin.
+// THE SPILLER'S ROLLER (2026-10-23, Mark: "now that you are in the code where water affects the land mesh,
+// you should be able to deduce the right spiller roll method"). Water that cannot stand on a slope runs
+// down it: the run-up law the shore obeys, a height dH carried dH / tan(theta) along a slope tan(theta). A
+// spilling crest is that law on the wave's OWN front face: the part of the crest over the depth's limit,
+// dH = Hc (1 - 1 / eCr) (eCr the crest's own excess), cannot stand and runs down the face as the roller --
+// it does not leave it, as a plunger's jet does. The face is this crest's, tan(theta) = k Hc / 2 (Duncan
+// 1981 measured the roller riding a face at ~12 degrees; k Hc / 2 is 0.15 - 0.3 for a breaking crest).
+// Its reach past the cusp is dH / tan(theta) = 2 (1 - 1 / eCr) / k, nothing at the limit, the cusp's own
+// length at twice it; and its drop is the face's, linear in the distance (SpillDrop) where the jet's is
+// the parabola's (LipFall). WaterTerms.h is its twin.
+float SpillReach(float Hc, float eCr, float k) {
+    const float face = max(max(k, 1e-4f) * 0.5f * max(Hc, 0.0f), 1e-4f);
+    return max(Hc, 0.0f) * (1.0f - 1.0f / max(eCr, 1.0f)) / face;
+}
 float SwashShare(float hsRaw, float L0, float depth) {
     const float R = max(0.043f * sqrt(max(hsRaw, 0.0f) * max(L0, 0.0f)), 1e-3f);
     return exp(-max(depth, 0.0f) / R);

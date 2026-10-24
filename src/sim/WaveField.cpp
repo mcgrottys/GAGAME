@@ -2171,10 +2171,9 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
     // hull never felt. WaterBank.hlsl's solved loop, THE SEA'S EXCESS UNCLAMPED, says why.)
     const double excRaw = (depthM > 0.0) ? bil(t.envSlice, 1) * double(t.excMax) : 0.0;
     // THE SWASH (WaterTerms.h SwashShare; the kernel's solved loop): the limiter scaled every component by
-    // 1 / max(excess, 1), so the raw sea is the delivered one times that, and its Hs sets the run-up
+    // 1 / max(excess, 1), so the raw sea is the delivered one times that; each component runs up by its own
     const double rawW = (std::max)(excRaw, 1.0);
     const double rmsDel = bil(t.envSlice, 0) * double(t.envMax);
-    const double hsRawW = 4.0 * rmsDel * rawW;
     double sumA = 0.0, sumAK = 0.0, sumACoth = 0.0, sumACothR = 0.0, sumADx = 0.0, sumADz = 0.0;
     double liftS = 0.0;   // -E[eta div D], chop 1 (Probe::lift)
     double vxS = 0.0, vyS = 0.0, vzS = 0.0;
@@ -2222,7 +2221,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         const double coth = (depthM > 0.0) ? 1.0 / std::tanh(k * (std::max)(depthM, 0.3)) : 1.0;
         // ...and in the swash toward the raw one, on this component's run-up (L0 = 2 pi coth / k)
         const double rawF = (rawW > 1.0)
-            ? 1.0 + SwashShare(hsRawW, 6.283185307179586 * coth / (std::max)(k, 1e-4), depthM) * (rawW - 1.0)
+            ? 1.0 + SwashShare(2.0 * a * rawW, 6.283185307179586 * coth / (std::max)(k, 1e-4), depthM) * (rawW - 1.0)
             : 1.0;
         const double cothL = coth * rawF;            // the lateral's factor
         eta += aC;                                   // eta = a cos(theta)   <- the reference

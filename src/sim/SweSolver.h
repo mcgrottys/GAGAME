@@ -231,6 +231,7 @@ public:
         return double(m_cb.tideNavd) + (k ? s / k : 0.0);
     }
     uint32_t DryWaiting() const;   // resident state tiles holding no water, inside their hysteresis
+    float WetDepth() const { return m_cb.wetEps; }   // wet is h > this (m): the readers' scale for a column's water
 
     // C4: THE SEA AT THE DOMAIN'S OPEN WATER: Hs (m), the peak period (s) and the direction it comes
     // FROM (degrees true) at a place (degrees) and an instant -- the global wave grid (GFS-Wave). The
@@ -402,7 +403,7 @@ public:
     bool Demanded() const { return !m_requests.empty(); }
     struct Deviation {
         float dEta = 0.0f;           // m, from the tide plane the solver was forced by: the wet columns' surface
-        float wet = 0.0f;            // the corners' wet share (bilinear): 0 = the solver says no water here
+        float wet = 0.0f;            // the corners' say, by the water each holds (h / (h + h_wet)): 0 = no water here
         float u = 0.0f, v = 0.0f;    // the solved surface current, m/s east / north
         bool currentValid = false;   // the solver has a current there (its valid channel > 0.5)
         double asOf = 0.0;           // the solver's clock when the texels were copied

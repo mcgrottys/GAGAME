@@ -451,7 +451,9 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         double gain[OceanCpu::kCascades];
         double brk = 1.0, rmsRaw = 0.0, kEff = 0.0;
         BandLaw(q, depth, hsScale, expo, gain, &brk, &rmsRaw, &kEff);
+        double hsBand[OceanCpu::kCascades];   // each band's raw Hs (the kernel's hsBand): its own run-up
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
+            hsBand[c] = 4.0 * gain[c] / std::max(brk, 1e-3) * m_bandRms[c];
             if (c != 2) gain[c] *= 1.0 - wWin;
         }
         // THE ORBIT IS THE DELIVERED ONE (2026-10-23; the kernel's cascade loop says why): each band's
@@ -464,7 +466,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             const double kB = m_ocean->BandK(c);
             latCoth[c] = OrbitCoth(kB, depth);
-            const double sw = SwashShare(4.0 * rmsRaw, 6.283185307179586 / std::max(kB, 1e-6), depth);
+            const double sw = SwashShare(hsBand[c], 6.283185307179586 / std::max(kB, 1e-6), depth);
             latGain[c] = latCoth[c] * (1.0 + sw * (1.0 / std::max(brk, 1e-3) - 1.0));
             // THE LIFT's cascade term (the kernel's liftE): vertical gain x lateral gain x the texture's
             // own E[h div D] (OceanCpu::LiftMoment, signed)

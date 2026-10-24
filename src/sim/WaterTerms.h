@@ -236,6 +236,12 @@ inline double LipReach(double k, double coth, double Hc, double h) {
     const double eLand = std::sqrt(2.0 * H * (1.0 + H / wt::Max(h, 0.3)) / wt::Max(kJetFallRatio * k * coth, 1e-6));
     return 1.0 / wt::Max(k, 1e-4) + eLand;
 }
+// THE SPILLER'S ROLLER (2026-10-23; shaders/Jet.hlsli SpillReach is its twin and says what it is): the
+// crest over its limit, Hc (1 - 1 / eCr), runs down its own face, tan = k Hc / 2.
+inline double SpillReach(double Hc, double eCr, double k) {
+    const double face = wt::Max(wt::Max(k, 1e-4) * 0.5 * wt::Max(Hc, 0.0), 1e-4);
+    return wt::Max(Hc, 0.0) * (1.0 - 1.0 / wt::Max(eCr, 1.0)) / face;
+}
 // THE SWASH (2026-10-23; shaders/Jet.hlsli SwashShare is its twin and says what it is): the raw orbit's
 // share at a depth, exp(-h / R), R = 0.043 sqrt(Hs L0) (Stockdon et al. 2006, dissipative R2%).
 inline double SwashShare(double hsRaw, double L0, double depth) {
@@ -310,9 +316,14 @@ inline void CrestLaw(CrestState& s, double dBx, double dBz, double aEnv, double 
     const double aLoop = LipReach(kBar, cothBar, Hc, depth);
     const double share = CrestExcessShare(s.eta, aEnv, excRaw);
     const double plunge = (share > 0.0) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0;
-    // to the cusp for every breaker, from the cusp to the landing for the plunging share
-    const double rH = 1.0 / wt::Max(aH, 1e-3), cuspR = rH / wt::Max(kBar, 1e-4);
-    const double q1 = share * (wt::Max(cuspR - 1.0, 0.0) + plunge * wt::Max(aLoop * rH - wt::Max(cuspR, 1.0), 0.0));
+    // to the cusp for every breaker; past it, the plunging share's jet to the landing and the spilling
+    // share's roller down its own face (SpillReach; at plunge 1 the law of before)
+    const double cusp = 1.0 / wt::Max(kBar, 1e-4);
+    const double eCr = excRaw * wt::Max(s.eta / aEnv, 0.0);
+    const double past = SpillReach(Hc, eCr, kBar) + plunge * ((aLoop - cusp) - SpillReach(Hc, eCr, kBar));
+    const double rH = 1.0 / wt::Max(aH, 1e-3), cuspR = cusp * rH;
+    const double q1 = share * (wt::Max(cuspR - 1.0, 0.0) + wt::Max((cusp + past) * rH - wt::Max(cuspR, 1.0), 0.0));
+    const double face = wt::Max(kBar, 1e-4) * 0.5 * Hc;   // the roller's face, its drop per metre
     const double g = 1.0 + q1 * wCr;
     const double wx = inBand ? 0.5 * s.sx / aEnv : 0.0;   // grad(w) (s.sx is grad(eta) so far)
     const double wz = inBand ? 0.5 * s.sz / aEnv : 0.0;
@@ -327,13 +338,15 @@ inline void CrestLaw(CrestState& s, double dBx, double dBz, double aEnv, double 
     s.jxx = s.jxx * g + tx * wx;
     s.jzz = s.jzz * g + tz * wz;
     s.jxz = s.jxz * g + 0.5 * (tx * wz + tz * wx);
-    const double ePast = wt::Max(aH * g - 1.0 / wt::Max(kBar, 1e-4), 0.0);
-    const double fall = LipFall(ePast, kBar, cothBar, Hc, depth);
+    // water past the cusp descends: the jet by the parabola of its fall, the roller by its face's slope
+    const double ePast = wt::Max(aH * g - cusp, 0.0);
+    const double fall = ePast * face + plunge * (LipFall(ePast, kBar, cothBar, Hc, depth) - ePast * face);
+    const double fallDe = face + plunge * (LipFallDe(ePast, kBar, cothBar, Hc, depth) - face);   // d(fall)/d(ePast)
     const double px = s.dx * g + shX * wCr, py = s.eta + shY * wCr - fall, pz = s.dz * g + shZ * wCr;
     const double floorY = wt::Min(s.eta, -aEnv);
     if (py >= floorY) {
         // the slope through w: the rise along the sheet up, the fall down (d(fall)/d(w))
-        const double dd = shY - LipFallDe(ePast, kBar, cothBar, Hc, depth) * aH * q1;
+        const double dd = shY - (ePast > 0.0 ? fallDe : 0.0) * aH * q1;
         s.sx += dd * wx;
         s.sz += dd * wz;
         s.eta = py;

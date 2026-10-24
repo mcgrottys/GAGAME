@@ -1810,6 +1810,14 @@ SUM, not on the terms; the inversion of a sheet belongs to the structure that al
     flies past it: on the Merrimack's spilling beaches nothing rolled. Law: before calling a drop a gain,
     put the number beside the scale the physics gives it; and a classifier (spilling, plunging) gates the
     part of a law the classes differ in, never the part they share.
+58. **A threshold upstream of geometry is a flicker** (2026-10-23; WATER_V2 §12.15, Mark: "the sand on the
+    beach adjusting height every few frames ... it looks like the beach breathes"). Prior (c80b018): the
+    drawn level is the WET columns' surface, wet meaning h > 1 cm. Measured by reading the path: the solver's
+    shoreline columns cross 1 cm step by step as the waves push. The level switched by the bed's rise across
+    a 10 m cell, the shore classifier (GlobeMesh's `wl`) followed, and the sand's vertices jumped between land
+    and water height. Law: a reader of a solver's state weights by the continuous quantity a flag summarizes
+    (here the water a column holds, h / (h + h_wet)). A flag may gate a cost, never a value that becomes
+    geometry.
 
 ## verification — The gate map: which algebra is pinned where
 

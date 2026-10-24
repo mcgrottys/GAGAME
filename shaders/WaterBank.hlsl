@@ -98,7 +98,8 @@ cbuffer BankCb : register(b0) {
     // at the end on both sides, per the layout law above.
     float4 gBandKSpread;
     // THE SOLVER IS TRUTH (the water match, step 1): x = the tide plane the solver was forced by
-    // this frame (NAVD m) -- its deviation is measured from it. Appended at the end on both sides.
+    // this frame (NAVD m) -- its deviation is measured from it; y = the solver's wet depth (m), the
+    // scale a column's water speaks for its surface by (SolverSurfaceDev). Appended at the end on both sides.
     float4 gSweB;
     // PHASE B2 (out/integration/plan_phase_b.md): THE WINDOWS THE RINGS STAND IN -- the rows of the
     // level whose eye the rings stand about (bank A: the camera's world; set B: the window's world),
@@ -420,32 +421,43 @@ float4 WavePageSample(float2 uv, uint plane, out bool prev) {
 // the bank's dry band and never above the frame's waterline (a dune is land under the waterline as
 // surely as under its crest), so the dry weight reads zero and the classifier reads land. The hull and the
 // drawn sea compose one level from the same texels.
+// A COLUMN SPEAKS BY THE WATER IT HOLDS (2026-10-23, Mark: "the sand on the beach adjusting height every few
+// frames ... it looks like the beach breathes"). "Wet" was the solver's threshold, h > 1 cm, and the level
+// switched with it: a shoreline column crossing 1 cm as the waves pushed moved the level by the bed's rise
+// across its cell, and the shore's classifier (GlobeMesh.hlsl, the shore at the water's own level) moved
+// the sand's vertices between the land and the water with it. Now a column's say in its own surface is
+// omega = h / (h + h_wet), h_wet the solver's wet depth (gSweB.y): ~1 for any water a hull floats in, 1/2
+// at the threshold, 0 dry -- continuous in the water. The corners speak their share, the rest of the say
+// is the ring's, and the ring's is the dry floor's as its water goes (the floor speaking as one ring cell
+// holding the wet depth). The same law wherever the water is a metre deep.
 // The twin: SweSolver.cpp Reconstruct.
 float SolverSurfaceDev(float2 texel) {
     const float2 tf = texel - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
+    const float hWet = max(gSweB.y, 1e-4f);
     float raw = 0.0f, sw = 0.0f, se = 0.0f, rw = 0.0f, re = 0.0f;
     [unroll] for (int j = -1; j <= 2; ++j) {
         [unroll] for (int i = -1; i <= 2; ++i) {
             const int2 tc = clamp(int2(t0) + int2(i, j), int2(0, 0), int2(gSweDims.xy) - int2(1, 1));
             const float e = gT[gSlotsA.w][tc].x;
-            const float wet = (gT[gSlotsB.x][tc].w > 0.5f) ? 1.0f : 0.0f;
+            const float h = max(gT[gSlotsB.x][tc].z, 0.0f);   // the water the column holds (a NULL tile, none)
+            const float om = h / (h + hWet);
             if (i >= 0 && i <= 1 && j >= 0 && j <= 1) {   // the four corners, bilinear
                 const float w = (i ? fr.x : 1.0f - fr.x) * (j ? fr.y : 1.0f - fr.y);
                 raw += w * e;
-                sw += w * wet;
-                se += w * wet * e;
+                sw += w * om;
+                se += w * om * e;
             } else {                                       // the ring about them, a tent two cells wide
                 const float w = max(2.0f - abs(float(i) - fr.x), 0.0f) * max(2.0f - abs(float(j) - fr.y), 0.0f);
-                rw += w * wet;
-                re += w * wet * e;
+                rw += w * om;
+                re += w * om * e;
             }
         }
     }
-    if (sw > 0.0f) return se / sw;
-    if (rw > 0.0f) return re / rw;
-    return min(raw - 0.65f, 0.0f);
+    const float dryL = min(raw - 0.65f, 0.0f);
+    const float ringL = (re + 0.5f * dryL) / (rw + 0.5f);
+    return se + (1.0f - sw) * ringL;
 }
 
 float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
@@ -580,13 +592,17 @@ float CrestLaw(inout float3 d, float2 gradEta, float2 dBar, float aEnv, float ex
     const float aLoop = LipReach(kBar, cothBar, Hc, depth);
     const float share = CrestExcessShare(d.y, aEnv, excRaw);
     const float plunge = (share > 0.0f) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0f;
-    // to the cusp for every breaker, from the cusp to the landing for the plunging share (at plunge 1 the
-    // law of before: the whole way to the landing)
-    const float rH = 1.0f / max(aH, 1e-3f), cuspR = rH / max(kBar, 1e-4f);
-    const float q1 = share * (max(cuspR - 1.0f, 0.0f) + plunge * max(aLoop * rH - max(cuspR, 1.0f), 0.0f));
+    // to the cusp for every breaker; past it, the plunging share's jet to the landing and the spilling
+    // share's roller down its own face (Jet.hlsli SpillReach; at plunge 1 the law of before)
+    const float cusp = 1.0f / max(kBar, 1e-4f);
+    const float eCr = excRaw * max(d.y / aEnv, 0.0f);
+    const float past = lerp(SpillReach(Hc, eCr, kBar), aLoop - cusp, plunge);
+    const float rH = 1.0f / max(aH, 1e-3f), cuspR = cusp * rH;
+    const float q1 = share * (max(cuspR - 1.0f, 0.0f) + max((cusp + past) * rH - max(cuspR, 1.0f), 0.0f));
     d.xz *= 1.0f + q1 * wCr;   // the orbit grows; the throw is the flight's, below
-    const float ePast = max(aH * (1.0f + q1 * wCr) - 1.0f / max(kBar, 1e-4f), 0.0f);
-    const float fall = LipFall(ePast, kBar, cothBar, Hc, depth);
+    // water past the cusp descends: the jet by the parabola of its fall, the roller by its face's slope
+    const float ePast = max(aH * (1.0f + q1 * wCr) - cusp, 0.0f);
+    const float fall = lerp(ePast * max(kBar, 1e-4f) * 0.5f * Hc, LipFall(ePast, kBar, cothBar, Hc, depth), plunge);
     const float3 tau = LipFlightTau(dBar, gradEta, q1 * wCr * aH, fall);
     const float yWas = d.y;
     d = MotorPoint(float4(1.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.5f * tau), d);
@@ -816,7 +832,6 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const float excessC =
         (envRmsRaw / max(gPatch.w, 1e-3f)) * 2.8284271f / BreakHmax(kEff, depth);
     const float brk = BreakFactor(excessC);
-    const float hsRawC = 4.0f * envRmsRaw / max(gPatch.w, 1e-3f);   // the raw sea's Hs, physical (the swash's run-up)
     float gain0 = gainC[0] * brk;
     float gain1 = gainC[1] * brk;
     float gain2 = gainC[2] * brk;
@@ -915,11 +930,14 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // below takes the geometry out before it.
         // ...and IN THE SWASH THE RAW ONE (2026-10-23, Mark: "the raw orbit near the waterline for the
         // run-up and backwash"; Jet.hlsli SwashShare): toward the waterline the lateral climbs from the
-        // delivered amplitude to the raw, amp / brk, by the swash zone's share on this band's run-up
-        // (its deep-water wavelength, the whole raw sea's Hs) -- the bore running up the slope under the
-        // crest and back under the trough. The landing holds it after the loop.
+        // delivered amplitude to the raw, amp / brk, by the swash zone's share on THIS BAND's run-up --
+        // its own raw Hs and deep-water wavelength -- the bore running up the slope under the crest and
+        // back under the trough. A band's own: the chop is broken up in the surf and runs up nothing, and
+        // on the whole sea's run-up it shoved the thin water over the sand metres to and fro every two
+        // seconds (Mark: "the beach height seems to jitter"). The landing holds it after the loop.
         const float cothC = OrbitCoth(gBandK[c], depth);   // the band's k IN THIS DEPTH (Jet.hlsli)
-        const float swC = SwashShare(hsRawC, 6.2831853f / max(gBandK[c], 1e-6f), depth);
+        const float hsBand = 4.0f * gainC[c] * gRmsRef[c] / max(gPatch.w, 1e-3f);   // its raw Hs, physical
+        const float swC = SwashShare(hsBand, 6.2831853f / max(gBandK[c], 1e-6f), depth);
         const float rawC = 1.0f + swC * (1.0f / max(brk, 1e-3f) - 1.0f);
         cothArr[c] = cothC;
         rawArr[c] = rawC;
@@ -1032,10 +1050,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
         const float excRaw = env.y * 2.5f;   // rms_raw / rms_limit, unclamped: how far over (or under)
         // THE SWASH (Jet.hlsli SwashShare; the cascade loop says why): the limiter scaled every component by
-        // 1 / max(excess, 1), so the raw sea is the delivered one times that, and its Hs sets the run-up
+        // 1 / max(excess, 1), so the raw sea is the delivered one times that; each component runs up by its own
         const float rawW = max(excRaw, 1.0f);
         const float rmsDel = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;
-        const float hsRawW = 4.0f * rmsDel * rawW;
         float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f, sumACothR = 0.0f;
         float sumLift = 0.0f;   // -E[eta div D] at chop 1: sum k a^2 coth / 2 (WaveField::Probe::lift)
         float2 sumADir = 0.0f;
@@ -1138,8 +1155,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             // the depth's orbit (the cascade loop says why): coth(kh) on this component's k; in the swash
             // toward the raw one, on this component's run-up (its deep-water wavelength 2 pi coth / k)
             const float cothW = 1.0f / tanh(kW * max(depth, 0.3f));
-            const float rawFW = (rawW > 1.0f) ? 1.0f + SwashShare(hsRawW, 6.2831853f * cothW / kW, depth) * (rawW - 1.0f)
-                                              : 1.0f;
+            const float rawFW = (rawW > 1.0f) ? 1.0f + SwashShare(2.0f * aW * rawW, 6.2831853f * cothW / kW, depth) * (rawW - 1.0f)
+                                              : 1.0f;   // its own run-up: its raw height 2 a, its deep-water wavelength
             dW.xz -= gWaveB.z * wFc * aW * cothW * rawFW * sT * dir2;
             // the sea's sums for the crest law below: its amplitude, its energy-weighted k, its
             // orbit's depth factor (the drawn lateral's too) and its travel

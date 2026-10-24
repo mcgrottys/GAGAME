@@ -430,16 +430,17 @@ ALLOW = {
     "WakeOne": ([0.5], []),
     "PlungeShare": ([], []),
     "SwashShare": ([], []),
+    "SpillReach": ([], []),
 }
 NAMED = {"BandPhaseSpeed": ("kGWave", "kDepthFloorM"),
          "ShoalFactor": ("kGWave", "kDepthFloorM"),
                   "WaveCurrentAmp": (), "WakeBranch": (), "WakeOne": ("kGWave",), "PlungeShare": (),
-         "SwashShare": ()}
+         "SwashShare": (), "SpillReach": ()}
 SRC = {"BandPhaseSpeed": JET, "ShoalFactor": JET, "WaveCurrentAmp": JET,
-       "WakeBranch": BANK, "WakeOne": BANK, "PlungeShare": JET, "SwashShare": JET}
+       "WakeBranch": BANK, "WakeOne": BANK, "PlungeShare": JET, "SwashShare": JET, "SpillReach": JET}
 
 for fname in ("BandPhaseSpeed", "ShoalFactor", "WaveCurrentAmp", "WakeBranch", "WakeOne", "PlungeShare",
-              "SwashShare"):
+              "SwashShare", "SpillReach"):
     h = literals(hlsl_body(SRC[fname], fname))
     c = literals(cpp_body(fname), NAMED[fname])
     only_h, only_c = multiset_diff(h, c)

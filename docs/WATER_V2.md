@@ -1085,6 +1085,40 @@ swash orbit is past the cusp at every crest there, and water past the cusp falls
 preferred carried the same (−0.19 m). The grid's fold count reads 0 % in all three, so it is not the
 instrument for the roll: Mark's eye is.
 
+**The same evening, Mark at Salisbury's waterline:** "looks better but not rolling as much as I would expect"
+and "the sand on the beach adjusting height every few frames ... it looks like the beach breathes". Three
+changes:
+
+* **The spiller's roller** (Jet.hlsli / WaterTerms.h `SpillReach`; Mark: "now that you are in the code where
+  water affects the land mesh, you should be able to deduce the right spiller roll method").
+  * The shore's own law: water that cannot stand on a slope runs down it, a height dH carried dH / tan θ.
+  * A spiller is that law on its OWN front face. The crest over its limit, Hc (1 − 1/e_cr), runs down a face
+    of tan θ = k Hc / 2, reaching 2 (1 − 1/e_cr) / k past the cusp, and drops linearly along it.
+  * A plunger's jet flies to the landing and falls on the parabola. `PlungeShare` mixes the two.
+  * At PlungeShare = 1 it is the law of before.
+  * Duncan (1981) measured the roller riding a ~12° face, and field roller slopes run 0.05–0.35. That is why
+    the face here is the crest's own rather than a constant.
+* **Each band runs up by its own run-up:** its own raw Hs and L0 (the solved field's components by their own
+  2a). The chop is broken in the surf and runs up nothing.
+* **The beach's breathing.** "Wet" was the solver's threshold (h > 1 cm), and the drawn level (`SolverSurfaceDev`
+  and its twin) switched with it. A shoreline column crossing 1 cm moved the level by the bed's rise across its
+  cell, and the shore's classifier (GlobeMesh.hlsl, "the shore at the water's own level", dbd25c0) moved the
+  sand's vertices between land and water height with it. Now a column speaks by the water it holds:
+  ω = h / (h + h_wet), with h_wet the solver's own wet depth (`gSweB.y`). The corners speak their share and
+  the ring takes the rest, sliding to the dry floor as its water goes. The level is continuous in the water;
+  wherever the water is real depth, it is unchanged.
+
+| Salisbury, 16:00Z Oct 22 | 0.5–1 m water | 1–2 m water | 2–3 m water | 5–99 m |
+|---|---|---|---|---|
+| folds (the sheet overturned) | 0 → 0 % | 0 → **1.3 %** | 0 → 0.1 % | 0 |
+| drawn mean | −0.26 → **−0.11 m** | −0.04 → −0.08 | −0.13 → −0.15 | unchanged |
+| hull vs drawn correlation | 0.92 → **0.39** | 0.65 → **0.94** | 0.94 → **0.98** | 0.99 |
+
+**Open:** the swash's twin (0.5–1 m water, rms 0.11 m). ξ there sits on the spill/plunge boundary (~0.3–0.4),
+and the two processors read the bed's slope from different caches (the hull's HeightPage, the bank's
+resident chain). So the fall's shape, the jet's parabola or the roller's slope, differs between them. A boat
+there is aground. The fix is one bed for both readers (the residency read of 2026-10-23, "two beds").
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

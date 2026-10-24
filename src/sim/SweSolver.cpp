@@ -836,9 +836,11 @@ namespace {
 // the bank's dry band and never above the frame's waterline (a dune is land under the waterline as
 // surely as under its crest), so the dry weight reads zero and the classifier reads land. The hull and the
 // drawn sea compose one level from the same texels.
-// Here: dEta is that level less the tide plane, and `wet` the corners' wet share.
+// A COLUMN SPEAKS BY THE WATER IT HOLDS (2026-10-23; the kernel says why): its say is h / (h + h_wet), the
+// corners speak their share, the rest is the ring's, the ring's the dry floor's as its water goes.
+// Here: dEta is that level less the tide plane, and `wet` the corners' say.
 template <class At>
-bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolver::Deviation& out) {
+bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, double hWet, At at, SweSolver::Deviation& out) {
     const double fx = tx - 0.5, fy = ty - 0.5;
     const double bx = std::floor(fx), by = std::floor(fy);
     const double frx = fx - bx, fry = fy - by;
@@ -849,7 +851,8 @@ bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolve
             const int iy = std::clamp(int(by) + j, 0, int(ny) - 1);
             float e = 0.0f, c[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             if (!at(ix, iy, e, c)) return false;
-            const double wet = (c[3] > 0.5f) ? 1.0 : 0.0;
+            const double h = (std::max)(double(c[2]), 0.0);   // the water the column holds
+            const double wet = h / (h + (std::max)(hWet, 1e-4));   // its say in its own surface (the kernel's omega)
             if (i >= 0 && i <= 1 && j >= 0 && j <= 1) {
                 const double w = (i ? frx : 1.0 - frx) * (j ? fry : 1.0 - fry);
                 eta += w * double(e);
@@ -864,7 +867,9 @@ bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolve
             }
         }
     }
-    out.dEta = float(sw > 0.0 ? se / sw : rw > 0.0 ? re / rw : (std::min)(eta - 0.65, 0.0));
+    const double dryL = (std::min)(eta - 0.65, 0.0);
+    const double ringL = (re + 0.5 * dryL) / (rw + 0.5);   // the dry floor speaks as one ring cell at the wet depth
+    out.dEta = float(se + (1.0 - sw) * ringL);
     out.wet = float(sw);
     out.u = float(uv[0]);
     out.v = float(uv[1]);
@@ -888,7 +893,7 @@ bool SweSolver::DeviationAt(double latDeg, double lonDeg, Deviation& out) const 
             for (int j = 0; j < 4; ++j) c[j] = r.uv[i * 4 + j];
             return true;
         };
-        if (Reconstruct(tx, ty, m_cb.nx, m_cb.ny, at, out)) {
+        if (Reconstruct(tx, ty, m_cb.nx, m_cb.ny, m_cb.wetEps, at, out)) {
             out.asOf = r.asOf;
             return true;
         }
@@ -909,7 +914,7 @@ bool SweSolver::DeviationFromFields(double latDeg, double lonDeg, const std::vec
         for (int j = 0; j < 4; ++j) c[j] = uv4[iu + j];
         return true;
     };
-    if (!Reconstruct(tx, ty, m_cb.nx, m_cb.ny, at, out)) return false;
+    if (!Reconstruct(tx, ty, m_cb.nx, m_cb.ny, m_cb.wetEps, at, out)) return false;
     out.asOf = asOf;
     return true;
 }
