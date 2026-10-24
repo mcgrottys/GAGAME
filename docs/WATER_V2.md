@@ -1114,6 +1114,37 @@ changes:
 | drawn mean | −0.26 → **−0.11 m** | −0.04 → −0.08 | −0.13 → −0.15 | unchanged |
 | hull vs drawn correlation | 0.92 → **0.39** | 0.65 → **0.94** | 0.94 → **0.98** | 0.99 |
 
+**The land still moved with the camera still** (Mark: "the land heights still seem to be adjusting when the
+camera is still", with his run's log). The log made the case:
+* the residency pool full (32,379 of 32,768 tiles), with a want set of 33–36 k cut at its tail each pass
+  ("2^-2 m: kept to 279 m, lost from 272 m");
+* the walk re-made on 7,397 of 7,657 frames, and "a reader said something else -- view" on 2,777 turns;
+* 73,598 reads and 426,939 fade steps in 7,676 turns.
+
+The path:
+1. The bank's fold grid (`m_fold`) was cleared and re-marked every frame with the sheet's folds of the
+   instant.
+2. The walk refines the land's mesh below level 18 near those folds (`GlobeLayer` `SplitAt`, the digest's
+   "the sea's folds"), and the vertex morphs on their distance (`CsFoldDist`).
+3. So the refined region, the morph, the view's wants and the residency's cut all moved with every crest,
+   and the land near the surf re-drew its heights each frame.
+4. The column ladder's tile mapping followed the same flags (the log's `column ring -N: ... mapped under a
+   fold` every few frames).
+
+Now a fold is HELD for two of the sea's peak periods (`SeaLayer::PeakPeriod`):
+* the grid keeps the tick a block last folded at (`InterlockedMax`; `gFoldClock`);
+* `CsFoldDist` and the walk count the blocks that folded within the hold;
+* the grid restarts only where ring 0 re-anchors or the clock is set back;
+* the ladder holds its tiles alike.
+
+The held set moves as the surf zone does, with the tide and the sea. A still run at the bar under a
+declared swell: 405 walks made, 795 kept, the view's wants changed 16 times in 1,223 turns (that run was
+still loading the scene).
+
+`scenes/demos/merrimack_bar_swell.json`: the bar's clocks and views under a declared east-northeast
+groundswell (`sea.storm`: Hs 2.5 m, Tp 11 s, from 70°). The bar is judged at a size that breaks over it, not
+at the day's buoys (0.3 m on 2026-10-23).
+
 **Open:** the swash's twin (0.5–1 m water, rms 0.11 m). ξ there sits on the spill/plunge boundary (~0.3–0.4),
 and the two processors read the bed's slope from different caches (the hull's HeightPage, the bank's
 resident chain). So the fall's shape, the jet's parabola or the roller's slope, differs between them. A boat

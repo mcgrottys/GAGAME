@@ -145,6 +145,10 @@ cbuffer BankCb : register(b0) {
     // texture as synthesized, m -- the lift's cascade term (CsBankFill, THE LIFT); w the texture's chop
     // (lambda: the drawn orbit over the height's, the crest law's). Appended at the END.
     float4 gBandLift;
+    // THE FOLDS HELD (2026-10-23): x the sim clock in ticks of 0.1 s (1 at the bank's first frame), y the
+    // hold in ticks (two of the sea's peak periods), z 1 where ring 0 re-anchored (the grid restarts).
+    // Appended at the END on both sides.
+    float4 gFoldClock;
 };
 
 // The ladder's ring under k: its texel over ring 0's, its mapped set.
@@ -1439,8 +1443,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             }
         }
         if (gSprayU.w != 0u && id.z == 0u && id.x < 2u && id.y == 0u) gUu[gSprayU.y][uint2(id.x, 0u)] = 0u;
-        // the fold grid, by tile 0's threads (64 x 64 of its 128 x 128)
-        if (gColN.z != 0u && id.z == 0u && id.x < 64u && id.y < 64u) gUu[gColN.z][id.xy] = 0u;
+        // the fold grid, by tile 0's threads (64 x 64 of its 128 x 128) -- only where ring 0 re-anchored:
+        // it holds each block's last fold for the hold (gFoldClock), about ring 0's origin
+        if (gColN.z != 0u && gFoldClock.z != 0.0f && id.z == 0u && id.x < 64u && id.y < 64u) gUu[gColN.z][id.xy] = 0u;
     }
 }
 
@@ -1510,12 +1515,17 @@ void ScatterTri(float2 A, float2 B, float2 C, float hA, float hB, float hC, floa
     // THE FOLD GRID (2026-10-20): an inverted triangle of ring 0 -- the sheet turned over -- marks
     // the 8-texel blocks its box touches. The globe's walk refines the mesh where these stand
     // (GlobeLayer SplitAt) and the vertex morphs on the distance from them (CsFoldDist).
+    // HELD OVER THE SEA'S CYCLE (2026-10-23, Mark: "the land heights still seem to be adjusting when the
+    // camera is still"): a block keeps the tick it last folded at, and counts as folded for two of the sea's
+    // peak periods after (gFoldClock). The flag of the instant moved with every crest, and the walk's
+    // refinement, the vertex morph and the residency's cut moved with it: the land near the surf re-drew
+    // its heights each frame. Held, they move as the surf zone does, with the tide and the sea.
     if (inverted && ring == 0 && gColN.z != 0u) {
         const float blockM = texelM * 8.0f;
         const int2 b0 = int2(floor((lo - ringOrg) / blockM)), b1 = int2(floor((hi - ringOrg) / blockM));
         for (int bz = max(b0.y, 0); bz <= min(b1.y, 63); ++bz) {
             for (int bx = max(b0.x, 0); bx <= min(b1.x, 63); ++bx) {
-                InterlockedOr(gUu[gColN.z][uint2(uint(bx), uint(bz))], 1u);
+                InterlockedMax(gUu[gColN.z][uint2(uint(bx), uint(bz))], uint(gFoldClock.x));
             }
         }
     }
@@ -1753,7 +1763,8 @@ void CsFoldDist(uint3 id : SV_DispatchThreadID) {
         for (int dx = -16; dx <= 16; ++dx) {
             const int2 c = int2(id.xy) + int2(dx, dz);
             if (any(c < 0) || any(c > 63)) continue;
-            if (gUu[gColN.z][uint2(c)] == 0u) continue;
+            const uint seen = gUu[gColN.z][uint2(c)];   // the tick it last folded (0: never)
+            if (seen == 0u || uint(gFoldClock.x) - seen > uint(gFoldClock.y)) continue;
             best = min(best, length(max(abs(float2(float(dx), float(dz))) - 0.5f, 0.0f)));
         }
     }

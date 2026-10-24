@@ -13,6 +13,7 @@
 #include "compose/ExposureSource.h"
 #include "compose/SurfaceFrame.h"
 #include "core/OceanFft.h"
+#include "core/Planet.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
 #include "core/GradeField.h"
@@ -153,6 +154,8 @@ public:
     // at another instant -- right Hs, wrong crests (2026-10-23, Mark: "the water is not matching what
     // the boat hits": coherence 0.1-0.4 between the hull's sea and the drawn one at every wavelength).
     double CascadeCycleUnix() const;
+    // The peak partition's period, s (its deep-water phase speed c = g T / 2 pi)
+    double PeakPeriod() const { return 6.283185307179586 * double(m_cPeak) / PlanetGWave(); }
     float PeakDirX() const { return m_peakDirX; }
     float PeakDirZ() const { return m_peakDirZ; }
     // M8 foamlaw: unit-sea rms envelope per cascade band (sqrt(2 m0), exaggerated) --

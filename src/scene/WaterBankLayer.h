@@ -362,6 +362,9 @@ private:
         // the Lagrangian lift's cascade term (gBandLift); [3] the texture's chop, lambda. Appended at
         // the END on both sides.
         float bandLift[4];
+        // THE FOLDS HELD (gFoldClock): the sim clock in 0.1 s ticks, the hold in ticks, ring 0 re-anchored.
+        // Appended at the END on both sides.
+        float foldClock[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -454,6 +457,7 @@ private:
         uint32_t flagUav = 0xFFFFFFFFu;
         uint32_t texels = 0, tiles = 0;
         std::vector<uint8_t> mapped;          // tiles x tiles
+        std::vector<double> seen;             // tiles x tiles: the sim instant a fold last wanted it (FoldHold)
         uint32_t mappedCount = 0, logged = 0xFFFFFFFFu;
     };
     ColumnRing m_under[kColumnRingsUnderMax];
@@ -500,6 +504,12 @@ private:
     GpuTexture m_fold, m_foldDist;   // the fold grid (R32_UINT) and its distance (R32_FLOAT), 64 x 64
     uint32_t m_foldUav = 0, m_foldDistUav = 0, m_foldDistSrv = 0;
     std::vector<uint16_t> m_foldCells;
+    // THE FOLDS HELD (gFoldClock; CsBankScatter says why): the clock's origin and last instant, and the
+    // restart (the first frame, ring 0 re-anchored, the clock set back): the grid is cleared then.
+    double m_foldT0 = -1.0, m_foldLastT = 0.0;
+    bool m_foldRestart = true;
+    double FoldHoldS() const;      // two of the sea's peak periods, s
+    uint32_t FoldTick() const;     // the sim clock in 0.1 s ticks from m_foldT0, 1 at the origin
     hal::Pso m_foldDistPso;   // ...and its height over the chart's tangent plane (P.up - R): ChartRows' row 3 w
     double m_eyeFlat[3] = {};                       // ...and in the flat frame
     Space::Anchor m_chart{};                        // the rings' plane (Chart above)
