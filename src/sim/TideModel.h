@@ -68,6 +68,13 @@ public:
     double ProfileKm(int index) const;
     // The `k` stations nearest a place (degrees), nearest first.
     std::vector<int> Nearest(double latDeg, double lonDeg, size_t k) const;
+    // NAVD88 zero above LOCAL MSL (m) at a place, from published CO-OPS station datums -- the same
+    // staff carries MSL and NAVD88, so their difference is data, not an assumption (Boston: MSL 2.660,
+    // NAVD88 2.752 -> +0.092). The link is regional (Boston +0.09 m, Sewells Point -0.08), so it is
+    // the NEAREST station to the place that publishes both, on the open coast: one up a river
+    // (riverKm > 0) stands on a river's mean. False (outM untouched) when none publishes both. One
+    // law, three readers: the bed's MSL layers, the tide's MLLW link, the atlas's MSL surface.
+    bool NavdAboveMsl(double latDeg, double lonDeg, double* outM, std::string* from = nullptr) const;
 
     // Metres above MLLW, analytic, valid for any t (accuracy degrades slowly outside fit year).
     double Height(size_t i, double unixT) const;

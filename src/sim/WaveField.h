@@ -19,7 +19,7 @@
 //  Packing (the GPU contract): ONE R8G8B8A8_UNORM atlas, slices in a 2-wide grid --
 //  slice s at texel origin ((s&1)*nx, (s/2)*ny). Slices 0..nUsed-1 = per-component
 //  (a/aMax, k/kMax, cos*0.5+0.5, sin*0.5+0.5); slice kEnvSlice = (rms/envMax,
-//  excess/2.5, sum/sumMax, spare). Components whose wavelength the grid undersamples
+//  excess/2.5, sum/sumMax, sqrt(tan beta) -- the bed's steepest slope, for which crests plunge). Components whose wavelength the grid undersamples
 //  (lambda < kMinSamplesPerLambda * cell) are NOT uploaded -- the FFT cascades keep that
 //  band, exactly the fold doctrine: a rung carries a band only while it resolves its phase.
 // ================================================================================================
@@ -77,7 +77,7 @@ struct WaveFieldConfig {
     double tideBucketM = 0.25;         // re-solve quantization
     double currentBucketMs = 0.10;
     float featherM = 120.0f;           // window edge blend into the cascades (scene cfg)
-    float displayExag = 1.15f;         // M8g: display exaggeration, applied to the dequant
+    float displayExag = 1.0f;          // M8g: display exaggeration, applied to the dequant
                                        // tables at ADOPTION (upload) -- the cache and the
                                        // bucket key stay raw physics; ProbeAt reads the
                                        // same scaled table, so 9b/9c agree with the GPU
@@ -107,7 +107,8 @@ public:
     // field has curl wherever grad k is not parallel to d^), so it printed the integration
     // route into the sea as banding. Every cached solve carries the old, walked phase.
     // F28: 11, was 10 -- the eikonal is swept until still; every cached two-round phase re-solves.
-    static constexpr uint32_t kSolverVersion = 11;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
+    // 12 (2026-10-22): the envelope's fourth channel is sqrt(tan beta), the bed's slope (Jet.hlsli PlungeShare).
+    static constexpr uint32_t kSolverVersion = 12;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
@@ -323,6 +324,11 @@ public:
         // Jacobian the displaced surface's tangents carry (the water match, step 3: TreeWater::At
         // stands the hull on the surface the mesh draws, which is displaced).
         float jxx = 0.0f, jxz = 0.0f, jzz = 0.0f;
+        // THE MEAN-LEVEL LIFT (2026-10-23; WaterBank.hlsl's solved loop): -E[eta div D] of the
+        // components at chop 1, sum k a^2 coth(kh) / 2 (Gerstner's sign: the offset gathers labels
+        // toward the crests, so the drawn sea stands this much below its labels' mean). The caller
+        // lifts by it times the vertical and lateral weights it gives the field.
+        float lift = 0.0f;
         float a[kMaxComp] = {}, k[kMaxComp] = {}, phase[kMaxComp] = {};
     };
     // depthM: the water's depth at the point, for the depth's orbit (the lateral term coth(kh) per

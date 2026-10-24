@@ -143,7 +143,7 @@ add_executable(gagame
   src/sim/VesselTest.cpp
   src/sim/WaveChartTest.cpp
   src/sim/WaveField.cpp
-  src/sim/WeatherManager.cpp
+  src/sim/WaterManager.cpp
   src/sim/GlobeModel.cpp
   src/scene/GlobeLayer.cpp
   src/scene/WaterBankLayer.cpp

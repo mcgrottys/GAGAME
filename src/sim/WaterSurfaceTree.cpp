@@ -11,22 +11,12 @@
 #include <algorithm>
 #include <intrin.h>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
 
 namespace ga {
 
-namespace {
-
-// HLSL's smoothstep, so the window feather is the same curve on both processors.
-double SmoothStep(double e0, double e1, double x) {
-    if (e1 <= e0) return (x < e0) ? 0.0 : 1.0;
-    const double t = (std::min)((std::max)((x - e0) / (e1 - e0), 0.0), 1.0);
-    return t * t * (3.0 - 2.0 * t);
-}
-
-}  // namespace
-
-void TreeWater::Configure(const WeatherManager* wx, const WaveField* wave, const OceanCpu* ocean,
+void TreeWater::Configure(const WaterManager* wx, const WaveField* wave, const OceanCpu* ocean,
                           const SeaState* sea, double heightScale, double waveExag,
                           double waveChop) {
     m_wx = wx;
@@ -174,7 +164,10 @@ double TreeWater::CascadeTime(double simUnix) const {
     if (!m_sea) return 0.0;
     // The float cast is deliberate and is explained in the header: mirror the GPU's clock, do
     // not improve on it.
-    return static_cast<double>(static_cast<float>(simUnix - m_sea->CycleUnix()));
+    // the FFT's own origin (SeaLayer::CascadeCycleUnix: the wave grid's cycle when the grid feeds the
+    // sea), handed in with the cascade sea; the SeaState's only where none was
+    const double cycle = (m_cascadeCycle == m_cascadeCycle) ? m_cascadeCycle : m_sea->CycleUnix();
+    return static_cast<double>(static_cast<float>(simUnix - cycle));
 }
 
 double TreeWater::WindowWeight(double wx, double wz) const {
@@ -190,7 +183,7 @@ double TreeWater::WindowWeight(double wx, double wz) const {
     const double eCells = (std::min)((std::min)(cx, double(t.nx) - cx),
                                      (std::min)(cz, double(t.ny) - cz));
     const double eM = eCells / double(t.invCell);
-    return SmoothStep(0.0, (std::max)(double(t.feather), 1.0), eM);
+    return wt::Smoothstep(0.0, (std::max)(double(t.feather), 1.0), eM);   // HLSL's, as the kernel's feather
 }
 
 const WeatherSample& TreeWater::SlowAt(double wx, double wz, double simUnix) const {
@@ -354,6 +347,15 @@ void TreeWater::Prepare(double wx, double wz, double simUnix, Prep& p) const {
             const double aLoop = LipReach(kSh0, OrbitCoth(kEff, depth), 2.0 * aEnv0, hB0);   // the landing
             const double aH0 = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / (std::max)(brk, 1e-3);
             aMax = (std::min)((std::max)(3.0 * aH0, 2.0), aLoop);
+            // the bed's slope one wave-radian of the whole sea east and north (the kernel's dS), never
+            // under the twin's texel: the face a breaking crest runs up (Prep::tanB)
+            const double dS = (std::max)(1.0 / (std::max)(kSh0, 1e-4), m_sampleM);
+            double laE = 0.0, loE = 0.0, laN = 0.0, loN = 0.0;
+            PlaceOf(wx + dS, wz, laE, loE);
+            PlaceOf(wx, wz + dS, laN, loN);
+            const double gx = (BedAt(q, laE, loE) - s.bedNavd) / dS;
+            const double gz = (BedAt(q, laN, loN) - s.bedNavd) / dS;
+            p.tanB = (std::min)(std::sqrt(gx * gx + gz * gz), 1.0);
         }
         p.profStep = 0.5 * aMax;   // 8 stations reach 4 x aMax
         p.profDirX = ux;
@@ -411,6 +413,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     double slopeX = 0.0, slopeZ = 0.0;
     double orbX = 0.0, orbY = 0.0, orbZ = 0.0;
     double jacXX = 0.0, jacXZ = 0.0, jacZZ = 0.0;   // d(dispX, dispZ)/d(x, z)
+    double liftPhys = 0.0;   // THE LIFT, -E[eta div D] of the waves as summed here (the kernel's)
 
     if (wGeom > 0.001 && m_wave) {
         const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix, depth, m_waveChop);   // the depth's orbit, the throw's bound
@@ -433,6 +436,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             jacXX += lq * double(p.jxx);  // the offset's gradient carries its chop and the law
             jacXZ += lq * double(p.jxz);
             jacZZ += lq * double(p.jzz);
+            liftPhys += wS * lq * double(p.lift);   // the solved field's: its vertical x lateral weights
         }
     }
     lap(s_cycProbe);
@@ -447,26 +451,26 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         double gain[OceanCpu::kCascades];
         double brk = 1.0, rmsRaw = 0.0, kEff = 0.0;
         BandLaw(q, depth, hsScale, expo, gain, &brk, &rmsRaw, &kEff);
+        double hsBand[OceanCpu::kCascades];   // each band's raw Hs (the kernel's hsBand): its own run-up
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
+            hsBand[c] = 4.0 * gain[c] / std::max(brk, 1e-3) * m_bandRms[c];
             if (c != 2) gain[c] *= 1.0 - wWin;
         }
-        // THE CREST LAW for the cascades (the kernel's cascade loop): the breaking factor bounds the
-        // height; the lateral term keeps the raw amplitude, amp / brk; and THE ORBIT IS THE DEPTH'S,
-        // coth(k h) on each band's k -- the lateral channels' own gain, handed to the sampler beside
-        // the height's.
-        double latGain[OceanCpu::kCascades];
-        // THE LATERAL BOUND (the kernel's, after its cascade loop: k A_h <= pi/2 on the sea's
-        // energy wavenumber in this depth; the drawn amplitude carries the exaggeration, as the
-        // kernel's envelope does)
-        const double hB = std::max(depth, 0.3);
-        const double kSh = ShoaledKh(kEff, hB) / hB;
-        const double aH = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / std::max(brk, 1e-3);
-        // the bound is the landing (the kernel's; WaterTerms.h LipReach), on the significant crest-to-trough
-        const double aEnvB = std::max(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
-        const double aReach = LipReach(kSh, OrbitCoth(kEff, depth), 2.0 * aEnvB, hB);
-        const double fB = std::min(1.0, aReach / std::max(aH, 1e-4));
+        // THE ORBIT IS THE DELIVERED ONE (2026-10-23; the kernel's cascade loop says why): each band's
+        // lateral rides its delivered gain times the depth's orbit, coth(k h) on the band's k -- the lateral
+        // channels' own gain, handed to the sampler beside the height's -- and IN THE SWASH climbs toward the
+        // raw one (WaterTerms.h SwashShare: the band's run-up on the raw sea's Hs), held to the landing after
+        // the sum. The crest's going forward is CrestLaw's, after the sum.
+        double latCoth[OceanCpu::kCascades], latGain[OceanCpu::kCascades];
+        double liftC = 0.0;   // the cascades' share of THE LIFT, held with their lateral below
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
-            latGain[c] = fB * (1.0 / std::max(brk, 1e-3)) * OrbitCoth(m_ocean->BandK(c), depth);
+            const double kB = m_ocean->BandK(c);
+            latCoth[c] = OrbitCoth(kB, depth);
+            const double sw = SwashShare(hsBand[c], 6.283185307179586 / std::max(kB, 1e-6), depth);
+            latGain[c] = latCoth[c] * (1.0 + sw * (1.0 / std::max(brk, 1e-3) - 1.0));
+            // THE LIFT's cascade term (the kernel's liftE): vertical gain x lateral gain x the texture's
+            // own E[h div D] (OceanCpu::LiftMoment, signed)
+            liftC -= gain[c] * (gain[c] * latGain[c]) * m_ocean->LiftMoment(c);
         }
         // THE CASCADES ARE READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h), which is the one
         // term of this water that needs a plane at all. Up to four charts touch a place; each is
@@ -477,7 +481,9 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         const int nCh = p.nCh;
         const WaveChart::Chart* ch = p.ch;
         const double norm = p.norm;
-        const double y0 = dispY, sx0 = slopeX, sz0 = slopeZ;   // the solved part: the fall is the cascades'
+        // the solved part, so the crest law below reads the cascades' own surface
+        const double y0 = dispY, dx0 = dispX, dz0 = dispZ, sx0 = slopeX, sz0 = slopeZ;
+        const double jxx0 = jacXX, jxz0 = jacXZ, jzz0 = jacZZ;
         for (int i = 0; i < nCh; ++i) {
             if (ch[i].w < WaveChart::kSkip) continue;   // the law's own skip; the norm keeps it
             OceanSample o;
@@ -506,39 +512,56 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             jacXZ += w * (a * R[2] + b * R[3]);
             jacZZ += w * (c2 * R[2] + d2 * R[3]);
         }
-        // THE LIP FALLS on the cascades' sea (the kernel's, after its lateral bound; the law at
-        // WaterTerms.h LipFall): the crest's water past the cusp, w the sea's crest weight, bounded
-        // by the trough. The kernel's d and envelope are the drawn sea's (gRmsRef carries the
-        // exaggeration); here the sum is physical and the drawn sea is it times m_heightScale.
-        {
-            const double hs = std::max(m_heightScale, 1e-3);
-            const double yC = (dispY - y0) * hs, sxC = (slopeX - sx0) * hs, szC = (slopeZ - sz0) * hs;
-            const double aEnvC = std::max(1.4142135623730951 * rmsRaw * m_heightScale * brk, 1e-3);
-            const double cothE = OrbitCoth(kEff, depth);
-            const double reach = std::min(aH, aReach);
-            const double wRaw = 0.5 + 0.5 * yC / aEnvC;
-            const double wCr = std::min(std::max(wRaw, 0.0), 1.0);
-            const double eUnit = std::max(reach - 1.0 / std::max(kSh, 1e-4), 0.0);
-            const double ePast = eUnit * wCr;
-            const double HC = aEnvC + std::max(yC, 0.0);
-            const double fall = LipFall(ePast, kSh, cothE, HC, hB);
-            if (fall > 0.0) {
-                const double free = yC - fall, floorY = std::min(yC, -aEnvC);
-                double yN = free, sxN = sxC, szN = szC;
-                if (free >= floorY) {
-                    const bool inBand = wRaw > 0.0 && wRaw < 1.0;
-                    const double dd = inBand ? LipFallDe(ePast, kSh, cothE, HC, hB) * eUnit * 0.5 / aEnvC : 0.0;
-                    sxN = sxC - dd * sxC;
-                    szN = szC - dd * szC;
-                } else {
-                    yN = floorY;
-                    sxN = szN = 0.0;
+        // THE CREST LAW ON THE CASCADES (the kernel's, after its cascade loop; WaterTerms.h CrestLaw, the
+        // solved field's own): on the sea the cascades draw here -- 0 and 1 yield by wWin, as `gain` does;
+        // the twin has no ring, so no fold -- in physical metres, its excess the drawn sea's against the
+        // depth, the bed's slope one wave-radian east and north where a crest is over its limit.
+        static const bool noCascadeCrest = [] { const char* e = std::getenv("GAGAME_NO_CASCADE_CREST"); return e && e[0] == '1'; }();
+        if (depth > 0.05) {
+            const double hB = std::max(depth, 0.3);
+            double eD = 0.0, eDk = 0.0, sA = 0.0, sAC = 0.0, sACR = 0.0;
+            for (int c = 0; c < OceanCpu::kCascades; ++c) {
+                const double gr = gain[c] / std::max(brk, 1e-3) * m_bandRms[c];   // the drawn band's raw rms
+                eD += gr * gr;
+                eDk += gr * gr * m_ocean->BandK(c);
+                sA += gr;
+                sAC += gr * latCoth[c];
+                sACR += gr * latGain[c];
+            }
+            const double envD = std::sqrt(eD);
+            if (eD > 1e-12) {
+                const double kD = (eDk + 1e-12 * kEff) / (eD + 1e-12);   // the whole sea's where nothing is drawn
+                const double kSh = ShoaledKh(kD, hB) / hB;
+                const double cothBar = sAC / sA;
+                const double aEnvC = std::max(1.4142135623730951 * envD * brk, 1e-3);
+                const double excD = envD * 2.8284271247461903 / BreakHmax(kD, depth);
+                // its drawn lateral amplitude, the swash's raise in it, HELD TO THE LANDING (the kernel's
+                // bound): the cascades' lateral, its Jacobian and its lift take the one factor
+                double aH = m_ocean->Lambda() * aEnvC * (sACR / sA);
+                const double fSw = std::min(1.0, LipReach(kSh, cothBar, 2.0 * aEnvC, hB) / std::max(aH, 1e-4));
+                aH *= fSw;
+                dispX = dx0 + fSw * (dispX - dx0);
+                dispZ = dz0 + fSw * (dispZ - dz0);
+                jacXX = jxx0 + fSw * (jacXX - jxx0);
+                jacXZ = jxz0 + fSw * (jacXZ - jxz0);
+                jacZZ = jzz0 + fSw * (jacZZ - jzz0);
+                liftC *= fSw;
+                if (!noCascadeCrest) {   // the A/B switch (WaterBankLayer.cpp)
+                    CrestState st;
+                    st.eta = dispY - y0; st.dx = dispX - dx0; st.dz = dispZ - dz0;
+                    st.sx = slopeX - sx0; st.sz = slopeZ - sz0;
+                    st.jxx = jacXX - jxx0; st.jxz = jacXZ - jxz0; st.jzz = jacZZ - jzz0;
+                    // the bed's slope Prepare read (Finish never touches the bed tree: it runs across the pool)
+                    const double tanB = (CrestExcessShare(st.eta, aEnvC, excD) > 0.0) ? p.tanB : 0.0;
+                    const double dBx = m_peakValid ? m_peakDirX : 0.0, dBz = m_peakValid ? m_peakDirZ : 0.0;
+                    CrestLaw(st, dBx, dBz, aEnvC, excD, kSh, cothBar, aH, 1.0, tanB, depth);
+                    dispY = y0 + st.eta; dispX = dx0 + st.dx; dispZ = dz0 + st.dz;
+                    slopeX = sx0 + st.sx; slopeZ = sz0 + st.sz;
+                    jacXX = jxx0 + st.jxx; jacXZ = jxz0 + st.jxz; jacZZ = jzz0 + st.jzz;
                 }
-                dispY = y0 + yN / hs;
-                slopeX = sx0 + sxN / hs;
-                slopeZ = sz0 + szN / hs;
             }
         }
+        liftPhys += liftC;
     }
     lap(s_cycCascade);
 
@@ -582,6 +605,23 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     // rides the sea the renderer draws, uncut.
     double eta = k * dispY;
     double sx = k * slopeX, sz = k * slopeZ;
+    // WATER CANNOT STAND BELOW ITS OWN BED (2026-10-23, Mark: "the water dips in like a dimple ... a
+    // mismatch in height/depth", on the Merrimack's entrance bar). Every term above is a law of its own --
+    // the orbit, the crest's fall to the trough, the wakes, the exaggeration -- and none asked how much
+    // water there is under the trough: on the bar a trough reached past the bed and the sand showed
+    // through it, a row of holes along the crest. The drawn excursion below the level saturates onto the
+    // water column, dy -> -D tanh(-dy / D), D the depth: unchanged where the trough is small against the
+    // water, never reaching the bed, the flat trough of a shallow sea. Not a cap on the height: a crest is
+    // untouched. The mirror of the shore's "water cannot stand above its own surface".
+    // The kernel's twin (WaterBank.hlsl, after `d *= dry * gPatch.w`); the slope takes the map's
+    // derivative, sech^2, as the kernel's normals take it from the planes.
+    if (eta < 0.0) {
+        const double colD = (std::max)(depth, 1e-3);
+        const double c = std::cosh(eta / colD);
+        sx /= c * c;
+        sz /= c * c;
+        eta = -colD * std::tanh(-eta / colD);
+    }
     s.dx = k * dispX;
     s.dz = k * dispZ;
     // THE SHORE STOP (2026-10-19; WaterBank.hlsl, after `d *= dry * gPatch.w`, which says why):
@@ -607,6 +647,11 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         s.dx *= dryL;
         s.dz *= dryL;
     }
+    // THE LIFT (WaterBank.hlsl, after the foam: the drawn sea's mean is the water's level): the labels
+    // stand -E[eta div D] above the level, both halves of the moment at the drawn weights -- the dry
+    // weight and the exaggeration on each, the shore stop on the lateral.
+    s.lift = k * k * dryL * liftPhys;
+    eta += s.lift;
     s.vx += k * orbX;
     s.vy += k * orbY;
     s.vz += k * orbZ;
@@ -699,11 +744,11 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     PlaceOf(wx, wz, latDeg, lonDeg);
     const WeatherSample q = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
     // THE AGE IT READS. Inside a solver's domain the level and the current are the solver's, as of
-    // the region it last delivered (WeatherManager::RequestRegion); this says that instant, or that
+    // the region it last delivered (WaterManager::RequestRegion); this says that instant, or that
     // no solver has answered yet -- in which case a point the solver owns reports no level at all.
     const double asOf = m_wx->SolverAsOf();
     char age[96];
-    if (asOf <= WeatherManager::kNeverRead) {
+    if (asOf <= WaterManager::kNeverRead) {
         snprintf(age, sizeof(age), "no solver has answered (its domain reports no level yet)");
     } else {
         snprintf(age, sizeof(age), "solver answers as of t=%.0f, %.1f s old", asOf, simUnix - asOf);

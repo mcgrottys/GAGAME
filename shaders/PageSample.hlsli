@@ -87,20 +87,48 @@ float PageHaveLoad(Texture2DArray<float4> map, float2 uv, uint slice) {
     return map.Load(int4(rc, int(slice), 0)).x * 15.9375f;
 }
 
-// Bilinear at one mip of one slice, by Loads: the kernels' read.
-float4 PageLoad4(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
+// Bilinear at one mip of one slice, by Loads (`wrap`: a window's taps modulo the page). `whole`:
+// the hardware says none of the four taps lay in a NULL tile.
+float4 PageTaps4(Texture2DArray<float4> arr, float2 uv, uint slice, float mip, bool wrap,
+                 out bool whole) {
     const float dim = kPageDim / exp2(mip);
-    const float2 tf = uv * dim - 0.5f;
+    const int idim = int(dim);
+    const float2 tf = (wrap ? frac(uv) : uv) * dim - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
     float4 acc = 0.0f;
+    whole = true;
     [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0),
-                              int2(dim - 1.0f, dim - 1.0f));
+        int2 tc = int2(t0) + int2(k & 1, k >> 1);
+        tc = wrap ? (tc + idim) % idim : clamp(tc, int2(0, 0), int2(idim - 1, idim - 1));
+        uint st;
         acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               arr.Load(int4(tc, int(slice), int(mip)));
+               arr.Load(int4(tc, int(slice), int(mip)), int2(0, 0), st);
+        whole = whole && CheckAccessFullyMapped(st);
     }
     return acc;
+}
+// THE KERNELS' CLIMB (residency audit 2026-10-22, D2/F4): the one byte under the uv is the first
+// guess; a tap past the tile's edge can lie in a neighbour held only coarser, and a NULL tap weighs
+// in a zero (a sudden shallow seam in a solver's bed). Where the hardware says a tap was NULL, the
+// four taps are read again a level up, twice at most, within the array's mips; if no level is
+// whole, the first read stands (a window past its floor: the rank above is the reader's to ask).
+float4 PageClimb4(Texture2DArray<float4> arr, float2 uv, uint slice, float mip, bool wrap,
+                  float4 first) {
+    uint w, h, n, levels;
+    arr.GetDimensions(0u, w, h, n, levels);
+    [loop] for (uint k = 1u; k <= 2u && mip + float(k) < float(levels); ++k) {
+        bool whole;
+        const float4 v = PageTaps4(arr, uv, slice, mip + float(k), wrap, whole);
+        if (whole) return v;
+    }
+    return first;
+}
+float4 PageLoad4(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
+    bool whole;
+    const float4 v = PageTaps4(arr, uv, slice, mip, false, whole);
+    [branch] if (whole) return v;
+    return PageClimb4(arr, uv, slice, mip, false, v);
 }
 float PageLoad(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
     return PageLoad4(arr, uv, slice, mip).x;
@@ -114,18 +142,10 @@ float PageHaveLoadWrap(Texture2DArray<float4> map, float2 uv, uint slice) {
     return PageHaveLoad(map, frac(uv), slice);
 }
 float4 PageLoad4Wrap(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
-    const float dim = kPageDim / exp2(mip);
-    const int idim = int(dim);
-    const float2 tf = frac(uv) * dim - 0.5f;
-    const float2 t0 = floor(tf);
-    const float2 fr = tf - t0;
-    float4 acc = 0.0f;
-    [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = (int2(t0) + int2(k & 1, k >> 1) + idim) % idim;
-        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               arr.Load(int4(tc, int(slice), int(mip)));
-    }
-    return acc;
+    bool whole;
+    const float4 v = PageTaps4(arr, uv, slice, mip, true, whole);
+    [branch] if (whole) return v;
+    return PageClimb4(arr, uv, slice, mip, true, v);
 }
 float PageLoadWrap(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
     return PageLoad4Wrap(arr, uv, slice, mip).x;
@@ -138,6 +158,46 @@ float4 PageSample(Texture2DArray arr, SamplerState s, float2 uv, uint slice, flo
 }
 float4 PageSampleCube(TextureCubeArray arr, SamplerState s, float3 dir, float have) {
     return arr.Sample(s, float4(dir, 0.0f), have);
+}
+// THE CLIMB (residency audit 2026-10-22, D2; finding 61): the clamp is the first guess and the
+// hardware the judge. The gather + max is sound under trilinear, but an anisotropic footprint
+// reaches past the four cells it gathered and can touch a NULL tile (HIERARCHY.md: up to 0.36 of a
+// zero under 8x) -- black in a colour, no buildings in the field. Where CheckAccessFullyMapped says
+// the sample touched one, it is taken again a whole level above the level it READ -- the clamp or
+// the hardware's own LOD, whichever is coarser (where the footprint's LOD decides, a clamp a level
+// above the map's says nothing) -- and once more: a level
+// up, the footprint reaches half as far in that level's texels, and every level above a held one
+// is held (the map's chain law). Never past `top`, the slice's coarsest level that can be held.
+// `have` leaves as the level read; `status` is the last sample's. The common path is the one
+// sample and an LOD; the climb runs in the quads that touched a frontier, on the first sample's
+// own gradients. MEASURED ([restest], the probe's "then the climb" row, 8x anisotropic): 1,606 of
+// 473,088 points touched a NULL tile under the clamp alone; climbing from the clamp alone left
+// 486 (478 where the hardware's LOD decided); climbing from the level read leaves 0.
+float4 PageSampleClimb(Texture2DArray arr, SamplerState s, float2 uv, uint slice, inout float have,
+                       float top, out uint status) {
+    const float2 dx = ddx(uv), dy = ddy(uv);
+    const float lod = arr.CalculateLevelOfDetail(s, uv);
+    float4 c = arr.Sample(s, float3(uv, slice), int2(0, 0), have, status);
+    [loop] for (uint k = 0u; k < 2u && !CheckAccessFullyMapped(status); ++k) {
+        const float up = floor(max(have, lod)) + 1.0f;
+        if (up > top) break;
+        have = up;
+        c = arr.SampleGrad(s, float3(uv, slice), dx, dy, int2(0, 0), have, status);
+    }
+    return c;
+}
+float4 PageSampleCubeClimb(TextureCubeArray arr, SamplerState s, float3 dir, inout float have,
+                           float top, out uint status) {
+    const float3 dx = ddx(dir), dy = ddy(dir);
+    const float lod = arr.CalculateLevelOfDetail(s, dir);
+    float4 c = arr.Sample(s, float4(dir, 0.0f), have, status);
+    [loop] for (uint k = 0u; k < 2u && !CheckAccessFullyMapped(status); ++k) {
+        const float up = floor(max(have, lod)) + 1.0f;
+        if (up > top) break;
+        have = up;
+        c = arr.SampleGrad(s, float4(dir, 0.0f), dx, dy, have, status);
+    }
+    return c;
 }
 // The explicit-lod sample at max(want, have): the level the caller wants, floored to what is
 // resident. want = 0 asks for the finest resident level.

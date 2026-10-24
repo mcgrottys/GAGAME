@@ -79,6 +79,13 @@ public:
     // the cut releases every turn and the discard-and-replace path runs on a moving camera.
     uint32_t poolCapTiles = kPoolCapTiles;
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
+    // THE FADE (residency audit 2026-10-22, F2/D1). A landing tile's map byte steps from its parent's
+    // level to its own over this many turns instead of in one: the pixel sampler's min-LOD clamp passes
+    // through fractional levels and trilinear blends the two held mips, so a tile comes into focus over
+    // ~100 ms at 60 fps instead of snapping. A stated choice, not physics (streaming.fadeTurns; 0 is
+    // the snap). The fade stays below the tile's mip + 1, so every reader that floors the byte (the
+    // kernels, the CPU, the audit) reads the finest held mip at once: no reader of physics fades.
+    uint8_t fadeTurns = 6;
     // ---- THE SAMPLERS (M13) -------------------------------------------------------------
     // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
     // and can be named: a view's walk, a subject whose surroundings stay resident, a gate's
@@ -334,9 +341,10 @@ public:
     // parent); the version law (old bytes held until the replacement lands) is for a repaint.
     void Invalidate(int tenant, const TileRequest& r, bool moved = false);
     // ASK AGAIN (2026-10-14): what a source that answered "not now" can now answer (a Google tile
-    // landed, core/TileProviders.h). A tile held back not whole goes back to Seen where it stands --
-    // tracked, its record alive -- for the order to load; a held tile's replacement refused not whole
-    // is asked as Invalidate asks (the version law). Invalidate on the held-back tile untracked it,
+    // landed, core/TileProviders.h; the wave field's solve, sim/WaveFieldSource.h Reopen). A tile held
+    // back not whole goes back to Seen where it stands -- tracked, its record alive -- for the order to
+    // load; a held tile's replacement refused not whole is asked as Invalidate asks (the version law),
+    // and a held tile that is current is left as it is. Invalidate on the held-back tile untracked it,
     // and a parent no reader names itself was never tracked again: its children waited on it for
     // good (a z17 still, 12 tiles "waiting on a parent not held"). Safe from any thread -- it queues.
     void Again(int tenant, const TileRequest& r) {
@@ -512,7 +520,8 @@ public:
         uint32_t landedUnowned = 0;   // ... landed for a coordinate the tile no longer owns
         uint32_t lagMin = 0, lagMax = 0;   // turns from a batch's Submit to its fence, this turn
         uint32_t batch = 0, direct = 0, ring = 0;   // the mapped batch, by fill path
-        uint32_t ringNoBytes = 0;   // ring fills of a tile with no bytes: a garbage fill
+        uint32_t ringNoBytes = 0;   // ring fills of a tile with no bytes: let go, never copied (F6)
+        uint32_t waitLanding = 0;   // F6: loaded tiles whose bytes are on disk, held back: no landing slot
         uint32_t evicted = 0;
         uint32_t reclaimed = 0;     // of `evicted`, the ones the headroom pass took unasked
         uint32_t landedOnly = 0;    // 1: tiles landed and no batch was mapped this turn
@@ -784,6 +793,10 @@ private:
         // byte names holds the PREVIOUS identity's bytes (stale, its refill on the way). The
         // reader decodes those with the previous table. The byte stays finest mip * 16 above it.
         bool versioned = false;
+        // A tenant whose tiles are COMPUTED, not read (hal::Residence::Recomputable: the swell's
+        // exposure, a march of rays a texel): its loads run on the computing lane (Lane::Long), so a
+        // page that takes seconds never holds the Io lane the read tenants' tiles stream through.
+        bool computed = false;
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
         // M9af: what this tenant's realization already holds on the NVMe. Borrowed; main owns
         // the indices. Null means "no information", which schedules exactly as before.
@@ -877,6 +890,7 @@ private:
         TileState state = TileState::Seen;
         bool predicted = false;
         uint8_t retries = 0;             // M7w: failed loads retry, then go honestly NULL
+        uint8_t rounds = 0;              // F8: rounds of those tries that failed (kRetryRounds at most)
         // PHASE A4: the tree answered it as the level above, magnified (g_tileMagnified): it holds
         // no bytes and is never mapped -- the Failed state's law, "honestly NULL so consumers fall
         // back to the coarser REAL mip", which is what it is -- and the ledger counts it apart.
@@ -892,6 +906,7 @@ private:
         // Step 5: its bytes are on the GPU -- the boot's fill, a ring fill with a
         // whole tile, a DirectStorage batch whose fence signalled. HELD = Mapped and landed.
         bool landed = false;
+        uint8_t fade = 0, fadeOf = 0; // F2/D1: turns of its fade left (0 in focus), of how many
         uint32_t firstP = 0;          // the last pass that placed it among the first P
         uint32_t rec = UINT32_MAX;    // step 5 E: its record in m_rec
         // The watchdog: since when it has been starved (1) or in flight (2), the turn last seen
@@ -922,6 +937,8 @@ private:
 public:
     // A tenant whose map bytes carry the version bit (Tenant::versioned).
     void SetVersioned(int tenant) { m_tenants[tenant].versioned = true; }
+    // A tenant whose tiles are computed (Tenant::computed): its loads run on Lane::Long.
+    void SetComputed(int tenant) { m_tenants[tenant].computed = true; }
     // How many of a tenant's held tiles are stale with their replacement not yet swapped in.
     uint32_t StaleHeld(int tenant) const {
         uint32_t n = 0;
@@ -1081,6 +1098,7 @@ private:
     std::array<std::atomic<int>, kMaxPaintTenants> m_painting{};
     std::atomic<int> m_paintShare{1};
     int PaintShare() const;
+    int PaintShareOf(int tenant) const;   // a computed tenant's is one: a page at a time (ResidencyOrder.cpp)
     // THE POOL AHEAD OF ITS DEMAND. A pool chunk is a CreateHeap, and inside the turn it cost
     // 1-24 ms (the drive: 228 chunks, 262 ms, every one on the render thread). So the pool is kept
     // ahead: when the free list falls under kPoolReserveTiles a worker creates the next chunk
@@ -1119,6 +1137,14 @@ private:
         m_edgeNotes.push_back({tenant, r});   // H2's closure, by events
     }
     void ApplyChanged();
+    // F2/D1: the tiles fading in (tenant, address). A fade steps once a turn while the tile is seen --
+    // every tile above it held, so its footprint speaks -- and its footprint is written again (the map
+    // only: its bytes did not change, so the max lanes are not told). m_fadeSteps: this turn's steps
+    // (a settled still is not exact while a fade moves).
+    std::vector<std::pair<int, TileRequest>> m_fading;
+    uint32_t m_fadeSteps = 0;
+    uint64_t fadeStepsTotal = 0, waitLandingTotal = 0;   // the stats line's: the fade's steps; F6's waits
+    void StepFades();
     // The max lanes' jobs from the turn's changed slots (before ApplyChanged clears them): each
     // held slot that changed, every alias of its address, the tiles beside it (their blocks' rims
     // read its texels), and every held ancestor -- up the slice's mips, across a rank's floor to the
@@ -1261,6 +1287,17 @@ private:
     uint64_t m_repeatsOf[kMaxSamplers] = {};
     uint64_t m_stHash[kMaxSamplers] = {}, m_stHashLatest[kMaxSamplers] = {};
     std::vector<std::pair<int, TileRequest>> m_failedKeys;   // failed or not whole, for the pass
+    // F8 (residency audit 2026-10-22): a tile that failed its four quick tries is asked again a glance
+    // later, kRetryRounds rounds at most -- a read that failed for a moment (an archive another run
+    // was writing, a disk hiccup) is not a hole for the run. Queued by the pass, in turn order.
+    static constexpr uint8_t kRetryRounds = 4;
+    struct RetryAt {
+        uint32_t turn;
+        int tenant;
+        TileRequest req;
+    };
+    std::deque<RetryAt> m_retryAt;
+    uint64_t retriedTotal = 0;
     void OrderNote(Tenant& t, uint32_t rec, int tenant, int sid, uint32_t stampFrame, uint32_t face,
                    uint32_t m, uint32_t x, uint32_t y, size_t idx, float nearM, float fu, float fv);
     void RecApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits) const;

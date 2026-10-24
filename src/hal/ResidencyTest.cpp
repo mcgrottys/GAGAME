@@ -633,10 +633,10 @@ constexpr uint32_t kPTileBytes = 65536;
 // 12 lies above it.
 constexpr int kNumMargins = 6;
 constexpr double kMargins[kNumMargins] = {2.0, 4.0, 6.0, 8.0, 10.0, 12.0};
-constexpr int kLaws = 7 + 2 * kNumMargins, kShapes = 7, kScales = 12;
+constexpr int kLaws = 8 + 2 * kNumMargins, kShapes = 7, kScales = 12;
 constexpr int kMaps = 3 + 2 * kNumMargins;   // true, floor, floor twice, each margin's F, F's floor
 constexpr uint32_t kQuadsMax = 384;
-constexpr uint32_t kRowsPerScan = kLaws * 2 * kShapes * kScales;   // 3192
+constexpr uint32_t kRowsPerScan = kLaws * 2 * kShapes * kScales;   // 3360
 
 struct FloorCb {   // shaders/ResidencyFloor.hlsl's FloorCb, as root constants
     uint32_t arr, map, slice, law, aniso, cube;
@@ -649,7 +649,8 @@ struct ProbeLaw {
     const char* name;
     uint32_t map;   // 0 the true map, 1 the floor, 2 the floor of the floor, 3 + k margin k's F,
                     // 3 + kNumMargins + k F's own 3 x 3 floor (k over kMargins)
-    uint32_t law;   // FloorCb::law: 0 PageHave (gather + max), 1 the floor's bilinear read, 2 fixed
+    uint32_t law;   // FloorCb::law: 0 PageHave (gather + max), 1 the floor's bilinear read, 2 fixed,
+                    // 3 PageHave then the climb (PageSampleClimb: the status judges, D2)
 };
 // The law in effect first: every other law is held against it point for point. The last two
 // are the floor maps read by the law in effect -- no law of the brief, measured as data.
@@ -675,6 +676,10 @@ const ProbeLaw kProbeLaws[kLaws] = {
     {"margin M=8 (bilinear, F's 3 x 3)", 12, 1},
     {"margin M=10 (bilinear, F's 3 x 3)", 13, 1},
     {"margin M=12 (bilinear, F's 3 x 3)", 14, 1},
+    // D2 (residency audit 2026-10-22): the law in effect, and where the hardware says the sample
+    // touched a NULL tile, the same sample a level up, twice at most. Its "touched" is what the
+    // climb's last sample still touched; 0 is the fix.
+    {"the law in effect, then the climb (D2)", 0, 3},
 };
 constexpr int kInEffect = 0, kFloor = 1, kFloor2 = 2, kPlanted = 3, kNoClamp = 4;
 constexpr int kGatherFloor = 5, kGatherFloor2 = 6;

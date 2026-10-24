@@ -396,9 +396,10 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--swe-uv") o.sweUvDump = Widen(next("swe_uv.png").c_str());
         else if (a == "--swe-gain") o.sweGain = static_cast<float>(atof(next("3.2").c_str()));
         else if (a == "--swe-spinup") o.sweSpinupH = atof(next("0.25").c_str());
-        else if (a == "--swe-cycle" || a == "--swe-cycle-stage") {   // one link: the chain is at
-            if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());   // MSVC's nesting limit
-            else o.sweCycleStageM = atof(next("0").c_str());
+        else if (a == "--swe-cycle" || a == "--swe-cycle-stage" || a == "--swe-cycle-surge") {   // one link: the chain
+            if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());   // is at MSVC's nesting limit
+            else if (a == "--swe-cycle-stage") o.sweCycleStageM = atof(next("0").c_str());
+            else o.sweCycleSurgeM = atof(next("2").c_str());
         }
         else if (a == "--water-map") o.waterMap = Widen(next("water_map.png").c_str());
         else if (a == "--wave-map") o.waveMap = Widen(next("wave_map.png").c_str());
@@ -760,6 +761,7 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.nearGroundEvery) rawf("--near-ground " + std::to_string(o.nearGroundEvery));
     if (o.starvePlant) rawf("--starve-plant " + std::to_string(o.starvePlant));
     if (o.sweCycleStageM != 0) rawf("--swe-cycle-stage " + scene::NumberText(o.sweCycleStageM));
+    if (o.sweCycleSurgeM != 0) rawf("--swe-cycle-surge " + scene::NumberText(o.sweCycleSurgeM));
     if (o.benchOverlap) rawf("--bench-overlap");
     else if (o.bench) rawf("--bench");
     if (o.gpuTime) rawf("--gpu-time");

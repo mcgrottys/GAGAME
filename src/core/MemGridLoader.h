@@ -12,7 +12,7 @@
 //  This is the seam that fixes that WITHOUT re-parsing anything. It is a FieldLoader over
 //  borrowed float arrays, so the same compositor, the same unit stage and the same paged bank
 //  serve in-memory fields and on-disk ones identically. GlobeLayer's five planes go through it;
-//  GulfLayer's currents and WeatherManager's mirrors are the same shape and can follow.
+//  GulfLayer's currents and WaterManager's mirrors are the same shape and can follow.
 //
 //  CHANNEL PACKING IS A LOAD CONCERN, not a layer's. GlobeLayer used to interleave chl / Kd490 /
 //  SPM / valid into one RGBA buffer by hand before uploading. That loop is composition performed

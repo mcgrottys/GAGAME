@@ -87,7 +87,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 #include "app/Assembly.h"
 #include "app/FramePipe.h"
 #include "app/Options.h"
@@ -123,15 +123,6 @@ static double ChordM(double R, double lat0, double lon0, double lat1, double lon
     const double sa = std::sin(0.5 * (lat1 - lat0) * d), so = std::sin(0.5 * (lon1 - lon0) * d);
     const double hav = sa * sa + std::cos(lat0 * d) * std::cos(lat1 * d) * so * so;
     return 2.0 * R * std::sqrt((std::min)((std::max)(hav, 0.0), 1.0));
-}
-
-// A producer's own clock (SceneSchema.h ClockProps) at the scene's instant: its start, else the
-// scene's, carried at its rate from the scene's start. "now" is the session's first instant, read
-// once, so the clock runs at its rate and not at the wall's as well.
-double ClockAt(const scene::ClockProps& c, double simUnix, double sceneStartUnix) {
-    static const double kSessionNow = NowUnix();
-    const double t0 = c.start.empty() ? sceneStartUnix : c.start == "now" ? kSessionNow : ParseStartTime(c.start);
-    return t0 + c.rate * (simUnix - sceneStartUnix);
 }
 
 void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool paused,
@@ -643,6 +634,7 @@ std::optional<int> FrameLoop::Session() {
     auto& poseMotor = m_poseMotor;
     auto& motorPose = m_motorPose;
     auto& simUnix = m_simUnix;
+    auto& sceneUnix = m_sceneUnix;
     auto& simClock = m_simClock;
     auto& vesselReg = m_vesselReg;
     auto& startUnix = m_startUnix;
@@ -1106,11 +1098,23 @@ std::optional<int> FrameLoop::Session() {
     // M12 step 5d: `time.start` -- "now" (the sentinel), a civil UTC stamp, or unix seconds;
     // ParseStartTime is the flag's own reader, so the two spellings land on the same instant.
     const double sceneStart = (S.time.start == "now") ? -1.0 : ParseStartTime(S.time.start);
-    simUnix = (sceneStart > 0) ? sceneStart : NowUnix();
-    // The playable clock (sim/SimClock.h). Headless keeps its own frame-indexed formula
-    // below -- that path was already fixed-step, which is why rails reproduce and sessions
+    sceneUnix = (sceneStart > 0) ? sceneStart : NowUnix();
+    // The playable clock (sim/SimClock.h) is the SCENE's. Headless keeps its own frame-indexed
+    // formula below -- that path was already fixed-step, which is why rails reproduce and sessions
     // did not.
-    simClock.Reset(simUnix);
+    simClock.Reset(sceneUnix);
+    m_sceneStartUnix = sceneUnix;
+    // THE CLOCKS (scene/SceneClocks.h): the data's, the season's and the day's, each a constant or a
+    // binding, resolved once here; a cycle is refused and said.
+    {
+        const std::string why = m_clocks.Configure(S.water.clock, S.sun.clock, S.sun.earth.clock, sceneUnix,
+                                                   NowUnix(), [](const std::string& t) { return ParseStartTime(t); });
+        if (!why.empty()) Log("%s", why.c_str());
+        Log("[clock] the scene's clock (time) starts %s UTC; %s; %s; %s", scene::SceneClocks::Stamp(sceneUnix).c_str(),
+            m_clocks.Describe(scene::SceneClocks::kWater).c_str(), m_clocks.Describe(scene::SceneClocks::kSun).c_str(),
+            m_clocks.Describe(scene::SceneClocks::kSunEarth).c_str());
+    }
+    simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);   // the data's instant
 
     // ==================================================================================
     //  M9bq THE BOAT -- M12 step 5e: an ENTITY node per hull (scene/Entity.h). A vessel
@@ -1241,6 +1245,26 @@ std::optional<int> FrameLoop::Session() {
                  haveCurrents ? &currents : nullptr);
     if (sea) weather.SetSeaSources(sea->Sources());   // PHASE C2: the sea state's sources
     if (swe.Ready()) weather.AddExternalWindow(S.scene.name.c_str(), &swe, oceanAt);   // C3: the scene's name
+    // WATER V2 C4: the sea at the solver's open water, from the global wave grid (GFS-Wave), whose waves
+    // push the solved water (setup): the same sea whichever way any eye looks.
+    if (swe.Ready() && m_A.seaGrid.Ready()) {
+        const SeaGrid* grid = &m_A.seaGrid;
+        swe.SetSeaSource([grid](double la, double lo, double t, double& hs, double& tp, double& fromDeg) {
+            SeaHour sh;
+            if (!grid->HourAt(la, lo, grid->HourIndex(t), sh)) return false;
+            hs = sh.combinedHs;
+            tp = sh.combinedTp;
+            fromDeg = sh.combinedFromDeg;
+            return true;
+        });
+    }
+    // WATER V2 C1: the solver's open sea rides the manager's Level (the tide atlas) along its sides.
+    if (swe.Ready()) {
+        const WaterAtlas* atlas = &waterAtlas;
+        swe.SetLevelSource([atlas](double la, double lo, double t) {
+            return atlas->Ready() ? atlas->MslNavd(la, lo) + atlas->Level(la, lo, t) : NAN;
+        });
+    }
     // The scene's dormant solvers (`solvers`): each asleep until the eye comes, its domain a box of
     // cells on the stack's bed, its open sea held to its own station's tide on NAVD88.
     for (const scene::SolverProps& v : S.solvers) {
@@ -1267,6 +1291,50 @@ std::optional<int> FrameLoop::Session() {
         weather.AddDormantWindow(v.name.c_str(), box, v.nx, v.ny, cfg, oceanAt, 0.5,
                                  [clock, tm](int f, double t) { return clock->DEta(*tm, f, t); },
                                  [clock, tm](int f, double t) { return clock->Q(*tm, f, t); });
+    }
+    // WATER V2 (sim/WaterProducer.h): the producers the manager does not evaluate, declared with their
+    // readers, so the manifest (LogProducers, below) is every input the water reads.
+    {
+        using Q = water::Quantity;
+        using Su = water::Support;
+        using T = water::TimeForm;
+        const auto declare = [&weather](const char* name, Q q, Su su, T f, double grainM,
+                                        const char* reader) {
+            water::Producer p;
+            p.name = name;
+            p.q = q;
+            p.support = su;
+            p.form = f;
+            p.grainM = grainM;
+            p.reader = reader;
+            weather.Declare(std::move(p));
+        };
+        declare("tide stations (CO-OPS harmonics)", Q::Level, Su::Point, T::Harmonic, 0.0,
+                "the waterline, the solvers' forcing plane, the atlas's station rung");
+        declare("rivers (gauged discharge, face tides)", Q::Current, Su::Point, T::Harmonic, 0.0,
+                "the solvers' river faces (Flather)");
+        if (haveCurrents) {
+            declare("tidal current stations", Q::Current, Su::Point, T::Series, 0.0,
+                    "the wave solve's current proxy and its key");
+        }
+        if (sea) {
+            declare("buoys (observed Hs over the grid's)", Q::Sea, Su::Point, T::Series, 0.0,
+                    "the eye's spectrum (SeaLayer::BuoyGainAt)");
+            declare("wind sea (Young & Verhagen, the walked fetch)", Q::Sea, Su::Point, T::Series,
+                    0.0, "the eye's spectrum (SeaLayer::PartsOfHour)");
+            if (sea->StormOn()) {
+                declare("sea.storm (the scene's)", Q::Sea, Su::Analytic, T::Static, 0.0,
+                        "the eye's spectrum");
+            }
+            declare("cascades (3 FFT patches of the eye's spectrum)", Q::Sea, Su::Analytic,
+                    T::Stochastic, 0.18, "the bank kernel; the hull (OceanCpu)");
+            declare("swell exposure (the bed's lee)", Q::Sea, Su::Tree, T::Static, 76.0,
+                    "the bank kernel's shelter; the hull (ExposureAt)");
+            declare("churn (foam memory)", Q::Memory, Su::Window, T::Transient, 2.0,
+                    "the bank kernel's foam");
+        }
+        declare("vessels (Kelvin wakes)", Q::Sea, Su::Point, T::Transient, 0.0,
+                "the bank kernel (the hull's twin is not fed: TreeWater::SetBoats has no caller)");
     }
     // PHASE B2 (D4): every solver binds the standing window (it reads it where the window holds its
     // cells, the cube elsewhere), and the pin and the whole-bed wait ask for its tiles. PHASE C1: this
@@ -1338,13 +1406,23 @@ std::optional<int> FrameLoop::Session() {
         waveField->Configure(wcfg, &compositor, hgtCh,
                              &waterAtlas, &model, entSta,
                              haveCurrents ? &currents : nullptr, wfCtSta);
+        {
+            water::Producer p;   // WATER V2: the solved field, a harmonic window
+            p.name = "wave.field (the solved BVP, 32 components)";
+            p.q = water::Quantity::Sea;
+            p.support = water::Support::Window;
+            p.form = water::TimeForm::Harmonic;
+            p.grainM = wcfg.cellM;
+            p.reader = "the bank kernel; the hull (WaveField::ProbeAt)";
+            weather.Declare(std::move(p));
+        }
         // M8 flows into waves: the SWE's SOLVED current drives the dispersion when
         // resident (the bent jet, the tip shear); the ACT proxy is the fallback.
         if (swe.Ready() && sea) {
             waveField->SetSweCurrent(&swe, sea->sweCurrentGain);
         }
         // The owned windows (Boston) step on the frame's list too, when a hull asks them
-        // (WeatherManager::Simulate), in the sea layer's simulate pass beside the external one.
+        // (WaterManager::Simulate), in the sea layer's simulate pass beside the external one.
         if (sea) {
             sea->onSimulate = [this](const FrameContext& ctx) {
                 if (ctx.cmd && ctx.gpu) m_weather.Simulate(*ctx.cmd, *ctx.gpu, m_simUnix);
@@ -1393,6 +1471,7 @@ std::optional<int> FrameLoop::Session() {
                 waveT, uint32_t(WaveField::kMaxComp) + 1u);
         }
     }
+    weather.LogProducers();   // WATER V2: the manifest, every producer the water reads
     // M9bi: --sun pins the pre-ephemeris art direction; sunPlaced stays false and the
     // renderer keeps using these two constants, exactly as every earlier baseline did.
     if (S.sun.source == Scene::kPinned) {
@@ -1470,7 +1549,7 @@ std::optional<int> FrameLoop::Session() {
         // asked, so the kernel reads the manager's own map (the coarsest mip) -- a diagnostic.
         bool bedWhole = false;
         if (S.water.swe.bedWait == 2 && S.water.swe.spinupH > 0) {
-            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            const WaterManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
             bedWhole = bw.done;
             Log("[swe] bed wait: %u window(s), %u tiles mapped in %u residency turns, %.2f s -- %s "
                 "(%llu of %llu cells read the page at mip 0)",
@@ -1495,6 +1574,14 @@ std::optional<int> FrameLoop::Session() {
         // A SOLVER'S WINDOW HOLDS ITS WATER: flooded on the bed its kernel reads when the whole-bed
         // wait finished (the trace reads it back), else on the CPU grid, and the line says which.
         swe.LogHoldsWater(gpu, bedWhole);
+        // --tool swe-test: the scheme's analytic judges (WATER_V2 12.5, C1) on the bed the wait made whole.
+        if (S.Tool("swe-test")) {
+            const bool ok = swe.RunSchemeTests(gpu);
+            gpu.WaitIdle();
+            resMgr.Shutdown();
+            gpu.Shutdown();
+            return ok ? 0 : 1;
+        }
         // --swe-cycle N: the validation cycle integrates on the bed a run's spin-up would, so
         // it comes after the wait (before it, the kernel reads a bed no turn has delivered).
         if (S.Tool("swe-cycle")) {
@@ -1542,10 +1629,32 @@ std::optional<int> FrameLoop::Session() {
                     return model.Height(size_t(fi), t) + datumOff;
                 };
             }
+            // THE JUDGES (WATER_V2 12.6): every tide station the domain holds, its own prediction on
+            // NAVD88 by its own link -- CO-OPS's where the station has one, else ResolveDatum's law at
+            // its place (its fitted mean is MSL, and NAVD88 stands NavdAboveMsl over MSL there).
+            std::vector<tools::SweFocusProbe> levelJudges;
+            for (size_t i = 0; i < model.Count(); ++i) {
+                const TideStation& st = model.S(i);
+                if (!swe.Domain().Holds(st.lat, st.lon)) continue;
+                double off = st.mllwMinusNavdM;
+                std::string from = "CO-OPS";
+                if (off <= -900.0) {
+                    double delta = 0.0;
+                    model.NavdAboveMsl(st.lat, st.lon, &delta, &from);
+                    off = -(st.meanMllwM + delta);
+                }
+                Log("[judge] level %s: MLLW - NAVD88 = %+.3f m (%s)", st.id.c_str(), off, from.c_str());
+                tools::SweFocusProbe p;
+                p.id = st.id;
+                p.lat = st.lat;
+                p.lon = st.lon;
+                p.pred = [&model, i, off](double t) { return model.Height(i, t) + off; };
+                levelJudges.push_back(std::move(p));
+            }
             return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents,
                                           tools::SweToolGrid{&swe.Domain(), surface.flat}, swe, resMgr,
                                           simUnix, oceanAt, faceAt, faceQAt, describeWest,
-                                          &focusProbe);
+                                          &focusProbe, &levelJudges);
         }
         if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -2549,6 +2658,7 @@ bool FrameLoop::Frame() {
     auto& motorPose = m_motorPose;
     auto& rail = m_rail;   // M12 step 5e: the rail as data (scene/Rail.h)
     auto& simUnix = m_simUnix;
+    auto& sceneUnix = m_sceneUnix;
     auto& simClock = m_simClock;
     auto& wavePending = m_wavePending;
     auto& wavePrefillDone = m_wavePrefillDone;
@@ -2808,14 +2918,15 @@ bool FrameLoop::Frame() {
         if (in.keyPressed[VK_UP]) timeScale = std::min(timeScale * 10.0, 864000.0);
         if (in.keyPressed[VK_DOWN]) timeScale = std::max(timeScale / 10.0, 1.0);
         const double nudge = in.keyDown[VK_SHIFT] ? 86400.0 : 3600.0;
-        if (in.keyPressed[VK_LEFT]) simUnix -= nudge;
-        if (in.keyPressed[VK_RIGHT]) simUnix += nudge;
-        if (in.keyPressed[VK_HOME] || in.keyPressed['N']) simUnix = NowUnix();
+        if (in.keyPressed[VK_LEFT]) sceneUnix -= nudge;
+        if (in.keyPressed[VK_RIGHT]) sceneUnix += nudge;
+        if (in.keyPressed[VK_HOME] || in.keyPressed['N']) sceneUnix = NowUnix();
         // A deliberate jump re-bases the clock; the partial quantum does not smear
         // across the discontinuity.
         if (in.keyPressed[VK_LEFT] || in.keyPressed[VK_RIGHT] ||
             in.keyPressed[VK_HOME] || in.keyPressed['N']) {
-            simClock.SetTo(simUnix);
+            simClock.SetTo(sceneUnix);
+            simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);
             // THE CLOCK POLICY, which a stateful body needs and nothing else in this
             // engine does. Everything else here is f(simUnix) and simply re-evaluates;
             // a hull carries momentum, so jumping an hour teleports the sea out from
@@ -2879,7 +2990,8 @@ bool FrameLoop::Frame() {
         // `for (int i = 0; i < simSteps; ++i) Step(SimClock::kDt)` hangs here.
         if (!paused) {
             simSteps = simClock.Advance(dt, timeScale);
-            simUnix = simClock.Now();
+            sceneUnix = simClock.Now();
+            simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);   // the data's instant
 
             // ---- THE HELM. Reading the controls is the only part of the boat that
             // is windowed-only; the STEP itself is shared with the headless path below,
@@ -2938,7 +3050,8 @@ bool FrameLoop::Frame() {
         // solid frame's crests, which is the second reason not to move it.
         const bool heldFrame = (opt.dumpBoth || settling) && S.capture.frames && recFrame >= S.capture.frames;
         if (heldFrame) recFrame = S.capture.frames - 1u;
-        simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+        sceneUnix = m_sceneStartUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+        simUnix = m_clocks.At(scene::SceneClocks::kWater, sceneUnix);   // the data's instant
         // The headless clock is frame-indexed, so a frame is worth exactly
         // timeScale/30 seconds of world; the boat owes that many whole quanta. Rounding
         // rather than truncating keeps the owed time from drifting slow over a long
@@ -3011,8 +3124,8 @@ bool FrameLoop::Frame() {
         const sun::SolarSystem ss =
             (S.sun.source == Scene::kEarth)
                 ? sun::BuildEarth(S.sun.earth.at, S.sun.earth.axis, S.sun.earth.spin)
-                : sun::Build(ClockAt(S.sun.clock, simUnix, startUnix),
-                             ClockAt(S.sun.earth.clock, simUnix, startUnix));
+                : sun::Build(m_clocks.At(scene::SceneClocks::kSun, sceneUnix),
+                             m_clocks.At(scene::SceneClocks::kSunEarth, sceneUnix));
         m_solar = ss;
         m_solarValid = true;
         const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
@@ -3524,6 +3637,7 @@ bool FrameLoop::Frame() {
                     (waveT < 0 || resMgr.StaleHeld(waveT) == 0)) {
                     std::atomic_store(waveTree.get(), wavePending);
                     resMgr.Reload(waveT);   // F13: the held tiles hold until their replacements land
+                    waveSrc->ForgetRefused();   // F3: Reload has asked every refused tile anew
                     m_waveStaleSince = frame;   // the instrument: how long old pages stay drawn
                     m_waveStaleAt = simUnix;
                     waveField->PublishKey(wavePendingKey);   // ONE SWAP: the twin and the bank's table flip with
@@ -3569,6 +3683,21 @@ bool FrameLoop::Frame() {
                         wavePending = fresh;
                         wavePrefillDone.store(true, std::memory_order_release);
                     });
+                }
+                // F3'S AGAIN: the tiles the node answered "not now" are asked again once the solve
+                // they were asked for is there -- their children no longer wait for the next swap.
+                if (waveSrc && waveT >= 0) {
+                    uint32_t asked = 0;
+                    waveSrc->Reopen([&](int t, const TileRequest& r) {
+                        resMgr.Again(t, r);
+                        ++asked;
+                    });
+                    if (asked) {
+                        Log("[wave] frame %llu: %u tile(s) the field answered \"not now\" asked again -- the "
+                            "solve of key %016llx is here (F3's Again)",
+                            static_cast<unsigned long long>(frame), asked,
+                            static_cast<unsigned long long>(waveSrc->Key()));
+                    }
                 }
                 if (m_waveStaleSince != UINT64_MAX && waveT >= 0) {
                     const uint32_t st = resMgr.StaleHeld(waveT);
@@ -4607,6 +4736,22 @@ bool FrameLoop::Frame() {
                     gulf ? gulf->validation.c_str() : nullptr,
                     globe ? globe->stats.c_str() : nullptr,
                     (mode == 1 && altV > 60000.0) ? 3 : mode);   // title by altitude
+        {
+            // THE CLOCKS, resolved (scene/SceneClocks.h): what this run's data, season and day are on,
+            // and the scene's own clock where the data's is bound away from it.
+            using SC = scene::SceneClocks;
+            const std::string w = SC::Stamp(simUnix);
+            const std::string se = SC::Stamp(m_clocks.At(SC::kSun, sceneUnix));
+            const std::string dy = SC::Stamp(m_clocks.At(SC::kSunEarth, sceneUnix));
+            wchar_t tail[256];
+            if (std::fabs(simUnix - sceneUnix) > 0.5) {
+                swprintf(tail, 256, L"  |  clocks: water %hs (scene %hs), season %hs, day %hs", w.c_str(),
+                         SC::Stamp(sceneUnix).c_str(), se.c_str(), dy.c_str());
+            } else {
+                swprintf(tail, 256, L"  |  clocks: water %hs, season %hs, day %hs", w.c_str(), se.c_str(), dy.c_str());
+            }
+            wcsncat_s(title, 512, tail, _TRUNCATE);
+        }
         window.SetTitle(title);
     }
 
@@ -5148,7 +5293,8 @@ bool FrameLoop::Frame() {
         }
         if (S.Tool("twin-surface") && !marsMode && sea && waterBank) {
             tools::RunTwinSurface(opt, gpu, seaState, sea, waterScene, waterBank, cam,
-                                  simUnix, weather, waveField, lastWaterNavd, m_A.surface.flat);
+                                  simUnix, weather, waveField, lastWaterNavd, m_A.surface.flat,
+                                  m_A.heightBed.get(), m_A.exposureShadow.get());
         }
         if (S.Tool("trace") && !marsMode && sea && waterBank) {
             tools::RunTrace(opt, gpu, sea, compositor, hgtCh, waterAtlas, waterBank, globe,
@@ -5159,7 +5305,7 @@ bool FrameLoop::Frame() {
         // same turns, the same trace as its test -- and read once more; every reading of the run
         // is then held against it.
         if (opt.bedTraceEvery > 0 && m_bedTracer.Configured() && !marsMode) {
-            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            const WaterManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
             Log("[bedtrace] the domain made whole at the run's end: %u tiles mapped in %u turns, "
                 "%.2f s -- %s",
                 bw.tiles, bw.turns, bw.seconds, bw.done ? "whole" : "NOT whole (see the reading)");

@@ -53,11 +53,35 @@ void ResidencyManager::WriteHeldFootprint(Tenant& t, const TileRequest& r, HeldF
     // THE VERSION BIT (Tenant::versioned): 1 where the finest held tile over a cell holds the
     // previous identity's bytes. Only the engine's own predicate knows a tile's bytes; the audit's
     // constructed held sets carry none, and their bytes stay the mip alone.
-    const bool ver = t.versioned && held == &HeldInSlots;
+    const bool live = held == &HeldInSlots;
+    const bool ver = t.versioned && live;
+    const auto tileAt = [&](uint32_t m, uint32_t x, uint32_t y) -> const Tracked* {
+        return live ? t.slot[StampIndex(t, face, m, x, y)] : nullptr;
+    };
     const auto stale = [&](uint32_t m, uint32_t x, uint32_t y) -> uint8_t {
         if (!ver) return 0;
-        const Tracked* p = t.slot[StampIndex(t, face, m, x, y)];
+        const Tracked* p = tileAt(m, x, y);
         return (p && p->stale) ? uint8_t(1) : uint8_t(0);
+    };
+    // THE FADE (F2/D1): a held tile's LEVEL is its mip plus its fade's share of the way up to its
+    // parent's level (the parent's own, fading or not), short of its mip + 1: it starts all but at
+    // its parent and reaches its own mip in its fade's turns, and the byte's sixteens digit is its mip
+    // throughout. A tile with no held tile above it (the slice's top) has nothing to fade from; the
+    // audit's held sets carry no fade.
+    const auto level = [&](uint32_t m, uint32_t x, uint32_t y, float parent) -> float {
+        const Tracked* p = tileAt(m, x, y);
+        if (!p || !p->fade || parent < 0.0f) return float(m);
+        const float f = float(p->fade) / float(p->fadeOf);
+        return float(m) + (std::min)((parent - float(m)) * f, 15.0f / 16.0f);
+    };
+    // A level to a byte: the mip x 16 and the fade's sixteenths below it (even ones on a versioned
+    // tenant: bit 0 is the version bit), or 255 for none.
+    const auto byteOf = [&](float lvl, uint8_t s) -> uint8_t {
+        if (lvl < 0.0f) return uint8_t(255);
+        const float m = std::floor(lvl);
+        float q = std::floor((lvl - m) * 16.0f);
+        if (ver) q = 2.0f * std::floor(q * 0.5f);
+        return uint8_t((std::min)(m * 16.0f + q, 254.0f)) | s;
     };
     const auto fill = [&](uint32_t m, uint32_t x, uint32_t y, uint8_t v) {
         const uint32_t x0 = x * cw(m), x1 = (std::min)((x + 1) * cw(m), bw);
@@ -69,50 +93,99 @@ void ResidencyManager::WriteHeldFootprint(Tenant& t, const TileRequest& r, HeldF
             }
         }
     };
-    // Under a tile (m, x, y) that is not held, over a whole chain: the level above it -- its
-    // parent, whose version the bit carries -- or nothing.
-    const auto below = [&](uint32_t m, uint32_t x, uint32_t y) -> uint8_t {
-        if (m >= top) return uint8_t(255);
-        const uint32_t px = (x * cw(m)) / cw(m + 1), py = (y * ch(m)) / ch(m + 1);
-        return static_cast<uint8_t>((m + 1) * 16 + stale(m + 1, px, py));
-    };
-    // The chain above r, from the coarsest down: the first tile not held decides r's footprint.
+    // The chain above r, from the coarsest down: the first tile not held decides r's footprint --
+    // the level above it (its parent's, whose version the bit carries), or nothing.
+    float lp = -1.0f;   // the level of the held tile above (-1: none)
+    uint8_t sp = 0;     // its version bit
     for (uint32_t m = top; m > r.mip; --m) {
         const uint32_t ax = (r.x * cw(r.mip)) / cw(m), ay = (r.y * ch(r.mip)) / ch(m);
         if (!held(ctx, face, m, ax, ay)) {
-            fill(r.mip, r.x, r.y, below(m, ax, ay));
+            fill(r.mip, r.x, r.y, byteOf(lp, sp));
             return;
         }
+        lp = level(m, ax, ay, lp);
+        sp = stale(m, ax, ay);
     }
-    // Whole above r: down through what is held. A tile's children are at most four, so the
-    // depth-first stack holds at most three siblings a level and the walk itself.
-    uint32_t stk[3 * 64];
+    // Whole above r: down through what is held, each tile carrying its parent's level and version
+    // bit. A tile's children are at most four, so the depth-first stack holds at most three siblings
+    // a level and the walk itself (five words an entry: mip, x, y, the level above, its bit).
+    uint32_t stk[5 * 64];
     int n = 0;
-    stk[n++] = r.mip;
-    stk[n++] = r.x;
-    stk[n++] = r.y;
+    const auto push = [&](uint32_t m, uint32_t x, uint32_t y, float l, uint8_t b) {
+        if (n + 5 > int(sizeof(stk) / sizeof(stk[0]))) {
+            throw std::runtime_error("residency: WriteHeldFootprint's stack overflowed");
+        }
+        uint32_t lb;
+        std::memcpy(&lb, &l, sizeof(lb));
+        stk[n++] = m;
+        stk[n++] = x;
+        stk[n++] = y;
+        stk[n++] = lb;
+        stk[n++] = b;
+    };
+    push(r.mip, r.x, r.y, lp, sp);
     while (n) {
+        const uint8_t bp = uint8_t(stk[--n]);
+        const uint32_t lb = stk[--n];
         const uint32_t y = stk[--n], x = stk[--n], m = stk[--n];
+        float pl;
+        std::memcpy(&pl, &lb, sizeof(pl));
         if (!held(ctx, face, m, x, y)) {
-            fill(m, x, y, below(m, x, y));
+            fill(m, x, y, byteOf(pl, bp));
             continue;
         }
+        const float l = level(m, x, y, pl);
+        const uint8_t b = stale(m, x, y);
         if (m == 0) {
-            fill(0, x, y, stale(0, x, y));
+            fill(0, x, y, byteOf(l, b));
             continue;
         }
         const auto& ti = t.tilings[p0 + m - 1];
-        const uint32_t k = cw(m) / cw(m - 1), l = ch(m) / ch(m - 1);   // 2 where the plane halves
-        for (uint32_t cy = y * l; cy < (y + 1) * l && cy < ti.HeightInTiles; ++cy) {
+        const uint32_t k = cw(m) / cw(m - 1), q = ch(m) / ch(m - 1);   // 2 where the plane halves
+        for (uint32_t cy = y * q; cy < (y + 1) * q && cy < ti.HeightInTiles; ++cy) {
             for (uint32_t cx = x * k; cx < (x + 1) * k && cx < ti.WidthInTiles; ++cx) {
-                if (n + 3 > int(sizeof(stk) / sizeof(stk[0]))) {
-                    throw std::runtime_error("residency: WriteHeldFootprint's stack overflowed");
-                }
-                stk[n++] = m - 1;
-                stk[n++] = cx;
-                stk[n++] = cy;
+                push(m - 1, cx, cy, l, b);
             }
         }
+    }
+}
+
+void ResidencyManager::StepFades() {
+    m_fadeSteps = 0;
+    if (m_fading.empty()) return;
+    std::lock_guard<std::mutex> lk(m_mx);   // the loads write Tracked::state under it
+    // Seen: every tile above it in its slice held, so its footprint is its own. A tile held under a
+    // gap keeps its whole fade until the gap fills (its parent's landing writes it from there).
+    const auto seen = [&](const Tenant& t, const TileRequest& r) {
+        const uint32_t p0 = r.face * t.mips;
+        const uint32_t bw = t.tilings[p0].WidthInTiles, bh = t.tilings[p0].HeightInTiles;
+        const auto cw = [&](uint32_t m) {
+            return bw / (std::max)(1u, static_cast<uint32_t>(t.tilings[p0 + m].WidthInTiles));
+        };
+        const auto ch = [&](uint32_t m) {
+            return bh / (std::max)(1u, static_cast<uint32_t>(t.tilings[p0 + m].HeightInTiles));
+        };
+        for (uint32_t m = TopOf(t, r.face); m > r.mip; --m) {
+            const uint32_t ax = (r.x * cw(r.mip)) / cw(m), ay = (r.y * ch(r.mip)) / ch(m);
+            if (!HeldInSlots(&t, r.face, m, ax, ay)) return false;
+        }
+        return true;
+    };
+    for (size_t i = 0; i < m_fading.size();) {
+        const auto [k, r] = m_fading[i];
+        Tracked* p = Find(k, r);
+        // Let go, replaced, or in focus: nothing left to step.
+        if (!p || !p->landed || p->state != TileState::Mapped || !p->fade) {
+            m_fading[i] = m_fading.back();
+            m_fading.pop_back();
+            continue;
+        }
+        ++i;
+        if (!seen(m_tenants[k], r)) continue;
+        --p->fade;
+        ++m_fadeSteps;
+        ++fadeStepsTotal;
+        m_changed.push_back({k, r});   // the map only (no m_edgeNotes: the bytes did not change)
     }
 }
 
@@ -1011,11 +1084,17 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     // ---- (a) failures and tiles not whole, said by the loads since the last pass: unreachable.
     std::vector<const Tracked*> refused;   // refused this pass, not held: the guard walks down from them
     for (const auto& [k, r] : m_failedKeys) {
-        const Tracked* tr = Find(k, r);
+        Tracked* tr = Find(k, r);
         // dead while it is refused: one asked again since (Again, a source that can now answer) is
         // Seen, and a dead mark here left its record out of every order for good
         if (tr && tr->rec != UINT32_MAX && tr->state == TileState::Failed) m_rec[tr->rec].flags |= kDeadBit;
         if (tr && tr->state == TileState::Failed && !tr->magnified) refused.push_back(tr);
+        // F8: a failure (not a refusal of an answer not whole, not a magnification) is asked again.
+        if (tr && tr->state == TileState::Failed && !tr->magnified && !tr->incomplete &&
+            tr->rounds + 1u < kRetryRounds) {
+            ++tr->rounds;
+            m_retryAt.push_back({m_frame + kGlanceTurns, k, r});
+        }
     }
     m_failedKeys.clear();
     // ---- (a'') THE GUARD (4.7 at the moment a parent is refused): a tile held under a parent
@@ -1591,7 +1670,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     std::array<int, kMaxPaintTenants> permitAsked{};
     const auto permitFree = [&](int tenant) {
         const size_t t = size_t(tenant) % kMaxPaintTenants;
-        if (m_painting[t].load(std::memory_order_relaxed) + permitAsked[t] >= m_paintShare.load(std::memory_order_relaxed)) return false;
+        if (m_painting[t].load(std::memory_order_relaxed) + permitAsked[t] >= PaintShareOf(tenant)) return false;
         ++permitAsked[t];
         return true;
     };
@@ -1601,6 +1680,11 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         Tracked* tr = e.tile;
         if (tr->state == TileState::Mapped && tr->landed) {
             if (!tr->stale || tr->dropped) continue;
+            // A stale tile whose refresh was REFUSED (the version law; residency audit 2026-10-22, F5):
+            // its old bytes stand and its byte says so (the version bit), and nothing is asked until the
+            // tree changes for it again (an Invalidate makes the next job). It is not pending: counted,
+            // it held PendingCount above zero for the run and no settle ever closed.
+            if (!tr->refill) continue;
             // F13: a stale held tile: its refresh job takes the queue here, in the order.
             ++pending;
             if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) {
@@ -1742,11 +1826,30 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         std::partial_sort(ready.begin(), ready.begin() + static_cast<std::ptrdiff_t>(keep), ready.end(), before);
         ready.resize(keep);
     }
+    // F6 (residency audit 2026-10-22): a tile whose bytes stayed on disk is mapped only with a
+    // landing slot for it this turn -- the slots free now and those the fill loop returns first;
+    // without one it stays Loaded for the next turn. Mapped without its bytes it would be garbage
+    // the map never names and no turn lets go.
+    size_t landing = 0;
+    if (m_stream && m_stream->Available() && !(dsSerial && !m_inFlightReads.empty())) {
+        landing = m_stageInit ? m_stageFree.size() : size_t(TileStream::kStageSlots);
+        for (const auto& [f, v] : m_stageRetire) {
+            if (f + kStageRetireFrames <= m_frame) landing += v.size();
+        }
+    }
     for (const OrderEntry* pe : ready) {
         if (batch.size() >= maxBatch) break;
         const OrderEntry& e = *pe;
         Tracked* tr = e.tile;
         if (tr->state != TileState::Loaded || tr->pos == UINT32_MAX) continue;
+        if (!tr->alias && tr->loc.Valid() && tr->data.size() < 65536) {
+            if (landing == 0) {
+                ++turn.waitLanding;
+                ++waitLandingTotal;
+                continue;
+            }
+            --landing;
+        }
         batch.push_back(m_tenants[tr->tenant].tracked[tr->pos]);
         if (!tr->alias) {   // F14: from the turn it was issued to the turn its bytes are mapped
             ++loader.gathered;
@@ -1882,6 +1985,16 @@ int ResidencyManager::PaintShare() const {
     }
     const int lane = Threads().IoCap();
     return (std::max)(1, (lane + painting) / (painting + 1));   // and one more share, the newcomer's; rounded up
+}
+
+// A COMPUTED TENANT PAINTS ONE PAGE AT A TIME (2026-10-23, Mark: "keep exposure paints from holding the Io
+// lane"). Its page is a march over the height stack whose rays touch ~650 of a source's decoded windows (a
+// page and its 4 km reach at 878 m a window; RasterFileSource keeps 1024): one page's set fits the cache,
+// two do not. Measured with twelve at once: 83,190 windows decoded, 47 s a page and the last five minutes,
+// where one alone was 3.2 s (2026-10-15). And the computing lane it runs on carries the wave solve.
+int ResidencyManager::PaintShareOf(int tenant) const {
+    if (tenant >= 0 && size_t(tenant) < m_tenants.size() && m_tenants[size_t(tenant)].computed) return 1;
+    return m_paintShare.load(std::memory_order_relaxed);
 }
 
 // THE WATCHDOG (Residency.h): starved = in the first P, not held, no load in flight, no retiring

@@ -35,10 +35,10 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | noaa.stations | harmonic fit | water.atlas | latlon.deg +v=N | latlon.deg +v=N | - | phasor re/im per constituent | sub-mm RMS (watertest) | x1 | harvest_tides.py -> StationFieldSource IDW p=2 |
 | eot20.grid | phasor grid | water.atlas | latlon.deg +v=N | latlon.deg +v=N | - | phasor re/im | |P| clamp a2>100 (Fundy) | x1 | Eot20Source (epoch-rotated arg sum P conj Q) |
 | water.atlas | tide phasors x18 (M8i) | window.field | latlon.deg +v=N | mercator.px +v=S | FLIP | phasor re/im | RG16F tiles | x1 | Compositor::WindowField paint |
-| water.atlas | level rotors | weather.mgr | latlon.deg +v=N | latlon.deg +v=N | - | m NAVD | +-3 | x1 | WeatherManager::Query h(t)=msl+Re[P e^iwt] |
+| water.atlas | level rotors | weather.mgr | latlon.deg +v=N | latlon.deg +v=N | - | m NAVD | +-3 | x1 | WaterManager::Query h(t)=msl+Re[P e^iwt] |
 | water.atlas | datum envelope (origin planes) | globe.mesh | latlon.deg +v=N | atlas.texel +v=N | - | m NAVD lo/hi | containment + width 2.4..3.6 (watertest 7) | x1 | WaterAtlas::EnvelopeNavd -> gBankE.w edit floor |
-| gfswave.grid | hs/tp/dir | weather.mgr | raster.row0N +v=S | latlon.deg +v=N | FLIP | m / s / deg | 0..15 m | x1 | WeatherManager wave grid (lat1-lat row) |
-| weather.mgr | corner params feed | compose.stack | latlon.deg +v=N | world.m +v=N | - | level/bed/hs | query rungs | x1 | WeatherManager::Query -> CornerParams |
+| gfswave.grid | hs/tp/dir | weather.mgr | raster.row0N +v=S | latlon.deg +v=N | FLIP | m / s / deg | 0..15 m | x1 | WaterManager wave grid (lat1-lat row) |
+| weather.mgr | corner params feed | compose.stack | latlon.deg +v=N | world.m +v=N | - | level/bed/hs | query rungs | x1 | WaterManager::Query -> CornerParams |
 | gfs.wind | wind-sea fill (fetch-grown, when partitions have none) | ocean.fft | latlon.deg +v=N | latlon.deg +v=N | - | m Hs / s Tp | Hs 0..2 over U10 0..9 | x1 | SeaLayer::SetTime -> SeaLayer::FetchAt -> SeaState::WindSeaGrown (closure windSeaFill) |
 | gfs.cloud | density bake | cloud.volume | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 | 3D tiles 320 km col | x1 | GlobeLayer cloud bake (ReliefUv family) |
 | cloud.volume | density march | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | sigma_t | 14 steps + sun tap | x1 | Globe.hlsl ReliefUv (row0 north) |

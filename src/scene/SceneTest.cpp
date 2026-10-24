@@ -71,6 +71,7 @@
 // reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
 #include "core/Window.h"
+#include "scene/SceneClocks.h"
 #include "scene/Gateway.h"
 #include "core/Dome.h"
 #include "sim/Ephemeris.h"
@@ -105,7 +106,7 @@
 #include "sim/GlobeModel.h"
 #include "sim/VesselSpec.h"
 #include "sim/WaterSurfaceTree.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -2011,8 +2012,8 @@ bool RunSceneSelfTest() {
             g.True(!e.Active() && !e.Helming(), "[entity] a node without a hull is inert");
             g.True(EntitySchema().Find("mirrorCadence") == nullptr,
                    "[entity] the entities section has no mirror cadence: the hull reads the solver by region every frame");
-            WeatherManager wm;
-            g.Same(wm.SolverAsOf(), WeatherManager::kNeverRead, "[entity] no solver has answered: asOf is never");
+            WaterManager wm;
+            g.Same(wm.SolverAsOf(), WaterManager::kNeverRead, "[entity] no solver has answered: asOf is never");
             FrameInfo fi;
             g.True(fi.asOf == 0.0 && fi.quanta == 0, "[entity] FrameInfo carries asOf and the clock's quanta");
             TreeWater tw;
@@ -2927,6 +2928,64 @@ bool RunSceneSelfTest() {
         cl[1].nearM = 0.0;
         sf.Claim(2, 3, cl, got);
         g.True(got[1] != got[0], "[claim] without the window's distance the home world cannot join");
+    }
+
+    // ---- [clock] THE SCENE'S CLOCKS (scene/SceneClocks.h, 2026-10-23): a constant, a binding with its
+    // offset and rate, the default (the scene's own), start and bind together, the offset's spellings, an
+    // unknown name, and a cycle refused -- the resolution finite and the refusal said.
+    {
+        using SC = SceneClocks;
+        const auto parse = [](const std::string& t) {
+            int Y = 0, M = 0, D = 0, h = 0, m = 0, sec = 0;
+            if (std::sscanf(t.c_str(), "%d-%d-%dT%d:%d:%dZ", &Y, &M, &D, &h, &m, &sec) != 6) return 0.0;
+            tm g0{};
+            g0.tm_year = Y - 1900; g0.tm_mon = M - 1; g0.tm_mday = D; g0.tm_hour = h; g0.tm_min = m; g0.tm_sec = sec;
+            return double(_mkgmtime(&g0));
+        };
+        const double s0 = parse("2026-10-23T18:59:47Z"), noon = parse("2026-10-23T16:00:00Z");
+        const double s1 = s0 + 600.0;   // ten minutes on the scene's clock
+        ClockProps water, sun, day;
+        sun.start = "2026-10-23T16:00:00Z"; sun.rate = 0.0;
+        day.start = "2026-10-23T16:00:00Z"; day.rate = 0.5;
+        SC c;
+        std::string why = c.Configure(water, sun, day, s0, 0.0, parse);
+        g.True(why.empty(), "[clock] sound clocks say nothing");
+        g.True(c.At(SC::kWater, s1) == s1 && c.At(SC::kTime, s1) == s1, "[clock] unset, the data's clock is the scene's");
+        g.True(c.At(SC::kSun, s1) == noon, "[clock] a constant at rate 0 holds its instant");
+        g.True(c.At(SC::kSunEarth, s1) == noon + 300.0, "[clock] a constant at rate 0.5 runs at half the scene's pace");
+        water.bind = "sun.earth.clock"; water.offset = "-3h";
+        why = c.Configure(water, sun, day, s0, 0.0, parse);
+        g.True(why.empty() && c.At(SC::kWater, s0) == noon - 10800.0,
+               "[clock] a binding is the bound clock's instant plus its offset at the scene's start");
+        g.True(c.At(SC::kWater, s1) == noon - 10800.0 + 300.0, "[clock] ...and runs at the bound clock's pace");
+        water.rate = 2.0;
+        c.Configure(water, sun, day, s0, 0.0, parse);
+        g.True(c.At(SC::kWater, s1) == noon - 10800.0 + 600.0, "[clock] its rate scales the bound clock's pace");
+        water.start = "2026-10-23T12:00:00Z"; water.offset = ""; water.rate = 1.0;
+        c.Configure(water, sun, day, s0, 0.0, parse);
+        g.True(c.At(SC::kWater, s1) == parse("2026-10-23T12:00:00Z") + 300.0,
+               "[clock] start and bind together: the binding's pace from the given instant");
+        double o = 0.0;
+        g.True(SC::ParseOffset("1h30m", o) && o == 5400.0, "[clock] an offset of 1h30m is 5400 s");
+        g.True(SC::ParseOffset("-2d", o) && o == -172800.0, "[clock] -2d is -172800 s");
+        g.True(SC::ParseOffset("45", o) && o == 45.0, "[clock] a bare number is seconds");
+        g.True(!SC::ParseOffset("3x", o), "[clock] an unknown unit is refused");
+        ClockProps w2, s2, d2;
+        w2.bind = "nowhere";
+        why = c.Configure(w2, s2, d2, s0, 0.0, parse);
+        g.True(why.find("names no clock") != std::string::npos && c.At(SC::kWater, s1) == s1,
+               "[clock] an unknown name is said and reads the scene's clock");
+        w2.bind = "sun.clock"; s2.bind = "water.clock";
+        why = c.Configure(w2, s2, d2, s0, 0.0, parse);
+        const double a = c.At(SC::kWater, s1), b = c.At(SC::kSun, s1);
+        g.True(why.find("cycle") != std::string::npos, "[clock] a cycle of bindings is refused and said");
+        g.True(std::isfinite(a) && std::isfinite(b) && (a == s1 || b == s1),
+               "[clock] ...the resolution is finite, the clock that closed it reading the scene's");
+        w2 = ClockProps{}; s2 = ClockProps{}; d2 = ClockProps{};
+        d2.bind = "sun.earth.clock";   // a clock bound to itself
+        why = c.Configure(w2, s2, d2, s0, 0.0, parse);
+        g.True(why.find("cycle") != std::string::npos && c.At(SC::kSunEarth, s1) == s1,
+               "[clock] a clock bound to itself is a cycle of one, refused");
     }
 
     if (g.ok) {

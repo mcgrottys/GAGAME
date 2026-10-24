@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -153,16 +154,61 @@ public:
         return false;
     }
 
+    // F3'S AGAIN (2026-10-23, Mark: "give the wave field ... an Again so a refused tile doesn't block its
+    // subtree"). A tile asked while no solve carries this node's key is answered "not now" (TileTree's
+    // Provider: not whole): nothing is mapped, and its children are never asked while it is not held
+    // (ResidencyOrder ParentGate). The source names the load that asked (core/TileAddress.h g_loadTenant,
+    // g_loadReq), as GoogleTileProvider names its fetch's waiters, and the frame loop says Again for each
+    // once the solve it was asked for is there: the key it was refused under, or -- refused before any
+    // solve (key 0, the boot's floor tiles) -- the first. A tile refused under one key is never asked again
+    // under a newer one: the key moves at a kick, and the tree drawn until the swap would paint the newer
+    // field under its own identity. At a swap the manager's Reload asks every tile anew: ForgetRefused.
+    template <class Again>
+    void Reopen(Again again) {
+        const uint64_t key = m_key.load();
+        if (!(m_wf && m_wf->SolvedFor(key))) return;   // nothing to answer with yet
+        std::vector<Refused> q;
+        {
+            std::lock_guard<std::mutex> lk(m_refusedMx);
+            for (size_t i = 0; i < m_refused.size();) {
+                if (m_refused[i].key == key || m_refused[i].key == 0) {
+                    q.push_back(m_refused[i]);
+                    m_refused[i] = m_refused.back();
+                    m_refused.pop_back();
+                    continue;
+                }
+                ++i;
+            }
+        }
+        for (const Refused& f : q) again(f.tenant, f.req);
+    }
+    void ForgetRefused() {
+        std::lock_guard<std::mutex> lk(m_refusedMx);
+        m_refused.clear();
+    }
+
     // The tile: plane r.face, any mip. Answers false (Transient) until the solver's live field
     // carries this node's key -- the tree never caches a tile of the wrong identity.
     bool PaintTile(const ColorFrame& frame, const TileRequest& r, uint32_t texW, uint32_t texH,
                    std::vector<DomainValue>& vals) const override {
         // The solve of THIS node's key: next (its pages are being painted) or live.
-        std::shared_ptr<const WaveField::Solved> s = m_wf ? m_wf->SolvedFor(m_key.load()) : nullptr;
-        if (!s) return false;
+        const uint64_t key = m_key.load();
+        std::shared_ptr<const WaveField::Solved> s = m_wf ? m_wf->SolvedFor(key) : nullptr;
+        if (!s || s->table.nx == 0 || s->table.ny == 0) {   // not now: say whom to tell (Reopen)
+            if (g_loadTenant >= 0) {
+                std::lock_guard<std::mutex> lk(m_refusedMx);
+                m_refused.push_back({g_loadTenant, g_loadReq, key});
+            }
+            return false;
+        }
         const WaveField::GpuTable& t = s->table;
         const uint32_t nx = t.nx, ny = t.ny;
-        if (nx == 0 || ny == 0 || r.face > t.nUsed) return false;
+        // A plane past the solve's (its envelope is nUsed) holds no component of it: void, never "not now"
+        // -- a refusal there would wait for a solve that will never carry it.
+        if (r.face > t.nUsed) {
+            vals.assign(size_t(texW) * texH, DomainValue{});
+            return true;
+        }
         const uint32_t plane = r.face;
         const size_t aw = size_t(nx) * 2;
         const size_t sx0 = size_t(plane & 1u) * nx, sy0 = size_t(plane >> 1u) * ny;
@@ -203,6 +249,13 @@ private:
     Frame m_frame;
     UnitSpec m_unit;
     std::atomic<uint64_t> m_key{0};
+    struct Refused {
+        int tenant;
+        TileRequest req;
+        uint64_t key;   // the key it was asked under (0: before any solve)
+    };
+    mutable std::mutex m_refusedMx;
+    mutable std::vector<Refused> m_refused;   // the loads answered "not now" (Reopen)
 };
 
 }  // namespace ga

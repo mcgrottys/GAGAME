@@ -48,10 +48,13 @@ struct WaterSceneConfig {
     float wfFeatherM = 120.0f;          // window edge blend into the cascades
     float wfChop = 1.1f;                // Gerstner horizontal displacement (the ambient
                                         // sea's lambda; one look for both)
-    float wfExag = 1.15f;               // M8g: solved-field DISPLAY exaggeration, applied
+    float wfExag = 1.0f;                // M8g: solved-field DISPLAY exaggeration, applied
                                         // to the dequant tables at upload (cache stays
                                         // raw physics; ProbeAt reads the same table so
-                                        // the 9b/9c twin holds). vqview shipped 1.15.
+                                        // the 9b/9c twin holds). ONE STATED NUMBER
+                                        // (2026-10-22): water.heightScale (1.15) already
+                                        // scales the whole bank, the solved field with it;
+                                        // 1 here draws the whole sea at that one number.
     float bankTexelM = 1.2f;            // M9c: 1.2, not 2.4. The fold law
                                         // sheds any band the ring undersamples, so this
                                         // caps which wavelengths become GEOMETRY, and a band

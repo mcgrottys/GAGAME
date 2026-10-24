@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <filesystem>
 #include <map>
@@ -439,17 +440,29 @@ bool WaterBankLayer::HeightWet(double wx0, double wz0, double spanM, bool& provi
     return false;
 }
 
-void WaterBankLayer::CornerParams(double wx, double wz, float& lvl, float& bed) const {
+// WATER V2, STAGE 2: the tide at a corner as a function of time -- its MSL and its constituents'
+// phasors at 500 m, the atlas's own grain for the bank (the kernel turns them: Re[P R(t)]).
+void WaterBankLayer::CornerTide(double wx, double wz, float& msl, float p[36]) const {
     double lat = 0.0, lon = 0.0;
     PlaceOfRing(wx, wz, lat, lon);
-    lvl = 0.0f;
-    if (m_atlas && m_atlas->Ready()) {
-        lvl = static_cast<float>(m_atlas->MslNavd(lat, lon) +
-                                 m_atlas->Level(lat, lon, m_simUnix, 500.0));
-    }
+    msl = static_cast<float>(m_atlas->MslNavd(lat, lon));
+    for (int c = 0; c < WaterAtlas::kCon; ++c) m_atlas->Phasor(c, lat, lon, 500.0, &p[2 * c]);
+}
+
+void WaterBankLayer::CornerParams(double wx, double wz, float& bed) const {
+    double lat = 0.0, lon = 0.0;
+    PlaceOfRing(wx, wz, lat, lon);
     bed = (m_comp && m_hgtCh >= 0)
               ? m_comp->SampleHeightResident(m_hgtCh, lat * kD2R, lon * kD2R, 100.0)
               : -30.0f;
+}
+
+// THE FOLDS HELD (2026-10-23; CsBankScatter says why): a fold counts for two of the sea's peak periods
+// after it stood -- every crest of a set has passed over the block by then, so the held set is where the
+// sea folds over its cycle, and it moves as the surf zone does.
+double WaterBankLayer::FoldHoldS() const { return 2.0 * (m_sea ? m_sea->PeakPeriod() : 10.0); }
+uint32_t WaterBankLayer::FoldTick() const {
+    return static_cast<uint32_t>(std::llround((std::max)(m_simUnix - m_foldT0, 0.0) * 10.0)) + 1u;
 }
 
 void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
@@ -462,6 +475,7 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
     // whose heights were answered coarser than asked asks again when a load has landed: the height
     // half only, where the ring stands -- the mask's answer is the ring's place's, kept until it moves.
     const bool moved = !(m_orgValid[m] && ox == m_orgX[m] && oz == m_orgZ[m]);
+    if (m == 0 && moved) m_foldRestart = true;   // the fold grid stands about ring 0's origin: it restarts
     const uint64_t landed = (m_comp && m_hgtCh >= 0) ? m_comp->HeightLanded(m_hgtCh) : 0u;
     // the mask's answers for this ring's tiles, if a loader has brought them since
     bool answered = false;
@@ -928,17 +942,37 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         // reads (1.5 ms of a 1.9 ms list on the storm rail), and the tiles asked it at positions a
         // float's rounding apart, so two tiles need not have agreed on their shared corner. Now
         // the lattice point is the tile origin's own spelling, float(org + i span), asked once.
-        float cLvl[kRingTiles + 1][kRingTiles + 1], cBed[kRingTiles + 1][kRingTiles + 1];
+        float cBed[kRingTiles + 1][kRingTiles + 1];
         bool cHave[kRingTiles + 1][kRingTiles + 1] = {};
-        auto corner = [&](int i, int j, float& lvl, float& bed) {
+        auto corner = [&](int i, int j, float& bed) {
             if (!cHave[j][i]) {
                 CornerParams(static_cast<float>(m_orgX[m] + i * tileSpan),
-                             static_cast<float>(m_orgZ[m] + j * tileSpan), cLvl[j][i], cBed[j][i]);
+                             static_cast<float>(m_orgZ[m] + j * tileSpan), cBed[j][i]);
                 cHave[j][i] = true;
             }
-            lvl = cLvl[j][i];
             bed = cBed[j][i];
         };
+        // WATER V2, STAGE 2: THE TIDE'S PHASORS AT THE RING'S LATTICE, asked when the ring moves (a
+        // place's phasors never change with t; the per-frame sum of 18 constituents at every lattice
+        // point is the kernel's now, by this frame's rotors). No atlas: zero phasors, the plane MSL 0.
+        TideLattice& tl = m_tideLat[m];
+        const bool atlasOn = m_atlas && m_atlas->Ready();
+        if (!tl.ok || tl.orgX != m_orgX[m] || tl.orgZ != m_orgZ[m]) {
+            for (int j = 0; j <= kRingTiles; ++j) {
+                for (int i = 0; i <= kRingTiles; ++i) {
+                    const int k = j * (kRingTiles + 1) + i;
+                    tl.msl[k] = 0.0f;
+                    for (float& v : tl.p[k]) v = 0.0f;
+                    if (atlasOn) {
+                        CornerTide(static_cast<float>(m_orgX[m] + i * tileSpan),
+                                   static_cast<float>(m_orgZ[m] + j * tileSpan), tl.msl[k], tl.p[k]);
+                    }
+                }
+            }
+            tl.orgX = m_orgX[m];
+            tl.orgZ = m_orgZ[m];
+            tl.ok = atlasOn;
+        }
         for (int ty = 0; ty < kRingTiles; ++ty) {
             for (int tx = 0; tx < kRingTiles; ++tx) {
                 if (!m_wet[m][ty * kRingTiles + tx]) continue;
@@ -951,7 +985,10 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 for (int k = 0; k < 4; ++k) {
                     const double cx = t.orgXZ[0] + (k & 1) * tileSpan;
                     const double cz = t.orgXZ[1] + ((k >> 1) & 1) * tileSpan;
-                    corner(tx + (k & 1), ty + ((k >> 1) & 1), t.lvl[k], t.bed[k]);
+                    corner(tx + (k & 1), ty + ((k >> 1) & 1), t.bed[k]);
+                    const int lk = (ty + ((k >> 1) & 1)) * (kRingTiles + 1) + tx + (k & 1);
+                    t.msl[k] = tl.msl[lk];
+                    std::memcpy(t.tide[k], tl.p[lk], sizeof(t.tide[k]));
                     // M8: under a --storm override the grid is STALE by definition -- the
                     // law answers 1 (the storm IS the reference). M7j/THE LOST LINE: every
                     // corner is written unconditionally; a tile that shipped 0 once flattened
@@ -1161,14 +1198,23 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.bandKFold[3] = 0.0f;
     for (int c = 0; c < 3; ++c) cb.bandKSpread[c] = m_sea->BandKSpread(c);
     cb.bandKSpread[3] = 0.0f;
+    // the texture's mean-level moment per band, from the CPU twin's walk of the same h0 grid (0
+    // until it is ready: no lift is the old surface)
+    for (int c = 0; c < 3; ++c) cb.bandLift[c] = float(m_sea->Ocean().LiftMoment(c));
+    cb.bandLift[3] = float(m_sea->Ocean().Lambda());   // the chop: the crest law's drawn orbit
     cb.sweB[0] = m_tidePlane;   // the solver is truth: its level is this plane plus its deviation
-    cb.sweB[1] = cb.sweB[2] = cb.sweB[3] = 0.0f;
+    cb.sweB[1] = (m_swe && m_swe->Ready()) ? m_swe->WetDepth() : 0.01f;   // its wet depth (SolverSurfaceDev)
+    cb.sweB[2] = cb.sweB[3] = 0.0f;
     static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");
     memcpy(cb.hwU, &m_hw, sizeof(m_hw));   // PHASE B2: hwU..hwS, KernelRows' packing
     memcpy(cb.svU, m_sv, sizeof(m_sv));   // svU..svO, SweDomain::KernelRows' packing
     cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
     cb.debugA[1] = flatBedNavd;
-    cb.debugA[2] = cb.debugA[3] = 0.0f;
+    // GAGAME_NO_CASCADE_CREST=1: the cascades' crest law off, here and in TreeWater (the A/B that splits
+    // the hull's water from the drawn one in cascade-owned surf, 2026-10-23)
+    static const bool noCascadeCrest = [] { const char* e = std::getenv("GAGAME_NO_CASCADE_CREST"); return e && e[0] == '1'; }();
+    cb.debugA[2] = noCascadeCrest ? 1.0f : 0.0f;
+    cb.debugA[3] = 0.0f;
     // M8 wavefield: the solved field's window + per-component table. The time rotor
     // (cos, sin)(sigma t) is computed HERE in doubles and reduced mod 2 pi -- sigma t
     // at unix scale would shred float precision in the kernel (the phase never wraps
@@ -1268,10 +1314,14 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     continue;
                 }
                 if (g.tag == 9u && g.w == kFoldGrid && g.h == kFoldGrid && g.bytes.size() >= size_t(kFoldGrid) * kFoldGrid * 4) {
+                    // the blocks that folded within the hold (each holds the tick it last folded at)
                     const uint32_t* f = reinterpret_cast<const uint32_t*>(g.bytes.data());
+                    const long long now = FoldTick(), hold = std::llround(FoldHoldS() * 10.0);
                     m_foldCells.clear();
                     for (uint32_t i = 0; i < kFoldGrid * kFoldGrid; ++i) {
-                        if (f[i] != 0u) m_foldCells.push_back(static_cast<uint16_t>((i % kFoldGrid) | ((i / kFoldGrid) << 8)));
+                        if (f[i] != 0u && now - static_cast<long long>(f[i]) <= hold) {
+                            m_foldCells.push_back(static_cast<uint16_t>((i % kFoldGrid) | ((i / kFoldGrid) << 8)));
+                        }
                     }
                     continue;
                 }
@@ -1279,17 +1329,24 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 ColumnRing& r = m_under[g.tag - 2u];
                 if (g.w != r.tiles || g.h != r.tiles || g.bytes.size() < size_t(r.tiles) * r.tiles * 4) continue;
                 const uint32_t* f = reinterpret_cast<const uint32_t*>(g.bytes.data());
+                // held as the fold grid is (FoldHoldS): a tile a fold wanted stays mapped for the hold, so
+                // the ladder's mapping moves with the surf zone and not with every crest
+                if (r.seen.size() != size_t(r.tiles) * r.tiles) r.seen.assign(size_t(r.tiles) * r.tiles, -1.0e300);
+                const double holdS = FoldHoldS();
                 uint32_t n = 0;
                 for (uint32_t ty = 0; ty < r.tiles; ++ty) {
                     for (uint32_t tx = 0; tx < r.tiles; ++tx) {
-                        uint8_t want = 0;
-                        for (int dy = -1; dy <= 1 && !want; ++dy) {
-                            for (int dx = -1; dx <= 1 && !want; ++dx) {
+                        uint8_t wantNow = 0;
+                        for (int dy = -1; dy <= 1 && !wantNow; ++dy) {
+                            for (int dx = -1; dx <= 1 && !wantNow; ++dx) {
                                 const int nx = int(tx) + dx, ny = int(ty) + dy;
                                 if (nx < 0 || ny < 0 || nx >= int(r.tiles) || ny >= int(r.tiles)) continue;
-                                if (f[uint32_t(ny) * r.tiles + uint32_t(nx)] != 0u) want = 1;
+                                if (f[uint32_t(ny) * r.tiles + uint32_t(nx)] != 0u) wantNow = 1;
                             }
                         }
+                        double& seen = r.seen[size_t(ty) * r.tiles + tx];
+                        if (wantNow) seen = m_simUnix;
+                        const uint8_t want = (m_simUnix - seen <= holdS) ? 1 : 0;
                         uint8_t& have = r.mapped[size_t(ty) * r.tiles + tx];
                         if (want != have) {
                             for (uint32_t band = 0; band < 4; ++band) {
@@ -1349,6 +1406,23 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     }
     cb.planet[0] = static_cast<float>(PlanetGWave());   // the planet's gravity (core/Planet.h)
     cb.planet[1] = cb.planet[2] = cb.planet[3] = 0.0f;
+    {   // THE FOLDS HELD (gFoldClock): the clock in ticks, the hold, and the restart (consumed here)
+        if (m_foldT0 < 0.0 || m_simUnix < m_foldLastT) {
+            m_foldT0 = m_simUnix;
+            m_foldRestart = true;
+        }
+        m_foldLastT = m_simUnix;
+        cb.foldClock[0] = static_cast<float>(FoldTick());
+        cb.foldClock[1] = static_cast<float>(std::llround(FoldHoldS() * 10.0));
+        cb.foldClock[2] = m_foldRestart ? 1.0f : 0.0f;
+        cb.foldClock[3] = 0.0f;
+        m_foldRestart = false;
+    }
+    {   // WATER V2, STAGE 2: this instant's rotors for the corners' phasors (WaterAtlas::Rotors)
+        float r[WaterAtlas::kCon][2] = {};
+        if (m_atlas && m_atlas->Ready()) m_atlas->Rotors(m_simUnix, r);
+        std::memcpy(cb.tideRot, r, sizeof(cb.tideRot));
+    }
     cb.colN[0] = m_ringsUnder;
     cb.colN[1] = (column && m_ringsUnder) ? 1u : 0u;
     cb.colN[2] = (column && m_foldUav) ? m_foldUav : 0u;

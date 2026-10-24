@@ -22,7 +22,8 @@ cbuffer FloorCb : register(b0) {
     uint gArr;      // the probe array's slot: its Texture2DArray view, or (gCube) its cube view
     uint gMap;      // the residency map's slot, the same kind of view: the true map or a floor
     uint gSlice;    // the slice; under gCube, the face whose plane the row walks
-    uint gLaw;      // 0 PageHave, the law in effect; 1 the floor's read (HaveFloor); 2 gFixed
+    uint gLaw;      // 0 PageHave, the law in effect; 1 the floor's read (HaveFloor); 2 gFixed;
+                    // 3 the law in effect, then the climb (PageSampleClimb, D2)
     uint gAniso;    // 0 the trilinear sampler (the shared layout's s0); 1 its anisotropic s3
     uint gCube;     // 1: through the cube views (PageHaveCube, PageSampleCube)
     float2 gStart;  // uv of quad 0 -- a face's uv under gCube, and past [0, 1] it crosses the edge
@@ -83,9 +84,17 @@ float4 PsFloor(float4 pos : SV_Position) : SV_Target {
     uint status = 0u;
     if (gCube != 0u) {
         const float3 d = CubeDir(gSlice, uv);
-        if (gLaw == 0u) have = PageHaveCube(gTexCubeArr[gMap], sTrilinear, d);
+        if (gLaw == 0u || gLaw == 3u) have = PageHaveCube(gTexCubeArr[gMap], sTrilinear, d);
         else if (gLaw == 1u) have = HaveFloorCube(d);
-        if (gAniso != 0u) {
+        if (gLaw == 3u) {   // the climb: the value and the status are the climb's last sample
+            if (gAniso != 0u) {
+                c = PageSampleCubeClimb(gTexCubeArr[gArr], sAniso, d, have, 15.0f, status);
+                lod = gTexCubeArr[gArr].CalculateLevelOfDetailUnclamped(sAniso, d);
+            } else {
+                c = PageSampleCubeClimb(gTexCubeArr[gArr], sTrilinear, d, have, 15.0f, status);
+                lod = gTexCubeArr[gArr].CalculateLevelOfDetailUnclamped(sTrilinear, d);
+            }
+        } else if (gAniso != 0u) {
             c = PageSampleCube(gTexCubeArr[gArr], sAniso, d, have);
             c.a = gTexCubeArr[gArr].Sample(sAniso, float4(d, 0.0f), have, status).a;
             lod = gTexCubeArr[gArr].CalculateLevelOfDetailUnclamped(sAniso, d);
@@ -95,9 +104,17 @@ float4 PsFloor(float4 pos : SV_Position) : SV_Target {
             lod = gTexCubeArr[gArr].CalculateLevelOfDetailUnclamped(sTrilinear, d);
         }
     } else {
-        if (gLaw == 0u) have = PageHave(gTexArr[gMap], sTrilinear, uv, gSlice);
+        if (gLaw == 0u || gLaw == 3u) have = PageHave(gTexArr[gMap], sTrilinear, uv, gSlice);
         else if (gLaw == 1u) have = HaveFloor(uv);
-        if (gAniso != 0u) {
+        if (gLaw == 3u) {
+            if (gAniso != 0u) {
+                c = PageSampleClimb(gTexArr[gArr], sAniso, uv, gSlice, have, 15.0f, status);
+                lod = gTexArr[gArr].CalculateLevelOfDetailUnclamped(sAniso, uv);
+            } else {
+                c = PageSampleClimb(gTexArr[gArr], sTrilinear, uv, gSlice, have, 15.0f, status);
+                lod = gTexArr[gArr].CalculateLevelOfDetailUnclamped(sTrilinear, uv);
+            }
+        } else if (gAniso != 0u) {
             c = PageSample(gTexArr[gArr], sAniso, uv, gSlice, have);
             c.a = gTexArr[gArr].Sample(sAniso, float3(uv, gSlice), int2(0, 0), have, status).a;
             lod = gTexArr[gArr].CalculateLevelOfDetailUnclamped(sAniso, uv);

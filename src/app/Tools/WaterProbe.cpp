@@ -223,7 +223,7 @@ void ReportOrientation(const scene::Entity& e, const WaveField* waveField, const
     // ---- the ambient cascades (the CPU twin the kernel's textures mirror), outside any window.
     if (sea && seaState && sea->Ocean().Ready()) {
         const double tSec =
-            static_cast<double>(static_cast<float>(simUnix - seaState->CycleUnix()));
+            static_cast<double>(static_cast<float>(simUnix - sea->CascadeCycleUnix()));
         double casAxis = 0.0, casCoh = 0.0;
         GradientAxis(cg[0], cg[2], 64, 2.0,
                      [&](double x, double z) {

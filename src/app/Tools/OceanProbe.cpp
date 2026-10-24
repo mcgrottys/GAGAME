@@ -10,7 +10,7 @@
 #include "render/Renderer.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,7 +32,7 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
                                  const std::function<double(double)>& oceanAt,
                                  const std::function<double(int, double)>& faceAt,
                                  const std::function<double(int, double)>& faceQAt,
-                                 WeatherManager& weather) {
+                                 WaterManager& weather) {
     double plat = 0, plon = 0;
     if (sscanf_s(opt.oceanProbe.c_str(), "%lf,%lf", &plat, &plon) == 2) {
         // The external solver window needs its history before it can be mirrored

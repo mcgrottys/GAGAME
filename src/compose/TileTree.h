@@ -811,6 +811,19 @@ public:
             }
             const Status st = Tile(frame, tag, r, out, loc);
             if (st == Status::Transient && (TreeStopped() || TreePaintRefused())) return false;   // not now: a later load
+            if (st == Status::Transient) {
+                // EVERY OTHER "NOT NOW" IS NOT A TILE (residency audit 2026-10-22, F3). A leaf not ready for
+                // its identity (WaveFieldSource before its solve is live), a snapshot changed under the
+                // paint: these were handed over as 64 KB of zeros, which the manager mapped and the map
+                // claimed -- a flat or black tile standing until an Invalidate. Answered NOT WHOLE, the
+                // manager maps nothing and asks again when the tree next changes (the version law), with
+                // no retry spent (four quick retries would make the hole permanent, audit F8).
+                g_tileIncomplete = true;
+                ++notNow;
+                out.assign(65536, 0);
+                if (loc) *loc = TileLoc{};
+                return true;
+            }
             if (st != Status::Content) {
                 out.assign(65536, 0);
                 if (loc) *loc = TileLoc{};
@@ -846,6 +859,7 @@ public:
     std::atomic<uint32_t> redundant{0};   // M9bd: folds the 4/255 rule found moved nothing
     std::atomic<uint32_t> magnified{0};   // PHASE A4: tiles answered as their parent, magnified
     std::atomic<uint32_t> below{0};       // 4.20's third clause: tiles below the own level, the own tile magnified (MagnifyOwn)
+    std::atomic<uint32_t> notNow{0};      // loads answered "not now" (not whole): nothing mapped, asked again on a change
 
     // PHASE A4: THE FINEST LEVEL ANY SOURCE UNDER THIS NODE HAS OF ITS OWN over a box: a leaf's
     // FinestMip there, a compose the finest of the children that touch the box (the membership
@@ -893,6 +907,10 @@ public:
                  voids.load(), refs.load(), composed.load(), hits.load(), arcPlaces.load(),
                  arcReads.load());
         std::string s = b;
+        if (notNow.load()) {
+            snprintf(b, sizeof(b), " | %u not now (not whole: nothing mapped)", notNow.load());
+            s += b;
+        }
         if (magnified.load() || below.load()) {
             snprintf(b, sizeof(b), " | %u magnified (no bytes: the parent), %u below the own level (the own tile magnified)",
                      magnified.load(), below.load());

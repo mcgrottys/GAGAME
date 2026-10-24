@@ -13,6 +13,7 @@
 #include "compose/ExposureSource.h"
 #include "compose/SurfaceFrame.h"
 #include "core/OceanFft.h"
+#include "core/Planet.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
 #include "core/GradeField.h"
@@ -147,6 +148,14 @@ public:
     uint32_t ExposureResSrv() const { return m_expRes; }
     // M7p: the peak propagation direction, for the bank's wave-current amplification.
     bool PeakDirValid() const { return m_peakDirValid; }
+    // THE CASCADES' CLOCK'S ORIGIN, unix s: the FFT is fed simUnix minus this, cast to float. Since the
+    // sea came from the global wave grid (PR 107) it is the GRID's cycle, not the SeaState's; every CPU
+    // reader of the cascades takes it from here (TreeWater::SetCascadeSea), or it samples the same sea
+    // at another instant -- right Hs, wrong crests (2026-10-23, Mark: "the water is not matching what
+    // the boat hits": coherence 0.1-0.4 between the hull's sea and the drawn one at every wavelength).
+    double CascadeCycleUnix() const;
+    // The peak partition's period, s (its deep-water phase speed c = g T / 2 pi)
+    double PeakPeriod() const { return 6.283185307179586 * double(m_cPeak) / PlanetGWave(); }
     float PeakDirX() const { return m_peakDirX; }
     float PeakDirZ() const { return m_peakDirZ; }
     // M8 foamlaw: unit-sea rms envelope per cascade band (sqrt(2 m0), exaggerated) --

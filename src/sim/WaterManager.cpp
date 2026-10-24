@@ -1,4 +1,4 @@
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include "compose/SurfaceFrame.h"
 
@@ -17,9 +17,9 @@ namespace {
 constexpr double kD2R = 3.14159265358979 / 180.0;
 }  // namespace
 
-void WeatherManager::Init(Compositor* comp, int heightChannel, const WaterAtlas* atlas,
-                          const TideModel* tides, const GlobeModel* globe,
-                          const SeaState* sea, const CurrentModel* currents) {
+void WaterManager::Init(Compositor* comp, int heightChannel, const WaterAtlas* atlas,
+                        const TideModel* tides, const GlobeModel* globe,
+                        const SeaState* sea, const CurrentModel* currents) {
     m_comp = comp;
     m_hgtCh = heightChannel;
     m_atlas = atlas;
@@ -27,10 +27,11 @@ void WeatherManager::Init(Compositor* comp, int heightChannel, const WaterAtlas*
     m_globe = globe;
     m_sea = sea;
     m_currents = currents;
+    Register();
 }
 
-void WeatherManager::AddExternalWindow(const char* name, SweSolver* solver,
-                                       std::function<double(double)> oceanAt) {
+void WaterManager::AddExternalWindow(const char* name, SweSolver* solver,
+                                     std::function<double(double)> oceanAt) {
     Window w;
     w.name = name;
     w.solver = solver;
@@ -46,12 +47,13 @@ void WeatherManager::AddExternalWindow(const char* name, SweSolver* solver,
     snprintf(w.levelTag, sizeof(w.levelTag), "swe.%s + stations", name);
     snprintf(w.currentTag, sizeof(w.currentTag), "swe.%s (solved)", name);
     m_windows.push_back(std::move(w));
+    Register();
 }
 
-void WeatherManager::AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny,
-                                      const SweConfig& cfg,
-                                      std::function<double(double)> oceanAt,
-                                      double spinupHours, FaceClock faceAt, FaceClock faceQAt) {
+void WaterManager::AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny,
+                                    const SweConfig& cfg,
+                                    std::function<double(double)> oceanAt,
+                                    double spinupHours, FaceClock faceAt, FaceClock faceQAt) {
     // PHASE C1: a dormant window's domain (and its holds-water line) is made on activation, from its
     // box and cells and the stack's bed.
     Window w;
@@ -69,10 +71,11 @@ void WeatherManager::AddDormantWindow(const char* name, const double box[4], uin
     snprintf(w.levelTag, sizeof(w.levelTag), "swe.%s + stations", name);
     snprintf(w.currentTag, sizeof(w.currentTag), "swe.%s (solved)", name);
     m_windows.push_back(std::move(w));
+    Register();
 }
 
-bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                              const char* name, double simUnix) {
+bool WaterManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                            const char* name, double simUnix) {
     for (Window& w : m_windows) {
         if (w.name != name) continue;
         if (w.active) return true;
@@ -102,6 +105,12 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         w.owned->Init(gpu, sc, shaderDir, dom, cfg);
         LogWindowHoldsWater(w.owned->Domain(), cfg, "on activation: on the CPU bed, the stack at the cells");
         w.owned->SetBed(gpu, m_hgtArr, m_hgtRes, m_hgtMips, m_bed);   // PHASE B2: the standing window
+        if (m_atlas) {   // C1: the open sea rides the manager's Level
+            const WaterAtlas* atlas = m_atlas;
+            w.owned->SetLevelSource([atlas](double la, double lo, double t) {
+                return atlas->Ready() ? atlas->MslNavd(la, lo) + atlas->Level(la, lo, t) : NAN;
+            });
+        }
         w.solver = w.owned.get();
         w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, w.faceAt, w.faceQAt);
         w.active = true;
@@ -113,11 +122,11 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
     return false;
 }
 
-void WeatherManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
+void WaterManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
     ReadMirrors(gpu, simUnix, kMirrorDt);
 }
 
-void WeatherManager::RequestRegion(double latDeg, double lonDeg, double radiusM) {
+void WaterManager::RequestRegion(double latDeg, double lonDeg, double radiusM) {
     for (Window& w : m_windows) {
         if (!w.active || !w.solver || !w.solver->Ready()) continue;
         // A region may reach a window whose box its centre is outside of: the solver's own chart
@@ -126,7 +135,7 @@ void WeatherManager::RequestRegion(double latDeg, double lonDeg, double radiusM)
     }
 }
 
-double WeatherManager::SolverAsOf() const {
+double WaterManager::SolverAsOf() const {
     double asOf = kNeverRead;
     bool any = false;
     for (const Window& w : m_windows) {
@@ -139,8 +148,8 @@ double WeatherManager::SolverAsOf() const {
     return asOf;
 }
 
-void WeatherManager::SolverRefine(double latDeg, double lonDeg, double unixT,
-                                  WeatherSample& s) const {
+void WaterManager::SolverRefine(double latDeg, double lonDeg, double unixT,
+                                WeatherSample& s) const {
     const Window* w = WindowAt(latDeg, lonDeg);
     if (!w || !w->solver || !w->solver->Ready()) return;
     const double wDom = w->solver->DomainWeight(latDeg, lonDeg);
@@ -156,6 +165,7 @@ void WeatherManager::SolverRefine(double latDeg, double lonDeg, double unixT,
         return;
     }
     const double atlas = s.levelNavd;
+    // the wet columns' surface; where none holds water, under the solver's bed (SweSolver Reconstruct)
     s.levelNavd = atlas + wDom * (w->oceanAt(unixT) + double(d.dEta) - atlas);
     s.levelSrc = w->levelTag;
     if (d.currentValid) {
@@ -167,7 +177,7 @@ void WeatherManager::SolverRefine(double latDeg, double lonDeg, double unixT,
     s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
 }
 
-void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge) {
+void WaterManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge) {
     for (Window& w : m_windows) {
         if (!w.active || !w.solver || !w.solver->Ready()) continue;
         if (simUnix - w.mirrorT <= maxAge) continue;   // inside the contract: no drain
@@ -186,11 +196,11 @@ void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge) {
     }
 }
 
-int WeatherManager::DomainRects(const Window& w, float out[4][4]) const {
+int WaterManager::DomainRects(const Window& w, float out[4][4]) const {
     return SurfaceFrame::SliceRectsLL(m_stand, w.box[0], w.box[1], w.box[2], w.box[3], out);
 }
 
-void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
+void WaterManager::PinDomains(ResidencyManager& res, int hgtTenant) {
     if (hgtTenant < 0 || !m_hgtArr) return;
     std::string pinned;
     for (const Window& w : m_windows) {
@@ -222,8 +232,8 @@ void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
     }
 }
 
-uint64_t WeatherManager::ClaimedMips(const ResidencyManager& res, int hgtTenant,
-                                     uint64_t hist[16], const char* only) const {
+uint64_t WaterManager::ClaimedMips(const ResidencyManager& res, int hgtTenant,
+                                   uint64_t hist[16], const char* only) const {
     for (int m = 0; m < 16; ++m) hist[m] = 0;
     if (hgtTenant < 0 || !m_hgtArr) return 0;
     uint64_t n = 0;
@@ -258,8 +268,8 @@ uint64_t WeatherManager::ClaimedMips(const ResidencyManager& res, int hgtTenant,
     return n;
 }
 
-WeatherManager::BedWait WeatherManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
-                                                    int hgtTenant, const char* only) {
+WaterManager::BedWait WaterManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
+                                                  int hgtTenant, const char* only) {
     BedWait bw;
     if (hgtTenant < 0 || !m_hgtArr) return bw;
     struct Domain {
@@ -328,9 +338,9 @@ WeatherManager::BedWait WeatherManager::WaitForBeds(Gpu& gpu, ResidencyManager& 
     return bw;
 }
 
-void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                            double simUnix, double camLatDeg, double camLonDeg,
-                            double camAltM) {
+void WaterManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                          double simUnix, double camLatDeg, double camLonDeg,
+                          double camAltM) {
     int active = 0;
     for (Window& w : m_windows) {
         if (!w.active && w.nx && camAltM < kActivateAltM) {
@@ -354,7 +364,7 @@ void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
     stats = s;
 }
 
-void WeatherManager::Simulate(hal::CommandContext& cmd, Gpu& gpu, double simUnix) {
+void WaterManager::Simulate(hal::CommandContext& cmd, Gpu& gpu, double simUnix) {
     for (Window& w : m_windows) {
         if (!w.active || !w.owned || !w.solver->Ready() || !w.solver->Demanded()) continue;
         if (!w.servedLogged) {
@@ -366,13 +376,13 @@ void WeatherManager::Simulate(hal::CommandContext& cmd, Gpu& gpu, double simUnix
     }
 }
 
-int WeatherManager::ActiveWindows() const {
+int WaterManager::ActiveWindows() const {
     int n = 0;
     for (const Window& w : m_windows) n += w.active ? 1 : 0;
     return n;
 }
 
-const WeatherManager::Window* WeatherManager::WindowAt(double latDeg, double lonDeg) const {
+const WaterManager::Window* WaterManager::WindowAt(double latDeg, double lonDeg) const {
     for (const Window& w : m_windows) {
         if (!w.active) continue;
         if (w.solver && w.solver->Ready() ? w.solver->Domain().Holds(latDeg, lonDeg)
@@ -383,98 +393,242 @@ const WeatherManager::Window* WeatherManager::WindowAt(double latDeg, double lon
     return nullptr;
 }
 
-WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
-                                    double groundResM, bool refineBySolver) const {
-    WeatherSample s;
-    const double latRad = latDeg * kD2R, lonRad = lonDeg * kD2R;
+// ---- THE REGISTRY -------------------------------------------------------------------------------
+namespace {
+// The nearest node of a regular lat/lon grid (rows from lat1 down, columns ending at lon1); false
+// outside it. A grid whose longitudes run 0..360 takes a western longitude modulo 360.
+bool NearestNode(double latDeg, double lonDeg, int nx, int ny, double lon1, double dLon, double lat1,
+                 double dLat, size_t& at) {
+    if (lon1 > 180.0 && lonDeg < 0.0) lonDeg += 360.0;
+    const int ix = static_cast<int>((lonDeg - (lon1 - nx * dLon)) / dLon);
+    const int iy = static_cast<int>((lat1 - latDeg) / dLat);
+    if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) return false;
+    at = static_cast<size_t>(iy) * nx + ix;
+    return true;
+}
+}  // namespace
 
-    // ---- the bed: the one composed stack, provenance = the topmost covering source.
+namespace water {
+const char* Name(Quantity q) {
+    static const char* k[] = {"level", "current", "bed", "sea", "wind", "memory"};
+    return k[static_cast<int>(q)];
+}
+const char* Name(Support s) {
+    static const char* k[] = {"point", "grid", "tree", "window", "analytic"};
+    return k[static_cast<int>(s)];
+}
+const char* Name(TimeForm f) {
+    static const char* k[] = {"static", "harmonic", "packet", "series", "stochastic", "transient"};
+    return k[static_cast<int>(f)];
+}
+}  // namespace water
+
+// The producers this manager answers for, in the order their law composes them (OVER: the later on
+// top), then the solver windows (SolverRefine REPLACES), then the declared.
+void WaterManager::Register() {
+    using Q = water::Quantity;
+    using Su = water::Support;
+    using T = water::TimeForm;
+    m_producers.clear();
+    const auto add = [&](const char* name, Q q, Su su, T f, double grainM,
+                         const char* reader, decltype(water::Producer::at) at) {
+        water::Producer p;
+        p.name = name;
+        p.q = q;
+        p.support = su;
+        p.form = f;
+        p.grainM = grainM;
+        p.reader = reader;
+        p.at = std::move(at);
+        m_producers.push_back(std::move(p));
+    };
+    // The bed: the one composed stack at the finest level held; provenance the topmost regional source.
     if (m_comp && m_hgtCh >= 0) {
-        // RESIDENT: a hull asks this on the frame thread every step (TreeWater::SlowAt, at 1 m); the tree's
-        // blocking read painted each cold tile there -- 2.8 s of the frame's waits over four travels
-        // (2026-10-15). The finest level held answers now; the step after a landing reads the finer one.
-        s.bedNavd = m_comp->SampleHeightResident(m_hgtCh, latRad, lonRad, groundResM);
-        s.bedSrc = "earth.height base";
-        const auto& ch = m_comp->ChannelAt(m_hgtCh);
-        for (const auto* src : ch.height) {
-            const SourceInfo& si = src->Info();
-            if (lonDeg >= si.lon0 && lonDeg <= si.lon1 && latDeg >= si.lat0 &&
-                latDeg <= si.lat1 && si.lon1 - si.lon0 < 359.0) {
-                s.bedSrc = si.name.c_str();   // topmost regional source wins the label
-            }
-        }
+        add("water.bed (the height stack)", Q::Bed, Su::Tree, T::Static, 3.43,
+            "Query; the bank, the solvers, the hull (TreeWater::BedAt)",
+            [this](double la, double lo, double, double g, water::Sample& x) {
+                // RESIDENT: a hull asks this on the frame thread every step (TreeWater::SlowAt, at 1 m); the
+                // tree's blocking read painted each cold tile there -- 2.8 s of the frame's waits over four
+                // travels (2026-10-15). The finest level held answers now; the step after a landing reads
+                // the finer one.
+                x.v[0] = m_comp->SampleHeightResident(m_hgtCh, la * kD2R, lo * kD2R, g);
+                x.has = 1;
+                x.src = "earth.height base";
+                for (const auto* src : m_comp->ChannelAt(m_hgtCh).height) {
+                    const SourceInfo& si = src->Info();
+                    if (lo >= si.lon0 && lo <= si.lon1 && la >= si.lat0 && la <= si.lat1 &&
+                        si.lon1 - si.lon0 < 359.0) {
+                        x.src = si.name.c_str();   // the topmost regional source wins the label
+                    }
+                }
+                return true;
+            });
     }
-
-    // ---- the level: the tide atlas everywhere; inside a solver's domain the solver's own surface
-    // (SolverRefine, at the end: the solver is truth).
-    if (m_atlas && m_atlas->Ready()) {
-        s.levelNavd = m_atlas->MslNavd(latDeg, lonDeg) +
-                      m_atlas->Level(latDeg, lonDeg, unixT, groundResM);
-        s.levelSrc = "water.tide atlas";
+    // The level: the tide atlas everywhere (inside a solver's domain the solver's own surface).
+    if (m_atlas) {
+        add("water.tide atlas", Q::Level, Su::Grid, T::Harmonic, 0.0,
+            "Query; the bank's corners, the solve's level",
+            [this](double la, double lo, double t, double g, water::Sample& x) {
+                if (!m_atlas->Ready()) return false;
+                x.v[0] = m_atlas->MslNavd(la, lo) + m_atlas->Level(la, lo, t, g);
+                x.has = 1;
+                x.src = "water.tide atlas";
+                return true;
+            });
     }
-
-    // ---- currents: the scene's regional model field; the solver's solved current replaces it where the
-    // solver has one (SolverRefine).
-    if (m_currents && m_currents->FieldCount()) {
-        float u = 0, v = 0;
-        if (m_currents->SampleAt(lonDeg, latDeg, u, v)) {
-            s.u = u;
-            s.v = v;
-            s.currentSrc = "current.field (surface)";
-        }
+    // The current: the scene's regional model fields (the solver's solved current replaces it).
+    if (m_currents) {
+        add("current.field (surface)", Q::Current, Su::Grid, T::Static, 0.0,
+            "Query; the Gulf map",
+            [this](double la, double lo, double, double, water::Sample& x) {
+                float u = 0, v = 0;
+                if (!m_currents->FieldCount() || !m_currents->SampleAt(lo, la, u, v)) return false;
+                x.v[0] = u;
+                x.v[1] = v;
+                x.has = 3;
+                x.src = "current.field (surface)";
+                return true;
+            });
     }
-
-    // ---- waves: the global Hs grid carries the world; the Gulf point forecast adds
-    // period + direction inside its box (a POINT product -- declared, not hidden).
-    if (m_globe && m_globe->WavesNx() > 0) {
-        const auto& hs = m_globe->Hs();
-        const int nx = m_globe->WavesNx(), ny = m_globe->WavesNy();
-        double lonS = lonDeg;
-        if (m_globe->WavesLon1() > 180.0 && lonS < 0.0) lonS += 360.0;
-        const double fx =
-            (lonS - (m_globe->WavesLon1() - nx * m_globe->WavesDLon())) / m_globe->WavesDLon();
-        const double fy = (m_globe->WavesLat1() - latDeg) / m_globe->WavesDLat();
-        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
-        if (ix >= 0 && iy >= 0 && ix < nx && iy < ny) {
-            const float v = hs[static_cast<size_t>(iy) * nx + ix];
-            if (v >= 0.0f) {
-                s.hs = v;
-                s.waveSrc = "gfswave.global 0p25 (Hs)";
-            }
-        }
+    // The sea's summary: the global Hs grid carries the world; the sea-state sources (each file at its
+    // own place and clock, the later listed on top: WaveScale's order) add period and direction inside
+    // their boxes, and Hs where the grid has none -- point products, declared, not hidden.
+    if (m_globe) {
+        add("gfswave.global 0p25 (Hs)", Q::Sea, Su::Grid, T::Series, 27750.0,
+            "Query (tools); WaveScale; the far sea (Globe.hlsl FarSeaScale)",
+            [this](double la, double lo, double, double, water::Sample& x) {
+                size_t i = 0;
+                if (m_globe->WavesNx() <= 0 ||
+                    !NearestNode(la, lo, m_globe->WavesNx(), m_globe->WavesNy(), m_globe->WavesLon1(),
+                                 m_globe->WavesDLon(), m_globe->WavesLat1(), m_globe->WavesDLat(), i)) {
+                    return false;
+                }
+                const float v = m_globe->Hs()[i];
+                if (!(v >= 0.0f)) return false;
+                x.v[0] = v;
+                x.has = 1;
+                x.src = "gfswave.global 0p25 (Hs)";
+                return true;
+            });
     }
-    // PHASE C2: period and direction (and Hs where the grid has none) from the sea-state source
-    // whose box holds the place, the later listed on top (WaveScale's order) -- each file at its own
-    // place and clock; no box in code.
     for (const SeaState* src : m_seaSources) {
-        if (!src || !src->Ready() || !src->HasBox()) continue;
-        double b[4];
-        src->Box(b);
-        if (latDeg < b[0] || latDeg > b[2] || lonDeg < b[1] || lonDeg > b[3]) continue;
-        const SeaHour& h = src->Hour(src->HourIndex(unixT));
-        if (h.parts.empty()) continue;
-        s.tp = static_cast<float>(h.combinedTp);
-        s.dirDeg = static_cast<float>(h.combinedFromDeg);
-        if (s.hs <= 0.0f) s.hs = static_cast<float>(h.combinedHs);
-        s.waveSrc = src->Label().c_str();
+        if (!src) continue;
+        add(src->Label().c_str(), Q::Sea, Su::Point, T::Series, 0.0,
+            "Query (tools); the eye's spectrum (SeaLayer::PartsAt); WaveScale",
+            [src](double la, double lo, double t, double, water::Sample& x) {
+                if (!src->Ready() || !src->HasBox()) return false;
+                double b[4];
+                src->Box(b);
+                if (la < b[0] || la > b[2] || lo < b[1] || lo > b[3]) return false;
+                const SeaHour& h = src->Hour(src->HourIndex(t));
+                if (h.parts.empty()) return false;
+                x.v[0] = h.combinedHs;
+                x.v[1] = h.combinedTp;
+                x.v[2] = h.combinedFromDeg;
+                x.has = 7;
+                x.fills = 1;
+                x.src = src->Label().c_str();
+                return true;
+            });
     }
+    // The wind: the global GFS 10 m vector grid.
+    if (m_globe) {
+        add("gfs.wind 0p5 (10 m)", Q::Wind, Su::Grid, T::Static, 55500.0,
+            "Query; the pixel's Cox-Munk slopes",
+            [this](double la, double lo, double, double, water::Sample& x) {
+                size_t i = 0;
+                if (m_globe->WindNx() <= 0 ||
+                    !NearestNode(la, lo, m_globe->WindNx(), m_globe->WindNy(), m_globe->WindLon1(),
+                                 m_globe->WindDLon(), m_globe->WindLat1(), m_globe->WindDLat(), i)) {
+                    return false;
+                }
+                x.v[0] = m_globe->WindU()[i];
+                x.v[1] = m_globe->WindV()[i];
+                x.has = 3;
+                x.src = "gfs.wind 0p5 (10 m)";
+                return true;
+            });
+    }
+    // The solver windows: transient state, refining the level and the current where they are resident.
+    for (const Window& w : m_windows) {
+        add(w.levelTag, Q::Level, Su::Window, T::Transient, 0.0,
+            "SolverRefine; the bank's level", nullptr);
+        add(w.currentTag, Q::Current, Su::Window, T::Transient, 0.0,
+            "SolverRefine; the bank, the wave solve", nullptr);
+    }
+    for (const water::Producer& p : m_declared) m_producers.push_back(p);
+}
 
-    // ---- wind: the global GFS 10 m vector grid.
-    if (m_globe && m_globe->WindNx() > 0) {
-        const int nx = m_globe->WindNx(), ny = m_globe->WindNy();
-        double lonS = lonDeg;
-        if (m_globe->WindLon1() > 180.0 && lonS < 0.0) lonS += 360.0;
-        const double fx =
-            (lonS - (m_globe->WindLon1() - nx * m_globe->WindDLon())) / m_globe->WindDLon();
-        const double fy = (m_globe->WindLat1() - latDeg) / m_globe->WindDLat();
-        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
-        if (ix >= 0 && iy >= 0 && ix < nx && iy < ny) {
-            s.windU = m_globe->WindU()[static_cast<size_t>(iy) * nx + ix];
-            s.windV = m_globe->WindV()[static_cast<size_t>(iy) * nx + ix];
-            s.windSrc = "gfs.wind 0p5 (10 m)";
+void WaterManager::LogProducers() const {
+    Log("[water] %zu producers (Water V2, sim/WaterProducer.h): quantity, support, time, grain, name -- who "
+        "reads it",
+        m_producers.size());
+    for (const water::Producer& p : m_producers) {
+        char g[24] = "-";
+        if (p.grainM > 0.0) snprintf(g, sizeof(g), "%.4g m", p.grainM);
+        Log("[water]   %-8s %-9s %-10s %-9s %s -- %s%s", water::Name(p.q), water::Name(p.support),
+            water::Name(p.form), g, p.name.c_str(), p.reader.c_str(), p.at ? "" : " (declared)");
+    }
+}
+
+// THE QUERY, ONE LOOP: each producer that answers here, composed by its quantity's law (SUM: the
+// first says, the rest add; OVER and the sea's summary: the later on top, a `fills` component only
+// where nothing positive is composed yet); a quantity's provenance is the last producer that said
+// any of it. Then the depth, and the solver windows refine (SolverRefine: the solver is truth).
+WeatherSample WaterManager::Query(double latDeg, double lonDeg, double unixT,
+                                  double groundResM, bool refineBySolver) const {
+    struct Acc {
+        double v[3] = {0.0, 0.0, 0.0};
+        uint8_t has = 0;
+        const char* src = "-";
+    } acc[water::kQuantities];
+    for (const water::Producer& p : m_producers) {
+        water::Sample x;
+        if (!p.at || !p.at(latDeg, lonDeg, unixT, groundResM, x)) continue;
+        Acc& a = acc[static_cast<int>(p.q)];
+        const bool sum = water::CombineOf(p.q) == water::Combine::Sum;
+        bool said = false;
+        for (int i = 0; i < 3; ++i) {
+            const uint8_t bit = static_cast<uint8_t>(1u << i);
+            if (!(x.has & bit)) continue;
+            if ((x.fills & bit) && (a.has & bit) && a.v[i] > 0.0) continue;
+            a.v[i] = (sum && (a.has & bit)) ? a.v[i] + x.v[i] : x.v[i];
+            a.has |= bit;
+            said = true;
         }
+        if (said) a.src = x.src;
     }
-
+    using Q = water::Quantity;
+    const Acc& lv = acc[int(Q::Level)];
+    const Acc& cu = acc[int(Q::Current)];
+    const Acc& bd = acc[int(Q::Bed)];
+    const Acc& se = acc[int(Q::Sea)];
+    const Acc& wi = acc[int(Q::Wind)];
+    WeatherSample s;
+    if (bd.has) {
+        s.bedNavd = static_cast<float>(bd.v[0]);
+        s.bedSrc = bd.src;
+    }
+    if (lv.has) {
+        s.levelNavd = lv.v[0];
+        s.levelSrc = lv.src;
+    }
+    if (cu.has) {
+        s.u = static_cast<float>(cu.v[0]);
+        s.v = static_cast<float>(cu.v[1]);
+        s.currentSrc = cu.src;
+    }
+    if (se.has) {
+        s.hs = static_cast<float>(se.v[0]);
+        s.tp = static_cast<float>(se.v[1]);
+        s.dirDeg = static_cast<float>(se.v[2]);
+        s.waveSrc = se.src;
+    }
+    if (wi.has) {
+        s.windU = static_cast<float>(wi.v[0]);
+        s.windV = static_cast<float>(wi.v[1]);
+        s.windSrc = wi.src;
+    }
     s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
     if (refineBySolver) SolverRefine(latDeg, lonDeg, unixT, s);
     return s;

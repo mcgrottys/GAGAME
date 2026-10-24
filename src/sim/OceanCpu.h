@@ -327,6 +327,21 @@ public:
     // OceanFft::MeasureHs, which reads the rendered texture back and computes the same number.
     double Variance(int cascade) const;
 
+    // THE MEAN-LEVEL MOMENT of a cascade (the Lagrangian lift, 2026-10-23), m: E[h div D] over the
+    // texture's plane and a period, D the choppy offset as drawn (lambda on). The mesh carries each
+    // label to L + D(L) at height h(L), so the surface an eye sees over a patch stands at the labels'
+    // heights weighted by the area det(1 + grad D) their cells are carried onto: its Eulerian mean is
+    // E[h] + E[h div D] to second order. Per pair, h = 2 Re P and div D = 2 lambda k Re P (the
+    // Jacobian rows below), so the moment is lambda sum 2 k (|A|^2 + |B|^2) over EVERY pair with
+    // energy -- the GPU texture's own content, not the retained subset. Its sign is the chop's: +
+    // while the offset points away from the crests (memory: cascade-sign finding #2, open); a fix
+    // of that sign flips the Jacobian rows and this with them. The bank lifts its labels by the
+    // negative of this times its gains (WaterBank.hlsl gBandLift; TreeWater::Finish the twin).
+    double LiftMoment(int cascade) const { return m_lift[cascade]; }
+    // The choppy displacement's scale (CsAssemble's fLambda): the drawn lateral orbit is lambda times
+    // the height's, the crest law's aH on the cascades (WaterTerms.h CrestLaw).
+    double Lambda() const { return m_lambda; }
+
 private:
     // One retained conjugate pair. Exactly 64 bytes -- one cache line, and the query loop is
     // pure streaming over these.
@@ -350,6 +365,7 @@ private:
     uint64_t m_epoch = 0;               // F21: moves with every SetSeaState; the memo's key
     double m_varAll[kCascades] = {};    // realized variance over every pair with energy
     double m_varKept[kCascades] = {};   // realized variance of the retained pairs
+    double m_lift[kCascades] = {};      // E[h div D], every pair with energy (LiftMoment)
     double m_kLo[kCascades] = {}, m_kHi[kCascades] = {};   // the band cuts, rad/m (OceanFft's)
     double m_lambda = 1.1;
     bool m_ready = false;

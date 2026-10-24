@@ -429,6 +429,33 @@ field's cells (below). The raw excess stays the foam's indicator.
 water has c ≈ 6 m/s, so a 1 m/s ebb reaches r ≈ −0.17 — a third of the way to blocking —
 exactly over the shallow bar. Deep water shrugs the same current off (c ≈ 17 m/s).
 
+**The drawn sea's mean level: the Lagrangian lift** (2026-10-23; WATER_V2 §12.12). The bank draws a
+LAGRANGIAN sheet: the label L stands at L + D(L), at the level plus η(L). Over a patch the eye sees
+the labels' heights weighted by the area each label's cell is carried onto, det(1 + ∇D), so the
+surface's Eulerian mean is
+
+    ⟨η⟩_E = E[η] + E[η ∇·D] + O(ε³),   E[η] = 0 for a linear sea,
+
+and for one component of vertical amplitude a and lateral orbit a_h, E[η ∇·D] = ∓ ½ k a a_h:
+minus where the offset gathers the labels toward the crests (Gerstner's sign, the solved field's),
+plus where it carries them away (the cascades' texture today: the sign finding of 2026-09-08, still
+open). The labels are lifted by
+
+    Λ = −E[η ∇·D]    (solved: chop·w_win²·Σ ½ k (w a)² coth kh;   cascades: −Σ_c V_c H_c M_c),
+
+M_c the texture's own E[h ∇·D] (`OceanCpu::LiftMoment`, λ Σ 2k(|A|² + |B|²) over every pair), V_c
+and H_c the band's vertical and lateral gains, both halves at the drawn weights (the dry weight and
+the exaggeration on each, the shore stop on the lateral). Λ is the surface particles' Lagrangian mean
+level, ½ k a² over the mean water level in deep water (Longuet-Higgins 1953), coth kh times the orbit
+here; with it the drawn mean is the solver's level to second order. Measured at the Merrimack (Hs 2.2
+m, Tp 9 s): before, the drawn sea stood **0.058 m under** the level in 5–8 m of water (k coth chop var
+predicts 0.075); after, within **±0.01 m** inside the solved window (two instants, 125k labels a bin),
+and outside it the lift cancels the measured E[η ∇·D] to 87–100 % in every deep bin (Salisbury Beach,
+cascades only: +0.074 → +0.011 m in 3–5 m). Not counted: the crest law's throw and fall (crest-local,
+beyond second order) and the trough bound -- where the crest law throws hard (Mavericks' bowl under a
+5 m, 17 s swell, the sheet folding) the moment and the measured E[η ∇·D] agree only to 0.8–1.4× in
+the large bins and 3.3× in the bowl. Code: `WaterBank.hlsl` THE LIFT, `TreeWater::Finish` its twin, `WaveField::Probe::lift`.
+
 Independent verification: `proofs/inlet_storm.py` runs these same closed forms on the
 engine's exported fields (numpy, no engine code); the match report holds the kernel to it
 (shape-normalized corr ≥ 0.9 per ring, mean |log ratio| ≤ ~4%).
@@ -1742,6 +1769,55 @@ throw is bounded by the wavelength; (f) the per-vertex Newton inversion blew up 
 the first-order affine cell images overlapped -- the column carries the label, the scatter
 rasterizes the mesh's own triangles. Law: a closure on a superposition must be written on the
 SUM, not on the terms; the inversion of a sheet belongs to the structure that already holds it.
+
+54. **A law judged on the sea it does not draw** (2026-10-23; WATER_V2 §12.12, Mark at the jetty
+    tip: "something is up with that shoal ... and it's affecting the mesh"). Prior: the whole sea's
+    envelope is the right normalizer for a crest law wherever it runs. Measured: inside the solved
+    window the cascades draw only the chop (bands 0 and 1 yield to the solved field), so the cascade
+    crest law compared the chop's elevation against the SWELL's envelope, put every phase at crest
+    weight ½, and subtracted the lip's fall as a smooth offset: a hollow 0.95 m deep where the ebb
+    jet crosses the ridge off the south jetty, −0.29 m mean over the 1–2 m water, the solver's own
+    setup (+0.1 to +0.2 m) buried under it. Two more normalizations in the same block: the lateral
+    amplitude divided by the breaking factor twice, and an exaggerated envelope against a physical
+    elevation. And on a coarse ring the same fault returns through the fold (the chop leaves geometry
+    for σ²). In the solved field, the set-crest excess was taken on max(excess, 1), forgetting how far
+    UNDER its limit a sea stands: a 2 m crest in 17 m of water was thrown 14.9 m and folded the sheet.
+    Law: a law on the drawn sea is normalized by the DRAWN sea — the yield, the fold, the units of
+    what it is applied to — and a ratio is never clamped before it multiplies.
+55. **A twin that agrees can agree somewhere else** (2026-10-23). Prior: `--twin-surface` compares
+    the hull's water with the drawn water at the same points. Measured: the tool's TreeWater had no
+    chart, so `PlaceOf` answered (0°, 0°): its bed was the Gulf of Guinea's (−4935 m), and the solved
+    field's height, which does not read the depth, agreed anyway (ratio 1.04, correlation 1.000). The
+    first law to read the depth there (the lift's coth kh) came out 1.6× apart, which is what showed
+    it. And both twins had carried the same hollow, so the twin could never have seen that either.
+    Law: a twin gate checks the parts of the answer that read each input it is given, and is handed
+    the place the way the reader it stands for is (`Entity.cpp`'s `SetChart`).
+56. **A law retired in one description lives on in another** (2026-10-23; WATER_V2 §12.13). Prior: the
+    crest law of priors 53 is the water's. Measured: it was the SOLVED field's; the cascades kept the
+    raw amplitude in the orbit at every phase, which 53 (c) had retired, and their own bound and fall.
+    Once their bound's double ÷brk was gone, the surf's orbit at Salisbury reached 11.8 m, and their
+    fall sank the inner surf 0.17 m below the solver's setup. Given the solved field's law (one
+    function, `CrestLaw`, called by both descriptions on both processors) the sink and the orbits went,
+    with no fold. Law: a phenomenon has ONE law, written once a processor and called by every
+    description of the sea; a description that cannot run it says why, in code.
+57. **A number that fell is not a sea that improved** (2026-10-23; WATER_V2 §12.15, Mark: "before there was
+    water going up the beach and flowing back down into the ocean and causing the waves flowing onto beach
+    to increase in size and roll"). Prior (§12.13): the surf's orbit falling 11.8 → 3.0 m with no folds was
+    the fix. Measured against the physics' own scale it was a loss. A swash zone's horizontal excursion is
+    the run-up over the slope: R2% ≈ 0.043 √(Hs L0) ≈ 0.75 m for the 2 m, 10 s sea, which is ~37 m up a 2 %
+    beach (Stockdon et al. 2006). And the Iribarren gate had been put on the crest's going forward, when
+    every breaker's crest reaches the phase speed (the kinematic criterion) and only the plunger's jet
+    flies past it: on the Merrimack's spilling beaches nothing rolled. Law: before calling a drop a gain,
+    put the number beside the scale the physics gives it; and a classifier (spilling, plunging) gates the
+    part of a law the classes differ in, never the part they share.
+58. **A threshold upstream of geometry is a flicker** (2026-10-23; WATER_V2 §12.15, Mark: "the sand on the
+    beach adjusting height every few frames ... it looks like the beach breathes"). Prior (c80b018): the
+    drawn level is the WET columns' surface, wet meaning h > 1 cm. Measured by reading the path: the solver's
+    shoreline columns cross 1 cm step by step as the waves push. The level switched by the bed's rise across
+    a 10 m cell, the shore classifier (GlobeMesh's `wl`) followed, and the sand's vertices jumped between land
+    and water height. Law: a reader of a solver's state weights by the continuous quantity a flag summarizes
+    (here the water a column holds, h / (h + h_wet)). A flag may gate a cost, never a value that becomes
+    geometry.
 
 ## verification — The gate map: which algebra is pinned where
 

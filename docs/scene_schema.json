@@ -107,12 +107,16 @@
       { "key": "clock", "type": "object", "field": "none", "schema": "sun.earth.clock", "reload": "hot", "doc": "ephemeris: the clock of the Earth's turn (the time of day), apart from the sun's" }
     ] },
     { "type": "sun.earth.clock", "keys": [
-      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the scene's time.start" },
-      { "key": "rate", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "its pace against the scene's clock (1 = the same, 0 = held)" }
+      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the bound clock's" },
+      { "key": "rate", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "its pace against the bound clock's (1 = the same, 0 = held)" },
+      { "key": "bind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the clock it follows (scene/SceneClocks.h): time, water.clock, sun.clock or sun.earth.clock; \"\" = time" },
+      { "key": "offset", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "added to its instant: seconds or a run of number+unit (\"-3h\", \"1h30m\", \"2d\")" }
     ] },
     { "type": "sun.clock", "keys": [
-      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the scene's time.start" },
-      { "key": "rate", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "its pace against the scene's clock (1 = the same, 0 = held)" }
+      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the bound clock's" },
+      { "key": "rate", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "its pace against the bound clock's (1 = the same, 0 = held)" },
+      { "key": "bind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the clock it follows (scene/SceneClocks.h): time, water.clock, sun.clock or sun.earth.clock; \"\" = time" },
+      { "key": "offset", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "added to its instant: seconds or a run of number+unit (\"-3h\", \"1h30m\", \"2d\")" }
     ] },
     { "type": "air", "keys": [
       { "key": "aod550", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "the day's aerosol optical depth at 550 nm, the air's one row that changes with the day (src/scene/Air.h); < 0 = the planet's typical value (Earth 0.10, the Maritime Aerosol Network's open-ocean mean; Mars's dust 0.5)" },
@@ -134,6 +138,7 @@
       { "key": "mllwToNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "tide (m MLLW) + this = NAVD88" }
     ] },
     { "type": "water", "keys": [
+      { "key": "clock", "type": "object", "field": "none", "schema": "water.clock", "reload": "hot", "doc": "the data's clock: the tide, the solver, the currents, the sea state, the wind, the cascades" },
       { "key": "pixelWater", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "shade the water per pixel (--no-pixel-water)" },
       { "key": "foam", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "sea-mode whitecap intensity (--foam)" },
       { "key": "edgePx", "type": "number", "field": "f32", "quantity": "1", "unit": "px", "default": 12, "reload": "hot", "doc": "tessellated edge target (--edge-px)" },
@@ -143,6 +148,12 @@
       { "key": "wavefield", "type": "object", "field": "none", "schema": "water.wavefield", "reload": "hot", "doc": "the solved wave field's window (data/wave_scene.json)" },
       { "key": "closures", "type": "object", "field": "none", "schema": "water.closures", "reload": "hot", "doc": "the kernel closures (data/wave_scene.json)" },
       { "key": "fleet", "type": "object", "field": "none", "schema": "water.fleet", "reload": "hot", "doc": "the AIS fleet (data/wave_scene.json)" }
+    ] },
+    { "type": "water.clock", "keys": [
+      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its instant at the scene's start: \"now\", UTC text or unix seconds; \"\" = the bound clock's" },
+      { "key": "rate", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "its pace against the bound clock's (1 = the same, 0 = held)" },
+      { "key": "bind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the clock it follows (scene/SceneClocks.h): time, water.clock, sun.clock or sun.earth.clock; \"\" = time" },
+      { "key": "offset", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "added to its instant: seconds or a run of number+unit (\"-3h\", \"1h30m\", \"2d\")" }
     ] },
     { "type": "water.swe", "keys": [
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the shallow-water solver; false = the analytic tide plane (--swe-off)" },
@@ -177,7 +188,7 @@
       { "key": "currentBucketMs", "type": "number", "field": "f64", "quantity": "velocity", "unit": "m/s", "default": 0.1, "reload": "hot", "doc": "re-solve quantization" },
       { "key": "featherM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 120, "reload": "hot", "doc": "window edge blend into the cascades" },
       { "key": "chop", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.1, "reload": "hot", "doc": "Gerstner horizontal displacement (the ambient sea's lambda; one look for both)" },
-      { "key": "exag", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.15, "reload": "hot", "doc": "solved-field DISPLAY exaggeration, applied to the dequant tables at upload (the cache stays raw physics)" },
+      { "key": "exag", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "solved-field DISPLAY exaggeration, applied to the dequant tables at upload (the cache stays raw physics)" },
       { "key": "bankTexelM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 1.2, "reload": "restart", "doc": "ring-0 texel: caps which wavelengths become GEOMETRY (the fold law sheds any band the ring undersamples); ring construction, so a change needs a restart" }
     ] },
     { "type": "water.closures", "keys": [
@@ -212,6 +223,7 @@
     { "type": "streaming", "keys": [
       { "key": "tileBudget", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 1000, "reload": "restart", "doc": "hard cap on Google fetches per run (--tile-budget)" },
       { "key": "poolTiles", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 32768, "reload": "restart", "doc": "the residency pool's ceiling in 64 KB tiles (32768 = 2 GB); smaller, the order's cut releases sooner" },
+      { "key": "fadeTurns", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 6, "reload": "restart", "doc": "the turns a landing tile takes to come into focus: its map byte steps from its parent's level to its own, and trilinear blends the two held mips (0 = the snap; at most 15)" },
       { "key": "dayTiles", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 100000, "reload": "restart", "doc": "cap on Google requests a UTC day, every request sent counted whatever came back, every engine on the machine together (cache/google/day_<date>.json); 0 = no request that day" },
       { "key": "dayBytes", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 5000000000, "reload": "restart", "doc": "cap on the bytes of Google tiles landed a UTC day, every engine on the machine together; 0 = no request that day" },
       { "key": "googleZoom", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 14, "reload": "restart", "doc": "the finest zoom the Google source may be asked for, held to 0..19; each step finer is four times the tiles (14 = the source as it was; any other value paints its own tree)" },
