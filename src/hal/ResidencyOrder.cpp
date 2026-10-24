@@ -1670,7 +1670,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     std::array<int, kMaxPaintTenants> permitAsked{};
     const auto permitFree = [&](int tenant) {
         const size_t t = size_t(tenant) % kMaxPaintTenants;
-        if (m_painting[t].load(std::memory_order_relaxed) + permitAsked[t] >= m_paintShare.load(std::memory_order_relaxed)) return false;
+        if (m_painting[t].load(std::memory_order_relaxed) + permitAsked[t] >= PaintShareOf(tenant)) return false;
         ++permitAsked[t];
         return true;
     };
@@ -1985,6 +1985,16 @@ int ResidencyManager::PaintShare() const {
     }
     const int lane = Threads().IoCap();
     return (std::max)(1, (lane + painting) / (painting + 1));   // and one more share, the newcomer's; rounded up
+}
+
+// A COMPUTED TENANT PAINTS ONE PAGE AT A TIME (2026-10-23, Mark: "keep exposure paints from holding the Io
+// lane"). Its page is a march over the height stack whose rays touch ~650 of a source's decoded windows (a
+// page and its 4 km reach at 878 m a window; RasterFileSource keeps 1024): one page's set fits the cache,
+// two do not. Measured with twelve at once: 83,190 windows decoded, 47 s a page and the last five minutes,
+// where one alone was 3.2 s (2026-10-15). And the computing lane it runs on carries the wave solve.
+int ResidencyManager::PaintShareOf(int tenant) const {
+    if (tenant >= 0 && size_t(tenant) < m_tenants.size() && m_tenants[size_t(tenant)].computed) return 1;
+    return m_paintShare.load(std::memory_order_relaxed);
 }
 
 // THE WATCHDOG (Residency.h): starved = in the first P, not held, no load in flight, no retiring

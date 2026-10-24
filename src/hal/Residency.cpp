@@ -97,7 +97,7 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         g_loadReq = job->req;
         g_tileStop = &m_quit;   // a Shutdown mid-load: the tree stops painting and the job leaves
         // THE LANE'S PAINT PERMIT (core/TileAddress.h): taken at the load's first paint, given back here.
-        PaintPermit permit{&m_painting[size_t(job->tenant)], m_paintShare.load(std::memory_order_relaxed)};
+        PaintPermit permit{&m_painting[size_t(job->tenant)], PaintShareOf(job->tenant)};
         g_paintPermit = &permit;
         {
             std::lock_guard<std::mutex> lkRun(g_runningMx);
@@ -1461,7 +1461,10 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     std::vector<std::shared_ptr<Tracked>> toLoad, batch, refills;
     OrderTurn(toLoad, batch, refills);
     for (const auto& tile : toLoad) {
-        Threads().Submit(Lane::Io, "residency.load", [this, tile] { RunLoad(tile); });
+        // a computed tenant's tiles on the computing lane: the Io lane stays the read tenants'
+        const bool computed = m_tenants[tile->tenant].computed;
+        Threads().Submit(computed ? Lane::Long : Lane::Io, computed ? "residency.compute" : "residency.load",
+                         [this, tile] { RunLoad(tile); });
     }
 
     turn.refills = static_cast<uint32_t>(refills.size());

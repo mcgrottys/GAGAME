@@ -793,6 +793,10 @@ private:
         // byte names holds the PREVIOUS identity's bytes (stale, its refill on the way). The
         // reader decodes those with the previous table. The byte stays finest mip * 16 above it.
         bool versioned = false;
+        // A tenant whose tiles are COMPUTED, not read (hal::Residence::Recomputable: the swell's
+        // exposure, a march of rays a texel): its loads run on the computing lane (Lane::Long), so a
+        // page that takes seconds never holds the Io lane the read tenants' tiles stream through.
+        bool computed = false;
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
         // M9af: what this tenant's realization already holds on the NVMe. Borrowed; main owns
         // the indices. Null means "no information", which schedules exactly as before.
@@ -933,6 +937,8 @@ private:
 public:
     // A tenant whose map bytes carry the version bit (Tenant::versioned).
     void SetVersioned(int tenant) { m_tenants[tenant].versioned = true; }
+    // A tenant whose tiles are computed (Tenant::computed): its loads run on Lane::Long.
+    void SetComputed(int tenant) { m_tenants[tenant].computed = true; }
     // How many of a tenant's held tiles are stale with their replacement not yet swapped in.
     uint32_t StaleHeld(int tenant) const {
         uint32_t n = 0;
@@ -1092,6 +1098,7 @@ private:
     std::array<std::atomic<int>, kMaxPaintTenants> m_painting{};
     std::atomic<int> m_paintShare{1};
     int PaintShare() const;
+    int PaintShareOf(int tenant) const;   // a computed tenant's is one: a page at a time (ResidencyOrder.cpp)
     // THE POOL AHEAD OF ITS DEMAND. A pool chunk is a CreateHeap, and inside the turn it cost
     // 1-24 ms (the drive: 228 chunks, 262 ms, every one on the render thread). So the pool is kept
     // ahead: when the free list falls under kPoolReserveTiles a worker creates the next chunk

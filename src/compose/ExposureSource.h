@@ -87,7 +87,7 @@ public:
     std::string Identity() const override {
         const uint64_t p = m_params.load();
         char b[96];
-        snprintf(b, sizeof(b), "swell.exposure|v4 fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
+        snprintf(b, sizeof(b), "swell.exposure|v5 fan5x26 best-ray march %.0fm to %.0fm graded|dir%03d|lvl%+d|",
                  kStepMinM, kMaxRangeM, DirBucket(p), LevelBucket(p));
         std::string id = b;
         if (m_comp && m_hgtCh >= 0) {
@@ -148,7 +148,6 @@ public:
         if (s_lastOpen) return true;
         const float e0 = m_comp->SampleHeightStack(m_hgtCh, lat0, lon0, q.groundM);
         if (e0 > level) return true;   // land: exposed by convention; never sampled as water
-        const int maxSteps = static_cast<int>(kMaxRangeM / stepM);
         // A FAN, not a ray -- and the BEST ray, not the mean. The sea has directional spread
         // (the wave-field spectrum's +-26 degrees, `wavefield`); a jettied channel takes
         // whatever part of that spread is aligned with it, because the waves that enter
@@ -159,22 +158,34 @@ public:
         // So: five rays across the spread, each transmission weighted by its angular
         // distance from the peak, and the exposure is the MAXIMUM -- the channel is as open
         // as its most open direction. Diffraction proper is not modelled and not claimed.
-        static const double kFanDeg[5] = {-26.0, -13.0, 0.0, 13.0, 26.0};
+        static const double kFanDeg[5] = {-2.0 * kFanSpacingDeg, -kFanSpacingDeg, 0.0, kFanSpacingDeg,
+                                          2.0 * kFanSpacingDeg};
         static const double kFanW[5] = {0.6, 0.85, 1.0, 0.85, 0.6};
+        // THE MARCH GRADED BY THE FAN (2026-10-23, Mark: "grade the march's grain with distance and keep
+        // exposure paints from holding the Io lane"). The fan sees across a ray no finer than its rays'
+        // half-spacing, d tan(6.5 deg) at distance d, so sampling along it finer is spent on nothing: each
+        // step, and the grain the stack is read at, is max(the texel's step, d tan 6.5). Fine beside the
+        // texel; ~450 m at the 4 km reach; ~50 reads a ray where 300 at the texel's grain were. The physics
+        // agrees: an obstacle narrower than the Fresnel radius sqrt(lambda d) far off casts no lasting
+        // shadow (diffraction fills it), and a coarse read averages such a one below the water line as the
+        // sea forgets it. Measured before: a direction that looks out to sea near a coast (the declared
+        // swell from 70 degrees) kept every Io worker on one page for three minutes, 161,070 raster windows
+        // decoded in 420 s, and the readers' tiles waited behind them.
+        const double fanHalfTan = FanHalfTan();
         double best = 0.0;
         for (int r = 0; r < 5; ++r) {
             const double ang = ang0 + kFanDeg[r] * kD2R;
             // Propagation direction (unit, world east/north); the march goes TOWARD the source.
             const double dirX = std::cos(ang), dirZ = std::sin(ang);
-            // PHASE C5: the step's angle on the sphere at the march's own latitude (radians).
-            const double dLat = -dirZ * stepM / GlobeModel::kR;
-            const double dLon = -dirX * stepM / (GlobeModel::kR * std::cos(lat0));
-            double lat = lat0, lon = lon0;
+            // PHASE C5: a metre's angle on the sphere at the march's own latitude (radians).
+            const double perLat = -dirZ / GlobeModel::kR;
+            const double perLon = -dirX / (GlobeModel::kR * std::cos(lat0));
             double excess = 0.0;   // worst blocker height above the water line en route
-            for (int s = 0; s < maxSteps; ++s) {
-                lat += dLat;
-                lon += dLon;
-                const float e = m_comp->SampleHeightStack(m_hgtCh, lat, lon, stepM);
+            for (double d = 0.0;;) {
+                const double step = (std::max)(stepM, d * fanHalfTan);
+                d += step;
+                if (d > kMaxRangeM) break;
+                const float e = m_comp->SampleHeightStack(m_hgtCh, lat0 + perLat * d, lon0 + perLon * d, step);
                 if (e > -9000.0f) excess = (std::max)(excess, double(e) - level);
                 if (excess > 1.2) break;   // a full wall already
             }
@@ -204,6 +215,10 @@ public:
     static constexpr double kLevelBucketM = 0.25;
     static constexpr double kStepMinM = 13.0;
     static constexpr double kMaxRangeM = 4000.0;
+    static constexpr double kFanSpacingDeg = 13.0;   // the fan's rays (five, +-26 degrees: the sea's spread)
+    // The fan's half-spacing's tangent: across a ray at distance d its neighbours leave d tan(6.5 deg)
+    // unseen, so the march steps (and reads) no finer than that there (SampleAt, the march graded by the fan).
+    static double FanHalfTan() { return std::tan(0.5 * kFanSpacingDeg * 3.14159265358979 / 180.0); }
     // --tool exposure-ab: the shortcut on or off, the plant's slack on its limit, and whether the last
     // sample on this thread was answered open.
     static inline bool s_openSea = true;
@@ -229,7 +244,8 @@ private:
         for (const expo_detail::OpenCell& c : expo_detail::t_open) {
             if (c.key == key) return c.open;
         }
-        const double marginM = kMaxRangeM + 2.0 * (std::max)(stepM, groundM) + 100.0;
+        // ...and the farthest read's own footprint (the march graded by the fan reads ~450 m at the reach)
+        const double marginM = kMaxRangeM + kMaxRangeM * FanHalfTan() + 2.0 * (std::max)(stepM, groundM) + 100.0;
         const double lat0 = cy * kCellDeg, lat1 = lat0 + kCellDeg;
         const double dLat = marginM / GlobeModel::kR * 180.0 / 3.14159265358979;
         const double cosMin = std::cos((std::min)(89.0, (std::max)(std::abs(lat0), std::abs(lat1)) + dLat) * 3.14159265358979 / 180.0);
