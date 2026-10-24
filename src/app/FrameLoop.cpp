@@ -1431,7 +1431,11 @@ std::optional<int> FrameLoop::Session() {
         // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
         // makes. Nothing between here and there reads either.
-        if (waterScene.wfEnabled) {
+        if (waterScene.wfEnabled && !waterScene.WaveWindowDeclared()) {
+            Log("[wave] this place declares no window (water.wavefield: orgX, orgZ, nx, ny, barNormalDeg): "
+                "no solved field; the cascades carry the sea");
+        }
+        if (waterScene.wfEnabled && waterScene.WaveWindowDeclared()) {
             waveSrc = std::make_shared<WaveFieldSource>(waveField.get(), waveFrame);
             waveTree = std::make_shared<std::shared_ptr<TileTree>>(
                 std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4));
@@ -3527,7 +3531,7 @@ bool FrameLoop::Frame() {
             // field or the previous one -- never a half-written atlas.
             // (frame >= 2: the first frames run on the boot clock before --start
             // settles; solving them caches a real answer for the wrong instant.)
-            if (waveField && sea && waterScene.wfEnabled && frame >= 2) {
+            if (waveField && sea && waterScene.wfEnabled && waterScene.WaveWindowDeclared() && frame >= 2) {
                 // A FIELD IS SOLVED FOR A READER (F8). The level the view asks of the window is
                 // computed here, once, from the solve's own window (the want below reads it): when
                 // the pyramid's top answers it (the clamp binds: the window stands under eight

@@ -218,10 +218,10 @@ public:
         return (m_fromGrid && m_grid) ? m_grid->CycleLabel() : m_sea ? m_sea->CycleLabel() : kNone;
     }
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
-    // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
-    // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak
-    // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
-    float sweCurrentGain = 3.2f;
+    // The solved current's gain into the waves: the scene's water.swe.gain, set at assembly (1: the
+    // current as solved). The 3.2 that stood here was one place's calibration (the Merrimack's
+    // ACT0816 against an old CUDEM window) and was always overwritten.
+    float sweCurrentGain = 1.0f;
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
 
     // M9bq: the cascades, evaluated on the CPU for the hull. Owned here because this is where

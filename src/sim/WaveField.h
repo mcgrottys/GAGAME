@@ -64,14 +64,15 @@ struct WaveFieldConfig {
     // The solve window, metres about the scene's place.anchor in its tangent plane (x east,
     // z north); row 0 = SOUTH (+v = +z = north, the patch.wrap family -- no flips into the bank
     // kernel). PHASE C4: Align turns it into a box of z16 page texels (pxX0, pxY0 = its NW
-    // texel), and a cell's place is THAT texel's (PlaceOfCell) -- no metres-per-degree.
-    double orgX = -1400.0, orgZ = -800.0;
+    // texel), and a cell's place is THAT texel's (PlaceOfCell) -- no metres-per-degree. A place's,
+    // from its scene (WaterSceneConfig::WaveWindowDeclared): no window here by default.
+    double orgX = 0.0, orgZ = 0.0;
     long long pxX0 = 0, pxY0 = 0;
-    int nx = 1600, ny = 1000;
+    int nx = 0, ny = 0;
     double cellM = 2.0;
     int nComp = 32;                    // M9bp: see SceneConfig wfComps (16 was the comb)
     double spreadDeg = 26.0;
-    double barNormalDeg = 285.0;       // the entrance bar's normal, compass
+    double barNormalDeg = -1.0;        // the window's bar normal, compass (its scene's)
     double gammaHs = 0.60;             // Hs <= gammaHs * h (the total limiter)
     double minSamplesPerLambda = 8.0;  // upload gate: lambda >= this * cell
     double tideBucketM = 0.25;         // re-solve quantization
