@@ -292,7 +292,7 @@ private:
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
         float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
         uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
-        float waveA[4];       // window org xy (world m), 1/cellM, feather m
+        float waveA[4];       // window org xy (the root's m, less the tiles' eye), 1/cellM, feather m
         float waveB[4];       // envMax, sumMax, chop, solved-at level
         float foamA[4];       // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
         float foamB[4];       // crestHi, depthLo, depthHi, spare
@@ -398,7 +398,8 @@ private:
         float bandY[4];       // edgeY at the origin, d/dex, d/dez, charts valid (0 = none)
         // PHASE B2: the tile's point for the windows' address (WaterBank.hlsl BankTile): the
         // ground point at the tile's origin relative to the rows' eye in the tangent axes (w = 1
-        // valid), and its derivative along the ring's x and z at the tile's centre.
+        // valid), and its derivative along the ring's x and z at the tile's centre. pointX.w = 1:
+        // the point addresses the solved wave window (the root's flat x, z less the eye).
         float pointA[4];
         float pointX[4];
         float pointZ[4];

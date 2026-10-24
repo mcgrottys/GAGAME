@@ -55,7 +55,7 @@ cbuffer BankCb : register(b0) {
     // stored spinor with CPU-computed (cos, sin)(sigma t) -- phase never wraps here.
     uint4  gWaveU;      // M9bc: x = wave PAGE tenant array SRV (0xFFFFFFFF = absent), y = its
                         // residency SRV, z = nUsed comps, w = the envelope plane
-    float4 gWaveA;      // window org xy (world m), z = 1/cellM, w = feather m
+    float4 gWaveA;      // window org xy (the root's flat m, less the tiles' eye), z = 1/cellM, w = feather m
     float4 gWaveB;      // x = envMax, y = sumMax, z = chop, w = solved-at level (NAVD)
     float4 gFoamA;      // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
     float4 gFoamB;      // crestHi, depthLo, depthHi, spare (data/wave_scene.json)
@@ -205,6 +205,7 @@ struct BankTile {
     // its level's eye in the tangent axes the rows were pulled into: pointA at the tile's origin
     // (w = 1 valid), its derivative along the ring's x and z at the tile's centre (midpoint rule).
     // The windows' planes are central, so the sphere's sag across a tile (radial) moves no address.
+    // pointX.w = 1: the point (its x, z) also addresses the solved wave window, the root's (gWaveA).
     float4 pointA;
     float4 pointX;
     float4 pointZ;
@@ -377,9 +378,11 @@ float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
 // (gWaveD.zw). Through Mercator latitude instead -- the old PageUvLatLon -- the rows came out 0.67 %
 // shorter than the solver's cells (a Mercator texel's metre of latitude is 111319.49 m/deg, the chart's
 // 110574), so the drawn solved waves stood up to 13.6 m north of the bathymetry they were solved over and
-// WaveField::ProbeAt, on the grid, disagreed with them.
-float2 WavePageUv(float2 xz) {
-    const float2 cells = (xz - gWaveA.xy) * gWaveA.z;
+// WaveField::ProbeAt, on the grid, disagreed with them. `rxz` is the point in the ROOT's flat frame less
+// the tiles' eye, as gWaveA's origin is (WaterBankLayer::Render's winEye): never a ring coordinate,
+// which is the chart under the eye's and the root's only near home.
+float2 WavePageUv(float2 rxz) {
+    const float2 cells = (rxz - gWaveA.xy) * gWaveA.z;
     return float2(gWaveD.z + cells.x, gWaveD.w + gWaveD.y - cells.y) * gWaveP.z;
 }
 // M9bl: the finest RESIDENT mip of one plane here (byte = finest mip * 16, conservative
@@ -739,14 +742,19 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float wWin = 0.0f;
     float wCas = 0.0f;   // what the CASCADES yield by -- see the delivery law below
     float2 wuv = 0.0f;
-    if (gWaveU.x != 0xFFFFFFFFu) {
-        const float2 wcell = (xz - gWaveA.xy) * gWaveA.z;
+    // The window is the ROOT's (WaveFieldSource::Align; the hull reads it at TreeWater::RootOf): the
+    // texel's ground in the root's axes, less the eye -- pT -- is its address. The ring's own xz is the
+    // chart under the eye, and read here it put the mouth's solved sea about every new origin the eye
+    // reached (2026-10-24). A tile with no root point (past the frame's horizon) has no window.
+    if (gWaveU.x != 0xFFFFFFFFu && t.pointX.w != 0.0f) {
+        const float2 rxz = pT.xz;
+        const float2 wcell = (rxz - gWaveA.xy) * gWaveA.z;
         const float2 dimsW = gWaveD.xy;
         const float eM =
             min(min(wcell.x, dimsW.x - wcell.x), min(wcell.y, dimsW.y - wcell.y)) /
             gWaveA.z;
         wWin = smoothstep(0.0f, max(gWaveA.w, 1.0f), eM);
-        wuv = WavePageUv(xz);
+        wuv = WavePageUv(rxz);
         // ---- M9by: THE CASCADES YIELD BY WHAT THE FIELD SUPPLIED, NOT BY THE WINDOW. -----
         //
         // This was the SAME bug a74382c fixed on the CPU, in the renderer, and it was left

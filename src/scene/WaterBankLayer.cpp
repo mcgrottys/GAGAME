@@ -934,6 +934,19 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // level and the bed, so the scale is continuous across tiles and across the grid's nodes.
     static const WaveScale kNone{};
     const WaveScale& waveScale = m_sea ? m_sea->Scale() : kNone;   // PHASE C2: the field
+    // THE SOLVED WAVE WINDOW'S ADDRESS (2026-10-24, Mark: "the drift happens when I take the boat far
+    // away from the mouth"). The window is a rectangle of the ROOT's flat frame (WaveFieldSource::Align)
+    // and the hull reads it there (TreeWater::RootOf); the rings stand in the chart under the eye, which
+    // is the root's only near home, so a ring coordinate read the window about the wrong origin as soon
+    // as the eye left the root's cell. A texel addresses it by its ground point in the root's axes -- the
+    // tile's point rows -- and the window's origin is said about the eye those rows stand about, here,
+    // in doubles. No rows: the chart IS the root's flat frame (SetFrame), and the eye is the flat one.
+    double winEye[2] = {m_eyeFlat[0], m_eyeFlat[2]};
+    if (m_surface && m_chart.Exact()) {
+        const SurfaceFrame& sf = *m_surface;
+        winEye[0] = m_hwEye[0] * sf.east[0] + m_hwEye[1] * sf.east[1] + m_hwEye[2] * sf.east[2];
+        winEye[1] = m_hwEye[0] * sf.north[0] + m_hwEye[1] * sf.north[1] + m_hwEye[2] * sf.north[2];
+    }
     for (int m = 0; m < kMips; ++m) {
         const double texel = m_baseTexelM * (1 << m);
         const double tileSpan = kTileTexels * texel;
@@ -1044,7 +1057,18 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                             t.pointZ[c] = okP ? static_cast<float>((pzp[c] - pzm[c]) / (2.0 * h)) : 0.0f;
                         }
                         t.pointA[3] = okP ? 1.0f : 0.0f;
-                        t.pointX[3] = t.pointZ[3] = 0.0f;
+                        // The same point addresses the solved wave window (winEye above); with no
+                        // rows the ring's own coordinate is the root's, less the flat eye.
+                        // pointX.w = 1: the point addresses the window.
+                        const bool flatRoot = !chart.Exact();
+                        if (flatRoot) {
+                            t.pointA[0] = static_cast<float>(ox - winEye[0]);
+                            t.pointA[2] = static_cast<float>(oz - winEye[1]);
+                            t.pointX[0] = 1.0f;
+                            t.pointZ[2] = 1.0f;
+                        }
+                        t.pointX[3] = (okP || flatRoot) ? 1.0f : 0.0f;
+                        t.pointZ[3] = 0.0f;
                     }
 
                     // ---- THE CASCADE SEA'S PLANES for this tile (sim/WaveChart.h). The
@@ -1239,8 +1263,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         cb.waveU[1] = m_wavePagesRes;
         cb.waveU[2] = wt.nUsed;
         cb.waveU[3] = wt.envSlice;
-        cb.waveA[0] = wt.orgX;
-        cb.waveA[1] = wt.orgZ;
+        cb.waveA[0] = static_cast<float>(double(wt.orgX) - winEye[0]);   // about the tiles' eye
+        cb.waveA[1] = static_cast<float>(double(wt.orgZ) - winEye[1]);
         cb.waveA[2] = wt.invCell;
         cb.waveA[3] = wt.feather;
         cb.waveP[0] = static_cast<float>(m_waveOrgPx[0]);
