@@ -90,6 +90,21 @@ float LipReach(float k, float coth, float Hc, float h) {
     return 1.0f / max(k, 1e-4f) + eLand;
 }
 
+// THE SWASH (2026-10-23, Mark: "the raw orbit near the waterline for the run-up and backwash"). Offshore
+// the orbit rides the amplitude the depth lets stand; at the waterline the bore that the breaking sea has
+// become runs up the slope and back with the momentum of the wave that was -- the raw amplitude's orbit,
+// forward under the crest, back under the trough (the backwash the next bore meets). The share of the
+// raw orbit is the swash zone's, exp(-h / R), R the run-up height: R = 0.043 sqrt(Hs L0), Stockdon,
+// Holman, Howd and Sallenger (Coastal Engineering 53, 2006), the dissipative beaches' R2% (xi < 0.3, the
+// Merrimack's: no slope in it). 1 at the waterline, ~e^-1 where the water is a run-up deep, nothing
+// offshore. L0 the deep-water wavelength of the band or component, 2 pi coth(kh) / k on its k in depth.
+// The orbit so raised is held to the landing reach, the cascades' bound since 2026-10-19 (a particle
+// thrown past it is a bore; the chips along the jetty): WaterTerms.h SwashShare is its twin.
+float SwashShare(float hsRaw, float L0, float depth) {
+    const float R = max(0.043f * sqrt(max(hsRaw, 0.0f) * max(L0, 0.0f)), 1e-3f);
+    return exp(-max(depth, 0.0f) / R);
+}
+
 // Green's-law-style shoaling: amplitude grows as the group speed drops entering shallow water.
 float ShoalFactor(float kBand, float depth) {
     const float kh = kBand * max(depth, 0.15f);

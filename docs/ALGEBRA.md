@@ -1800,6 +1800,16 @@ SUM, not on the terms; the inversion of a sheet belongs to the structure that al
     function, `CrestLaw`, called by both descriptions on both processors) the sink and the orbits went,
     with no fold. Law: a phenomenon has ONE law, written once a processor and called by every
     description of the sea; a description that cannot run it says why, in code.
+57. **A number that fell is not a sea that improved** (2026-10-23; WATER_V2 §12.15, Mark: "before there was
+    water going up the beach and flowing back down into the ocean and causing the waves flowing onto beach
+    to increase in size and roll"). Prior (§12.13): the surf's orbit falling 11.8 → 3.0 m with no folds was
+    the fix. Measured against the physics' own scale it was a loss. A swash zone's horizontal excursion is
+    the run-up over the slope: R2% ≈ 0.043 √(Hs L0) ≈ 0.75 m for the 2 m, 10 s sea, which is ~37 m up a 2 %
+    beach (Stockdon et al. 2006). And the Iribarren gate had been put on the crest's going forward, when
+    every breaker's crest reaches the phase speed (the kinematic criterion) and only the plunger's jet
+    flies past it: on the Merrimack's spilling beaches nothing rolled. Law: before calling a drop a gain,
+    put the number beside the scale the physics gives it; and a classifier (spilling, plunging) gates the
+    part of a law the classes differ in, never the part they share.
 
 ## verification — The gate map: which algebra is pinned where
 

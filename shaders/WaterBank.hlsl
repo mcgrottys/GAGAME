@@ -561,11 +561,14 @@ float CardPattern(float2 uv) {
 // THE CREST LAW, ONE FOR EVERY DESCRIPTION OF THE SEA (2026-10-23, Mark: "give the cascades the solved
 // field's crest law"; WaterTerms.h CrestLaw is its twin and says what it is). On one description's
 // displacement d at a label (x east, y up, z north; its orbit already on the amplitude the depth lets
-// stand): at the crest alone, the throw toward the landing by the crest's own excess where the bed's
-// slope says it plunges, the lip's fall the flight's boost back, bounded by the trough. gradEta the
-// description's slope, dBar its travel, aEnv its significant amplitude, excRaw the sea's rms_raw /
-// rms_limit (unclamped), kBar and cothBar its wavenumber in this depth and orbit factor, aH its DRAWN
-// lateral amplitude, tanBeta the bed's slope. Returns q1, the crest's throw share (the spray reads it).
+// stand, raised toward the raw one in the swash): at the crest alone, by the crest's own excess, EVERY
+// breaking crest goes forward to the cusp (k A_h = 1, the crest's water at the phase speed: the kinematic
+// criterion, a spiller's as much as a plunger's), and past it the jet flies toward the landing only where
+// the bed's slope says it plunges (PlungeShare gates the flight alone, Mark 2026-10-23); water past the
+// cusp falls, the flight's boost back, bounded by the trough. gradEta the description's slope, dBar its
+// travel, aEnv its significant amplitude, excRaw the sea's rms_raw / rms_limit (unclamped), kBar and
+// cothBar its wavenumber in this depth and orbit factor, aH its DRAWN lateral amplitude, tanBeta the
+// bed's slope. Returns q1, the crest's forward share (the spray reads it).
 float CrestExcessShare(float eta, float aEnv, float excRaw) {
     const float eCr = excRaw * max(eta / aEnv, 0.0f);
     return 1.0f - 1.0f / max(eCr * eCr, 1.0f);
@@ -577,7 +580,10 @@ float CrestLaw(inout float3 d, float2 gradEta, float2 dBar, float aEnv, float ex
     const float aLoop = LipReach(kBar, cothBar, Hc, depth);
     const float share = CrestExcessShare(d.y, aEnv, excRaw);
     const float plunge = (share > 0.0f) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0f;
-    const float q1 = max(aLoop / max(aH, 1e-3f) - 1.0f, 0.0f) * share * plunge;
+    // to the cusp for every breaker, from the cusp to the landing for the plunging share (at plunge 1 the
+    // law of before: the whole way to the landing)
+    const float rH = 1.0f / max(aH, 1e-3f), cuspR = rH / max(kBar, 1e-4f);
+    const float q1 = share * (max(cuspR - 1.0f, 0.0f) + plunge * max(aLoop * rH - max(cuspR, 1.0f), 0.0f));
     d.xz *= 1.0f + q1 * wCr;   // the orbit grows; the throw is the flight's, below
     const float ePast = max(aH * (1.0f + q1 * wCr) - 1.0f / max(kBar, 1e-4f), 0.0f);
     const float fall = LipFall(ePast, kBar, cothBar, Hc, depth);
@@ -774,6 +780,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float liftE = 0.0f;       // E[eta div D] of the cascades as drawn (THE LIFT, below)
     float wDrawn[3];          // each band's share drawn as geometry here: its fold x the window's yield
     float cothArr[3];         // each band's orbit factor in this depth (the crest law's coth, amplitude-weighted)
+    float rawArr[3];          // each band's lateral over its delivered orbit: 1 offshore, 1 / brk at the waterline (the swash)
     float2 gradC = 0.0f;      // the cascades' drawn slope (the deriv fiber's hx, hz): the throw's launch
     // Per-band gains -> the detail plane. Band 1 has fed the PS sparkle since M7a; M8
     // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
@@ -809,6 +816,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const float excessC =
         (envRmsRaw / max(gPatch.w, 1e-3f)) * 2.8284271f / BreakHmax(kEff, depth);
     const float brk = BreakFactor(excessC);
+    const float hsRawC = 4.0f * envRmsRaw / max(gPatch.w, 1e-3f);   // the raw sea's Hs, physical (the swash's run-up)
     float gain0 = gainC[0] * brk;
     float gain1 = gainC[1] * brk;
     float gain2 = gainC[2] * brk;
@@ -905,14 +913,22 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // cascades are synthesized at the deep-water k, and coth of THAT k reached 113 on the 213 m
         // band in the shallows, 52 m of slosh, a torn sheet). The depth floor is 0.3 m; the dry weight
         // below takes the geometry out before it.
+        // ...and IN THE SWASH THE RAW ONE (2026-10-23, Mark: "the raw orbit near the waterline for the
+        // run-up and backwash"; Jet.hlsli SwashShare): toward the waterline the lateral climbs from the
+        // delivered amplitude to the raw, amp / brk, by the swash zone's share on this band's run-up
+        // (its deep-water wavelength, the whole raw sea's Hs) -- the bore running up the slope under the
+        // crest and back under the trough. The landing holds it after the loop.
         const float cothC = OrbitCoth(gBandK[c], depth);   // the band's k IN THIS DEPTH (Jet.hlsli)
+        const float swC = SwashShare(hsRawC, 6.2831853f / max(gBandK[c], 1e-6f), depth);
+        const float rawC = 1.0f + swC * (1.0f / max(brk, 1e-3f) - 1.0f);
         cothArr[c] = cothC;
+        rawArr[c] = rawC;
         d.y += s.y * (w * amp);
-        d.xz += s.xz * (w * amp * cothC);
+        d.xz += s.xz * (w * amp * cothC * rawC);
         gradC += dv.xy * (w * amp);
         // this band's share of E[eta div D]: its vertical gain times its lateral gain times the
         // texture's own moment (bands are uncorrelated; the charts' blend keeps the norm)
-        liftE += (w * amp) * (w * amp * cothC) * gBandLift[c];
+        liftE += (w * amp) * (w * amp * cothC * rawC) * gBandLift[c];
         // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
         // the old additive term here read it and contributed nothing since M7).
         // Monahan-gated: the Jacobian says WHERE a whitecap sits, the wind says HOW MANY
@@ -950,14 +966,30 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
                                (a0 + a1 + a2 + 1e-6f);
         const float aEnvC = max(1.4142136f * envD * brk, 1e-3f);   // its significant amplitude, delivered
         const float excD = envD * 2.8284271f / BreakHmax(kD, depth);   // its raw Hs over the depth's limit
+        // ITS DRAWN LATERAL AMPLITUDE, at the texture's chop, the swash's raise in it -- and THE SWASH HELD TO
+        // THE LANDING (Jet.hlsli SwashShare; the cascades' bound of 2026-10-19, the chips along the jetty):
+        // a particle carried past the reach of the significant crest's own landing is a bore. Offshore the
+        // delivered orbit never reaches it (k A_h <= chop x 0.21 where Hs <= 0.60 h; 1 is the cusp), so it
+        // holds the swash alone.
+        const float cothRawC = (a0 * cothArr[0] * rawArr[0] + a1 * cothArr[1] * rawArr[1] +
+                                a2 * cothArr[2] * rawArr[2] + 1e-6f * OrbitCoth(kD, depth)) / (a0 + a1 + a2 + 1e-6f);
+        float aHC = gBandLift.w * aEnvC * cothRawC;
+        if (depth > 0.05f && eD > 1e-12f) {
+            const float fSw = min(1.0f, LipReach(kSh, cothBarC, 2.0f * aEnvC, hB) / max(aHC, 1e-4f));
+            d.xz *= fSw;
+            liftE *= fSw;   // the moment rides the lateral it is taken on
+            aHC *= fSw;
+        }
         if (depth > 0.05f && eD > 1e-12f && gDebugA.z == 0.0f) {   // z: the A/B switch (WaterBankLayer.cpp)
             // THE BED'S SLOPE for the Iribarren gate, read only where a crest is over its limit: the
-            // bank's own bed one wave-radian (1 / k in this depth, never under a texel) east and north --
-            // the face a breaking crest runs up, not a rock, as the solve's +-4 cells are (WaveField's env
-            // slice) -- by forward differences; the corner lerp's own slope where no tenant is resident.
+            // bank's own bed one wave-radian of the WHOLE sea (1 / k of its energy wavenumber in this depth,
+            // never under a texel) east and north -- the face the breaking sea runs up, not a rock, as the
+            // solve's +-4 cells are (WaveField's env slice); inside the window too, where the drawn sea is
+            // the chop but the sea that breaks is not (and the twin reads it once, in Prepare) -- by forward
+            // differences; the corner lerp's own slope where no tenant is resident.
             float tanB = 0.0f;
             if (gDebugA.x == 0.0f && CrestExcessShare(d.y, aEnvC, excD) > 0.0f) {
-                const float dS = max(1.0f / max(kSh, 1e-4f), t.texelM);
+                const float dS = max(hB / max(ShoaledKh(kEff, hB), 1e-4f), t.texelM);
                 float gx, gz;
                 if (gSlotsD.x != 0xFFFFFFFFu) {
                     const float2 pe = TilePlace(t, exz + float2(dS, 0.0f)) * 0.01745329252f;
@@ -974,7 +1006,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
                 tanB = min(length(float2(gx, gz)), 1.0f);
             }
             const float2 dBarC = (gPeakDir.z > 0.5f) ? gPeakDir.xy : float2(0.0f, 0.0f);
-            CrestLaw(d, gradC, dBarC, aEnvC, excD, kSh, cothBarC, gBandLift.w * aEnvC * cothBarC, tanB, depth);
+            CrestLaw(d, gradC, dBarC, aEnvC, excD, kSh, cothBarC, aHC, tanB, depth);
         }
     }
 
@@ -993,13 +1025,18 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         float sigW = 0.0f;
         // THE CREST LAW for the solved field (the cascade loop above says why): the solver's
         // limiter scaled every component's amplitude by 1 / max(excess, 1) to hold Hs <= 0.60 h;
-        // the lateral term keeps the RAW amplitude, so it carries that ratio back. The envelope
-        // slice is read here, before the components, for its excess (the same read the foam takes
-        // below).
+        // the lateral term rides that delivered amplitude offshore and carries the ratio back in the
+        // swash. The envelope slice is read here, before the components, for its excess (the same read
+        // the foam takes below).
         bool envPrev;
         const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
         const float excRaw = env.y * 2.5f;   // rms_raw / rms_limit, unclamped: how far over (or under)
-        float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f;
+        // THE SWASH (Jet.hlsli SwashShare; the cascade loop says why): the limiter scaled every component by
+        // 1 / max(excess, 1), so the raw sea is the delivered one times that, and its Hs sets the run-up
+        const float rawW = max(excRaw, 1.0f);
+        const float rmsDel = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;
+        const float hsRawW = 4.0f * rmsDel * rawW;
+        float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f, sumACothR = 0.0f;
         float sumLift = 0.0f;   // -E[eta div D] at chop 1: sum k a^2 coth / 2 (WaveField::Probe::lift)
         float2 sumADir = 0.0f;
         float2 gradEta = 0.0f;   // the sheet's slope, grad eta = -sum a k sin(phi - sigma t) d (the flight's launch)
@@ -1098,15 +1135,19 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float4 dd = prev ? gWaveDirP[s >> 1] : WaveDirRow(s >> 1);
             const float2 dir2 = (s & 1) ? dd.zw : dd.xy;
             dW.y += wFc * aW * cT;
-            // the depth's orbit (the cascade loop says why): coth(kh) on this component's k
+            // the depth's orbit (the cascade loop says why): coth(kh) on this component's k; in the swash
+            // toward the raw one, on this component's run-up (its deep-water wavelength 2 pi coth / k)
             const float cothW = 1.0f / tanh(kW * max(depth, 0.3f));
-            dW.xz -= gWaveB.z * wFc * aW * cothW * sT * dir2;
+            const float rawFW = (rawW > 1.0f) ? 1.0f + SwashShare(hsRawW, 6.2831853f * cothW / kW, depth) * (rawW - 1.0f)
+                                              : 1.0f;
+            dW.xz -= gWaveB.z * wFc * aW * cothW * rawFW * sT * dir2;
             // the sea's sums for the crest law below: its amplitude, its energy-weighted k, its
-            // orbit's depth factor and its travel
+            // orbit's depth factor (the drawn lateral's too) and its travel
             sumA += wFc * aW;
             sumAK += wFc * aW * kW;
             sumACoth += wFc * aW * cothW;
-            sumLift += 0.5f * kW * (wFc * aW) * (wFc * aW) * cothW;
+            sumACothR += wFc * aW * cothW * rawFW;
+            sumLift += 0.5f * kW * (wFc * aW) * (wFc * aW) * cothW * rawFW;
             sumADir += wFc * aW * dir2;
             gradEta -= wFc * aW * kW * sT * dir2;
         }
@@ -1123,13 +1164,18 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // (the loop wider than the crest: the sheet's own limit, k A_h <= pi/2); past it the water
         // is a bore, the foam's business. One min, the bound the wavelength's.
         if (sumA > 1e-6f) {
-            const float rmsNow = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;
-            const float aEnv = max(1.4142136f * rmsNow, 1e-3f);
+            const float aEnv = max(1.4142136f * rmsDel, 1e-3f);
             const float wCr = saturate(0.5f + 0.5f * dW.y / aEnv);
             const float kBar = sumAK / sumA;
             const float cothBar = sumACoth / sumA;
             const float2 dBar = sumADir / max(length(sumADir), 1e-6f);
-            const float aH = gWaveB.z * aEnv * cothBar;   // the sea's horizontal amplitude, at its chop
+            // the sea's horizontal amplitude, at its chop, the swash's raise in it -- held to the landing
+            // (the cascades' bound; offshore the delivered orbit never reaches it)
+            float aH = gWaveB.z * aEnv * (sumACothR / sumA);
+            const float fSw = min(1.0f, LipReach(kBar, cothBar, 2.0f * aEnv, max(depth, 0.3f)) / max(aH, 1e-4f));
+            dW.xz *= fSw;
+            sumLift *= fSw;
+            aH *= fSw;
             // THE CREST LAW (CrestLaw above; its history: 2026-10-19 the crest climbs to the cusp by the
             // share of the raw variance over the limit, the set wave's own excess; 2026-10-20 the lip falls
             // and the flight is one translator; 2026-10-22 the Iribarren gate; 2026-10-23 the sea's excess

@@ -236,6 +236,12 @@ inline double LipReach(double k, double coth, double Hc, double h) {
     const double eLand = std::sqrt(2.0 * H * (1.0 + H / wt::Max(h, 0.3)) / wt::Max(kJetFallRatio * k * coth, 1e-6));
     return 1.0 / wt::Max(k, 1e-4) + eLand;
 }
+// THE SWASH (2026-10-23; shaders/Jet.hlsli SwashShare is its twin and says what it is): the raw orbit's
+// share at a depth, exp(-h / R), R = 0.043 sqrt(Hs L0) (Stockdon et al. 2006, dissipative R2%).
+inline double SwashShare(double hsRaw, double L0, double depth) {
+    const double R = wt::Max(0.043 * std::sqrt(wt::Max(hsRaw, 0.0) * wt::Max(L0, 0.0)), 1e-3);
+    return std::exp(-wt::Max(depth, 0.0) / R);
+}
 // WHICH CRESTS PLUNGE (2026-10-22, Mark at the Merrimack bar: "we clip water heights"). The throw past
 // the fold onset (k A_h = 1, where the height field folds back on itself) is a PLUNGING breaker's, and a
 // beach makes plungers only where it is steep against the wave: the surf-similarity (Iribarren) number
@@ -266,19 +272,29 @@ inline double LipFallDe(double ePast, double k, double coth, double H, double h)
 // phase -- the "sea mid-plunge at every phase" ALGEBRA.md priors 53 (c) retired for the solved field,
 // and it spent the energy the depth takes twice: the solver already turns it into the push and the
 // setup. The law, on one description's surface at a label:
-//   - the ORBIT is the description's own, on the amplitude the depth lets stand (the caller's);
-//   - at the CREST alone (w = 1/2 + eta / 2 A_env), the throw toward the landing (LipReach) by the
-//     crest's own excess -- the sea's raw ratio, unclamped, times the crest over the significant
-//     amplitude -- where the bed's slope says the crest plunges (PlungeShare, the Iribarren band);
-//   - the lip's fall the flight's boost back (LipFall, LipFlightTau), bounded by the trough.
+//   - the ORBIT is the description's own, on the amplitude the depth lets stand, raised toward the raw
+//     one in the swash (SwashShare: the caller's);
+//   - at the CREST alone (w = 1/2 + eta / 2 A_env), by the crest's own excess -- the sea's raw ratio,
+//     unclamped, times the crest over the significant amplitude -- EVERY breaking crest goes forward to
+//     the cusp (k A_h = 1: the kinematic criterion, a spiller's as much as a plunger's), and the jet
+//     flies on toward the landing (LipReach) only where the bed's slope says it plunges (PlungeShare,
+//     the Iribarren band, gates the flight alone: Mark, 2026-10-23);
+//   - water past the cusp falls, the flight's boost back (LipFall, LipFlightTau), bounded by the trough.
 // The state is the description's surface at the label: eta, its lateral offset (dx, dz) in the units
 // the caller holds it -- `post` is the factor the caller multiplies the lateral by afterwards (the
 // solved field's chop in ProbeAt, 1 where the lateral is already drawn) -- its slope and the offset's
 // Jacobian, carried through by the product rule (grad w = grad eta / 2 A_env inside the band). aH is
 // the DRAWN lateral amplitude of the sea (chop x A_env x coth), excRaw the sea's rms_raw / rms_limit.
 // The translator's sandwich on a point is its shift (Pga.h's Motor::Translation): p + tau.
-struct CrestState {
-    double eta = 0.0, dx = 0.0, dz = 0.0, sx = 0.0, sz = 0.0, jxx = 0.0, jxz = 0.0, jzz = 0.0;
+struct CrestState {   // one member a line: proofs/water_terms.py transpiles this header
+    double eta = 0.0;
+    double dx = 0.0;
+    double dz = 0.0;
+    double sx = 0.0;
+    double sz = 0.0;
+    double jxx = 0.0;
+    double jxz = 0.0;
+    double jzz = 0.0;
 };
 // The share of the crest's variance over the depth's limit: 0 below it, the plunge's gate.
 inline double CrestExcessShare(double eta, double aEnv, double excRaw) {
@@ -294,7 +310,9 @@ inline void CrestLaw(CrestState& s, double dBx, double dBz, double aEnv, double 
     const double aLoop = LipReach(kBar, cothBar, Hc, depth);
     const double share = CrestExcessShare(s.eta, aEnv, excRaw);
     const double plunge = (share > 0.0) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0;
-    const double q1 = wt::Max(aLoop / wt::Max(aH, 1e-3) - 1.0, 0.0) * share * plunge;
+    // to the cusp for every breaker, from the cusp to the landing for the plunging share
+    const double rH = 1.0 / wt::Max(aH, 1e-3), cuspR = rH / wt::Max(kBar, 1e-4);
+    const double q1 = share * (wt::Max(cuspR - 1.0, 0.0) + plunge * wt::Max(aLoop * rH - wt::Max(cuspR, 1.0), 0.0));
     const double g = 1.0 + q1 * wCr;
     const double wx = inBand ? 0.5 * s.sx / aEnv : 0.0;   // grad(w) (s.sx is grad(eta) so far)
     const double wz = inBand ? 0.5 * s.sz / aEnv : 0.0;

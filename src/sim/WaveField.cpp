@@ -2170,7 +2170,12 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
     // gated on the sea's excess, and this twin did, so a set crest the kernel threw in deep water the
     // hull never felt. WaterBank.hlsl's solved loop, THE SEA'S EXCESS UNCLAMPED, says why.)
     const double excRaw = (depthM > 0.0) ? bil(t.envSlice, 1) * double(t.excMax) : 0.0;
-    double sumA = 0.0, sumAK = 0.0, sumACoth = 0.0, sumADx = 0.0, sumADz = 0.0;
+    // THE SWASH (WaterTerms.h SwashShare; the kernel's solved loop): the limiter scaled every component by
+    // 1 / max(excess, 1), so the raw sea is the delivered one times that, and its Hs sets the run-up
+    const double rawW = (std::max)(excRaw, 1.0);
+    const double rmsDel = bil(t.envSlice, 0) * double(t.envMax);
+    const double hsRawW = 4.0 * rmsDel * rawW;
+    double sumA = 0.0, sumAK = 0.0, sumACoth = 0.0, sumACothR = 0.0, sumADx = 0.0, sumADz = 0.0;
     double liftS = 0.0;   // -E[eta div D], chop 1 (Probe::lift)
     double vxS = 0.0, vyS = 0.0, vzS = 0.0;
     double jxxS = 0.0, jxzS = 0.0, jzzS = 0.0;
@@ -2215,22 +2220,28 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         // in deep water. depthM <= 0 is the deep-water orbit (the instruments that read the field
         // alone); the hull's twin hands the depth it stands in.
         const double coth = (depthM > 0.0) ? 1.0 / std::tanh(k * (std::max)(depthM, 0.3)) : 1.0;
+        // ...and in the swash toward the raw one, on this component's run-up (L0 = 2 pi coth / k)
+        const double rawF = (rawW > 1.0)
+            ? 1.0 + SwashShare(hsRawW, 6.283185307179586 * coth / (std::max)(k, 1e-4), depthM) * (rawW - 1.0)
+            : 1.0;
+        const double cothL = coth * rawF;            // the lateral's factor
         eta += aC;                                   // eta = a cos(theta)   <- the reference
-        dxS -= aS * dX * coth;                       // D_h = -a sin(theta) coth(kh) d^   (chop = 1;
-        dzS -= aS * dZ * coth;                       //        WaterBank scales this by wfChop)
+        dxS -= aS * dX * cothL;                      // D_h = -a sin(theta) coth(kh) d^   (chop = 1;
+        dzS -= aS * dZ * cothL;                      //        WaterBank scales this by wfChop)
         // the sea's sums for the crest law after the loop (the kernel's)
         sumA += aC0;
         sumAK += aC0 * k;
         sumACoth += aC0 * coth;
+        sumACothR += aC0 * cothL;
         sumADx += aC0 * dX;
         sumADz += aC0 * dZ;
-        liftS += 0.5 * k * aC0 * aC0 * coth;         // -E[eta div D] = k a a coth / 2 (the mean lift)
+        liftS += 0.5 * k * aC0 * aC0 * cothL;        // -E[eta div D] = k a a coth / 2 (the mean lift)
         sxS -= aS * k * dX;                          // grad eta = -a k sin(theta) d^
         szS -= aS * k * dZ;                          //   (the k is the term: a slope is 1/L)
         vxS += sig * aC * dX;                        // u = +sigma a cos(theta) d^  (crest
         vzS += sig * aC * dZ;                        //   water runs WITH the wave)
         vyS += sig * aS;                             // w = +sigma a sin(theta) == d(eta)/dt
-        const double aKC = aC * k * coth;            // grad D_h = -a k cos(theta) coth(kh) d^ (x) d^
+        const double aKC = aC * k * cothL;           // grad D_h = -a k cos(theta) coth(kh) d^ (x) d^
         jxxS -= aKC * dX * dX;
         jxzS -= aKC * dX * dZ;
         jzzS -= aKC * dZ * dZ;
@@ -2240,17 +2251,28 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
     // where the bed plunges, the lip's fall bounded by the trough, the slope and the offset's Jacobian
     // carried through. Here the lateral is at chop 1 (the caller's lq carries the chop): post = chopM.
     if (depthM > 0.0 && sumA > 1e-9) {
-        const double rmsNow = bil(t.envSlice, 0) * double(t.envMax);
-        const double aEnv = (std::max)(1.4142135623730951 * rmsNow, 1e-3);
+        const double aEnv = (std::max)(1.4142135623730951 * rmsDel, 1e-3);
         const double kBar = sumAK / sumA;
         const double cothBar = sumACoth / sumA;
+        // the sea's drawn lateral amplitude (chop applied), the swash's raise in it, HELD TO THE LANDING
+        // (the kernel's bound): the lateral, its Jacobian and the lift take the one factor
+        double aH = aEnv * (sumACothR / sumA) * chopM;
+        const double fSw = (std::min)(1.0, LipReach(kBar, cothBar, 2.0 * aEnv, (std::max)(depthM, 0.3)) /
+                                               (std::max)(aH, 1e-4));
+        aH *= fSw;
+        dxS *= fSw;
+        dzS *= fSw;
+        jxxS *= fSw;
+        jxzS *= fSw;
+        jzzS *= fSw;
+        liftS *= fSw;
         const double dLen = std::sqrt(sumADx * sumADx + sumADz * sumADz);
         const double dBx = dLen > 1e-9 ? sumADx / dLen : 0.0, dBz = dLen > 1e-9 ? sumADz / dLen : 0.0;
         const double sqB = bil(t.envSlice, 3);   // sqrt(tan beta), the solve's bed slope
         CrestState st;
         st.eta = eta; st.dx = dxS; st.dz = dzS; st.sx = sxS; st.sz = szS;
         st.jxx = jxxS; st.jxz = jxzS; st.jzz = jzzS;
-        CrestLaw(st, dBx, dBz, aEnv, excRaw, kBar, cothBar, aEnv * cothBar * chopM, chopM, sqB * sqB, depthM);
+        CrestLaw(st, dBx, dBz, aEnv, excRaw, kBar, cothBar, aH, chopM, sqB * sqB, depthM);
         eta = st.eta; dxS = st.dx; dzS = st.dz; sxS = st.sx; szS = st.sz;
         jxxS = st.jxx; jxzS = st.jxz; jzzS = st.jzz;
     }

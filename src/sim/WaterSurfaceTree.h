@@ -205,6 +205,9 @@ private:
         // Station i stands at i * profStep metres along (profDirX, profDirZ); dryProf[8] is the point.
         double dryProf[17] = {};
         double profStep = 1.0, profDirX = 1.0, profDirZ = 0.0;
+        // THE BED'S SLOPE for the cascades' Iribarren gate (CrestLaw), one wave-radian of the whole sea east
+        // and north, read here for the same reason (2026-10-23: bbd1a98 read it in Finish, across the pool).
+        double tanB = 0.0;
     };
     void Prepare(double wx, double wz, double simUnix, Prep& p) const;
     SurfaceSample Finish(const Prep& p, double wx, double wz, double simUnix, bool displaced) const;

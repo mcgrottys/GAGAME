@@ -347,6 +347,15 @@ void TreeWater::Prepare(double wx, double wz, double simUnix, Prep& p) const {
             const double aLoop = LipReach(kSh0, OrbitCoth(kEff, depth), 2.0 * aEnv0, hB0);   // the landing
             const double aH0 = 1.4142135623730951 * rmsRaw * m_heightScale * OrbitCoth(kEff, depth) / (std::max)(brk, 1e-3);
             aMax = (std::min)((std::max)(3.0 * aH0, 2.0), aLoop);
+            // the bed's slope one wave-radian of the whole sea east and north (the kernel's dS), never
+            // under the twin's texel: the face a breaking crest runs up (Prep::tanB)
+            const double dS = (std::max)(1.0 / (std::max)(kSh0, 1e-4), m_sampleM);
+            double laE = 0.0, loE = 0.0, laN = 0.0, loN = 0.0;
+            PlaceOf(wx + dS, wz, laE, loE);
+            PlaceOf(wx, wz + dS, laN, loN);
+            const double gx = (BedAt(q, laE, loE) - s.bedNavd) / dS;
+            const double gz = (BedAt(q, laN, loN) - s.bedNavd) / dS;
+            p.tanB = (std::min)(std::sqrt(gx * gx + gz * gz), 1.0);
         }
         p.profStep = 0.5 * aMax;   // 8 stations reach 4 x aMax
         p.profDirX = ux;
@@ -447,14 +456,19 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         }
         // THE ORBIT IS THE DELIVERED ONE (2026-10-23; the kernel's cascade loop says why): each band's
         // lateral rides its delivered gain times the depth's orbit, coth(k h) on the band's k -- the lateral
-        // channels' own gain, handed to the sampler beside the height's. The crest's throw is CrestLaw's,
-        // after the sum.
-        double latGain[OceanCpu::kCascades];
+        // channels' own gain, handed to the sampler beside the height's -- and IN THE SWASH climbs toward the
+        // raw one (WaterTerms.h SwashShare: the band's run-up on the raw sea's Hs), held to the landing after
+        // the sum. The crest's going forward is CrestLaw's, after the sum.
+        double latCoth[OceanCpu::kCascades], latGain[OceanCpu::kCascades];
+        double liftC = 0.0;   // the cascades' share of THE LIFT, held with their lateral below
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
-            latGain[c] = OrbitCoth(m_ocean->BandK(c), depth);
+            const double kB = m_ocean->BandK(c);
+            latCoth[c] = OrbitCoth(kB, depth);
+            const double sw = SwashShare(4.0 * rmsRaw, 6.283185307179586 / std::max(kB, 1e-6), depth);
+            latGain[c] = latCoth[c] * (1.0 + sw * (1.0 / std::max(brk, 1e-3) - 1.0));
             // THE LIFT's cascade term (the kernel's liftE): vertical gain x lateral gain x the texture's
             // own E[h div D] (OceanCpu::LiftMoment, signed)
-            liftPhys -= gain[c] * (gain[c] * latGain[c]) * m_ocean->LiftMoment(c);
+            liftC -= gain[c] * (gain[c] * latGain[c]) * m_ocean->LiftMoment(c);
         }
         // THE CASCADES ARE READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h), which is the one
         // term of this water that needs a plane at all. Up to four charts touch a place; each is
@@ -501,15 +515,16 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         // the twin has no ring, so no fold -- in physical metres, its excess the drawn sea's against the
         // depth, the bed's slope one wave-radian east and north where a crest is over its limit.
         static const bool noCascadeCrest = [] { const char* e = std::getenv("GAGAME_NO_CASCADE_CREST"); return e && e[0] == '1'; }();
-        if (depth > 0.05 && !noCascadeCrest) {   // the A/B switch (WaterBankLayer.cpp)
+        if (depth > 0.05) {
             const double hB = std::max(depth, 0.3);
-            double eD = 0.0, eDk = 0.0, sA = 0.0, sAC = 0.0;
+            double eD = 0.0, eDk = 0.0, sA = 0.0, sAC = 0.0, sACR = 0.0;
             for (int c = 0; c < OceanCpu::kCascades; ++c) {
                 const double gr = gain[c] / std::max(brk, 1e-3) * m_bandRms[c];   // the drawn band's raw rms
                 eD += gr * gr;
                 eDk += gr * gr * m_ocean->BandK(c);
                 sA += gr;
-                sAC += gr * latGain[c];
+                sAC += gr * latCoth[c];
+                sACR += gr * latGain[c];
             }
             const double envD = std::sqrt(eD);
             if (eD > 1e-12) {
@@ -518,28 +533,33 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
                 const double cothBar = sAC / sA;
                 const double aEnvC = std::max(1.4142135623730951 * envD * brk, 1e-3);
                 const double excD = envD * 2.8284271247461903 / BreakHmax(kD, depth);
-                CrestState st;
-                st.eta = dispY - y0; st.dx = dispX - dx0; st.dz = dispZ - dz0;
-                st.sx = slopeX - sx0; st.sz = slopeZ - sz0;
-                st.jxx = jacXX - jxx0; st.jxz = jacXZ - jxz0; st.jzz = jacZZ - jzz0;
-                double tanB = 0.0;
-                if (CrestExcessShare(st.eta, aEnvC, excD) > 0.0) {
-                    const double dS = std::max(1.0 / std::max(kSh, 1e-4), m_sampleM);   // the twin's texel
-                    double laE = 0.0, loE = 0.0, laN = 0.0, loN = 0.0;
-                    PlaceOf(wx + dS, wz, laE, loE);
-                    PlaceOf(wx, wz + dS, laN, loN);
-                    const double gx = (BedAt(q, laE, loE) - s.bedNavd) / dS;
-                    const double gz = (BedAt(q, laN, loN) - s.bedNavd) / dS;
-                    tanB = std::min(std::sqrt(gx * gx + gz * gz), 1.0);
+                // its drawn lateral amplitude, the swash's raise in it, HELD TO THE LANDING (the kernel's
+                // bound): the cascades' lateral, its Jacobian and its lift take the one factor
+                double aH = m_ocean->Lambda() * aEnvC * (sACR / sA);
+                const double fSw = std::min(1.0, LipReach(kSh, cothBar, 2.0 * aEnvC, hB) / std::max(aH, 1e-4));
+                aH *= fSw;
+                dispX = dx0 + fSw * (dispX - dx0);
+                dispZ = dz0 + fSw * (dispZ - dz0);
+                jacXX = jxx0 + fSw * (jacXX - jxx0);
+                jacXZ = jxz0 + fSw * (jacXZ - jxz0);
+                jacZZ = jzz0 + fSw * (jacZZ - jzz0);
+                liftC *= fSw;
+                if (!noCascadeCrest) {   // the A/B switch (WaterBankLayer.cpp)
+                    CrestState st;
+                    st.eta = dispY - y0; st.dx = dispX - dx0; st.dz = dispZ - dz0;
+                    st.sx = slopeX - sx0; st.sz = slopeZ - sz0;
+                    st.jxx = jacXX - jxx0; st.jxz = jacXZ - jxz0; st.jzz = jacZZ - jzz0;
+                    // the bed's slope Prepare read (Finish never touches the bed tree: it runs across the pool)
+                    const double tanB = (CrestExcessShare(st.eta, aEnvC, excD) > 0.0) ? p.tanB : 0.0;
+                    const double dBx = m_peakValid ? m_peakDirX : 0.0, dBz = m_peakValid ? m_peakDirZ : 0.0;
+                    CrestLaw(st, dBx, dBz, aEnvC, excD, kSh, cothBar, aH, 1.0, tanB, depth);
+                    dispY = y0 + st.eta; dispX = dx0 + st.dx; dispZ = dz0 + st.dz;
+                    slopeX = sx0 + st.sx; slopeZ = sz0 + st.sz;
+                    jacXX = jxx0 + st.jxx; jacXZ = jxz0 + st.jxz; jacZZ = jzz0 + st.jzz;
                 }
-                const double dBx = m_peakValid ? m_peakDirX : 0.0, dBz = m_peakValid ? m_peakDirZ : 0.0;
-                CrestLaw(st, dBx, dBz, aEnvC, excD, kSh, cothBar, m_ocean->Lambda() * aEnvC * cothBar, 1.0,
-                         tanB, depth);
-                dispY = y0 + st.eta; dispX = dx0 + st.dx; dispZ = dz0 + st.dz;
-                slopeX = sx0 + st.sx; slopeZ = sz0 + st.sz;
-                jacXX = jxx0 + st.jxx; jacXZ = jxz0 + st.jxz; jacZZ = jzz0 + st.jzz;
             }
         }
+        liftPhys += liftC;
     }
     lap(s_cycCascade);
 

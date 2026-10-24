@@ -1049,6 +1049,42 @@ it: `TreeWater` via `SetCascadeSea`, and the probe's orientation line.
 **Still apart:** the 8 km ring (ratio 1.78, correlation 0.63). The coarse ring folds the bands into σ²
 while the hull sums them, and that is by design.
 
+### 12.15 The one law: every breaker to the cusp, the flight by its plunge, the swash (2026-10-23)
+
+Mark: "the waves don't seem to be rolling as they should, before there was water going up the beach and
+flowing back down into the ocean and causing the waves flowing onto beach to increase in size and roll."
+§12.13 had done it. It retired the cascades' raw orbit (the run-up and the backwash) and gated a crest's
+whole going-forward on the Iribarren number, so the Merrimack's spilling beaches (median ξ 0.19) did not
+roll. Mark chose the one-law fix (ALGEBRA.md priors 57):
+
+* **`CrestLaw`, both processors.** The crest's forward share is share × [(to the cusp) + PlungeShare ×
+  (from the cusp to the landing)]. Every breaking crest goes forward to the cusp (k A_h = 1), and the jet
+  flies on only where the bed plunges. At PlungeShare = 1 it is the law of before.
+* **The swash, every description, both processors.** The lateral orbit is the delivered one × (1 + S (raw /
+  delivered − 1)), where S = exp(−h / R) and R = 0.043 √(Hs L0) (Stockdon et al. 2006, the dissipative
+  beaches' R2%).
+  * Cascades: per band, raw / delivered = 1 / brk, L0 = 2π / k_band.
+  * Solved field: per component, max(excess, 1), L0 = 2π coth / k.
+  * The raised orbit is held to the landing reach (the cascades' bound of 2026-10-19), and the lift rides
+    the lateral it is taken on. Offshore the delivered orbit never reaches the bound.
+* **The twin's bed slope moves into `Prepare`.** bbd1a98 read it in `TreeWater::Finish`, which `AtMany` runs
+  across the pool, while `HeightPage`'s memo is single-threaded. That was the crash and the hour-long hang
+  of 2026-10-19 come back. Both processors now take its step on the WHOLE sea's energy wavenumber, which is
+  the sea that breaks, even inside the window where only the chop is drawn.
+
+| Salisbury, 16:00Z Oct 22, cascades only | §12.12 (raw orbit) | §12.13 | **now** |
+|---|---|---|---|
+| lateral mean / max, 0.5–1 m water | 2.73 / 8.75 m | 0.78 / 3.02 m | **2.52 / 8.47 m** |
+| lateral mean / max, 1–2 m water | 3.81 / 11.79 m | 1.11 / 3.03 m | **2.47 / 8.83 m** |
+| drawn mean, 0.5–1 m / 1–2 m water | −0.19 / −0.17 m | −0.02 / −0.02 m | **−0.26 / −0.04 m** |
+| offshore (5–99 m) | — | — | unchanged to the mm |
+| twin correlation 0 / 500 / 2000 m | — | 0.993 / 0.989 / 0.928 | **0.993 / 0.989 / 0.928** |
+
+**Open:** the inner surf's drawn mean stands below the solver's level again (−0.26 m at 0.5–1 m water). The
+swash orbit is past the cusp at every crest there, and water past the cusp falls. The §12.12 look Mark
+preferred carried the same (−0.19 m). The grid's fold count reads 0 % in all three, so it is not the
+instrument for the roll: Mark's eye is.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

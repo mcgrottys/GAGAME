@@ -429,14 +429,17 @@ ALLOW = {
     # comparison has no literal counterpart.  Same law, one fewer float.
     "WakeOne": ([0.5], []),
     "PlungeShare": ([], []),
+    "SwashShare": ([], []),
 }
 NAMED = {"BandPhaseSpeed": ("kGWave", "kDepthFloorM"),
          "ShoalFactor": ("kGWave", "kDepthFloorM"),
-                  "WaveCurrentAmp": (), "WakeBranch": (), "WakeOne": ("kGWave",), "PlungeShare": ()}
+                  "WaveCurrentAmp": (), "WakeBranch": (), "WakeOne": ("kGWave",), "PlungeShare": (),
+         "SwashShare": ()}
 SRC = {"BandPhaseSpeed": JET, "ShoalFactor": JET, "WaveCurrentAmp": JET,
-       "WakeBranch": BANK, "WakeOne": BANK, "PlungeShare": JET}
+       "WakeBranch": BANK, "WakeOne": BANK, "PlungeShare": JET, "SwashShare": JET}
 
-for fname in ("BandPhaseSpeed", "ShoalFactor", "WaveCurrentAmp", "WakeBranch", "WakeOne", "PlungeShare"):
+for fname in ("BandPhaseSpeed", "ShoalFactor", "WaveCurrentAmp", "WakeBranch", "WakeOne", "PlungeShare",
+              "SwashShare"):
     h = literals(hlsl_body(SRC[fname], fname))
     c = literals(cpp_body(fname), NAMED[fname])
     only_h, only_c = multiset_diff(h, c)
