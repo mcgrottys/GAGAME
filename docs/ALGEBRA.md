@@ -769,13 +769,47 @@ solution including σ_r/σ (verified 4e-16 over r ∈ [−0.24, 0.3]), and Shoal
 finite-depth action shoaling without current. The solved field supersedes both for
 DISPLAY inside its window; the closures stay for the foam/churn path and the fallback sea.
 
-**Refraction.** Snell against one fixed bar-normal frame (compass 285): per-COMPONENT
-incidence θ0_i from the component's own direction (using the mean direction gets 15 of 16
-components wrong), sin θ = sin θ0 · c/c0 with the SOLVED c, Kr = √(cos θ0 / cos θ) ≤ 1
-(spreading only — no focusing, an accepted liberty of the fixed frame). The direction
-change is a rotor in e1∧e2 (one-sided Cl(2)+ multiplication, the tide-phasor law), but the
-reference applies only the amplitude consequence: d̂ stays the offshore direction, and the
-port that diffs against the reference textures must keep it so.
+**Refraction (W1, 2026-10-24): the action, carried along the eikonal.** The amplitude is
+the wave action N = A²/σ_r transported by the absolute group velocity along the phase's own
+rays, ∇·(N (c_g k̂ + U)) = 0 with k̂ = ∇φ/|∇φ| (`wavecore::ActionTransport`). One statement
+covers refraction, shoaling (now with the σ_r/σ factor the energy-flux form above dropped)
+and the current's action exchange; it focuses as well as spreads. Its limit on straight
+parallel contours with no current is the law it replaced — Snell plus energy-flux shoaling,
+A² = a0² (cg0/cg)(cos θ_e / cos θ) — but stated by the bathymetry, not by one declared bar
+normal for the whole window (the Merrimack's 285°, which every scene inherited). Discretized on
+the cells along the eikonal's own characteristics: a cell's direction is the Godunov upwind
+gradient its phase was solved with (the winning ray family's), it drains by its own velocity,
+and along each axis it is fed from the side that velocity comes from; where two ray families
+meet (a crease of the first-arrival phase) the losing family's flux ends — past the crease it
+would be a second, crossing sea, which a single-valued phase cannot hold. The window's inflow
+edges carry the deep swell's action flux Φ0 (d̂·n_in), Φ0 = a0² cg0/σ — the flux per metre of
+edge under the phase seed's own assumption (contours along the edge). The phase itself is solved
+over the WATER first, land a wall, and only then continued onto the land from the water's edge
+(for the shore's interpolation): swept together, a dry cell's shoreline k made a ten-cell jetty
+cheaper to cross than to go round, and the Merrimack's channel took its crests through the north
+jetty. The cells are marched in phase order (every ray runs from lower phase to higher), each
+diffracted sample restricted to the corners that precede the cell it feeds, so a pass settles
+the field (a few in the tests, 26-53 on the Merrimack window with the solver's ebb).
+
+**Diffraction (Mase 2001).** Geometric optics alone leaves a jetty's lee dark and draws every
+convergence of rays as a one-cell line (the layer sheet showed both: the inlet black, a streak
+off the north jetty). Mase's energy-balance term (H. Mase 2001, Coastal Engineering Journal
+43(4)), κ/(2σ)·[∂_n(C C_g ∂_n N) − ½ C C_g ∂_nn N] with κ = 2.5 and n along the local crest,
+spreads action across rays. It makes the steady balance parabolic, so it is integrated as a
+march: the action arriving from an upwind neighbour has spread along that neighbour's crest
+over the step it travelled, (1−2r)N(q) + r N(q ± Δn n̂), r = D ds/(|F| Δn²) ≤ ½ with
+D = κ C C_g/(4σ), and Mase's drift (C C_g)_n N_n shifts q along the crest (clamped to a cell:
+on a bar's face it reached 5-10). Every weight is positive and every dependency upstream; solved
+implicitly the crest coupling made the sweep elliptic and it crawled (hundreds of rounds, point
+or line relaxation alike). Note the generalisation: Mase diffuses along one fixed grid axis with a
+cos²θ weight, so a wave refracting over straight contours feels nothing; along the local crest it
+acts on the crest's along-contour gradients too — a small correction to pure refraction, largest
+on a steep face. Gates (`[wavetest]`): a plane wave in deep water is exact; straight contours
+stay within 1.5 % of Snell from deep water (p99 1.3 %); a semi-infinite breakwater leaves 0.37
+of the energy on the line its tip casts (the random-wave diffraction diagrams give about half),
+the light 0.99, the lee 0.20 three wavelengths in. Reviewed 2026-10-24 (a Fable pass): the edge
+flux, the action's side under a turning current, the drift's step and a blocked cell's σ_r were
+its findings, all taken.
 
 **The total-Hs limiter.** Depth limits the SEA, not each spectral line: per-component caps
 left the sum 6.8× over the limit in the shallows (measured 63.9% of cells at N=4, 96.8%

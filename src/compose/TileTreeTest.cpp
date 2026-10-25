@@ -933,7 +933,6 @@ bool PrefillGates() {
     cfg.nx = 1600;
     cfg.ny = 1000;
     cfg.cellM = 2.0;
-    cfg.barNormalDeg = 285.0;
     // The shipped window about the shipped scenes' anchor (test data, pinned at the anchor).
     const WaveFieldSource::Frame wf =
         WaveFieldSource::Align(cfg, Space::Anchor::About(42.81833, -70.81, 6371000.0));

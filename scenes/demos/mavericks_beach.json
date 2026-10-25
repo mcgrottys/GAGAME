@@ -29,7 +29,6 @@
       "nx": 1700,
       "ny": 1400,
       "cellM": 2.5,
-      "barNormalDeg": 65,
       "gammaHs": 0.6
     }
   },

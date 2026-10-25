@@ -1375,7 +1375,6 @@ std::optional<int> FrameLoop::Session() {
         c.cellM = s.wfCellM;
         c.nComp = s.wfComps;
         c.spreadDeg = s.wfSpreadDeg;
-        c.barNormalDeg = s.wfBarNormalDeg;
         c.gammaHs = s.wfGammaHs;
         c.minSamplesPerLambda = s.wfMinSamplesPerLambda;
         c.tideBucketM = s.wfTideBucketM;
@@ -1432,7 +1431,7 @@ std::optional<int> FrameLoop::Session() {
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
         // makes. Nothing between here and there reads either.
         if (waterScene.wfEnabled && !waterScene.WaveWindowDeclared()) {
-            Log("[wave] this place declares no window (water.wavefield: orgX, orgZ, nx, ny, barNormalDeg): "
+            Log("[wave] this place declares no window (water.wavefield: orgX, orgZ, nx, ny): "
                 "no solved field; the cascades carry the sea");
         }
         if (waterScene.wfEnabled && waterScene.WaveWindowDeclared()) {

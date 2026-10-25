@@ -181,7 +181,6 @@
       { "key": "cellM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "hot", "doc": "cell size" },
       { "key": "comps", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 32, "reload": "hot", "doc": "spectral components (M9bp: 32 -- sixteen 1.6 deg apart sum to a fixed interference lattice, the comb of straight ridges down a storm face)" },
       { "key": "spreadDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "directional spread" },
-      { "key": "barNormalDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": -1, "reload": "hot", "doc": "the window's bar normal, compass; the place's (< 0: undeclared, no solve)" },
       { "key": "gammaHs", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.6, "reload": "hot", "doc": "Hs <= gamma * h (the total limiter)" },
       { "key": "minSamplesPerLambda", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 8, "reload": "hot", "doc": "upload gate; the cascades keep the shorter bands" },
       { "key": "tideBucketM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.25, "reload": "hot", "doc": "re-solve quantization" },

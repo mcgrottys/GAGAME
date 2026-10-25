@@ -31,10 +31,10 @@ namespace ga {
 
 struct WaterSceneConfig {
     // ---- the solved wave field's window (metres east/north of the scene's place.anchor) ----
-    // A PLACE'S, declared by its scene (water.wavefield: orgX, orgZ, nx, ny, barNormalDeg). None is
+    // A PLACE'S, declared by its scene (water.wavefield: orgX, orgZ, nx, ny). None is
     // the default, and with none there is no solve. These were the Merrimack mouth's numbers until
     // 2026-10-24, so a scene that declared no window solved the Merrimack's about its own anchor, at
-    // the Merrimack bar's normal; and data/wave_scene.json, read under every scene, cannot say a
+    // the Merrimack bar's normal (gone with W1); and data/wave_scene.json, read under every scene, cannot say a
     // window any more (LoadWaterScene).
     bool wfEnabled = true;
     double wfOrgX = 0.0, wfOrgZ = 0.0;
@@ -45,7 +45,6 @@ struct WaterSceneConfig {
     // not only in data/wave_scene.json, because that file is untracked.
     int wfComps = 32;
     double wfSpreadDeg = 26.0;
-    double wfBarNormalDeg = -1.0;       // the window's bar normal, compass; < 0: undeclared
     double wfGammaHs = 0.60;            // Hs <= gamma * h (the total limiter)
     double wfMinSamplesPerLambda = 8.0; // upload gate; the cascades keep shorter bands
     double wfTideBucketM = 0.25;        // re-solve quantization
@@ -126,9 +125,8 @@ struct WaterSceneConfig {
         {3.34, 6.0, 0.38, 900.0, 1},     // commercial skiff
         {4.86, 6.5, 0.44, 1800.0, -1},   // second recreational, inbound
     };
-    // The solved wave field stands only where its scene declared the window: cells both ways and the
-    // bar normal it is solved against.
-    bool WaveWindowDeclared() const { return wfNx > 0 && wfNy > 0 && wfBarNormalDeg >= 0.0; }
+    // The solved wave field stands only where its scene declared the window: cells both ways.
+    bool WaveWindowDeclared() const { return wfNx > 0 && wfNy > 0; }
 };
 
 inline void WriteDefaultWaterScene(const char* path) {
@@ -205,7 +203,11 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
         out.wfEnabled = !en || en->type != JsonValue::Type::Bool || en->boolean;
         // THE WINDOW IS A PLACE'S (2026-10-24): this file is read under every scene, so a window
         // said here stood about every scene's anchor. The scene's water.wavefield says it.
-        for (const char* k : {"orgX", "orgZ", "nx", "ny", "barNormalDeg"}) {
+        if (w->Get("barNormalDeg")) {
+            Log("[scene] %s: wavefield.barNormalDeg is not read -- the solve carries the action along its own "
+                "rays and needs no bar normal (W1, 2026-10-24)", path);
+        }
+        for (const char* k : {"orgX", "orgZ", "nx", "ny"}) {
             if (w->Get(k)) {
                 Log("[scene] %s: wavefield.%s is a window's, and a window is a place's -- not read from here; "
                     "delete it (a scene that includes this file takes it as its own) and declare it in the "

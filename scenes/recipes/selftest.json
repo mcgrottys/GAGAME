@@ -46,7 +46,6 @@
       "cellM": 2,
       "comps": 32,
       "spreadDeg": 26,
-      "barNormalDeg": 285,
       "gammaHs": 0.6,
       "minSamplesPerLambda": 8,
       "tideBucketM": 0.25,

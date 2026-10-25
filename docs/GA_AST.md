@@ -26,7 +26,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | compose.stack | corners | water.bank | world.m +v=N | world.m +v=N | - | m NAVD level/bed + hsScale | hsScale 0.15..3 | x1 | WaterBankLayer CornerParams (CPU) |
 | compose.stack | bed (per cell) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m NAVD | -40..15 | x1 | WaveField.h SolveNow (SampleHeightStack) |
 | water.atlas | level bucket | wave.solver | world.m +v=N | world.m +v=N | - | m NAVD | 0.25 m buckets | x1 | WaveField.h BucketKey |
-| act.currents | current proxy (fallback) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m/s (conveyance jet, x3.0 closure) | 0..2 | x3 | WaveField.h (ebb toward 105, flood 285) |
+| act.currents | current (the regional field, per cell) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m/s, 0.05 buckets | +-2.5 | x1 | WaveField.cpp Configure (FieldFlow, CurrentModel::SampleAt) |
 | swe.solver | current (solved) | wave.solver | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s (live SeaLayer gain), 0.05 buckets | +-2.5 | x1 | WaveField.h RefreshSweCurrent (1-v flip) |
 | wave.solver | a/k/phase-spinor planes | water.bank | mercator.px +v=S | uv01.vS +v=S | - | m / rad/m / unit spinor (RGBA8 pages, per-comp aMax kMax) | 17 planes of the wave.field page tenant (z16), mip 0 pinned | x1 | WaterBank.hlsl WavePageSample (M9bc; no flip: both vS) |
 | water.bank | disp/param/detail (sanity lens only) | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m/s / band gains (g1,dry,g0,g2) | rings 1.2..38 m/texel | x1 | Globe.hlsl BankSample cubic (Catmull-Rom) + tangent bivector |

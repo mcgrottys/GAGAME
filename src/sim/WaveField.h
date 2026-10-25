@@ -72,7 +72,6 @@ struct WaveFieldConfig {
     double cellM = 2.0;
     int nComp = 32;                    // M9bp: see SceneConfig wfComps (16 was the comb)
     double spreadDeg = 26.0;
-    double barNormalDeg = -1.0;        // the window's bar normal, compass (its scene's)
     double gammaHs = 0.60;             // Hs <= gammaHs * h (the total limiter)
     double minSamplesPerLambda = 8.0;  // upload gate: lambda >= this * cell
     double tideBucketM = 0.25;         // re-solve quantization
@@ -109,7 +108,9 @@ public:
     // route into the sea as banding. Every cached solve carries the old, walked phase.
     // F28: 11, was 10 -- the eikonal is swept until still; every cached two-round phase re-solves.
     // 12 (2026-10-22): the envelope's fourth channel is sqrt(tan beta), the bed's slope (Jet.hlsli PlungeShare).
-    static constexpr uint32_t kSolverVersion = 12;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
+    // 13 (2026-10-24): W1, the amplitude is the action carried along the eikonal (no bar normal); W2, the
+    // current is the manager's per cell (no proxy jet). Every cached solve re-solves.
+    static constexpr uint32_t kSolverVersion = 13;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
@@ -117,10 +118,11 @@ public:
 
     // M8 FLOWS INTO WAVES (the user's priority, verbatim: "flows affect waves"): when
     // the SWE solver is resident its SOLVED current -- the bent jet, the shear off the
-    // tips -- drives the dispersion instead of the climatological proxy. The planes are
-    // read back on the main thread at a quantized cadence, resampled onto the solve
-    // grid (row-0-north flip declared), scaled by the prism-truncation gain, and their
-    // quantized bytes join the bucket key: content identity, not a clock.
+    // tips -- drives the dispersion over the regional field's (W2: the manager's law, the
+    // solver over the field by its domain weight). The planes are read back on the main
+    // thread at a quantized cadence, resampled onto the solve grid (row-0-north flip
+    // declared), scaled by the scene's gain, and their quantized bytes join the bucket key:
+    // content identity, not a clock.
     void SetSweCurrent(class SweSolver* swe, float gain) {
         m_swe = swe;
         m_sweGain = gain;
@@ -390,8 +392,17 @@ private:
     const CurrentModel* m_currents = nullptr;
     int m_actSta = -1;
     class SweSolver* m_swe = nullptr;             // M8: the real flow (optional)
-    float m_sweGain = 3.2f;                       // prism-truncation magnitude restore
+    float m_sweGain = 1.0f;                       // the scene's water.swe.gain (SetSweCurrent)
     std::vector<float> m_curU, m_curV;            // solve-grid planes, main-thread owned
+    // W2 (2026-10-24): THE FIELD'S CURRENT ON THE SOLVE'S CELLS -- CurrentModel::SampleAt at each
+    // cell's place, in the 0.05 m/s quanta the solve eats -- made at Configure. The solver's flow is
+    // composed over it by the solver's domain weight (ResampleFlow); with no solver it is the flow.
+    // Shared, so a resample on a worker reads the planes it was handed.
+    struct FieldFlow {
+        std::vector<float> u, v;
+        uint64_t sig = 0;
+    };
+    std::shared_ptr<const FieldFlow> m_field;
     // F25: THE DISPERSION IS A FUNCTION OF THE CELL. k(sigma, h, along) depends on nothing but the
     // cell's depth, its flow along the component and the component itself, and finding it is the
     // solve's cost (96 brackets + 48 bisections of a tanh, 11 s of 20 at 1920x1152x32). A current
@@ -409,6 +420,7 @@ private:
     struct CurJob {
         SweSolver::FieldsRead read;   // the two readbacks, mapped and unpacked on the worker
         std::vector<float> uv4, U, V, oldU, oldV;
+        std::shared_ptr<const FieldFlow> field;   // W2: the field the solver's flow is composed over
         uint32_t uw = 0, uh = 0;
         uint64_t h = 0;            // the signature of what landed (the last one's when nothing was read)
         size_t moved = 0;
@@ -418,13 +430,14 @@ private:
     };
     std::shared_ptr<CurJob> m_curJob;
     // F17: THE FLOW IS PART OF THE KEY'S CONTENT. When a solver stands, the first solve waits for
-    // its first flow to land (whatever it held): a key formed before it names the proxy jet, and
+    // its first flow to land (whatever it held): a key formed before it names the field alone (it
+    // named the proxy jet until W2), and
     // that field was solved, cached and drawn for 90 s at every start since F13. The resample is
     // one function, run on a worker (the frame) or inline (the blocking path: dumps, rails,
     // settles, whose first frame must see the field).
     bool m_flowKnown = false;
     bool m_flowWaitSaid = false;
-    static void ResampleFlow(CurJob& j, const SweDomain& dom, float gain, const WaveFieldConfig& cfg, Gpu& gpu);
+    static void ResampleFlow(CurJob& j, const SweSolver& swe, float gain, const WaveFieldConfig& cfg, Gpu& gpu);
     mutable std::atomic<double> m_probeReadT{-1e18};   // the last probe inside the window (sim s)
     uint64_t m_waitingKey = 0;                    // a roll noted once while no one reads
 

@@ -57,8 +57,6 @@ const Schema& WavefieldTable() {
                   "spectral components (M9bp: 32 -- sixteen 1.6 deg apart sum to a fixed "
                   "interference lattice, the comb of straight ridges down a storm face)", H)
             .Bind("spreadDeg", kCfg.wfSpreadDeg, Q::Angle, "deg", "directional spread", H)
-            .Bind("barNormalDeg", kCfg.wfBarNormalDeg, Q::Angle, "deg",
-                  "the window's bar normal, compass; the place's (< 0: undeclared, no solve)", H)
             .Bind("gammaHs", kCfg.wfGammaHs, Q::Dimensionless, "1",
                   "Hs <= gamma * h (the total limiter)", H)
             .Bind("minSamplesPerLambda", kCfg.wfMinSamplesPerLambda, Q::Dimensionless, "1",
@@ -211,7 +209,7 @@ std::string ValueTextOf(const PropSet& set, const std::string& key) {
 bool IsSolverKey(const std::string& key) {
     static const char* kKeys[] = {"wavefield.orgX", "wavefield.orgZ", "wavefield.nx",
                                   "wavefield.ny", "wavefield.cellM", "wavefield.comps",
-                                  "wavefield.spreadDeg", "wavefield.barNormalDeg",
+                                  "wavefield.spreadDeg",
                                   "wavefield.gammaHs", "wavefield.minSamplesPerLambda",
                                   "wavefield.tideBucketM", "wavefield.currentBucketMs",
                                   "wavefield.featherM", "wavefield.exag"};

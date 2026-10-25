@@ -21,13 +21,14 @@
 //  ENGINE DECISIONS layered over the proof (each one mirrored by the checker):
 //    * dry cells (h <= 0): skip the solve -- k held at the blocked value, a = 0. (The proof
 //      floors h at 0.15 and solves anyway; solving land buys nothing and costs the hot loop.)
-//    * current: a deterministic climatological proxy, NOT the live SWE (which stays a
-//      per-frame amplitude modifier elsewhere): the bucketed signed ACT speed spread over the
-//      vqview ebb-jet conveyance envelope w = clip((h-1.2)/(7.0-1.2),0,1)^0.75, a seaward
-//      decay exp(-(x-800)/420) past the jetty tips, and the x3.0 throat-vs-station
-//      calibration CLOSURE (ACT station max 0.91 m/s -> throat ~1.3, like the reference).
-//      Ebb (signed speed < 0, CurrentModel's +flood/-ebb convention) flows TOWARD compass
-//      105; flood toward 285.
+//    * current (W2, 2026-10-24): the water manager's, per cell -- the regional current field
+//      (CurrentModel::SampleAt) everywhere, the solver's solved current over it by the solver's
+//      domain weight (ComposeFlow). The Merrimack proxy that stood here (an ebb jet aimed toward
+//      compass 105, x3.0 from ACT0816, decaying past x = 800 m of one window) is gone.
+//    * the amplitude (W1, 2026-10-24): the wave action carried along the eikonal's rays,
+//      div(N (c_g k^ + U)) = 0 (ActionTransport) -- refraction, shoaling and the current's action
+//      exchange in one law, with no bar normal. The proof's Snell against one fixed frame (and
+//      proofs/wave_field_check.py with it) no longer describes this solve.
 //    * upload gate: a component ships only while the grid resolves its phase --
 //      lambda_deep = 2*pi*g/sigma^2 >= minSamplesPerLambda * cellM; the FFT cascades keep the
 //      rest (the fold doctrine). Gated slices stay zero, aMax = 0, table keeps sigma/dir.
@@ -76,9 +77,11 @@ constexpr double kPiW = 3.14159265358979323846;
 constexpr int kBracketN = 96;        // log-spaced dispersion candidates (proof: nsamp=96)
 constexpr int kBisectN = 48;         // bisections -> bracket width ~4e-16 * k
 constexpr double kDepthFloor = 0.15; // m; the proof's np.maximum(h, 0.15)
-constexpr double kCgFloor = 0.15;    // m/s floor under cg + U_along (shoaling denominator)
-constexpr double kSnellClip = 0.999; // sine clip at grazing
-constexpr double kKrCosFloor = 1e-3; // Kr cosine floors
+constexpr double kCgFloor = 0.15;    // m/s floor under the action's speed (cg + U_along; ActionTransport)
+// Mase's diffraction parameter (H. Mase 2001, "Multi-directional random wave transformation model based on
+// energy balance equation", Coastal Engineering Journal 43(4)): kappa = 2.5, his fit of the energy balance's
+// transverse diffusion to the diffraction diagrams. The one closure the transport carries.
+constexpr double kMaseKappa = 2.5;
 constexpr double kGolden = 0.6180339887498949;   // golden-sequence directions
 // M9bv: DIRECTIONS PER FREQUENCY. A directional spectrum is S(f, theta) -- two dimensional --
 // and the fan used to sample it along a diagonal, one theta per f. Four per frequency turns
@@ -270,37 +273,6 @@ static_assert(sizeof(CacheHead) == 144, "cache head layout is the python checker
 // LoadCached, and kSolverVersion bumps so the bucket key changes too.
 static_assert(sizeof(WaveField::GpuTable) == 688, "GpuTable layout is the GPU/cache contract");
 
-// The climatological current proxy (engine decision 2 in the file header). Depth-gated
-// conveyance + seaward decay + the x3.0 throat closure; direction by the sign convention
-// pinned in CurrentModel.h (TidalEvent: "+ flood, - ebb"), ebb TOWARD compass 105.
-void BuildCurrentPlanes(const WaveFieldConfig& cfg, double level, double signedMs,
-                        const std::vector<float>& bed, std::vector<float>& u,
-                        std::vector<float>& v) {
-    const size_t cells = size_t(cfg.nx) * size_t(cfg.ny);
-    u.assign(cells, 0.0f);
-    v.assign(cells, 0.0f);
-    if (signedMs == 0.0) return;   // slack: the sea rides currentless
-    const double dirDeg = (signedMs < 0.0) ? 105.0 : 285.0;
-    const double dirRad = dirDeg * (kPiW / 180.0);
-    const double sinD = std::sin(dirRad), cosD = std::cos(dirRad);
-    const double mag = std::fabs(signedMs) * 3.0;   // CLOSURE: ACT max 0.91 -> throat ~1.3
-    for (int j = 0; j < cfg.ny; ++j) {
-        const size_t row = size_t(j) * size_t(cfg.nx);
-        for (int i = 0; i < cfg.nx; ++i) {
-            const double h = (std::max)(level - double(bed[row + i]), 0.0);
-            double w = (h - 1.2) / (7.0 - 1.2);   // the vqview ebb-jet conveyance proxy
-            if (w < 0.0) w = 0.0;
-            else if (w > 1.0) w = 1.0;
-            w = std::pow(w, 0.75);
-            const double x = cfg.orgX + (double(i) + 0.5) * cfg.cellM;
-            const double decay = (x <= 800.0) ? 1.0 : std::exp(-(x - 800.0) / 420.0);
-            const double uc = mag * w * decay;
-            u[row + i] = float(uc * sinD);
-            v[row + i] = float(uc * cosD);
-        }
-    }
-}
-
 // The solve: proofs/wave_field.py build_spectrum() + component() + dispersion_k(), one pass
 // per component (rows parallel; the gauge cumsum sequential -- cheap), then the TOTAL-Hs
 // limiter (ONE uniform factor on the rms envelope; per-line caps measured 6.8x over in the
@@ -320,19 +292,28 @@ void BuildCurrentPlanes(const WaveFieldConfig& cfg, double level, double signedM
 // a round moves no cell (the update only lowers, bounded below by the seed, so it ends). Returns
 // the rounds it took. `passes` > 0 is the instrument's probe (the converge tool): exactly that
 // many passes from the phase it is given, no fixed point.
+// `wet` + `mode` (W1, 2026-10-24): 0 sweeps every cell (the law before); 1 sweeps the WATER alone -- a dry cell
+// is neither seeded nor updated and stays unreached, a wall the phase goes around; 2 fills the LAND from the
+// water's edge with the water frozen (EikonalPhase below says why).
 int EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1,
-                        const std::vector<double>& feik, std::vector<double>& phibuf, int passes = 0) {
+                        const std::vector<double>& feik, std::vector<double>& phibuf, int passes = 0,
+                        const std::vector<double>* wet = nullptr, int mode = 0) {
+    auto skip = [&](size_t idx) {
+        if (!wet || mode == 0) return false;
+        const bool isWet = (*wet)[idx] > 0.0;
+        return (mode == 1) ? !isWet : isWet;
+    };
     const double kInf = 1e30;
     const int ib = (d0 >= 0.0) ? 0 : (nx - 1);      // the inflow corner
     const int jb = (d1 >= 0.0) ? 0 : (ny - 1);
     auto seed = [&]() {
         for (int i = 0; i < nx; ++i) {
-            phibuf[size_t(jb) * size_t(nx) + size_t(i)] =
-                kInfC * d0 * double(i - ib) * dxm;
+            const size_t idx = size_t(jb) * size_t(nx) + size_t(i);
+            if (!skip(idx)) phibuf[idx] = kInfC * d0 * double(i - ib) * dxm;
         }
         for (int j = 0; j < ny; ++j) {
-            phibuf[size_t(j) * size_t(nx) + size_t(ib)] =
-                kInfC * d1 * double(j - jb) * dxm;
+            const size_t idx = size_t(j) * size_t(nx) + size_t(ib);
+            if (!skip(idx)) phibuf[idx] = kInfC * d1 * double(j - jb) * dxm;
         }
     };
     seed();
@@ -356,6 +337,7 @@ int EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1,
             for (int ii = 0; ii < nx; ++ii) {
                 const int i = xr ? (nx - 1 - ii) : ii;
                 const size_t idx = row + size_t(i);
+                if (skip(idx)) continue;
                 const double ax = (std::min)((i > 0) ? phibuf[idx - 1] : kInf,
                                              (i + 1 < nx) ? phibuf[idx + 1] : kInf);
                 const double ay =
@@ -377,6 +359,322 @@ int EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1,
         }
     }
     seed();   // the last sweep must not be allowed to undercut it either
+    return rounds;
+}
+
+// THE PHASE GOES AROUND LAND (W1, 2026-10-24). A dry cell carries the wet field's shoreline k (kShore) so a
+// footprint straddling the beach interpolates a continuing wave -- and swept with the water, that made land
+// passable: across a jetty ten cells wide the path THROUGH it was the cheaper first arrival, so the Merrimack's
+// entrance channel took its crests straight through the north jetty, and the action (which land does not
+// send) left the channel dark. The water is solved first with land a wall (the rays go round the tips and
+// diffract into the lee); then the land's phase is filled from the water's edge with the water frozen, the
+// water's own phase continued for the shore's interpolation and nothing more. Returns the rounds of both.
+int EikonalPhase(int nx, int ny, double dxm, double kInfC, double d0, double d1, const std::vector<double>& h,
+                 const std::vector<double>& feik, std::vector<double>& phibuf) {
+    const int water = EikonalSweep(nx, ny, dxm, kInfC, d0, d1, feik, phibuf, 0, &h, 1);
+    return water + EikonalSweep(nx, ny, dxm, kInfC, d0, d1, feik, phibuf, 0, &h, 2);
+}
+
+// W1 (2026-10-24, Mark: "refraction by action transport along the eikonal, no bar normal"). THE
+// AMPLITUDE IS THE WAVE ACTION, CARRIED. A component's action density N = A^2 / sigma_r rides the
+// absolute group velocity F = c_g k^ + U, and in a steady sea it is conserved:
+//
+//     div (N F) = 0,      k^ = grad phi / |grad phi|   (the eikonal's own direction field)
+//
+// which is refraction, shoaling and the current's action exchange in one statement. Its limit on
+// straight parallel contours with no current is Snell and energy-flux shoaling exactly,
+// A^2 = a0^2 (cg0 / cg)(cos th0 / cos th) -- the law that stood here, against ONE declared bar
+// normal for the whole window and spreading only (Kr <= 1). Carried along the eikonal's rays it
+// needs no normal, and a shoal that bends rays together raises the sea behind it (focusing).
+//
+// Discretized on the cells along the EIKONAL'S OWN RAYS: each cell's direction is the upwind gradient
+// the phase was solved with (so its velocity is the winning ray family's), it drains by that velocity
+// through every face it leaves by, and along each axis it is fed from the one side its velocity comes
+// from, by that neighbour's own flow toward it. So a cell's balance is
+//
+//     N_i (|F_i,x| + |F_i,z|)  =  sum over the axes of (F_src . n_in)+ N_src
+//                                  + the incident swell where the source is the window's outside,
+//
+// marched in phase order (below) until a pass moves no cell by more than kStill of the deep action (the
+// F28 law: a fixed point has no count in it). Every wet cell drains by its own velocity, whose speed is
+// at least kCgFloor, so no cell is a sink; the side is the action's velocity's, not the phase's, so a
+// current turning a component of F against k^ moves the action rather than losing it.
+// WHERE TWO RAY FAMILIES MEET -- a crease of the first-arrival phase: off a jetty's tip, behind a
+// shoal -- the losing family's flux ENDS: a crease cell's velocity is the winner's, and it is fed from
+// the winner's side. Past the crease it would be a second sea crossing the first, and a single-valued
+// phase holds one. Two versions taught it (2026-10-24, the helm window): faces with averaged velocities
+// poured the losing family into the crease (lines of 3x the sea, a 27.8 m raw peak where the bar
+// normal's field had 8.3 m); a centred direction fed a crease from both sides, being their bisector.
+//
+// DIFFRACTION, ACROSS THE RAY (Mase 2001, the energy balance equation with diffraction, EBED): geometric
+// optics alone leaves a jetty's lee dark -- energy reaches it only by the fan of rays from the tip cell --
+// and draws every convergence of rays as a line one cell wide (2026-10-24, the layer sheet: the inlet black,
+// a streak off the north jetty). Mase's term spreads action along the crest,
+//
+//     kappa / (2 sigma) * [ d_n (C C_g d_n N) - 1/2 C C_g d_nn N ],     n along the crest, kappa = 2.5,
+//
+// written there on a grid axis with a cos^2 weight; here n is the local crest itself, from the eikonal's ray.
+// On a field uniform along its crests it is zero (deep water stays exact); on the line a jetty's tip casts it
+// leaves about a third of the energy (0.37 in [wavetest]; the random-wave diffraction diagrams give about half).
+//
+// THE BOUNDARY IS THE INCIDENT SWELL, stated as the phase's is. The eikonal holds the deep plane on the
+// inflow edges, which fixes the tangential wavenumber on the assumption that the contours run along the
+// edge; under that same assumption the action crossing the edge per metre of it is conserved from deep
+// water, Phi0 (d^ . n_in)+ with Phi0 = a0^2 cg0 / sigma. (The first version used the refracted ray's own
+// cosine there, which on a shallow edge the swell grazes -- the Merrimack's south edge, along Plum Island --
+// overfed it 3.5x. A review caught it; the straight-contour test had been normalised to the same mistake.)
+// Returns the rounds; `aOut` gets A = sqrt(sigma_r N) (0 on land), `flux` and `N` are the caller's.
+// `stats` (the instrument): the carried amplitude over the swell shoaled onto each cell with no
+// refraction, a0 sqrt(sigma_r cg0 / (sigma |F|)) -- what refraction and the creases did, by cell.
+struct CarryStats {
+    double p50 = 0.0, p99 = 0.0, max = 0.0;
+    double over2 = 0.0;   // the share of wet cells carried above twice the shoaled swell
+    int iMax = -1, jMax = -1;
+};
+int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1, double a0,
+                    const std::vector<double>& h, const double* kbuf, const std::vector<double>& phi,
+                    const std::vector<float>& u, const std::vector<float>& v, std::vector<float>& flux,
+                    std::vector<double>& N, std::vector<uint32_t>& order, std::vector<float>& ray, float* aOut,
+                    const uint8_t* blockedBits = nullptr, CarryStats* stats = nullptr, float* gainOut = nullptr) {
+    const size_t cells = size_t(nx) * size_t(ny);
+    const bool haveFlow = u.size() == cells && v.size() == cells;
+    const double g = PlanetGWave();
+    auto sigmaR = [&](double k, double hc) {   // the intrinsic frequency the dispersion solved for
+        const double hf = (hc > kDepthFloor) ? hc : kDepthFloor;
+        return std::sqrt(g * k * std::tanh((std::min)(k * hf, 30.0)));
+    };
+    // THE RAY AT A CELL IS THE EIKONAL'S OWN. The direction is the upwind gradient the Godunov update
+    // solved with -- along each axis the neighbour of lower phase, the steeper of the two where both are
+    // lower (a crease: the winning family's) -- the one-sided difference inward at the window's edge.
+    // The returned code (1 the lower neighbour, 2 the higher, 3 the edge, 0 none) is the side.
+    auto P = [&](int i, int j) { return phi[size_t(j) * size_t(nx) + size_t(i)]; };
+    auto upwind = [&](int i, int j, int n, bool alongX, double& gOut) -> uint8_t {
+        const int c = alongX ? i : j;
+        auto at = [&](int k) { return alongX ? P(k, j) : P(i, k); };
+        gOut = 0.0;
+        if (n < 2) return 0;
+        if (c == 0) {
+            gOut = (at(1) - at(0)) / dxm;
+            return (gOut > 0.0) ? 3 : (gOut < 0.0) ? 2 : 0;
+        }
+        if (c == n - 1) {
+            gOut = (at(c) - at(c - 1)) / dxm;
+            return (gOut > 0.0) ? 1 : (gOut < 0.0) ? 3 : 0;
+        }
+        const double dm = (at(c) - at(c - 1)) / dxm, dp = (at(c + 1) - at(c)) / dxm;
+        if (dm > 0.0 && dm >= -dp) {
+            gOut = dm;
+            return 1;
+        }
+        if (-dp > 0.0) {
+            gOut = dp;
+            return 2;
+        }
+        return 0;
+    };
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const size_t idx = size_t(j) * size_t(nx) + size_t(i);
+            float* F = &flux[2 * idx];
+            float* R = &ray[3 * idx];
+            if (h[idx] <= 0.0) {
+                F[0] = F[1] = 0.0f;
+                R[0] = R[1] = R[2] = 0.0f;
+                continue;
+            }
+            double gx = 0.0, gz = 0.0;
+            upwind(i, j, nx, true, gx);
+            upwind(i, j, ny, false, gz);
+            const double gl = std::sqrt(gx * gx + gz * gz);
+            const double ke = (gl > 0.0) ? gx / gl : d0, kn = (gl > 0.0) ? gz / gl : d1;
+            const double k = kbuf[idx];
+            double kh = k * ((h[idx] > kDepthFloor) ? h[idx] : kDepthFloor);
+            if (kh < 1e-4) kh = 1e-4;
+            else if (kh > 30.0) kh = 30.0;
+            const double cg = 0.5 * (1.0 + (2.0 * kh) / std::sinh(2.0 * kh)) * sigmaR(k, h[idx]) / k;
+            R[0] = float(ke);   // the ray, and C C_g -- the diffraction's coefficient (below)
+            R[1] = float(kn);
+            R[2] = float(sigmaR(k, h[idx]) / k * cg);
+            const double ue = haveFlow ? double(u[idx]) : 0.0, un = haveFlow ? double(v[idx]) : 0.0;
+            const double along = ue * ke + un * kn;
+            const double cgEff = (std::max)(cg + along, kCgFloor);
+            F[0] = float(ke * cgEff + (ue - along * ke));
+            F[1] = float(kn * cgEff + (un - along * kn));
+        }
+    }
+    const double cg0 = 0.5 * g / sig;
+    const double phi0 = a0 * a0 * cg0 / sig;   // the deep swell's action flux per crest
+    const double nDeep = a0 * a0 / sig;        // and its density, the measure of "still"
+    constexpr double kStill = 1e-7;
+    std::fill(N.begin(), N.end(), 0.0);
+    // THE DIFFRACTION IS A MARCH ALONG THE RAY. Mase's term makes the steady balance parabolic: along the
+    // ray the action is carried, across it it spreads. Solved as written -- the crest coupling implicit --
+    // the sweep was elliptic and crawled (2026-10-24: hundreds of rounds, cell by cell or line by line).
+    // So it is integrated the way it runs: the action ARRIVING from an upwind neighbour has spread along
+    // that neighbour's crest over the step it travelled, ds = dx |k^ . axis|,
+    //
+    //     S(N)_nb = (1 - 2r) N(q) + r N(q + dn n^) + r N(q - dn n^),   r = D ds / (|F| dn^2),
+    //     D = kappa C Cg / (4 sigma)  (Mase's coefficient on N_nn),   dn = max(dx, sqrt(2 D ds / |F|)),
+    //
+    // so r <= 1/2 and every weight is positive; Mase's drift, kappa/(2 sigma) (C Cg)_n N_n, is the shift
+    // of q along the crest by kappa (C Cg)_n ds / (2 sigma |F|) toward larger C Cg. The samples are
+    // bilinear; land and the window's outside give back the neighbour's own value (no energy crosses a
+    // wall). Every dependency is upstream, so it converges as the geometric transport does. On a field
+    // uniform along its crests S is the identity: deep water and a plane wave stay exact.
+    // bilinear N at cell coordinates: walls and the outside mirror `self`; a corner at or past `phiLim` (the
+    // receiving cell's phase) is left out and the rest renormalised, so every sample is upstream of the cell
+    // it feeds and one pass in phase order is the march (the corners just downstream held it to dozens)
+    auto Nat = [&](double x, double z, double self, double phiLim) {
+        const int i0 = int(std::floor(x)), j0 = int(std::floor(z));
+        const double fx = x - double(i0), fz = z - double(j0);
+        double v = 0.0, wt = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            const int ci = i0 + (c & 1), cj = j0 + (c >> 1);
+            const double w = ((c & 1) ? fx : 1.0 - fx) * ((c >> 1) ? fz : 1.0 - fz);
+            if (!(w > 0.0)) continue;
+            const size_t cn = size_t(cj) * size_t(nx) + size_t(ci);
+            if (ci < 0 || cj < 0 || ci >= nx || cj >= ny || h[cn] <= 0.0) {
+                v += w * self;
+                wt += w;
+                continue;
+            }
+            if (!(phi[cn] < phiLim)) continue;
+            v += w * N[cn];
+            wt += w;
+        }
+        return (wt > 0.0) ? v / wt : self;
+    };
+    auto Aat = [&](double x, double z, double self) {   // bilinear C Cg, walls mirror `self`
+        const int i0 = int(std::floor(x)), j0 = int(std::floor(z));
+        const double fx = x - double(i0), fz = z - double(j0);
+        double v = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            const int ci = i0 + (c & 1), cj = j0 + (c >> 1);
+            const double w = ((c & 1) ? fx : 1.0 - fx) * ((c >> 1) ? fz : 1.0 - fz);
+            if (!(w > 0.0)) continue;
+            const size_t cn = size_t(cj) * size_t(nx) + size_t(ci);
+            v += w * ((ci < 0 || cj < 0 || ci >= nx || cj >= ny || h[cn] <= 0.0) ? self : double(ray[3 * cn + 2]));
+        }
+        return v;
+    };
+    // the action arriving from cell (ni, nj) after `ds` metres of travel along its ray
+    auto arriving = [&](int ni, int nj, double ds, double phiLim) {
+        const size_t nb = size_t(nj) * size_t(nx) + size_t(ni);
+        const double self = N[nb];
+        const float* R = &ray[3 * nb];
+        const float* G = &flux[2 * nb];
+        const double fm = (std::max)(std::sqrt(double(G[0]) * G[0] + double(G[1]) * G[1]), kCgFloor);
+        const double D = kMaseKappa * double(R[2]) / (4.0 * sig);
+        if (!(D > 0.0) || !(ds > 0.0)) return self;
+        const double cx = -double(R[1]), cz = double(R[0]);   // along the crest, in cells per cell
+        const double dn = (std::max)(dxm, std::sqrt(2.0 * D * ds / fm));
+        const double r = D * ds / (fm * dn * dn);
+        const double an = (Aat(ni + cx, nj + cz, double(R[2])) - Aat(ni - cx, nj - cz, double(R[2]))) / (2.0 * dxm);
+        // cells along the crest, at most one: the drift's step can outrun the march (a bar's face, a jetty's
+        // toe: (C Cg)_n of 15 m/s^2 shifted 5-10 cells), and past a cell the sample is no longer this term's
+        const double shift = std::clamp((kMaseKappa * an * ds / (2.0 * sig * fm)) / dxm, -1.0, 1.0);
+        const double qx = double(ni) + shift * cx, qz = double(nj) + shift * cz, dc = dn / dxm;
+        return (1.0 - 2.0 * r) * Nat(qx, qz, self, phiLim) + r * Nat(qx + dc * cx, qz + dc * cz, self, phiLim) +
+               r * Nat(qx - dc * cx, qz - dc * cz, self, phiLim);
+    };
+    // THE MARCH RUNS IN PHASE ORDER. Every ray runs from lower phase to higher, so the wet cells sorted by
+    // their phase put almost every cell after all it depends on -- its upwind neighbours, and the crest it
+    // spreads from -- and a pass settles what four sweep orders took a hundred rounds to (2026-10-24: the
+    // crest samples' corners sit just downstream of a cell as often as not). A pass is repeated until still,
+    // for the few links that run against the phase (a current turning the action's velocity, a corner).
+    // Two stages, sequenced: the geometric transport, then the diffraction from it.
+    size_t nWet = 0;
+    for (size_t idx = 0; idx < cells; ++idx) {
+        if (h[idx] > 0.0) order[nWet++] = uint32_t(idx);
+    }
+    std::sort(order.begin(), order.begin() + ptrdiff_t(nWet), [&](uint32_t x, uint32_t y) { return phi[x] < phi[y]; });
+    constexpr int kPassCap = 64;   // a guard on each stage's loop, not a law
+    auto sweep = [&](bool diffract) {
+        int passes = 0;
+        bool moved = true;
+        while (moved) {
+            if (passes >= kPassCap) {
+                Log("[wave] action: %d passes and still moving%s -- the guard stopped it", passes,
+                    diffract ? " (the diffraction)" : "");
+                break;
+            }
+            moved = false;
+            ++passes;
+            for (size_t o = 0; o < nWet; ++o) {
+                const size_t idx = order[o];
+                const int i = int(idx % size_t(nx)), j = int(idx / size_t(nx));
+                const float* F = &flux[2 * idx];
+                // out: every face this cell's own flow leaves by, whatever is beyond it
+                const double out = std::abs(double(F[0])) + std::abs(double(F[1]));
+                double in = 0.0;
+                // in: along each axis, from the side the action's own velocity comes from -- the neighbour's
+                // flow toward this cell, its action spread along its crest over the step (the diffraction) --
+                // or, where that side is the window's outside, the deep swell's flux through the edge
+                for (int ax = 0; ax < 2; ++ax) {
+                    const double fc = double(F[ax]);
+                    if (fc == 0.0) continue;
+                    const int sg = (fc > 0.0) ? -1 : 1;   // the source's offset: against the flow
+                    const int ni = (ax == 0) ? i + sg : i, nj = (ax == 1) ? j + sg : j;
+                    if (ni < 0 || nj < 0 || ni >= nx || nj >= ny) {
+                        // the incident swell, Phi0 (d^ . n_in): the edge's flux under the phase seed's own
+                        // assumption (contours along the edge), not the refracted ray's cosine
+                        const double dIn = (ax == 0) ? -double(sg) * d0 : -double(sg) * d1;
+                        if (dIn > 0.0) in += phi0 * dIn;
+                        continue;
+                    }
+                    const size_t nb = size_t(nj) * size_t(nx) + size_t(ni);
+                    if (h[nb] <= 0.0) continue;   // land sends nothing
+                    const double gn = -double(sg) * double(flux[2 * nb + size_t(ax)]);   // its flow toward this cell
+                    if (gn > 0.0) {
+                        in += gn * (diffract ? arriving(ni, nj, dxm * std::abs(double(ray[3 * nb + size_t(ax)])), phi[idx])
+                                             : N[nb]);
+                    }
+                }
+                const double nNew = in / (std::max)(out, kCgFloor);
+                if (std::abs(nNew - N[idx]) > kStill * nDeep) moved = true;
+                N[idx] = nNew;
+            }
+        }
+        return passes;
+    };
+    const int roundsGeo = sweep(false);   // first: the operands of + are unsequenced
+    const int rounds = roundsGeo + sweep(true);
+    std::vector<float> gains;
+    if (stats) gains.reserve(cells / 4);
+    for (size_t idx = 0; idx < cells; ++idx) {
+        if (!(h[idx] > 0.0)) {
+            aOut[idx] = 0.0f;
+            if (gainOut) gainOut[idx] = 0.0f;
+            continue;
+        }
+        // a blocked cell holds a stand-in k (kHold), whose intrinsic frequency means nothing: the arrested
+        // wave's action is read at the component's own sigma there
+        const bool blocked = blockedBits && ((blockedBits[idx >> 3] >> (idx & 7)) & 1u);
+        const double sr = blocked ? sig : (std::max)(sigmaR(kbuf[idx], h[idx]), 0.05 * sig);
+        aOut[idx] = float(std::sqrt(sr * N[idx]));
+        if (!stats && !gainOut) continue;
+        const double fl = std::sqrt(double(flux[2 * idx]) * flux[2 * idx] + double(flux[2 * idx + 1]) * flux[2 * idx + 1]);
+        const double shoaled = a0 * std::sqrt(sr * cg0 / (sig * (std::max)(fl, kCgFloor)));
+        const double gain = (shoaled > 0.0) ? double(aOut[idx]) / shoaled : 0.0;
+        if (gainOut) gainOut[idx] = float(gain);
+        if (!stats) continue;
+        gains.push_back(float(gain));
+        if (gain > stats->max) {
+            stats->max = gain;
+            stats->iMax = int(idx % size_t(nx));
+            stats->jMax = int(idx / size_t(nx));
+        }
+    }
+    if (stats && !gains.empty()) {
+        size_t n2 = 0;
+        for (const float x : gains) n2 += (x > 2.0f) ? 1 : 0;
+        stats->over2 = double(n2) / double(gains.size());
+        std::nth_element(gains.begin(), gains.begin() + gains.size() / 2, gains.end());
+        stats->p50 = gains[gains.size() / 2];
+        const size_t k99 = (std::min)(gains.size() - 1, size_t(0.99 * double(gains.size())));
+        std::nth_element(gains.begin(), gains.begin() + k99, gains.end());
+        stats->p99 = gains[k99];
+    }
     return rounds;
 }
 
@@ -432,6 +730,61 @@ struct Memo {
     std::vector<uint8_t> blocked;          // nc planes of nx*ny bits (nx is a multiple of 8)
 };
 static bool g_solveAudit = false;
+
+// --wave-map's LAYERS (Mark, 2026-10-24: "show every layer (kinda like how graphics programmers debug
+// layers) from the inputs and different steps in the pipeline to produce the output"). One PNG per stage of
+// the solve, on its own cells, north up, land dark, beside the map: <map>_<n>_<stage>.png. The inputs, then
+// each step of a component (the most energetic one, and the one the action carried hottest), then the sea's
+// sums and the limiter, then the map itself (eta). An instrument: nothing here touches the answer.
+struct LayerSink {
+    std::wstring base;   // the map's path less its extension; empty = off
+    int nx = 0, ny = 0;
+    const std::vector<double>* h = nullptr;
+    static void Seq(double t, uint8_t* px) {   // dark violet -> teal -> yellow
+        t = (std::min)((std::max)(t, 0.0), 1.0);
+        const double a[3][3] = {{68, 1, 84}, {33, 145, 140}, {253, 231, 37}};
+        const int k = (t < 0.5) ? 0 : 1;
+        const double f = (t < 0.5) ? t * 2.0 : (t - 0.5) * 2.0;
+        for (int c = 0; c < 3; ++c) px[c] = uint8_t(a[k][c] + f * (a[k + 1][c] - a[k][c]));
+    }
+    static void Div(double t, uint8_t* px) {   // blue (-1) -> white (0) -> red (+1)
+        t = (std::min)((std::max)(t, -1.0), 1.0);
+        const double lo[3] = {59, 76, 192}, mid[3] = {245, 245, 245}, hi[3] = {180, 4, 38};
+        const double* e = (t < 0.0) ? lo : hi;
+        const double f = std::abs(t);
+        for (int c = 0; c < 3; ++c) px[c] = uint8_t(mid[c] + f * (e[c] - mid[c]));
+    }
+    static void Hue(double ang, double val, uint8_t* px) {   // direction as hue, strength as value
+        const double hh = std::fmod(ang / (2.0 * 3.14159265358979) + 1.0, 1.0) * 6.0;
+        const int si = int(hh) % 6;
+        const double f = hh - std::floor(hh);
+        const double v = (std::min)((std::max)(val, 0.0), 1.0) * 255.0;
+        const double q = v * (1.0 - f), t = v * f;
+        const double r[6] = {v, q, 0, 0, t, v}, g[6] = {t, v, v, q, 0, 0}, bl[6] = {0, 0, t, v, v, q};
+        px[0] = uint8_t(r[si]);
+        px[1] = uint8_t(g[si]);
+        px[2] = uint8_t(bl[si]);
+    }
+    template <class Fn>
+    void Write(const std::wstring& name, Fn rgbAt) const {
+        if (base.empty()) return;
+        std::vector<uint8_t> img(size_t(nx) * size_t(ny) * 4);
+        for (int j = 0; j < ny; ++j) {
+            const size_t src = size_t(ny - 1 - j) * size_t(nx);   // row 0 is SOUTH; a PNG's is the top
+            for (int i = 0; i < nx; ++i) {
+                uint8_t* px = &img[(size_t(j) * size_t(nx) + size_t(i)) * 4];
+                px[3] = 255;
+                if ((*h)[src + size_t(i)] <= 0.0) {
+                    px[0] = px[1] = px[2] = 40;
+                    continue;
+                }
+                rgbAt(src + size_t(i), px);
+            }
+        }
+        SavePng(base + L"_" + name + L".png", img.data(), uint32_t(nx), uint32_t(ny), uint32_t(nx) * 4,
+                img.size());
+    }
+};
 
 // `phiOut`, when given: each component's EIKONAL phase, the real number before it is packed as a spinor
 // (nComp planes of nx*ny, component-major) -- the field the blend between tide buckets interpolates.
@@ -566,6 +919,39 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         h[idx] = (std::max)(in.level - double(in.bed[idx]), 0.0);
     }
     const double kHold = BracketGrid()[kBracketN - 1] * 0.25;
+    LayerSink layers;
+    if (!cfg.mapPath.empty()) {
+        layers.base = cfg.mapPath;
+        const size_t dot = layers.base.find_last_of(L'.');
+        if (dot != std::wstring::npos) layers.base.resize(dot);
+        layers.nx = nx;
+        layers.ny = ny;
+        layers.h = &h;
+        layers.Write(L"0_depth", [&](size_t idx, uint8_t* px) {   // 0 .. 40 m, log
+            LayerSink::Seq(std::log1p(h[idx]) / std::log1p(40.0), px);
+        });
+        double sMax = 0.05;
+        for (size_t idx = 0; idx < cells && in.u.size() == cells; ++idx) {
+            sMax = (std::max)(sMax, std::hypot(double(in.u[idx]), double(in.v[idx])));
+        }
+        layers.Write(L"1_current", [&](size_t idx, uint8_t* px) {   // hue = toward, value = speed / its max
+            const double ue = (in.u.size() == cells) ? double(in.u[idx]) : 0.0;
+            const double vn = (in.v.size() == cells) ? double(in.v[idx]) : 0.0;
+            LayerSink::Hue(std::atan2(vn, ue), std::hypot(ue, vn) / sMax, px);
+        });
+        Log("[wave] layers: depth 0..40 m (log); current: hue the direction it flows toward, value its speed "
+            "over the window's fastest, %.2f m/s", sMax);
+    }
+    // The layers' components: the most energetic, and (kept as it is found) the one carried hottest.
+    int peakIc = 0;
+    for (int i = 1; i < nc; ++i) {
+        if (wts[i] > wts[peakIc]) peakIc = i;
+    }
+    int hotIc = -1, lastIc = 0;
+    for (int i = 0; i < nc; ++i) {
+        if (wts[i] > 0.0) lastIc = i;
+    }
+    std::vector<float> hotPhi, hotFlux, hotGain;
 
     // -- per-component solve ---------------------------------------------------------------
     // F25: the k planes are the memo's (or a solve-local one when no memo was given). The memo
@@ -596,14 +982,9 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         const double sig = 2.0 * kPiW / T;
         const double prop = Wrap360(dirs[ic] + 180.0) * (kPiW / 180.0);   // travel TOWARD
         const double d0 = std::sin(prop), d1 = std::cos(prop);            // (east, north)
-        const double c0 = PlanetGWave() * T / (2.0 * kPiW);
-        const double cg0 = 0.5 * c0;
-        // Snell vs the fixed bar-normal frame, PER-COMPONENT incidence -- the mean direction
-        // gets 15 of 16 components wrong (ALGEBRA.md `wavefield`, fidelity-verified).
-        const double th0 =
-            (Wrap360((dirs[ic] + 180.0) - cfg.barNormalDeg + 180.0) - 180.0) * (kPiW / 180.0);
-        const double cosTh0 = std::cos(th0), sinTh0 = std::sin(th0);
-        const double a0 = aTot * wts[ic];
+        // W1 (2026-10-24): this pass is the dispersion alone. The amplitude is the action carried
+        // along the eikonal's own rays (ActionTransport), so it is made after the phase, below;
+        // the Snell factor against one bar normal that stood here is gone with the normal.
         float* aPlane = aRaw.data() + size_t(ic) * cells;
         double* kbuf = M.k.data() + size_t(ic) * cells;
         uint8_t* kblk = M.blocked.data() + size_t(ic) * ((cells + 7) / 8);
@@ -641,28 +1022,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                         else kblk[idx >> 3] &= uint8_t(~(1u << (idx & 7)));
                     }
                     if (blocked) ++nb;
-                    const double c = (2.0 * kPiW / k) / T;
-                    double kh = k * hf;
-                    if (kh < 1e-4) kh = 1e-4;
-                    else if (kh > 30.0) kh = 30.0;
-                    const double nfac = 0.5 * (1.0 + (2.0 * kh) / std::sinh(2.0 * kh));
-                    const double cg = nfac * c;
-                    double cgEff = cg + along;
-                    if (cgEff < kCgFloor) cgEff = kCgFloor;
-                    const double Ks = std::sqrt(cg0 / cgEff);   // energy-flux shoaling
-                    double sinT = (sinTh0 * c) / c0;
-                    if (sinT > kSnellClip) sinT = kSnellClip;
-                    else if (sinT < -kSnellClip) sinT = -kSnellClip;
-                    const double cosT = std::cos(std::asin(sinT));
-                    const double Kr =
-                        std::sqrt(((cosTh0 > kKrCosFloor) ? cosTh0 : kKrCosFloor) /
-                                  ((cosT > kKrCosFloor) ? cosT : kKrCosFloor));
-                    const double ar = (a0 * Ks) * Kr;
                     kbuf[idx] = k;
-                    aPlane[idx] = float(ar);
-                    sumsq[idx] += ar * ar;   // rows are disjoint across threads
-                    sumsqk[idx] += ar * ar * k;
-                    sumA[idx] += ar;
                 }
             }
             blockedCells += nb;
@@ -694,16 +1054,25 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     // order on one thread so eta's sum is the sum it always was, to the bit.
     const int compGrain = cfg.mapPath.empty() ? 1 : nc;
     std::atomic<int> roundsMin{INT_MAX}, roundsMax{0};   // F28: until still, per component
+    // W1: EVERY component with energy is phased and carried, uploaded or not -- the limiter and the
+    // envelope sum the whole sea, and its amplitude is now made from its phase. Only an uploaded
+    // component's k and phase are written to the atlas (a gated slice stays zero bytes).
+    std::atomic<int> carryMin{INT_MAX}, carryMax{0};   // the action's rounds until still
+    wavecore::CarryStats carry[WaveField::kMaxComp] = {};   // the instrument, per component
     Threads().ParallelFor(Lane::Long, "wave.comps", nc, compGrain, [&](int c0, int c1) {
     std::vector<double> phibuf(cells), feik(cells);
+    std::vector<float> flux(2 * cells);   // the action's velocity, (east, north) per cell
+    std::vector<uint32_t> order(cells);   // the march's order: the wet cells by phase
+    std::vector<float> ray(3 * cells);    // the ray and C Cg (the diffraction)
+    std::vector<float> gainBuf;           // --wave-map: the action's gain over the shoaled swell
     for (int ic = c0; ic < c1; ++ic) {
-        if (!uploaded[ic]) continue;
+        if (!(wts[ic] > 0.0)) continue;
         const double T = in.tp * (fp / fr[ic]);
         const double sig = 2.0 * kPiW / T;
         const double prop = Wrap360(dirs[ic] + 180.0) * (kPiW / 180.0);   // travel TOWARD
         const double d0 = std::sin(prop), d1 = std::cos(prop);            // (east, north)
         const double* kbuf = M.k.data() + size_t(ic) * cells;
-        const float* aPlane = aRaw.data() + size_t(ic) * cells;
+        float* aPlane = aRaw.data() + size_t(ic) * cells;
 
         // ---- M9bw: THE PHASE IS A FIELD, NOT A PATH. -----------------------------------
         //
@@ -783,10 +1152,76 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             //
             // Re-applied after every sweep so it stays a boundary condition rather than an
             // initial guess the sweep is free to undercut.
-            const int rounds = EikonalSweep(nx, ny, dxm, (sig * sig) / PlanetGWave(), d0, d1, feik, phibuf);
+            const int rounds = EikonalPhase(nx, ny, dxm, (sig * sig) / PlanetGWave(), d0, d1, h, feik, phibuf);
             for (int cur = roundsMin.load(); rounds < cur && !roundsMin.compare_exchange_weak(cur, rounds);) {}
             for (int cur = roundsMax.load(); rounds > cur && !roundsMax.compare_exchange_weak(cur, rounds);) {}
         }
+
+        // ---- W1: THE AMPLITUDE IS THE ACTION, CARRIED ALONG THE PHASE (ActionTransport). ----
+        // feik is spent with the sweep; it holds the action density from here.
+        {
+            if (layers.base.size() && gainBuf.size() != cells) gainBuf.assign(cells, 0.0f);
+            const int rounds = ActionTransport(nx, ny, cfg.cellM, sig, d0, d1, aTot * wts[ic], h, kbuf,
+                                               phibuf, in.u, in.v, flux, feik, order, ray, aPlane,
+                                               M.blocked.data() + size_t(ic) * ((cells + 7) / 8), &carry[ic],
+                                               layers.base.size() ? gainBuf.data() : nullptr);
+            for (int cur = carryMin.load(); rounds < cur && !carryMin.compare_exchange_weak(cur, rounds);) {}
+            for (int cur = carryMax.load(); rounds > cur && !carryMax.compare_exchange_weak(cur, rounds);) {}
+        }
+        if (!cfg.mapPath.empty()) {   // --wave-map: components in order, so eta's sum is one thread's
+            for (size_t idx = 0; idx < cells; ++idx) eta[idx] += double(aPlane[idx]) * std::cos(phibuf[idx]);
+            const double a0c = aTot * wts[ic], kInfC = (sig * sig) / PlanetGWave();
+            auto writeComp = [&](int c, const float* ph, const float* fx, const float* gn, const float* am) {
+                const std::wstring p = L"c" + std::to_wstring(c) + L"_";
+                const double* kc = M.k.data() + size_t(c) * cells;
+                const double kI = (std::pow(2.0 * kPiW / (in.tp * (fp / fr[c])), 2.0)) / PlanetGWave();
+                layers.Write(p + L"2_k", [&](size_t i, uint8_t* px) {   // k / k_deep: 1 .. 4
+                    LayerSink::Seq((kc[i] / kI - 1.0) / 3.0, px);
+                });
+                layers.Write(p + L"3_phase", [&](size_t i, uint8_t* px) { LayerSink::Div(std::cos(double(ph[i])), px); });
+                layers.Write(p + L"4_ray", [&](size_t i, uint8_t* px) {   // the action's direction (hue)
+                    LayerSink::Hue(std::atan2(double(fx[2 * i + 1]), double(fx[2 * i])), 1.0, px);
+                });
+                layers.Write(p + L"5_crease", [&](size_t i, uint8_t* px) {   // both neighbours lower: a crease
+                    const int ci = int(i % size_t(nx)), cj = int(i / size_t(nx));
+                    auto ridge = [&](int di, int dj) {
+                        const int ai = ci - di, aj = cj - dj, bi = ci + di, bj = cj + dj;
+                        if (ai < 0 || aj < 0 || bi >= nx || bj >= ny) return false;
+                        return ph[size_t(aj) * nx + ai] < ph[i] && ph[size_t(bj) * nx + bi] < ph[i];
+                    };
+                    const bool r = ridge(1, 0) || ridge(0, 1);
+                    px[0] = r ? 200 : 235;
+                    px[1] = r ? 30 : 235;
+                    px[2] = r ? 30 : 235;
+                });
+                layers.Write(p + L"6_gain", [&](size_t i, uint8_t* px) {   // log2(A / shoaled swell): +-3 = 8x
+                    LayerSink::Div((gn[i] > 0.0f) ? std::log2(double(gn[i])) / 3.0 : -1.0, px);
+                });
+                layers.Write(p + L"7_amp", [&](size_t i, uint8_t* px) {   // A / (2 a0)
+                    LayerSink::Seq(double(am[i]) / (2.0 * aTot * wts[c]), px);
+                });
+                Log("[wave] layers: component %d (T %.1f s, from %.0f deg, a0 %.3f m): k/k_deep 1..4, cos phase, the "
+                    "ray's direction, creases, log2 of the action's gain over the shoaled swell (+-3 = 8x), A/(2 a0); "
+                    "its gain p50 %.2f p99 %.2f max %.2f at (%d, %d)",
+                    c, in.tp * (fp / fr[c]), Wrap360(dirs[c]), aTot * wts[c], carry[c].p50, carry[c].p99, carry[c].max,
+                    carry[c].iMax, carry[c].jMax);
+            };
+            (void)a0c;
+            (void)kInfC;
+            std::vector<float> phf(cells);
+            for (size_t i = 0; i < cells; ++i) phf[i] = float(phibuf[i]);
+            if (ic == peakIc) writeComp(ic, phf.data(), flux.data(), gainBuf.data(), aPlane);
+            if (ic != peakIc && (hotIc < 0 || carry[ic].max > carry[hotIc].max)) {
+                hotIc = ic;
+                hotPhi = phf;
+                hotFlux = flux;
+                hotGain = gainBuf;
+            }
+            if (ic == lastIc && hotIc >= 0) {
+                writeComp(hotIc, hotPhi.data(), hotFlux.data(), hotGain.data(), aRaw.data() + size_t(hotIc) * cells);
+            }
+        }
+        if (!uploaded[ic]) continue;   // the fold gate: its slice stays zero bytes
 
         double kFieldMax = 0.0;
         for (size_t idx = 0; idx < cells; ++idx) kFieldMax = (std::max)(kFieldMax, kbuf[idx]);
@@ -805,13 +1240,46 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     if (phiOut) (*phiOut)[size_t(ic) * cells + row + i] = float(ph);
                     px[2] = Quant8(std::cos(ph) * 0.5 + 0.5, 1.0);
                     px[3] = Quant8(std::sin(ph) * 0.5 + 0.5, 1.0);
-                    eta[row + i] += double(aPlane[row + i]) * std::cos(ph);
                 }
             }
         }
     }
     });
+    // The sea's sums over every component, once the amplitudes exist (they were summed in the
+    // dispersion pass while the amplitude was made there): rows in parallel, components in order.
+    ParallelRows(ny, [&](int j0, int j1) {
+        for (size_t idx = size_t(j0) * size_t(nx); idx < size_t(j1) * size_t(nx); ++idx) {
+            double s2 = 0.0, s2k = 0.0, s1 = 0.0;
+            for (int ic = 0; ic < nc; ++ic) {
+                const double a = double(aRaw[size_t(ic) * cells + idx]);
+                s2 += a * a;
+                s2k += a * a * M.k[size_t(ic) * cells + idx];
+                s1 += a;
+            }
+            sumsq[idx] = s2;
+            sumsqk[idx] = s2k;
+            sumA[idx] = s1;
+        }
+    });
     const double secsEik = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() - secsDisp;
+    {   // W1's instrument: what the transport did against the swell shoaled with no refraction
+        int worst = -1;
+        double p50 = 0.0, over2 = 0.0;
+        int n = 0;
+        for (int ic = 0; ic < nc; ++ic) {
+            if (!(wts[ic] > 0.0)) continue;
+            p50 += carry[ic].p50;
+            over2 = (std::max)(over2, carry[ic].over2);
+            ++n;
+            if (worst < 0 || carry[ic].max > carry[worst].max) worst = ic;
+        }
+        if (worst >= 0) {
+            Log("[wave] action vs the swell shoaled without refraction: mean p50 %.3f; worst component %d "
+                "(T %.1f s, from %.0f deg): p99 %.2f max %.2f at cell (%d, %d); cells over 2x at most %.2f%%",
+                n ? p50 / n : 0.0, worst, in.tp * (fp / fr[worst]), Wrap360(dirs[worst]), carry[worst].p99,
+                carry[worst].max, carry[worst].iMax, carry[worst].jMax, 100.0 * over2);
+        }
+    }
 
     // -- the TOTAL-Hs limiter: Hs = 2 sqrt2 rms against gammaHs * h, ONE uniform factor per cell
     //    on every a_i (spectral shape and directions survive); excess > 1 is the breaking
@@ -832,6 +1300,22 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         sumFieldMax = (std::max)(sumFieldMax, sumA[idx] * L);
     }
     const double envMax = Ceil3(1.05 * rmsFieldMax);
+    if (layers.base.size()) {
+        const double rmsDeep = aTot / std::sqrt(2.0);   // the incident sea's rms
+        layers.Write(L"8_rms_raw", [&](size_t i, uint8_t* px) { LayerSink::Seq(std::sqrt(sumsq[i]) / (2.0 * rmsDeep), px); });
+        layers.Write(L"9_excess", [&](size_t i, uint8_t* px) {
+            const double kEff = sumsqk[i] / ((sumsq[i] > 1e-12) ? sumsq[i] : 1e-12);
+            const double rmsLim = BreakHmax(kEff, h[i]) / (2.0 * std::sqrt(2.0));
+            LayerSink::Seq(std::sqrt(sumsq[i]) / ((rmsLim > 1e-6) ? rmsLim : 1e-6) / 2.5, px);
+        });
+        layers.Write(L"10_limiter", [&](size_t i, uint8_t* px) { LayerSink::Seq(lim[i], px); });
+        layers.Write(L"11_hs", [&](size_t i, uint8_t* px) {
+            LayerSink::Seq(2.0 * std::sqrt(2.0) * std::sqrt(sumsq[i]) * lim[i] / (2.0 * in.hs), px);
+        });
+        Log("[wave] layers: the sea -- rms before the limiter / (2 x the incident rms %.3f m), excess / 2.5, the "
+            "limiter's factor 0..1, Hs after it / (2 x the incident Hs %.2f m); the map (eta) is the last layer",
+            rmsDeep, in.hs);
+    }
     const double sumMax = Ceil3(1.05 * sumFieldMax);
     table.envMax = float(envMax);
     table.sumMax = float(sumMax);
@@ -929,14 +1413,13 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     const double secs =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     Log("[wave] solved %dx%dx%d in %.1f s: %d/%d comps uploaded (gate %.0f m lambda), "
-        "blocked %.3f%%, lvl %+.2f cur %+.2f",
+        "blocked %.3f%%, lvl %+.2f",
         nx, ny, nc, secs, nUp, nc, cfg.minSamplesPerLambda * cfg.cellM,
-        100.0 * double(blockedCells.load()) / (double(nc) * double(cells)), in.level,
-        in.currentMs);
-    Log("[wave]   the dispersion %.1f s: %zu cells solved, %zu kept from the memo (F25); the phase %.1f s, "
-        "%d components in parallel, %d-%d rounds until still (F28); the rest %.1f s",
-        secsDisp, cellsSolved.load(), cellsKept.load(), secsEik, nUp,
-        nUp ? roundsMin.load() : 0, roundsMax.load(), secs - secsDisp - secsEik);
+        100.0 * double(blockedCells.load()) / (double(nc) * double(cells)), in.level);
+    Log("[wave]   the dispersion %.1f s: %zu cells solved, %zu kept from the memo (F25); the phase and the "
+        "action %.1f s, components in parallel, %d-%d and %d-%d rounds until still (F28, W1); the rest %.1f s",
+        secsDisp, cellsSolved.load(), cellsKept.load(), secsEik, roundsMax.load() ? roundsMin.load() : 0,
+        roundsMax.load(), carryMax.load() ? carryMin.load() : 0, carryMax.load(), secs - secsDisp - secsEik);
 }
 
 // `phi`: the eikonal phase planes, after the inputs, flagged in the head's pad0 (bit 0) -- a reader
@@ -968,7 +1451,7 @@ bool WriteCache(const char* path, uint64_t key, const Inputs& in,
     hd.mwdDeg = in.mwdFromDeg;
     hd.cellM = in.cfg.cellM;
     hd.spreadDeg = in.cfg.spreadDeg;
-    hd.barNormalDeg = in.cfg.barNormalDeg;
+    hd.barNormalDeg = 0.0;   // W1: no bar normal; the slot keeps the head's layout
     hd.gammaHs = in.cfg.gammaHs;
     hd.minSamplesPerLambda = in.cfg.minSamplesPerLambda;
     hd.orgX = in.cfg.orgX;
@@ -1057,6 +1540,47 @@ void WaveField::Configure(const WaveFieldConfig& cfg, const Compositor* comp, in
     m_currents = currents;
     m_actSta = actStation;
     m_liveKey = 0;   // force the first Update to solve or hit cache
+    // W2: THE FIELD'S CURRENT ON THE SOLVE'S CELLS, at each cell's place, in the quanta the solve eats.
+    {
+        auto f = std::make_shared<FieldFlow>();
+        const size_t cells = size_t((std::max)(cfg.nx, 0)) * size_t((std::max)(cfg.ny, 0));
+        f->u.assign(cells, 0.0f);
+        f->v.assign(cells, 0.0f);
+        if (currents && currents->FieldCount() && cells) {
+            ParallelRows(cfg.ny, [&](int j0, int j1) {
+                for (int j = j0; j < j1; ++j) {
+                    for (int i = 0; i < cfg.nx; ++i) {
+                        double la = 0.0, lo = 0.0;
+                        cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
+                        float u = 0.0f, v = 0.0f;
+                        if (!currents->SampleAt(lo, la, u, v)) continue;
+                        const size_t idx = size_t(j) * size_t(cfg.nx) + size_t(i);
+                        f->u[idx] = std::round(u / 0.05f) * 0.05f;
+                        f->v[idx] = std::round(v / 0.05f) * 0.05f;
+                    }
+                }
+            });
+        }
+        uint64_t h = 14695981039346656037ull;
+        auto mixB = [&h](const void* p, size_t n) {
+            const uint8_t* bb = static_cast<const uint8_t*>(p);
+            for (size_t i = 0; i < n; ++i) h = (h ^ bb[i]) * 1099511628211ull;
+        };
+        mixB("field flow", 10);
+        mixB(f->u.data(), f->u.size() * sizeof(float));
+        mixB(f->v.data(), f->v.size() * sizeof(float));
+        f->sig = h;
+        size_t moving = 0;
+        float fastest = 0.0f;
+        for (size_t idx = 0; idx < cells; ++idx) {
+            const float sp = std::hypot(f->u[idx], f->v[idx]);
+            if (sp > 0.0f) ++moving;
+            fastest = (std::max)(fastest, sp);
+        }
+        Log("[wave] the field's current on the window: %zu of %zu cells moving, the fastest %.2f m/s "
+            "(the solver's flow is composed over it where one stands)", moving, cells, fastest);
+        m_field = f;
+    }
     Log("[wave] configured: %dx%d @ %.1f m (%.0f x %.0f m window), %d comps, buckets "
         "tide %.2f m / current %.2f m/s",
         cfg.nx, cfg.ny, cfg.cellM, cfg.nx * cfg.cellM, cfg.ny * cfg.cellM, cfg.nComp,
@@ -1089,17 +1613,14 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
     mixD(m_cfg.cellM);
     mixU(uint32_t(m_cfg.nComp));
     mixD(m_cfg.spreadDeg);
-    mixD(m_cfg.barNormalDeg);
     mixD(m_cfg.gammaHs);
     mixD(m_cfg.minSamplesPerLambda);
 
     mixD(std::isnan(levelAt) ? std::round(LevelRaw(simUnix) / m_cfg.tideBucketM) * m_cfg.tideBucketM : levelAt);
-    const double sRaw = (m_currents && m_actSta >= 0 &&
-                         size_t(m_actSta) < m_currents->Count())
-                            ? m_currents->SignedSpeed(size_t(m_actSta), simUnix)
-                            : 0.0;
-    mixD(std::round(sRaw / m_cfg.currentBucketMs) * m_cfg.currentBucketMs);
-    mixBytes(&m_curSig, sizeof(m_curSig));   // the solved flow's content signature
+    // W2: the flow the solve eats, by its content -- the solver's over the field, or the field's alone.
+    // (The ACT station's speed bucket was in the key while it drove the proxy; it drives nothing now.)
+    const uint64_t flowSig = (!m_curU.empty() && m_curSig != 0) ? m_curSig : (m_field ? m_field->sig : 0);
+    mixBytes(&flowSig, sizeof(flowSig));
 
     if (parts && nParts > 0) mixBytes(parts, sizeof(PartParam) * size_t(nParts));
     if (m_comp && m_hgtCh >= 0) {
@@ -1119,7 +1640,8 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
 // by the prism-truncation gain, QUANTIZE to 0.05 m/s, and hash the quantized bytes into
 // the bucket key. The solve then eats exactly the bytes the key describes -- content
 // identity, so the same flow always finds its cache and a changed flow always re-solves.
-void WaveField::ResampleFlow(CurJob& j, const SweDomain& dom, float gain, const WaveFieldConfig& cfg, Gpu& gpu) {
+void WaveField::ResampleFlow(CurJob& j, const SweSolver& swe, float gain, const WaveFieldConfig& cfg, Gpu& gpu) {
+    const SweDomain& dom = swe.Domain();
     const size_t cells = size_t(cfg.nx) * size_t(cfg.ny);
     std::vector<float> eta;
     uint32_t ew = 0, eh = 0;
@@ -1130,6 +1652,11 @@ void WaveField::ResampleFlow(CurJob& j, const SweDomain& dom, float gain, const 
         j.done.store(true, std::memory_order_release);
         return;
     }
+    // W2: THE MANAGER'S TWO CURRENTS, PER CELL. The regional field everywhere (made at Configure), the
+    // solver's solved current over it by the solver's domain weight, continuous across the domain's edge.
+    // (WaterManager::SolverRefine still REPLACES the field with the solver's inside that one-cell band:
+    // the hull's current is twinned with the bank's, which holds no field current. docs/INSERTS.md.)
+    const bool haveField = j.field && j.field->u.size() == cells && j.field->v.size() == cells;
     j.U.assign(cells, 0.0f);
     j.V.assign(cells, 0.0f);
     // PHASE C4: each cell's place is its page texel's (WaveFieldConfig::PlaceOfCell), then
@@ -1137,6 +1664,10 @@ void WaveField::ResampleFlow(CurJob& j, const SweDomain& dom, float gain, const 
     for (int jj = 0; jj < cfg.ny; ++jj) {
         const size_t row = size_t(jj) * size_t(cfg.nx);
         for (int i = 0; i < cfg.nx; ++i) {
+            const float fu = haveField ? j.field->u[row + i] : 0.0f;
+            const float fv = haveField ? j.field->v[row + i] : 0.0f;
+            j.U[row + i] = fu;
+            j.V[row + i] = fv;
             double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
             cfg.PlaceOfCell(double(i) + 0.5, double(jj) + 0.5, la, lo);
             if (!dom.CellOf(la, lo, tx, ty) ||
@@ -1145,10 +1676,11 @@ void WaveField::ResampleFlow(CurJob& j, const SweDomain& dom, float gain, const 
             }
             const int ix = int(tx), iy = int(ty);   // row 0 = NORTH
             const float* sp = &j.uv4[(size_t(iy) * j.uw + size_t(ix)) * 4];
-            if (sp[3] < 0.5f) continue;   // solver-invalid: sponge or dry
+            if (sp[3] < 0.5f) continue;   // solver-invalid: sponge or dry -- the field's
+            const float w = float(swe.DomainWeight(la, lo));
             // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats
-            j.U[row + i] = std::round(sp[0] * gain / 0.05f) * 0.05f;
-            j.V[row + i] = std::round(sp[1] * gain / 0.05f) * 0.05f;
+            j.U[row + i] = std::round((fu + w * (sp[0] * gain - fu)) / 0.05f) * 0.05f;
+            j.V[row + i] = std::round((fv + w * (sp[1] * gain - fv)) / 0.05f) * 0.05f;
         }
     }
     uint64_t h = 14695981039346656037ull;
@@ -1218,18 +1750,19 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix, bool block) {
     job->oldV = m_curV;
     job->first = m_curU.empty();
     job->h = m_curSig;    // nothing read keeps the last signature
+    job->field = m_field;
     m_curJob = job;
-    const SweDomain* dom = &m_swe->Domain();
+    const SweSolver* swe = m_swe;
     const float gain = m_sweGain;
     const WaveFieldConfig cfg = m_cfg;
     Gpu* gp = &gpu;
     if (block) {   // F17: inline, then adopted at once -- the frame that asked sees the flow
-        ResampleFlow(*job, *dom, gain, cfg, gpu);
+        ResampleFlow(*job, *swe, gain, cfg, gpu);
         RefreshSweCurrent(gpu, simUnix, block);
         return;
     }
-    Threads().Submit(Lane::Long, "wave.current", [job, dom, gain, cfg, gp]() {
-        ResampleFlow(*job, *dom, gain, cfg, *gp);
+    Threads().Submit(Lane::Long, "wave.current", [job, swe, gain, cfg, gp]() {
+        ResampleFlow(*job, *swe, gain, cfg, *gp);
     });
 }
 
@@ -1302,13 +1835,16 @@ void WaveField::BuildInputs(double simUnix, const std::vector<PartParam>& parts,
         });
     }
     if (!m_curU.empty() && m_curSig != 0) {
-        // M8 flows-into-waves: the SWE's solved jet (quantized planes; their hash is
-        // in this solve's key). The dispersion now sees the bent channel jet and the
-        // shear off the tips -- the proxy could only point one way.
+        // M8 flows-into-waves: the SWE's solved jet over the field (quantized planes; their hash
+        // is in this solve's key). The dispersion sees the bent channel jet and the shear off the tips.
         in.u = m_curU;
         in.v = m_curV;
+    } else if (m_field && m_field->u.size() == cells) {
+        in.u = m_field->u;   // W2: no solver's flow (yet, or at all): the field's
+        in.v = m_field->v;
     } else {
-        wavecore::BuildCurrentPlanes(m_cfg, in.level, in.currentMs, in.bed, in.u, in.v);
+        in.u.assign(cells, 0.0f);
+        in.v.assign(cells, 0.0f);
     }
 
 }
@@ -1385,7 +1921,6 @@ static bool ReadEntry(const std::string& path, wavecore::Inputs& in, std::vector
     in.cfg.nComp = int(hd.nComp);
     in.cfg.cellM = hd.cellM;
     in.cfg.spreadDeg = hd.spreadDeg;
-    in.cfg.barNormalDeg = hd.barNormalDeg;
     in.cfg.gammaHs = hd.gammaHs;
     in.cfg.minSamplesPerLambda = hd.minSamplesPerLambda;
     in.cfg.orgX = hd.orgX;
@@ -1467,11 +2002,11 @@ bool WaveField::ConvergeCache(const std::string& arg) {
                 feik[idx] = (h[idx] > 0.0) ? kp[idx] : kShore;
                 phi[idx] = 1e30;
             }
-            EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, feik, phi);   // the solve's (F28: until still)
+            EikonalPhase(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, h, feik, phi);   // the solve's (F28: until still)
             std::vector<double> phi8 = phi;
             for (int round = 0; round < kMaxRounds; ++round) {
                 prev = phi;
-                EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, feik, phi, 4);
+                EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / PlanetGWave(), d0, d1, feik, phi, 4, &h, 1);   // the water's
                 size_t moved = 0; double mx = 0.0;
                 for (size_t idx = 0; idx < cells; ++idx) {
                     if (phi[idx] != prev[idx]) { ++moved; mx = (std::max)(mx, std::abs(prev[idx] - phi[idx])); }
@@ -1644,6 +2179,10 @@ void WaveField::Publish() {
 }
 
 bool WaveField::LoadCache(uint64_t key, Solved& out) const {
+    // --wave-map (the map and its layers) is drawn by a solve: a cache hit would answer the field and draw
+    // nothing, so the instrument always solves. Its answer is the cache's to the byte (the key is the
+    // question), and it is written back as any solve is.
+    if (!m_cfg.mapPath.empty()) return false;
     char path[128];
     CachePathFor(key, path, sizeof(path));
     if (!wavecore::ReadCache(path, key, m_cfg, out.atlas, out.table, &out.phi)) return false;
@@ -2338,6 +2877,123 @@ bool RunWaveFieldSelfTest() {
     if (!(std::abs(w.p50 - 0.1) < 0.005)) {
         Log("[wavetest] FAIL: the gauge read p50 %.4f on a phase scaled by 1.1 (0.1 expected)", w.p50);
         ok = false;
+    }
+    // W1: THE ACTION'S TWO LIMITS. (a) Deep water, oblique: the transport hands the incident amplitude
+    // back. (b) Straight parallel contours (depth a function of x alone), no current: Snell and energy-
+    // flux shoaling, A = a0 sqrt((cg0 / cg)(cos th_e / cos th)), th by Snell from the east edge's th_e
+    // -- the law the bar normal stated for one window, which the transport must reproduce wherever its
+    // assumption is true. Measured over the cells whose rays enter by the east edge (the north edge's
+    // datum is the swell shoaled without refraction: the edge's one assumption).
+    auto carry = [&](int cx, int cy, double dx, const std::vector<double>& hh, double t0, double t1,
+                     std::vector<float>& aOut) {
+        const size_t n = size_t(cx) * size_t(cy);
+        std::vector<double> kk(n), ph(n, 1e30), nn(n);
+        std::vector<float> fl(2 * n), none;
+        std::vector<uint32_t> up(n);
+        std::vector<float> ry(3 * n);
+        for (size_t idx = 0; idx < n; ++idx) {
+            bool bl = false;
+            kk[idx] = SolveDispersion(sig, hh[idx], 0.0, bl);
+        }
+        wavecore::EikonalPhase(cx, cy, dx, kInfC, t0, t1, hh, kk, ph);
+        aOut.assign(n, 0.0f);
+        return wavecore::ActionTransport(cx, cy, dx, sig, t0, t1, 1.0, hh, kk.data(), ph, none, none, fl, nn, up, ry,
+                                         aOut.data());
+    };
+    {
+        const int ax = 96, ay = 96;
+        const double th = 0.6;   // toward the north-east, oblique to the grid
+        std::vector<double> hd(size_t(ax) * ay, 400.0);
+        std::vector<float> a;
+        const int rounds = carry(ax, ay, 4.0, hd, std::sin(th), std::cos(th), a);
+        double worst = 0.0;
+        for (const float x : a) worst = (std::max)(worst, std::abs(double(x) - 1.0));
+        Log("[wavetest] action, deep and oblique: |A/a0 - 1| max %.2e over %d cells (%d rounds)", worst, ax * ay,
+            rounds);
+        if (!(worst < 1e-3)) {
+            Log("[wavetest] FAIL: the deep sea's action does not hand back the incident amplitude");
+            ok = false;
+        }
+    }
+    {
+        const int sx = 400, sy = 1200;
+        const double dx = 2.0, th0 = 30.0 * 3.14159265358979 / 180.0;
+        const double t0 = -std::cos(th0), t1 = -std::sin(th0);   // toward the west-south-west, from deep water
+        std::vector<double> hs(size_t(sx) * sy);
+        for (int j = 0; j < sy; ++j)
+            for (int i = 0; i < sx; ++i) hs[size_t(j) * sx + i] = 2.0 + 58.0 * double(i) / double(sx - 1);
+        std::vector<float> a;
+        const int rounds = carry(sx, sy, dx, hs, t0, t1, a);
+        const double gW = PlanetGWave(), cg0 = 0.5 * gW / sig, c0 = gW / sig;
+        auto at = [&](double hc, double& cg, double& c) {
+            bool bl = false;
+            const double kk = SolveDispersion(sig, hc, 0.0, bl);
+            const double kh = kk * hc;
+            c = sig / kk;
+            cg = 0.5 * (1.0 + 2.0 * kh / std::sinh(2.0 * kh)) * c;
+        };
+        // Snell from DEEP water, cos th0 -- not the east edge's own refracted angle, which the first version of
+        // this test used and so agreed with an edge datum that overfed a shallow edge (the review, 2026-10-24)
+        const double cos0 = std::cos(th0);
+        std::vector<double> err;
+        const double reach = double(sx) * dx * std::tan(th0);   // a ray's fall over the window's width
+        for (int j = 4; j < sy - 4; ++j) {
+            if (double(j) * dx > double(sy) * dx - reach - 200.0) continue;   // fed by the north edge
+            for (int i = 4; i < sx - 4; ++i) {
+                const double hc = hs[size_t(j) * sx + i];
+                if (hc < 3.0) continue;
+                double cg = 0.0, c = 0.0;
+                at(hc, cg, c);
+                const double sn = std::sin(th0) * c / c0, cs = std::sqrt(1.0 - sn * sn);
+                const double want = std::sqrt((cg0 / cg) * (cos0 / cs));
+                err.push_back(std::abs(double(a[size_t(j) * sx + i]) / want - 1.0));
+            }
+        }
+        std::sort(err.begin(), err.end());
+        const double p50 = err.empty() ? 1.0 : err[err.size() / 2];
+        const double p99 = err.empty() ? 1.0 : err[(std::min)(err.size() - 1, size_t(0.99 * double(err.size())))];
+        const double mx = err.empty() ? 1.0 : err.back();
+        Log("[wavetest] action, straight contours 60 -> 2 m at 30 deg: |A / Snell-shoaled - 1| p50 %.3f%% p99 %.3f%% "
+            "max %.3f%% over %zu cells (%d rounds)", p50 * 100.0, p99 * 100.0, mx * 100.0, err.size(), rounds);
+        if (!(p99 < 0.02 && mx < 0.05)) {
+            Log("[wavetest] FAIL: the action on straight contours is not Snell and shoaling");
+            ok = false;
+        }
+    }
+    // THE JETTY'S SHADOW (Mase's diffraction): a semi-infinite breakwater across half of a deep window, the
+    // swell square on to it. Geometric optics leaves the lee black; the energy balance with diffraction
+    // leaves a third to a half of the energy on the line the tip casts (the random-wave diagrams give about
+    // half), the lit side whole far from it, and the lee dimming with distance into it. Read 3 to 7
+    // wavelengths behind.
+    {
+        const int bx = 400, by = 400;
+        const double dx = 4.0;   // 1.6 km square; T 8 s in 50 m: lambda ~100 m
+        std::vector<double> hb(size_t(bx) * by, 50.0);
+        for (int j = 0; j < by / 2; ++j)
+            for (int i = 20; i < 23; ++i) hb[size_t(j) * bx + i] = 0.0;   // the breakwater: rows j < by/2
+        std::vector<float> a;
+        const int rounds = carry(bx, by, dx, hb, 1.0, 0.0, a);
+        auto meanAt = [&](int j0, int j1) {   // the mean amplitude over rows [j0, j1), columns 3..7 lambda behind
+            double sum = 0.0;
+            int n = 0;
+            for (int j = j0; j < j1; ++j)
+                for (int i = 23 + 75; i < 23 + 175; ++i) {
+                    sum += double(a[size_t(j) * bx + i]);
+                    ++n;
+                }
+            return n ? sum / n : 0.0;
+        };
+        const double line = meanAt(by / 2 - 1, by / 2 + 1);    // the two rows either side of the tip's line
+        const double lit = meanAt(by / 2 + 75, by / 2 + 85);   // 300 m into the light
+        const double lee = meanAt(by / 2 - 85, by / 2 - 75);   // 300 m into the lee
+        Log("[wavetest] action, the breakwater's shadow (T 8 s, 50 m, kappa %.1f): amplitude on the tip's line %.3f "
+            "(energy %.3f), 300 m into the light %.3f, 300 m into the lee %.3f (%d rounds)",
+            kMaseKappa, line, line * line, lit, lee, rounds);
+        if (!(line * line > 0.35 && line * line < 0.65 && lit > 0.9 && lit < 1.1 && lee < 0.35 && lee > 0.0)) {
+            Log("[wavetest] FAIL: the breakwater's shadow is not the diffracted one (half the energy on the line, "
+                "the light whole, the lee dim)");
+            ok = false;
+        }
     }
     Log("[wavetest] %s", ok ? "PASS" : "FAIL");
     return ok;
