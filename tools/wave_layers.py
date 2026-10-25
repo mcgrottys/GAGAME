@@ -25,6 +25,7 @@ STAGES = {
     "5_crease": "creases of the phase (red)",
     "6_gain": "action / shoaled swell, log2 (+-3 = 8x)",
     "7_amp": "amplitude / (2 a0)",
+    "8_dropped": "action dropped at creases (x4)",
     "8_rms_raw": "rms before the limiter",
     "9_excess": "excess / 2.5",
     "10_limiter": "the limiter's factor",
@@ -57,7 +58,7 @@ def main():
     ap.add_argument("--cols", type=int, default=4)
     a = ap.parse_args()
     base = a.map[:-4] if a.map.lower().endswith(".png") else a.map
-    files = [f for f in glob.glob(base + "_*.png") if not f.endswith("_sheet.png")]
+    files = [f for f in glob.glob(base + "_*.png") if "_sheet" not in os.path.basename(f)]
     files.sort(key=lambda f: order_key(f, base))
     files.append(a.map)
     crop = tuple(int(v) for v in a.crop.split(",")) if a.crop else None

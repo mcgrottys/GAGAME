@@ -402,9 +402,10 @@ int EikonalPhase(int nx, int ny, double dxm, double kInfC, double d0, double d1,
 // WHERE TWO RAY FAMILIES MEET -- a crease of the first-arrival phase: off a jetty's tip, behind a
 // shoal -- the losing family's flux ENDS: a crease cell's velocity is the winner's, and it is fed from
 // the winner's side. Past the crease it would be a second sea crossing the first, and a single-valued
-// phase holds one. Two versions taught it (2026-10-24, the helm window): faces with averaged velocities
-// poured the losing family into the crease (lines of 3x the sea, a 27.8 m raw peak where the bar
-// normal's field had 8.3 m); a centred direction fed a crease from both sides, being their bisector.
+// phase holds one. It is not free: the ledger (below) shows how much a window drops there -- 56 % of the
+// swell entering the Merrimack window (2026-10-25). Merging the loser into the winner instead (taken by
+// how far the two flows agree) kept more of it but did not converge where families met head on; that law
+// waits, with the ledger as its gate.
 //
 // DIFFRACTION, ACROSS THE RAY (Mase 2001, the energy balance equation with diffraction, EBED): geometric
 // optics alone leaves a jetty's lee dark -- energy reaches it only by the fan of rays from the tip cell --
@@ -430,12 +431,18 @@ struct CarryStats {
     double p50 = 0.0, p99 = 0.0, max = 0.0;
     double over2 = 0.0;   // the share of wet cells carried above twice the shoaled swell
     int iMax = -1, jMax = -1;
+    // THE LEDGER (2026-10-25, Mark: "the waves seem a bit flat going into the inlet"): the action the swell
+    // brings in through the window's edge, and where it goes -- out through the edge again, onto land (the
+    // beach, the jetties), or dropped where two ray families meet (a crease: the losing family ends). Each
+    // face's flux is counted once, from the cell it leaves; the diffraction's mixing makes it approximate.
+    double injected = 0.0, outEdge = 0.0, onLand = 0.0, atCrease = 0.0;
 };
 int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1, double a0,
                     const std::vector<double>& h, const double* kbuf, const std::vector<double>& phi,
                     const std::vector<float>& u, const std::vector<float>& v, std::vector<float>& flux,
                     std::vector<double>& N, std::vector<uint32_t>& order, std::vector<float>& ray, float* aOut,
-                    const uint8_t* blockedBits = nullptr, CarryStats* stats = nullptr, float* gainOut = nullptr) {
+                    const uint8_t* blockedBits = nullptr, CarryStats* stats = nullptr, float* gainOut = nullptr,
+                    float* creaseOut = nullptr) {
     const size_t cells = size_t(nx) * size_t(ny);
     const bool haveFlow = u.size() == cells && v.size() == cells;
     const double g = PlanetGWave();
@@ -639,6 +646,44 @@ int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1
     };
     const int roundsGeo = sweep(false);   // first: the operands of + are unsequenced
     const int rounds = roundsGeo + sweep(true);
+    if (stats || creaseOut) {   // THE LEDGER, from the settled field
+        if (creaseOut) std::fill(creaseOut, creaseOut + cells, 0.0f);
+        for (size_t o = 0; o < nWet; ++o) {
+            const size_t idx = order[o];
+            const int i = int(idx % size_t(nx)), j = int(idx / size_t(nx));
+            const float* F = &flux[2 * idx];
+            for (int ax = 0; ax < 2; ++ax) {
+                const double fc = double(F[ax]);
+                if (fc == 0.0) continue;
+                const int sg = (fc > 0.0) ? 1 : -1;   // the face this cell's flow leaves by
+                const int ni = (ax == 0) ? i + sg : i, nj = (ax == 1) ? j + sg : j;
+                if (ni < 0 || nj < 0 || ni >= nx || nj >= ny) {
+                    if (stats) stats->outEdge += std::abs(fc) * N[idx];
+                    continue;
+                }
+                const size_t nb = size_t(nj) * size_t(nx) + size_t(ni);
+                const double q = std::abs(fc) * N[idx];
+                if (h[nb] <= 0.0) {
+                    if (stats) stats->onLand += q;
+                    continue;
+                }
+                const double fn = double(flux[2 * nb + size_t(ax)]);
+                if ((fn > 0.0) != (fc > 0.0) || fn == 0.0) {   // the neighbour is fed from its other side
+                    if (stats) stats->atCrease += q;
+                    if (creaseOut) creaseOut[idx] += float(q / (std::max)(phi0, 1e-30));
+                }
+            }
+            // the window's inflow edges where the cell's own flow does not leave by them
+            for (int ax = 0; ax < 2 && stats; ++ax) {
+                const double fc = double(F[ax]);
+                const int sg = (fc > 0.0) ? -1 : 1;   // the side the flow comes from
+                const int ni = (ax == 0) ? i + sg : i, nj = (ax == 1) ? j + sg : j;
+                if (fc == 0.0 || !(ni < 0 || nj < 0 || ni >= nx || nj >= ny)) continue;
+                const double dIn = (ax == 0) ? -double(sg) * d0 : -double(sg) * d1;
+                if (dIn > 0.0) stats->injected += phi0 * dIn;
+            }
+        }
+    }
     std::vector<float> gains;
     if (stats) gains.reserve(cells / 4);
     for (size_t idx = 0; idx < cells; ++idx) {
@@ -951,7 +996,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     for (int i = 0; i < nc; ++i) {
         if (wts[i] > 0.0) lastIc = i;
     }
-    std::vector<float> hotPhi, hotFlux, hotGain;
+    std::vector<float> hotPhi, hotFlux, hotGain, hotCrease;
 
     // -- per-component solve ---------------------------------------------------------------
     // F25: the k planes are the memo's (or a solve-local one when no memo was given). The memo
@@ -1065,6 +1110,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     std::vector<uint32_t> order(cells);   // the march's order: the wet cells by phase
     std::vector<float> ray(3 * cells);    // the ray and C Cg (the diffraction)
     std::vector<float> gainBuf;           // --wave-map: the action's gain over the shoaled swell
+    std::vector<float> creaseBuf;         // --wave-map: the action dropped at creases, over the deep flux
     for (int ic = c0; ic < c1; ++ic) {
         if (!(wts[ic] > 0.0)) continue;
         const double T = in.tp * (fp / fr[ic]);
@@ -1161,17 +1207,20 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         // feik is spent with the sweep; it holds the action density from here.
         {
             if (layers.base.size() && gainBuf.size() != cells) gainBuf.assign(cells, 0.0f);
+            if (layers.base.size() && creaseBuf.size() != cells) creaseBuf.assign(cells, 0.0f);
             const int rounds = ActionTransport(nx, ny, cfg.cellM, sig, d0, d1, aTot * wts[ic], h, kbuf,
                                                phibuf, in.u, in.v, flux, feik, order, ray, aPlane,
                                                M.blocked.data() + size_t(ic) * ((cells + 7) / 8), &carry[ic],
-                                               layers.base.size() ? gainBuf.data() : nullptr);
+                                               layers.base.size() ? gainBuf.data() : nullptr,
+                                               layers.base.size() ? creaseBuf.data() : nullptr);
             for (int cur = carryMin.load(); rounds < cur && !carryMin.compare_exchange_weak(cur, rounds);) {}
             for (int cur = carryMax.load(); rounds > cur && !carryMax.compare_exchange_weak(cur, rounds);) {}
         }
         if (!cfg.mapPath.empty()) {   // --wave-map: components in order, so eta's sum is one thread's
             for (size_t idx = 0; idx < cells; ++idx) eta[idx] += double(aPlane[idx]) * std::cos(phibuf[idx]);
             const double a0c = aTot * wts[ic], kInfC = (sig * sig) / PlanetGWave();
-            auto writeComp = [&](int c, const float* ph, const float* fx, const float* gn, const float* am) {
+            auto writeComp = [&](int c, const float* ph, const float* fx, const float* gn, const float* am,
+                                 const float* cl) {
                 const std::wstring p = L"c" + std::to_wstring(c) + L"_";
                 const double* kc = M.k.data() + size_t(c) * cells;
                 const double kI = (std::pow(2.0 * kPiW / (in.tp * (fp / fr[c])), 2.0)) / PlanetGWave();
@@ -1200,6 +1249,9 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                 layers.Write(p + L"7_amp", [&](size_t i, uint8_t* px) {   // A / (2 a0)
                     LayerSink::Seq(double(am[i]) / (2.0 * aTot * wts[c]), px);
                 });
+                layers.Write(p + L"8_dropped", [&](size_t i, uint8_t* px) {   // dropped at a crease / the deep flux, x4
+                    LayerSink::Seq(4.0 * double(cl[i]), px);
+                });
                 Log("[wave] layers: component %d (T %.1f s, from %.0f deg, a0 %.3f m): k/k_deep 1..4, cos phase, the "
                     "ray's direction, creases, log2 of the action's gain over the shoaled swell (+-3 = 8x), A/(2 a0); "
                     "its gain p50 %.2f p99 %.2f max %.2f at (%d, %d)",
@@ -1210,15 +1262,17 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             (void)kInfC;
             std::vector<float> phf(cells);
             for (size_t i = 0; i < cells; ++i) phf[i] = float(phibuf[i]);
-            if (ic == peakIc) writeComp(ic, phf.data(), flux.data(), gainBuf.data(), aPlane);
+            if (ic == peakIc) writeComp(ic, phf.data(), flux.data(), gainBuf.data(), aPlane, creaseBuf.data());
             if (ic != peakIc && (hotIc < 0 || carry[ic].max > carry[hotIc].max)) {
                 hotIc = ic;
                 hotPhi = phf;
                 hotFlux = flux;
                 hotGain = gainBuf;
+                hotCrease = creaseBuf;
             }
             if (ic == lastIc && hotIc >= 0) {
-                writeComp(hotIc, hotPhi.data(), hotFlux.data(), hotGain.data(), aRaw.data() + size_t(hotIc) * cells);
+                writeComp(hotIc, hotPhi.data(), hotFlux.data(), hotGain.data(), aRaw.data() + size_t(hotIc) * cells,
+                          hotCrease.data());
             }
         }
         if (!uploaded[ic]) continue;   // the fold gate: its slice stays zero bytes
@@ -1272,6 +1326,20 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             over2 = (std::max)(over2, carry[ic].over2);
             ++n;
             if (worst < 0 || carry[ic].max > carry[worst].max) worst = ic;
+        }
+        double inj = 0.0, edge = 0.0, land = 0.0, crease = 0.0;
+        for (int ic = 0; ic < nc; ++ic) {
+            inj += carry[ic].injected;
+            edge += carry[ic].outEdge;
+            land += carry[ic].onLand;
+            crease += carry[ic].atCrease;
+        }
+        if (inj > 0.0) {
+            Log("[wave] the action's ledger, all components: of what the swell brings in at the window's edge, %.1f%% "
+                "leaves by the edge again, %.1f%% runs onto land (beaches, jetties), %.1f%% is dropped at creases "
+                "(where two ray families meet); %.1f%% unaccounted (the diffraction's mixing)",
+                100.0 * edge / inj, 100.0 * land / inj, 100.0 * crease / inj,
+                100.0 * (inj - edge - land - crease) / inj);
         }
         if (worst >= 0) {
             Log("[wave] action vs the swell shoaled without refraction: mean p50 %.3f; worst component %d "

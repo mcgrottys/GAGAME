@@ -844,6 +844,24 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const float excessC =
         (envRmsRaw / max(gPatch.w, 1e-3f)) * 2.8284271f / BreakHmax(kEff, depth);
     const float brk = BreakFactor(excessC);
+    // THE CASCADES YIELD BY THE ENERGY THE SOLVED FIELD CARRIES (2026-10-25, Mark: "the waves seem a bit flat
+    // going into the inlet"). The window stood the structure bands down by where the solved field's PAGES
+    // were, whatever it carried there -- and in a jetty's lee, up a dredged channel, the solved field (the
+    // offshore swell carried along its rays) is rightly weak, so the water there kept only the chop band:
+    // flat. The bands now yield the share of their energy the solved field supplies, min(1, E_solved /
+    // E_bands), both sheltered by the exposure: where the solved sea is whole it owns the bands as before;
+    // where it is weak the bands fill to their own level, so the drawn sea is max(E_solved, E_bands) --
+    // never less than the sheltered open-sea law, and the solved structure wherever it carries more.
+    // The twin: TreeWater::Finish.
+    if (wCas > 0.0f) {
+        bool envPrevY;
+        const float4 envY = WavePageSample(wuv, gWaveU.w, envPrevY);
+        const float rmsS = envY.x * (envPrevY ? gWaveBP.x : gWaveB.x) * expo;   // the solved sea's delivered rms
+        const float rb0 = gainC[0] * brk * gRmsRef.x / max(gPatch.w, 1e-3f);    // the bands' own, delivered
+        const float rb1 = gainC[1] * brk * gRmsRef.y / max(gPatch.w, 1e-3f);
+        const float eBands = rb0 * rb0 + rb1 * rb1;
+        if (eBands > 1e-12f) wCas *= min(1.0f, rmsS * rmsS / eBands);
+    }
     float gain0 = gainC[0] * brk;
     float gain1 = gainC[1] * brk;
     float gain2 = gainC[2] * brk;

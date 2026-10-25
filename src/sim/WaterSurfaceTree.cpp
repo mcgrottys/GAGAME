@@ -408,6 +408,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     const double rwx = p.rwx, rwz = p.rwz, wGeom = p.wGeom;
     (void)latDeg; (void)lonDeg;
     double wWin = 0.0;
+    double rmsSolved = 0.0;   // the solved sea's delivered rms here, sheltered (the bands' yield below)
 
     double dispX = 0.0, dispY = 0.0, dispZ = 0.0;   // wave displacement, physical metres
     double slopeX = 0.0, slopeZ = 0.0;
@@ -419,6 +420,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix, depth, m_waveChop);   // the depth's orbit, the throw's bound
         if (p.valid) {
             wWin = wGeom;
+            rmsSolved = double(p.rms) * expo;
             // The swell shadow shelters the solved components as it does the cascades (the kernel's
             // aW = a * aMax * expo).
             const double wS = wWin * expo;
@@ -451,10 +453,20 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         double gain[OceanCpu::kCascades];
         double brk = 1.0, rmsRaw = 0.0, kEff = 0.0;
         BandLaw(q, depth, hsScale, expo, gain, &brk, &rmsRaw, &kEff);
+        // THE BANDS YIELD BY THE ENERGY THE SOLVED FIELD CARRIES (2026-10-25; the kernel's, WaterBank.hlsl
+        // "THE CASCADES YIELD BY THE ENERGY..."): the share of their energy it supplies, min(1, E_solved /
+        // E_bands), both sheltered -- where the solved sea is weak (a lee, a channel) the bands fill to their
+        // own level. (The twin reads the whole atlas, so its supplied share is the window's weight.)
+        double wCas = wWin;
+        if (wCas > 0.0) {
+            const double rb0 = gain[0] * m_bandRms[0], rb1 = gain[1] * m_bandRms[1];   // delivered
+            const double eBands = rb0 * rb0 + rb1 * rb1;
+            if (eBands > 1e-12) wCas *= std::min(1.0, rmsSolved * rmsSolved / eBands);
+        }
         double hsBand[OceanCpu::kCascades];   // each band's raw Hs (the kernel's hsBand): its own run-up
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             hsBand[c] = 4.0 * gain[c] / std::max(brk, 1e-3) * m_bandRms[c];
-            if (c != 2) gain[c] *= 1.0 - wWin;
+            if (c != 2) gain[c] *= 1.0 - wCas;
         }
         // THE ORBIT IS THE DELIVERED ONE (2026-10-23; the kernel's cascade loop says why): each band's
         // lateral rides its delivered gain times the depth's orbit, coth(k h) on the band's k -- the lateral
@@ -513,7 +525,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
             jacZZ += w * (c2 * R[2] + d2 * R[3]);
         }
         // THE CREST LAW ON THE CASCADES (the kernel's, after its cascade loop; WaterTerms.h CrestLaw, the
-        // solved field's own): on the sea the cascades draw here -- 0 and 1 yield by wWin, as `gain` does;
+        // solved field's own): on the sea the cascades draw here -- 0 and 1 yield by wCas, as `gain` does;
         // the twin has no ring, so no fold -- in physical metres, its excess the drawn sea's against the
         // depth, the bed's slope one wave-radian east and north where a crest is over its limit.
         static const bool noCascadeCrest = [] { const char* e = std::getenv("GAGAME_NO_CASCADE_CREST"); return e && e[0] == '1'; }();
