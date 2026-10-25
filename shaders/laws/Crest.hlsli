@@ -164,10 +164,19 @@ inline CrestOut CrestLaw(CrestState s, real dBx, real dBz, real aEnv, real excRa
     o.s.jxx = s.jxx * g + tx * wx;
     o.s.jzz = s.jzz * g + tz * wz;
     o.s.jxz = s.jxz * g + 0.5 * (tx * wz + tz * wx);
-    // water past the cusp descends: the jet by the parabola of its fall, the roller by its face
+    // water past the cusp descends: the jet by the parabola of its fall, the roller by its face.
+    // THE ROLLER RUNS DOWN THE FACE IT SITS ON (2026-10-25, Mark: "the tops seem a bit flat"): the
+    // roller is water that cannot stand on the front face sliding down it, so a label is lowered by the
+    // roller in the share of the face it sits on -- the sheet's descent along the travel, -m, over the
+    // roller's own face, k Hc / 2, saturated: nothing on the level top (m = 0) and on the back face
+    // (m > 0), the whole drop where the sheet is as steep as the roller's face or steeper. Lowered at
+    // crest weight alone, the top dropped as one shelf with a lip at its end (the plateau); now the
+    // top stays rounded and leans forward, and the face below it carries the roller. The jet is in
+    // free flight and falls by its parabola wherever it is.
+    const real wFace = saturate(-m / face);
     const real ePast = max(aH * g - cusp, 0.0);
-    const real fall = ePast * face + plunge * (LipFall(ePast, kBar, cothBar, Hc, depth) - ePast * face);
-    const real fallDe = face + plunge * (LipFallDe(ePast, kBar, cothBar, Hc, depth) - face);   // d(fall)/d(ePast)
+    const real fall = ePast * face * wFace + plunge * (LipFall(ePast, kBar, cothBar, Hc, depth) - ePast * face * wFace);
+    const real fallDe = face * wFace + plunge * (LipFallDe(ePast, kBar, cothBar, Hc, depth) - face * wFace);   // d(fall)/d(ePast)
     const real px = s.dx * g + shX * wCr, py = s.eta + shY * wCr - fall, pz = s.dz * g + shZ * wCr;
     const real floorY = min(s.eta, -aEnv);
     if (py >= floorY) {

@@ -254,3 +254,57 @@ Named, not changed (each a law of its own, for Mark's call):
 * `LipFlightTau` defined after `#endif` (every includer redefined it).
 * Six divisions by the display exaggeration inside the physics (`/ gPatch.w`): gone with the physical
   `gRmsRef`.
+
+## 7. The roller's curvature, the hulls, and DX12 Ultimate (2026-10-25, Mark's second look)
+
+Mark, after running the bar: "much better ... the only issue I notice with the mesh now is that the tops
+seem a bit flat. I wonder if that diffraction work might address it." And: "make sure we are not under
+utilizing DX12 Ultimate shader features. I'd hope these physics could apply to the boats."
+
+### 7.1 The flat tops are the roller's drop, not the diffraction
+
+The diffraction decides how much action lands where along a crest; the crest's shape is the crest law's
+(`laws/Crest.hlsli`). A spilling crest over its limit was carried forward to the cusp and the water past
+the cusp lowered linearly along its own face, the roller, `ePast × face` — applied at crest weight alone,
+so every label on the top dropped by the same amount: a shelf with a lip at its end, the plateau in the
+close-up. The roller is water that cannot stand on the FRONT FACE sliding down it, so a label is now
+lowered by the roller in the share of the face it sits on: the sheet's descent along the travel, −m (the
+`m` the flight's translator already computes), over the roller's own face k Hc / 2, saturated. Nothing on
+the level top and on the back face, the whole drop where the sheet is as steep as the roller's face or
+steeper. The top stays rounded and leans forward; the face below it carries the roller. The jet is in
+free flight and falls by its parabola wherever it is, unchanged. One continuous expression; a saturate on a
+ratio, which is a domain clamp, not a case.
+
+Two things that stack on it in the storm and were checked: the march's per-component cap (Hmax / 2 for
+ONE wave) is far looser than the sea's total limiter (Hmax / 2√2 on the rms of all 32), so the two never
+flatten the same crest twice: the cap bites only a focus, the limiter then scales every component by one
+factor and the shapes survive. And the trough bound flattens troughs, not crests; the eye reads the crests
+as flatter by contrast.
+
+### 7.2 The hulls
+
+The crest law is one text, so `TreeWater::Finish` runs the rounded roller the frame it is drawn with: a
+hull rides the rounded top and the roller on the face, because there is no second body to update. (The
+hull's state carries the sheet's slope, so its `m` is the same quantity.) Still open and older: the hull
+does not feel the fleet's wakes (`TreeWater::SetBoats` has no caller; REVIEW_2026-10-17).
+
+### 7.3 DX12 Ultimate, audited against the water path
+
+The device of the storm runs: RTX 5060 (laptop), shader model 6.7, mesh shader tier 1, sampler feedback
+tier 0.9, tiled resources tier 4, resource binding tier 3. What the water asks of it today:
+
+| feature | used | by | fit for the water |
+|---|---|---|---|
+| mesh + amplification shaders (SM 6.5) | yes | the globe's mesh (`MsMain`), the column ladder's lip (`MsLip`), buildings (`AsShape`/`MsShape`) | the sheet IS a mesh-shader job; done |
+| bindless over the heap (tier 3) | yes | every kernel (`gT[]`, `gTA[]`, `gU[]` by slot) | done; SM 6.6's `ResourceDescriptorHeap[]` would only drop the root-signature ranges |
+| reserved resources, tiled residency (tier 4) | yes | every page tenant, the banks | done |
+| **variable rate shading** (tier 2) | **no** | — | **the one clear gap.** REVIEW_2026-10-21 measured the frame's GPU budget dominated by WATER PIXELS (the two-ray water, the caustic tiers). The bank already knows per texel where the sea is smooth and where it breaks (the detail plane's gains, the foam, the fold grid): a shading-rate image written from it (2×2 over the smooth open sea, 1×1 within a wavelength of a crest's foam and the fold grid's held blocks, by distance beyond) is a direct win on the dominant cost with no change to the laws. A render change; it wants the A/B and Mark's eye |
+| **sampler feedback** (tier 0.9) | **no** | — | the second real fit: the residency's wants are PREDICTED by the CPU walk (SetView 3.0 ms, PredictWants 1.0 ms a frame, the review of 2026-10-17); `FeedbackTexture2D<MinMip>` written by the globe's pixel shader as it samples the page arrays is "a reader wants what it reads" said by the hardware. A design change to the residency, not a kernel edit |
+| wave intrinsics (SM 6.0+, available at `cs_6_0`) | no (water); yes (buildings) | — | small: `CsBankFill` reads 33 residency bytes per texel for the planes' share (`nHave`), the same bytes for a whole tile; one lane could read them and broadcast (`WaveReadLaneFirst`). A few percent of that kernel |
+| 64-bit atomics (SM 6.6) | no | — | the column plane packs a 14-bit height with an 18-bit label into one 32-bit word for its three `InterlockedMin/Max`; a 64-bit word would carry a full float height. The 14 bits are a centimetre over ±82 m, which is under the drawn floor: not a need |
+| 16-bit types (SM 6.2) | no in compute; the pixel stage has an fp16 variant | — | the bank sums 32 components; fp16 accumulation would lose the hull's twin to rounding. Not for the kernels |
+| DXR / inline `RayQuery` (SM 6.5) | no | — | the sheet is a height field with columns; the engine marches it (`TerrainRay.hlsli`, the maximum-mipmap cast, the PCSS sun map). A BLAS of the sheet rebuilt every frame would cost more than the march and answer the same ray. Not a fit |
+
+So: the water's kernels are not leaving a shader feature on the table that would change the physics; the
+two features that would change the frame are VRS on the water pixels and sampler feedback for the
+residency's wants. Both are proposed here, neither is in this branch.
