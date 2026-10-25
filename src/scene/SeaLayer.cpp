@@ -574,8 +574,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         // pixel, and the old hand-tuned fade distances (which deleted the energy) retire.
         {
             const double kPiD = 3.14159265358979;
-            const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
-                                    0.9 * kPiD * OceanFft::kN / 47.0};
+            const double kCut[4] = {OceanFft::BandCutK(0), OceanFft::BandCutK(1), OceanFft::BandCutK(2), OceanFft::BandCutK(3)};   // the one source
             double mss[3] = {0, 0, 0};
             double m0b[3] = {0, 0, 0};   // M8 foamlaw: banded amplitude variance too
             double lnk[3] = {0, 0, 0};   // M9c: energy-weighted sum of ln k, for the FOLD
@@ -697,10 +696,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     // OceanFft uses). The SHADER turns these into phase speeds at the local depth -- in deep
     // water ~18/6.5/1.9 m/s, but an 11 s swell over the 4 m bar drops to ~6 m/s, which is why
     // the ebb stands the entrance up (M5b).
-    const double kPiD = 3.14159265358979;
-    const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
-                            0.9 * kPiD * OceanFft::kN / 47.0};
-    m_chopK = static_cast<float>(std::sqrt(kCut[2] * kCut[3]));   // the chop band, the churn's
+    m_chopK = static_cast<float>(std::sqrt(OceanFft::BandCutK(2) * OceanFft::BandCutK(3)));   // the chop band, the churn's
 
     // ---- M4: churn atlas bindings + residency policy
     // M9az: THE CHURN FOLLOWS THE CAMERA. The 16 km domain used to sit on the station: memory
@@ -875,7 +871,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.miscC[0] = m_chopK;
         m_churnCb.miscC[1] = m_fft.PatchL(2);
         m_churnCb.miscC[2] = static_cast<float>(std::fmod(m_tSec, 1024.0f));
-        m_churnCb.miscC[3] = static_cast<float>(PlanetGWave());   // the planet's gravity (SeaChurn: Jet.hlsli)
+        m_churnCb.miscC[3] = static_cast<float>(PlanetGWave());   // the planet's gravity (SeaChurn: shaders/laws)
         // PHASE C5: the world.flat chart's rows (the exact map); the height window's rows below.
         m_surface->TangentRows(m_churnCb.tanE, m_churnCb.tanU, m_churnCb.tanN);
         memcpy(m_churnCb.eyeT, m_churnEyeT, sizeof(m_churnEyeT));   // PHASE B2

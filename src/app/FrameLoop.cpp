@@ -3850,13 +3850,10 @@ bool FrameLoop::Frame() {
             }
             uint32_t derivS[3];
             float patchS[3], bandKS[3], bandRmsS[3], bandFoldS[3];
-            const double kPiB = 3.14159265358979;
-            const double kCutB[4] = {2.0 * kPiB / 756.0, 2.0 * kPiB / 60.0,
-                                     2.0 * kPiB / 12.0, 0.9 * kPiB * 256.0 / 47.0};
             for (int c = 0; c < 3; ++c) {
                 derivS[c] = sea->FftDerivSrv(c);
                 patchS[c] = sea->FftPatchL(c);
-                bandKS[c] = static_cast<float>(std::sqrt(kCutB[c] * kCutB[c + 1]));
+                bandKS[c] = static_cast<float>(std::sqrt(OceanFft::BandCutK(c) * OceanFft::BandCutK(c + 1)));
                 bandRmsS[c] = sea->BandRms(c);
                 bandFoldS[c] = sea->BandKFold(c);
             }

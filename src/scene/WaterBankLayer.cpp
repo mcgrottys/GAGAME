@@ -1171,10 +1171,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.org[3] = static_cast<float>(m_simUnix);
     for (int c = 0; c < 3; ++c) cb.patch[c] = m_sea->FftPatchL(c);
     cb.patch[3] = m_sea->heightScale;
-    const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
-                            0.9 * kPiD * 256.0 / 47.0};
-    for (int c = 0; c < 3; ++c) {
-        cb.bandK[c] = static_cast<float>(std::sqrt(kCut[c] * kCut[c + 1]));
+    for (int c = 0; c < 3; ++c) {   // the band cuts' one source (OceanFft::BandCutK)
+        cb.bandK[c] = static_cast<float>(std::sqrt(OceanFft::BandCutK(c) * OceanFft::BandCutK(c + 1)));
     }
     if (m_swe && m_swe->Ready()) {
         cb.sweDims[0] = static_cast<float>(m_swe->Nx());
@@ -1216,7 +1214,9 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // rms envelopes let the kernel normalize eta for the crest gate and depth excess.
     for (int c = 0; c < 3; ++c) cb.slotsE[c] = m_sea->FftDerivSrv(c);
     cb.slotsE[3] = 0xFFFFFFFFu;
-    for (int c = 0; c < 3; ++c) cb.rmsRef[c] = m_sea->BandRms(c);
+    // PHYSICAL (2026-10-25): the kernel's laws read the unit sea's rms in metres and apply the
+    // exaggeration once, to the displacement; it used to carry heightScale and every law divided it out.
+    for (int c = 0; c < 3; ++c) cb.rmsRef[c] = static_cast<float>(m_sea->BandRmsPhysical(c));
     cb.rmsRef[3] = 0.0f;
     for (int c = 0; c < 3; ++c) cb.bandKFold[c] = m_sea->BandKFold(c);
     cb.bandKFold[3] = 0.0f;

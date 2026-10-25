@@ -55,7 +55,7 @@ void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& com
         wq.u, wq.v, wq.currentSrc);
     Log("[trace] 5 depth     level - bed = %.2f m  dry %.2f  breaking clamp "
         "0.55*depth = %.2f m", wq.depthM,
-        wt::Smoothstep(0.05, 0.65, double(wq.depthM)),
+        DryWeight(double(wq.depthM)),
         0.55 * (std::max)(static_cast<double>(wq.depthM), 0.05));
     // The one law the bank's tile corners and the hull's twin read (sim/WaveScale.h).
     static const WaveScale kNone{};

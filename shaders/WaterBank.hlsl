@@ -45,7 +45,8 @@ cbuffer BankCb : register(b0) {
     uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q),
                         // z = the window's SLICE when x/y are array views (M9aq), else ~0
     uint4  gSlotsE;     // M8 foamlaw: cascade DERIV SRVs x3 (hx, hz, J, foam)
-    float4 gRmsRef;     // M8: unit-sea rms envelope per band (xyz), w spare
+    float4 gRmsRef;     // M8: the unit sea's rms per band (xyz), PHYSICAL m -- the exaggeration is
+                        //     applied once, to the summed displacement, never inside a law; w spare
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield; src/sim/WaveField) ----
     // One RGBA8 atlas of 17 slices in a 2-wide grid (slice s at ((s&1)*nx, (s/2)*ny)):
     // per-component (a/aMax, k/kMax, cos*.5+.5, sin*.5+.5), slice 16 = the envelope
@@ -260,8 +261,9 @@ float2 ChartUv(const BankTile t, uint k, uint c, float2 exz) {
 float4 ChartRot(const BankTile t, uint k) { return t.chart[k][3]; }
 
 #define GA_PLANET_G (gPlanet.x)
+typedef float real;   // the laws' type: float in a kernel (shaders/laws/Laws.hlsli says the contract)
 #include "GA.hlsli"
-#include "Jet.hlsli"
+#include "laws/Laws.hlsli"
 
 // Bindless over the shared heap (the renderer's doctrine, compute-side): textures by SLOT,
 // never by name -- the residency machinery can move data under this kernel freely. All
@@ -485,88 +487,8 @@ float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
 // folded away and the throat painted as featureless milk -- a shading texture must live
 // at shading resolution. The kernel ships PURE physics foam; Globe.hlsl breaks it up.)
 
-// ================================================================================================
-//  M8 KELVIN WAKES (ALGEBRA.md wake; proofs/kelvin_wake.py). Station keeping c = U cos
-//  theta gives k = K0 sec^2 theta, K0 = g/U^2; stationarity reduces to the quadratic
-//  2 zeta t^2 + xi t + zeta = 0 (t = tan theta) and the famous 19.4712-degree wedge IS its
-//  discriminant. THE SIGNED PHASE: this port CORRECTS its reference -- the vqview shader
-//  folded |t| into a non-stationary angle (measured |grad ph|/k up to 6.65 where theory
-//  demands 1); the true phase at the signed roots is ph = K0 sec theta (xi - zeta |t|),
-//  already mirror-symmetric, with slope direction d = grad(ph)/k. Gatest block 10 pins the
-//  quadratic, the wedge, and the gradient identity the reference fails.
-//  Every bound is physics with its argument recorded (closures, gate-pinned): steepness
-//  cap ak <= 0.30 (pre-breaking Miche family), divergent damping exp(-(k/5K0)^2) (viscous
-//  removal of the short arm), band-limit vs THIS TILE'S TEXEL (the kernel is the mesh --
-//  smoothstep(2, 5, lambda/texel)), cusp boost faded in over dRel 1..3.5 (Airy validity),
-//  near fade 0.5..2.5 hull-lengths (linear theory dies at the hull), draught amp cap.
-// ================================================================================================
-void WakeBranch(float t, float K0, float xi, float zeta, float amp, float sampleM,
-                float2 fwd, float2 rgt, float side, inout float eta, inout float2 slope,
-                inout float akMax) {
-    const float sec = sqrt(1.0f + t * t);
-    const float k = K0 * sec * sec;
-    const float lam = 6.2831853f / k;
-    const float w = smoothstep(2.0f, 5.0f, lam / max(sampleM, 1e-3f));
-    if (w <= 0.0f) return;
-    // the SIGNED stationary phase + its consistent slope direction (ph and d flip together)
-    const float ph = K0 * sec * (xi - zeta * abs(t));
-    const float ct = 1.0f / sec, st = abs(t) / sec;
-    const float2 d = -(fwd * ct + rgt * (side * st));
-    const float kRel = k / max(K0, 1e-6f);
-    const float damp = exp(-(kRel / 5.0f) * (kRel / 5.0f));
-    const float aMaxK = 0.30f / max(k, 1e-3f);
-    const float a = min(amp * w * damp, aMaxK);
-    eta += a * cos(ph);
-    slope -= (a * k) * sin(ph) * d;
-    akMax = max(akMax, a * k);
-}
-
-void WakeOne(float4 A, float4 B, float2 posM, float sampleM, inout float eta,
-             inout float2 slope, inout float akMax, inout float stern) {
-    if (B.z < 0.5f || A.w < 0.5f) return;
-    const float2 fwd = float2(cos(A.z), sin(A.z));
-    const float2 rgt = float2(-fwd.y, fwd.x);
-    const float2 r = posM - A.xy;
-    if (dot(r, r) > 1200.0f * 1200.0f) return;   // spread + damp are dead past this
-    const float xi = -dot(r, fwd);               // metres astern
-    const float across = dot(r, rgt);
-    const float side = (across >= 0.0f) ? 1.0f : -1.0f;
-    const float zeta = abs(across);
-    const float halfLen = max(B.y, 1.0f);
-    // stern turbulence envelope (the aerated prop wash): short, narrow, decaying --
-    // the reference's tuned closure; joins the foam UNION, never adds.
-    if (xi > 0.0f) {
-        const float wid = halfLen * 0.34f * (1.0f + xi / (halfLen * 10.0f));
-        stern = max(stern, smoothstep(0.0f, halfLen * 0.3f, xi) *
-                               exp(-xi / (halfLen * 3.2f)) *
-                               (1.0f - smoothstep(wid * 0.45f, wid * 1.15f, zeta)));
-    }
-    if (xi <= 0.5f) return;                      // nothing ahead of the bow
-    const float disc = xi * xi - 8.0f * zeta * zeta;
-    if (disc <= 0.0f) return;                    // outside the wedge: no stationary phase
-    const float sq = sqrt(disc);
-    const float U = A.w;
-    const float K0 = gPlanet.x / (U * U);
-    const float dist = max(length(r), 1.0f);
-    const float dRel = dist / halfLen;
-    const float cuspFar = 1.0f + 1.8f * pow(saturate(1.0f - sq / max(xi, 1e-3f)), 3.0f);
-    const float cusp = 1.0f + (cuspFar - 1.0f) * smoothstep(1.0f, 3.5f, dRel);
-    const float nearFade = smoothstep(0.5f, 2.5f, dRel);
-    const float ampCap = 0.22f * halfLen * 0.34f;
-    const float spread = 1.0f / sqrt(0.6f + dRel);
-    const float amp =
-        min(B.x * smoothstep(0.0f, halfLen * 2.0f, xi) * cusp * spread, ampCap) * nearFade;
-    if (amp < 1e-4f) return;
-    if (zeta < 1e-3f) {
-        WakeBranch(0.0f, K0, xi, zeta, amp, sampleM, fwd, rgt, side, eta, slope, akMax);
-        return;
-    }
-    const float t1 = (-xi + sq) / (4.0f * zeta);
-    const float t2 = (-xi - sq) / (4.0f * zeta);
-    WakeBranch(abs(t1), K0, xi, zeta, amp, sampleM, fwd, rgt, side, eta, slope, akMax);
-    WakeBranch(abs(t2), K0, xi, zeta, amp * 0.85f, sampleM, fwd, rgt, side, eta, slope,
-               akMax);
-}
+// THE KELVIN WAKES live in laws/Wake.hlsli (WakeVessel, WakeSample, WakeOne), one text with the hull's
+// twin: the signed stationary phase, the wedge as a discriminant, every bound with its argument.
 
 // M7n: THE COINCIDENCE CARD. Quadrant shading (4 distinct levels -- any flip or rotation
 // permutes them visibly) + thin border lines at the wrap seams.
@@ -577,45 +499,9 @@ float CardPattern(float2 uv) {
     return v;
 }
 
-// THE CREST LAW, ONE FOR EVERY DESCRIPTION OF THE SEA (2026-10-23, Mark: "give the cascades the solved
-// field's crest law"; WaterTerms.h CrestLaw is its twin and says what it is). On one description's
-// displacement d at a label (x east, y up, z north; its orbit already on the amplitude the depth lets
-// stand, raised toward the raw one in the swash): at the crest alone, by the crest's own excess, EVERY
-// breaking crest goes forward to the cusp (k A_h = 1, the crest's water at the phase speed: the kinematic
-// criterion, a spiller's as much as a plunger's), and past it the jet flies toward the landing only where
-// the bed's slope says it plunges (PlungeShare gates the flight alone, Mark 2026-10-23); water past the
-// cusp falls, the flight's boost back, bounded by the trough. gradEta the description's slope, dBar its
-// travel, aEnv its significant amplitude, excRaw the sea's rms_raw / rms_limit (unclamped), kBar and
-// cothBar its wavenumber in this depth and orbit factor, aH its DRAWN lateral amplitude, tanBeta the
-// bed's slope. Returns q1, the crest's forward share (the spray reads it).
-float CrestExcessShare(float eta, float aEnv, float excRaw) {
-    const float eCr = excRaw * max(eta / aEnv, 0.0f);
-    return 1.0f - 1.0f / max(eCr * eCr, 1.0f);
-}
-float CrestLaw(inout float3 d, float2 gradEta, float2 dBar, float aEnv, float excRaw, float kBar,
-               float cothBar, float aH, float tanBeta, float depth) {
-    const float wCr = saturate(0.5f + 0.5f * d.y / aEnv);
-    const float Hc = aEnv + max(d.y, 0.0f);   // this crest's height over the trough
-    const float aLoop = LipReach(kBar, cothBar, Hc, depth);
-    const float share = CrestExcessShare(d.y, aEnv, excRaw);
-    const float plunge = (share > 0.0f) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0f;
-    // to the cusp for every breaker; past it, the plunging share's jet to the landing and the spilling
-    // share's roller down its own face (Jet.hlsli SpillReach; at plunge 1 the law of before)
-    const float cusp = 1.0f / max(kBar, 1e-4f);
-    const float eCr = excRaw * max(d.y / aEnv, 0.0f);
-    const float past = lerp(SpillReach(Hc, eCr, kBar), aLoop - cusp, plunge);
-    const float rH = 1.0f / max(aH, 1e-3f), cuspR = cusp * rH;
-    const float q1 = share * (max(cuspR - 1.0f, 0.0f) + max((cusp + past) * rH - max(cuspR, 1.0f), 0.0f));
-    d.xz *= 1.0f + q1 * wCr;   // the orbit grows; the throw is the flight's, below
-    // water past the cusp descends: the jet by the parabola of its fall, the roller by its face's slope
-    const float ePast = max(aH * (1.0f + q1 * wCr) - cusp, 0.0f);
-    const float fall = lerp(ePast * max(kBar, 1e-4f) * 0.5f * Hc, LipFall(ePast, kBar, cothBar, Hc, depth), plunge);
-    const float3 tau = LipFlightTau(dBar, gradEta, q1 * wCr * aH, fall);
-    const float yWas = d.y;
-    d = MotorPoint(float4(1.0f, 0.0f, 0.0f, 0.0f), float4(0.0f, 0.5f * tau), d);
-    d.y = max(d.y, min(yWas, -aEnv));
-    return q1;
-}
+// THE CREST LAW lives in laws/Crest.hlsli (CrestState, CrestLaw): one text for every description of the
+// sea on both processors. The kernel packs a description's displacement and slope into a CrestState at
+// the call and unpacks the result; the Jacobian terms it does not draw it passes as zero.
 
 [numthreads(16, 16, 1)]
 void CsBankFill(uint3 id : SV_DispatchThreadID) {
@@ -717,7 +603,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // solver, same instant.
     if (gDebugA.x != 0.0f) bed = gDebugA.y;
     const float depth = lvl - bed;
-    const float dry = smoothstep(0.05f, 0.65f, depth);
+    const float dry = DryWeight(depth);
 
     // M7j: THE SWELL SHADOW. The solver's line-of-sight exposure field (CPU march toward
     // the peak-wave source) always sheltered the OLD renderer; one-water lost the edge
@@ -750,10 +636,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float2 rxz = pT.xz;
         const float2 wcell = (rxz - gWaveA.xy) * gWaveA.z;
         const float2 dimsW = gWaveD.xy;
-        const float eM =
-            min(min(wcell.x, dimsW.x - wcell.x), min(wcell.y, dimsW.y - wcell.y)) /
-            gWaveA.z;
-        wWin = smoothstep(0.0f, max(gWaveA.w, 1.0f), eM);
+        wWin = WindowWeight(WindowEdgeM(wcell.x, wcell.y, dimsW.x, dimsW.y, 1.0f / gWaveA.z), gWaveA.w);
         wuv = WavePageUv(rxz);
         // ---- M9by: THE CASCADES YIELD BY WHAT THE FIELD SUPPLIED, NOT BY THE WINDOW. -----
         //
@@ -815,35 +698,27 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // Jacobian and Laplacian it assembles from the cascade derivative textures
     // (ALGEBRA.md caustics: areaJac_fold = 1 + sum w*amp*(J_c - 1); lap folds linearly).
     // F7: THE BANDS' GAINS FIRST (shoaling, the wave-current gain), then the sea's depth excess
-    // from the raw envelope they make, then BREAKING: one factor on every band (Jet.hlsli
+    // from the raw envelope they make, then BREAKING: one factor on every band (laws/Breaking.hlsli
     // BreakFactor, the clipped Rayleigh sea). The raw excess stays the foam's indicator below.
+    // THE BAND LAW (laws/Bands.hlsli BandLaw; TreeWater reads the same text): each band's raw gain --
+    // the sea-state scale, the swell shadow, the wave-current gain, Green's shoaling -- the raw
+    // envelope they make, its energy wavenumber, its excess against the depth's limit, and the one
+    // breaking factor every band is drawn with.
+    const BandSea bandSea = BandLaw(hsScale, expo, depth, cur.x, cur.y, gPeakDir.x, gPeakDir.y,
+                                    gPeakDir.z > 0.5f, gBandK.x, gBandK.y, gBandK.z,
+                                    gRmsRef.x, gRmsRef.y, gRmsRef.z);
     float gainC[3], blockedC[3];
     [unroll] for (uint cg = 0; cg < 3; ++cg) {
-        float amp = hsScale * expo;
-        float blocked = 0.0f;
-        if (depth > 0.05f) {
-            const float cB = BandPhaseSpeed(gBandK[cg], max(depth, 0.3f));
-            float2 ab = (gPeakDir.z > 0.5f) ? WaveCurrentAmp(cur, gPeakDir.xy, cB)
-                                            : float2(1.0f, 0.0f);
-            ab.x *= ShoalFactor(gBandK[cg], depth);
-            amp *= ab.x;
-            blocked = ab.y;
-        }
-        gainC[cg] = amp;
-        blockedC[cg] = blocked;
+        gainC[cg] = bandSea.gain[cg];
+        blockedC[cg] = bandSea.blocked[cg];
     }
-    const float envRmsRaw =
-        max(sqrt(gainC[0] * gainC[0] * gRmsRef.x * gRmsRef.x +
-                 gainC[1] * gainC[1] * gRmsRef.y * gRmsRef.y +
-                 gainC[2] * gainC[2] * gRmsRef.z * gRmsRef.z), 1e-4f);
-    // F7b: the sea's energy-weighted wavenumber at this texel, and the height it can stand to.
+    const float envRmsRaw = bandSea.rmsRaw;
     const float e0 = gainC[0] * gainC[0] * gRmsRef.x * gRmsRef.x;
     const float e1 = gainC[1] * gainC[1] * gRmsRef.y * gRmsRef.y;
     const float e2 = gainC[2] * gainC[2] * gRmsRef.z * gRmsRef.z;
-    const float kEff = (e0 * gBandK.x + e1 * gBandK.y + e2 * gBandK.z) / max(e0 + e1 + e2, 1e-12f);
-    const float excessC =
-        (envRmsRaw / max(gPatch.w, 1e-3f)) * 2.8284271f / BreakHmax(kEff, depth);
-    const float brk = BreakFactor(excessC);
+    const float kEff = bandSea.kEff;
+    const float excessC = bandSea.excess;
+    const float brk = bandSea.factor;
     // THE CASCADES YIELD BY THE ENERGY THE SOLVED FIELD CARRIES (2026-10-25, Mark: "the waves seem a bit flat
     // going into the inlet"). The window stood the structure bands down by where the solved field's PAGES
     // were, whatever it carried there -- and in a jetty's lee, up a dredged channel, the solved field (the
@@ -853,14 +728,14 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // where it is weak the bands fill to their own level, so the drawn sea is max(E_solved, E_bands) --
     // never less than the sheltered open-sea law, and the solved structure wherever it carries more.
     // The twin: TreeWater::Finish.
+    // THE SOLVED FIELD IS NOT SHELTERED BY THE EXPOSURE PAGE (2026-10-25, docs/WATER_LAWS.md 5.1): since
+    // W1 the solve goes round the walls itself and diffracts into their lee; the page is the cascades'
+    // closure. So its delivered rms stands against the bands' sheltered one here, as it is drawn below.
     if (wCas > 0.0f) {
         bool envPrevY;
         const float4 envY = WavePageSample(wuv, gWaveU.w, envPrevY);
-        const float rmsS = envY.x * (envPrevY ? gWaveBP.x : gWaveB.x) * expo;   // the solved sea's delivered rms
-        const float rb0 = gainC[0] * brk * gRmsRef.x / max(gPatch.w, 1e-3f);    // the bands' own, delivered
-        const float rb1 = gainC[1] * brk * gRmsRef.y / max(gPatch.w, 1e-3f);
-        const float eBands = rb0 * rb0 + rb1 * rb1;
-        if (eBands > 1e-12f) wCas *= min(1.0f, rmsS * rmsS / eBands);
+        const float rmsS = envY.x * (envPrevY ? gWaveBP.x : gWaveB.x);   // the solved sea's delivered rms
+        wCas = YieldShare(wCas, rmsS, gainC[0] * brk * gRmsRef.x, gainC[1] * brk * gRmsRef.y);
     }
     float gain0 = gainC[0] * brk;
     float gain1 = gainC[1] * brk;
@@ -954,21 +829,20 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // CrestLaw's throw, at the crest alone, by its own excess, where the bed says it plunges.
         // ...and THE ORBIT IS THE DEPTH'S (2026-10-19): a particle's horizontal excursion in water of
         // depth h is coth(kh) times its vertical (Airy's ellipse at the surface), 1 in deep water and
-        // growing as the wave shoals. The k is the band's IN THIS DEPTH (Jet.hlsli ShoaledKh: the
+        // growing as the wave shoals. The k is the band's IN THIS DEPTH (laws/Dispersion.hlsli ShoaledKh: the
         // cascades are synthesized at the deep-water k, and coth of THAT k reached 113 on the 213 m
         // band in the shallows, 52 m of slosh, a torn sheet). The depth floor is 0.3 m; the dry weight
         // below takes the geometry out before it.
         // ...and IN THE SWASH THE RAW ONE (2026-10-23, Mark: "the raw orbit near the waterline for the
-        // run-up and backwash"; Jet.hlsli SwashShare): toward the waterline the lateral climbs from the
+        // run-up and backwash"; laws/Crest.hlsli SwashShare): toward the waterline the lateral climbs from the
         // delivered amplitude to the raw, amp / brk, by the swash zone's share on THIS BAND's run-up --
         // its own raw Hs and deep-water wavelength -- the bore running up the slope under the crest and
         // back under the trough. A band's own: the chop is broken up in the surf and runs up nothing, and
         // on the whole sea's run-up it shoved the thin water over the sand metres to and fro every two
         // seconds (Mark: "the beach height seems to jitter"). The landing holds it after the loop.
-        const float cothC = OrbitCoth(gBandK[c], depth);   // the band's k IN THIS DEPTH (Jet.hlsli)
-        const float hsBand = 4.0f * gainC[c] * gRmsRef[c] / max(gPatch.w, 1e-3f);   // its raw Hs, physical
-        const float swC = SwashShare(hsBand, 6.2831853f / max(gBandK[c], 1e-6f), depth);
-        const float rawC = 1.0f + swC * (1.0f / max(brk, 1e-3f) - 1.0f);
+        const float cothC = OrbitCoth(gBandK[c], depth);   // the band's k IN THIS DEPTH (laws/Dispersion)
+        const float hsBand = 4.0f * gainC[c] * gRmsRef[c];   // its raw Hs, physical
+        const float rawC = SwashFactor(1.0f / max(brk, 1e-3f), hsBand, 6.2831853f / max(gBandK[c], 1e-6f), depth);
         cothArr[c] = cothC;
         rawArr[c] = rawC;
         d.y += s.y * (w * amp);
@@ -1004,7 +878,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float eD0 = e0 * wDrawn[0] * wDrawn[0], eD1 = e1 * wDrawn[1] * wDrawn[1];
         const float eD2 = e2 * wDrawn[2] * wDrawn[2];
         const float eD = eD0 + eD1 + eD2;
-        const float envD = sqrt(eD) / max(gPatch.w, 1e-3f);   // the drawn bands' raw envelope, physical
+        const float envD = sqrt(eD);   // the drawn bands' raw envelope, physical
         // the drawn sea's energy-weighted wavenumber (the whole sea's where nothing is drawn: 0 / 0), in
         // this depth; its amplitude-weighted orbit factor, as the solved field's sums make theirs
         const float kD = (eD0 * gBandK.x + eD1 * gBandK.y + eD2 * gBandK.z + 1e-12f * kEff) / (eD + 1e-12f);
@@ -1013,9 +887,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float cothBarC = (a0 * cothArr[0] + a1 * cothArr[1] + a2 * cothArr[2] + 1e-6f * OrbitCoth(kD, depth)) /
                                (a0 + a1 + a2 + 1e-6f);
         const float aEnvC = max(1.4142136f * envD * brk, 1e-3f);   // its significant amplitude, delivered
-        const float excD = envD * 2.8284271f / BreakHmax(kD, depth);   // its raw Hs over the depth's limit
+        const float excD = SeaBreakAt(envD, kD, depth).excess;   // its raw Hs over the depth's limit
         // ITS DRAWN LATERAL AMPLITUDE, at the texture's chop, the swash's raise in it -- and THE SWASH HELD TO
-        // THE LANDING (Jet.hlsli SwashShare; the cascades' bound of 2026-10-19, the chips along the jetty):
+        // THE LANDING (laws/Crest.hlsli SwashShare; the cascades' bound of 2026-10-19, the chips along the jetty):
         // a particle carried past the reach of the significant crest's own landing is a bore. Offshore the
         // delivered orbit never reaches it (k A_h <= chop x 0.21 where Hs <= 0.60 h; 1 is the cusp), so it
         // holds the swash alone.
@@ -1054,7 +928,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
                 tanB = min(length(float2(gx, gz)), 1.0f);
             }
             const float2 dBarC = (gPeakDir.z > 0.5f) ? gPeakDir.xy : float2(0.0f, 0.0f);
-            CrestLaw(d, gradC, dBarC, aEnvC, excD, kSh, cothBarC, aHC, tanB, depth);
+            CrestState cs;
+            cs.eta = d.y; cs.dx = d.x; cs.dz = d.z;
+            cs.sx = gradC.x; cs.sz = gradC.y;
+            cs.jxx = 0.0f; cs.jxz = 0.0f; cs.jzz = 0.0f;
+            const CrestOut co = CrestLaw(cs, dBarC.x, dBarC.y, aEnvC, excD, kSh, cothBarC, aHC, 1.0f, tanB, depth);
+            d = float3(co.s.dx, co.s.eta, co.s.dz);
         }
     }
 
@@ -1079,10 +958,10 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         bool envPrev;
         const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
         const float excRaw = env.y * 2.5f;   // rms_raw / rms_limit, unclamped: how far over (or under)
-        // THE SWASH (Jet.hlsli SwashShare; the cascade loop says why): the limiter scaled every component by
+        // THE SWASH (laws/Crest.hlsli SwashShare; the cascade loop says why): the limiter scaled every component by
         // 1 / max(excess, 1), so the raw sea is the delivered one times that; each component runs up by its own
         const float rawW = max(excRaw, 1.0f);
-        const float rmsDel = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;
+        const float rmsDel = env.x * (envPrev ? gWaveBP.x : gWaveB.x);
         float sumA = 0.0f, sumAK = 0.0f, sumACoth = 0.0f, sumACothR = 0.0f;
         float sumLift = 0.0f;   // -E[eta div D] at chop 1: sum k a^2 coth / 2 (WaveField::Probe::lift)
         float2 sumADir = 0.0f;
@@ -1099,7 +978,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             // The swell shadow shelters the SOLVED bands exactly as it does the
             // cascades (the helm-in-the-lee shot exposed the asymmetry: solved comps
             // sailed through the jetty's lee unsheltered).
-            const float aW = t4.x * aMax * expo;
+            const float aW = t4.x * aMax;   // unsheltered: the solve carries its own walls and diffraction
             if (aW < 1e-4f) continue;
             const float kW = max(t4.y * kMax, 1e-4f);
             // ---- M9bx: THE SOLVED FIELD GETS THE SAME FOLD THE CASCADES GOT. -------------
@@ -1184,9 +1063,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             dW.y += wFc * aW * cT;
             // the depth's orbit (the cascade loop says why): coth(kh) on this component's k; in the swash
             // toward the raw one, on this component's run-up (its deep-water wavelength 2 pi coth / k)
-            const float cothW = 1.0f / tanh(kW * max(depth, 0.3f));
-            const float rawFW = (rawW > 1.0f) ? 1.0f + SwashShare(2.0f * aW * rawW, 6.2831853f * cothW / kW, depth) * (rawW - 1.0f)
-                                              : 1.0f;   // its own run-up: its raw height 2 a, its deep-water wavelength
+            const float cothW = OrbitCothK(kW, depth);
+            // its own run-up: its raw height 2 a, its deep-water wavelength
+            const float rawFW = SwashFactor(rawW, 2.0f * aW * rawW, 6.2831853f * cothW / kW, depth);
             dW.xz -= gWaveB.z * wFc * aW * cothW * rawFW * sT * dir2;
             // the sea's sums for the crest law below: its amplitude, its energy-weighted k, its
             // orbit's depth factor (the drawn lateral's too) and its travel
@@ -1228,7 +1107,13 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             // and the flight is one translator; 2026-10-22 the Iribarren gate; 2026-10-23 the sea's excess
             // unclamped -- a 2 m set crest in 17 m of water was thrown 14.9 m on max(excess, 1) -- and the
             // law made one, the cascades' too). The bed's slope is the solve's, per cell (env.w^2).
-            const float q1 = CrestLaw(dW, gradEta, dBar, aEnv, excRaw, kBar, cothBar, aH, env.w * env.w, depth);
+            CrestState cs;
+            cs.eta = dW.y; cs.dx = dW.x; cs.dz = dW.z;
+            cs.sx = gradEta.x; cs.sz = gradEta.y;
+            cs.jxx = 0.0f; cs.jxz = 0.0f; cs.jzz = 0.0f;
+            const CrestOut co = CrestLaw(cs, dBar.x, dBar.y, aEnv, excRaw, kBar, cothBar, aH, 1.0f, env.w * env.w, depth);
+            dW = float3(co.s.dx, co.s.eta, co.s.dz);
+            const float q1 = co.q1;
             // THE SPRAY's quantities (the spawn stands after the shore stop below): the crest's
             // excursion past the CUSP (1 / k) is a loop's water, the plunging lip's -- that is what
             // leaves the sheet as spray, at a crest texel (w > 3/4); the summed k and travel for
@@ -1237,8 +1122,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             sprayK = kBar;
             sprayDir = dBar;
         }
-        rmsW = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;   // the solver's envelope, sheltered like its comps
-        excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
+        rmsW = env.x * (envPrev ? gWaveBP.x : gWaveB.x);   // the solver's envelope, as its comps are drawn
+        excW = env.y * 2.5f;              // its breaking indicator, rms_raw / rms_limit
         d += dW * wWin;
         liftWin = gWaveB.z * sumLift * wWin * wWin;   // the lateral at its chop, both halves by wWin
         // Storm-sea mss ceiling on the solved shed (default ~ hurricane Cox-Munk): past
@@ -1252,14 +1137,17 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // crests). Superposition: 8 boats cost a loop, no interaction to resolve.
     float sternF = 0.0f;
     {
-        float wEta = 0.0f;
-        float2 wSlope = 0.0f;
-        float wakeAk = 0.0f;
+        WakeSample ws;
+        ws.eta = 0.0f; ws.slopeX = 0.0f; ws.slopeZ = 0.0f; ws.akMax = 0.0f; ws.stern = 0.0f;
         [unroll] for (uint b = 0; b < 8; ++b) {
-            WakeOne(gBoatA[b], gBoatB[b], xz, t.texelM, wEta, wSlope, wakeAk, sternF);
+            WakeVessel v;   // the table's two rows, as WaterBankLayer::SetBoats lays them out
+            v.x = gBoatA[b].x; v.z = gBoatA[b].y; v.heading = gBoatA[b].z; v.speed = gBoatA[b].w;
+            v.wakeAmp = gBoatB[b].x; v.hullHalfLen = gBoatB[b].y; v.enabled = gBoatB[b].z >= 0.5f;
+            ws = WakeOne(v, xz.x, xz.y, t.texelM, ws);
         }
-        d.y += wEta;
-        steepFoam = max(steepFoam, smoothstep(0.352f, 0.528f, wakeAk));
+        d.y += ws.eta;
+        steepFoam = max(steepFoam, smoothstep(0.352f, 0.528f, ws.akMax));
+        sternF = ws.stern;
     }
     d *= dry * gPatch.w;
     // WATER CANNOT STAND BELOW ITS OWN BED (2026-10-23, Mark: "the water dips in like a dimple ... a
@@ -1271,10 +1159,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // water, never reaching the bed, the flat trough of a shallow sea. Not a cap on the height: a crest is
     // untouched. The mirror of the shore's "water cannot stand above its own surface".
     // TreeWater::Finish is its twin.
-    if (d.y < 0.0f) {
-        const float colD = max(depth, 1e-3f);
-        d.y = -colD * tanh(-d.y / colD);
-    }
+    d.y = TroughBound(d.y, depth);
 
     // THE SHORE STOP (2026-10-19, Mark's jetty): the lateral term carried wet labels onto the
     // riprap -- the orbit and the crest's throw never asked whether the water the particle moves
@@ -1345,8 +1230,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // F7: the envelope the crest gate normalizes by is the DELIVERED one (broken down); the
     // excess the foam reads is the RAW one, computed with the gains above -- both say what the
     // sea wants against what the water allows, as the solver's env slice does inside the window.
+    // (both envelopes are physical; d.y is exaggerated above, so the gate's envelope is too)
     const float envRmsC = max(envRmsRaw * brk, 1e-4f);
-    const float envRms = lerp(envRmsC, max(rmsW * gPatch.w, 1e-4f), wCas);
+    const float envRms = max(lerp(envRmsC, rmsW, wCas) * gPatch.w, 1e-4f);
     const float excess = lerp(excessC, excW, wCas);
     // The kernel writes PURE physics foam (triggers x crest); the visual BREAKUP is the
     // pixel stage's job -- noise at ring resolution folded its fine octaves away and

@@ -290,7 +290,7 @@ private:
         float peakDir[4];     // M7p: peak propagation dir xy, z valid (gPeakDir)
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
-        float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
+        float rmsRef[4];      // M8: unit-sea rms envelope per band, PHYSICAL m (crest gate / excess)
         uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
         float waveA[4];       // window org xy (the root's m, less the tiles' eye), 1/cellM, feather m
         float waveB[4];       // envMax, sumMax, chop, solved-at level
@@ -352,7 +352,7 @@ private:
         // size, on; dt (s), the drop's terminal speed (m/s), its life (s), the spawn gain.
         uint32_t sprayU[4];
         float sprayA[4];
-        // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (Jet.hlsli, the spray, the
+        // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (shaders/laws, the spray, the
         // wakes). Appended at the END on both sides.
         float planet[4];
         // WATER V2, STAGE 2: THE TIDE'S ROTORS of this instant (WaterAtlas::Rotors), two constituents

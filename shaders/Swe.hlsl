@@ -76,6 +76,12 @@ cbuffer SweCb : register(b0) {
 
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
+// The water's laws this solver shares with the bank and the hull (shaders/laws): Guo's dispersion
+// and Battjes-Janssen's height, one text.
+typedef float real;
+#define GA_PLANET_G (gGravity)
+#include "laws/Dispersion.hlsli"
+#include "laws/Breaking.hlsli"
 
 // THE CELL'S POINT about the domain's anchor C (the standing window's centre), in C's east / up /
 // north: the cell's place (s, t) in the anchor's tangent plane (over R) carried onto the sphere along
@@ -759,11 +765,10 @@ void CsSweLedger(uint gi : SV_GroupIndex) {
 // taller than the bank's own law lets it (BREAKING: Battjes and Janssen's clipped Rayleigh sea,
 // WaterTerms.h BreakHmax / BreakFactor, the same law the drawn sea is broken by). The dissipation D is
 // what the breaking takes; its force is the radiation stress's divergence (FaceUpdate).
-// The wavenumber: Guo's explicit approximation of the dispersion relation (2002, within 0.75 %).
+// The wavenumber: Guo's explicit approximation of the dispersion relation (laws/Dispersion.hlsli
+// ShoaledKh, the one text the bank and the hull read it from), from the deep-water k = omega^2 / g.
 float WaveK(float omega, float d) {
-    const float x = omega * omega * d / gGravity;
-    const float y = pow(max(1.0f - exp(-pow(omega * sqrt(d / gGravity), 2.5f)), 1e-6f), -0.4f);
-    return x * y / d;
+    return ShoaledKh(omega * omega / gGravity, d) / d;
 }
 
 float4 WavePrevAt(float2 p) {   // bilinear over the sweep before, at a point in cell units (centres at +0.5)
@@ -834,7 +839,7 @@ void CsSweWaves(uint3 id : SV_DispatchThreadID) {
         // (WaterTerms.h BreakHmax: Battjes and Janssen's Miche-bounded gamma h, a limit on Hs, read for one
         // wave as sqrt(2) of it: Hs = sqrt(2) Hrms) -- Hrms the arriving sea's.
         const float hrms2 = 8.0f * F / cg;    // Hrms^2 = 8 E with E = Hs^2 / 16
-        const float hb = 1.41421356f * (0.88f / k) * tanh(0.60f * k * h / 0.88f);
+        const float hb = 1.41421356f * BreakHmax(k, h);   // laws/Breaking.hlsli: the bank's own law
         const float D = 0.25f * (omega / 6.2831853f) * exp(-hb * hb / max(hrms2, 1e-8f)) * (hb * hb + hrms2);
         E = max(F - D * s, 0.0f) / cg;   // F and D both per rho g: the flux of Hrms^2 / 8
     }

@@ -1,4 +1,4 @@
-﻿// ================================================================================================
+// ================================================================================================
 //  WaveField.cpp - M8: the solved wave field, ported NUMBER FOR NUMBER from proofs/wave_field.py
 //  (the authoritative prototype, itself twin-tested to half an 8-bit LSB against the
 //  vqview-inlet reference bake). ALGEBRA.md `wavefield` carries the derivation; every closure
@@ -399,13 +399,20 @@ int EikonalPhase(int nx, int ny, double dxm, double kInfC, double d0, double d1,
 // F28 law: a fixed point has no count in it). Every wet cell drains by its own velocity, whose speed is
 // at least kCgFloor, so no cell is a sink; the side is the action's velocity's, not the phase's, so a
 // current turning a component of F against k^ moves the action rather than losing it.
-// WHERE TWO RAY FAMILIES MEET -- a crease of the first-arrival phase: off a jetty's tip, behind a
-// shoal -- the losing family's flux ENDS: a crease cell's velocity is the winner's, and it is fed from
-// the winner's side. Past the crease it would be a second sea crossing the first, and a single-valued
-// phase holds one. It is not free: the ledger (below) shows how much a window drops there -- 56 % of the
-// swell entering the Merrimack window (2026-10-25). Merging the loser into the winner instead (taken by
-// how far the two flows agree) kept more of it but did not converge where families met head on; that law
-// waits, with the ledger as its gate.
+// WHERE RAYS CONVERGE -- over a shoal's lee, off a jetty's tip -- ACTION IS CONSERVED (2026-10-25,
+// docs/WATER_LAWS.md 5.2). A convergence of the ray field is a ridge of the first-arrival phase, on a
+// cell (both neighbours lower on an axis) or between two (each flows into the other). The law before
+// fed a cell from the one side its own velocity came from, so at every ridge the other side's flux
+// ENDED -- every convergence a sink, and converging rays are what a bar does. The ledger read 80.9 % of
+// a 3 m storm's swell dropped that way in the Merrimack window, the delta's lee dark. Now a cell takes
+// every flow that enters it and goes its way (the donor-cell form of div (N F) = 0, which conserves
+// action by construction); a ridge cell has no transverse flow of its own (its ray runs along the
+// ridge: upwind below); a head-on family is a second sea a single-valued phase cannot carry, and is
+// turned back (the ledger says how much). Where the current closes a loop of F (the ebb jet's shallow
+// pocket, near blocking, where flows meet from every side) the loop fills only to the water's limit --
+// the cap in the march: a cell holds no more action than one wave at Hmax -- as waves that meet from
+// every side break; and the focus geometric optics makes is bounded the same way. Everywhere else the
+// links that run against the phase (the two sides of a ridge trading flux) converge under the march.
 //
 // DIFFRACTION, ACROSS THE RAY (Mase 2001, the energy balance equation with diffraction, EBED): geometric
 // optics alone leaves a jetty's lee dark -- energy reaches it only by the fan of rays from the tip cell --
@@ -433,9 +440,11 @@ struct CarryStats {
     int iMax = -1, jMax = -1;
     // THE LEDGER (2026-10-25, Mark: "the waves seem a bit flat going into the inlet"): the action the swell
     // brings in through the window's edge, and where it goes -- out through the edge again, onto land (the
-    // beach, the jetties), or dropped where two ray families meet (a crease: the losing family ends). Each
-    // face's flux is counted once, from the cell it leaves; the diffraction's mixing makes it approximate.
-    double injected = 0.0, outEdge = 0.0, onLand = 0.0, atCrease = 0.0;
+    // beach, the jetties), turned back where a head-on family meets the cell's own, or merged where an
+    // oblique family's flux crosses a crease (counted, not lost). Each face's flux is counted once, from
+    // the cell it leaves; the diffraction's mixing makes it approximate.
+    double injected = 0.0, outEdge = 0.0, onLand = 0.0, turnedBack = 0.0, merged = 0.0;
+    double broken = 0.0;   // the action a cell could not hold: over the water's limit at a focus or a shoal
 };
 int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1, double a0,
                     const std::vector<double>& h, const double* kbuf, const std::vector<double>& phi,
@@ -469,11 +478,19 @@ int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1
             return (gOut > 0.0) ? 1 : (gOut < 0.0) ? 3 : 0;
         }
         const double dm = (at(c) - at(c - 1)) / dxm, dp = (at(c + 1) - at(c)) / dxm;
-        if (dm > 0.0 && dm >= -dp) {
+        const bool lowerM = dm > 0.0, lowerP = -dp > 0.0;
+        // A RIDGE OF THE PHASE (both neighbours lower: the axis where one family's rays converge, or a
+        // crease where two meet) carries its ray ALONG the ridge, not down the steeper side (2026-10-25):
+        // the upwind pick of a side gave every ridge cell a transverse flow, and with it the ridge was fed
+        // from one side and the other side's flux ended -- every convergence of the ray field a sink, 81 %
+        // of a storm's swell dropped in the Merrimack window, the ebb delta's lee dark. A ridge cell has no
+        // transverse flow of its own and takes the flux of BOTH sides (the march below).
+        if (lowerM && lowerP) return 0;
+        if (lowerM) {
             gOut = dm;
             return 1;
         }
-        if (-dp > 0.0) {
+        if (lowerP) {
             gOut = dp;
             return 2;
         }
@@ -512,7 +529,9 @@ int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1
     const double cg0 = 0.5 * g / sig;
     const double phi0 = a0 * a0 * cg0 / sig;   // the deep swell's action flux per crest
     const double nDeep = a0 * a0 / sig;        // and its density, the measure of "still"
-    constexpr double kStill = 1e-7;
+    // STILL, in the drawn sea's own units: a move of kStill of the deep action is 5e-6 of the deep
+    // amplitude, two orders under the atlas's 8-bit floor.
+    constexpr double kStill = 1e-5;
     std::fill(N.begin(), N.end(), 0.0);
     // THE DIFFRACTION IS A MARCH ALONG THE RAY. Mase's term makes the steady balance parabolic: along the
     // ray the action is carried, across it it spreads. Solved as written -- the crest coupling implicit --
@@ -528,6 +547,13 @@ int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1
     // bilinear; land and the window's outside give back the neighbour's own value (no energy crosses a
     // wall). Every dependency is upstream, so it converges as the geometric transport does. On a field
     // uniform along its crests S is the identity: deep water and a plane wave stay exact.
+    // THE SPREAD IS A GATHER OF THE NEIGHBOURS' ACTION, as W1 wrote it. Two conservative forms were
+    // tried on 2026-10-25 and are recorded in docs/WATER_LAWS.md 5.2: a scatter of each sender's flux along
+    // its receiver's crest (exact, but its deferred deposits relaxed a cell a pass: 190 passes, 27 minutes
+    // a solve) and the adjoint gather of the senders' fluxes (exact on a plane wave and on straight
+    // contours, but on the window it lost 81 % of the swell, the cause not found). This gather is not
+    // conservative where N changes by an order across a cell (a focus: it invents action beside it, and
+    // the water's limit below takes it back); the ledger says how much, as "unaccounted".
     // bilinear N at cell coordinates: walls and the outside mirror `self`; a corner at or past `phiLim` (the
     // receiving cell's phase) is left out and the rest renormalised, so every sample is upstream of the cell
     // it feeds and one pass in phase order is the march (the corners just downstream held it to dozens)
@@ -599,13 +625,17 @@ int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1
     auto sweep = [&](bool diffract) {
         int passes = 0;
         bool moved = true;
+        double worst = 0.0;        // the largest move of the last pass, over the deep action
+        double brokenPass = 0.0;   // the action broken at the water's limit, this pass (the last one's is the field's)
         while (moved) {
             if (passes >= kPassCap) {
-                Log("[wave] action: %d passes and still moving%s -- the guard stopped it", passes,
-                    diffract ? " (the diffraction)" : "");
+                Log("[wave] action: %d passes and still moving%s -- the guard stopped it at a largest move of %.2e of "
+                    "the deep action (still is %.0e)", passes, diffract ? " (the diffraction)" : "", worst, kStill);
                 break;
             }
             moved = false;
+            worst = 0.0;
+            brokenPass = 0.0;
             ++passes;
             for (size_t o = 0; o < nWet; ++o) {
                 const size_t idx = order[o];
@@ -614,34 +644,59 @@ int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1
                 // out: every face this cell's own flow leaves by, whatever is beyond it
                 const double out = std::abs(double(F[0])) + std::abs(double(F[1]));
                 double in = 0.0;
-                // in: along each axis, from the side the action's own velocity comes from -- the neighbour's
-                // flow toward this cell, its action spread along its crest over the step (the diffraction) --
-                // or, where that side is the window's outside, the deep swell's flux through the edge
+                // in: through every face a flow enters by -- a neighbour's flow toward this cell that goes the
+                // cell's way, its flux spread along the neighbour's crest over the step (the diffraction) -- or,
+                // where a side is the window's outside, the deep swell's flux through the edge. The side the
+                // cell's own velocity comes from feeds it as it always did; the OTHER side feeds it where the
+                // neighbour there flows back into it (the two converge: a ridge of the phase that fell between
+                // them) or where the cell has no flow of its own along the axis (a ridge cell). A head-on
+                // family is a second sea a single-valued phase cannot carry: turned back, and counted.
                 for (int ax = 0; ax < 2; ++ax) {
-                    const double fc = double(F[ax]);
-                    if (fc == 0.0) continue;
-                    const int sg = (fc > 0.0) ? -1 : 1;   // the source's offset: against the flow
-                    const int ni = (ax == 0) ? i + sg : i, nj = (ax == 1) ? j + sg : j;
-                    if (ni < 0 || nj < 0 || ni >= nx || nj >= ny) {
-                        // the incident swell, Phi0 (d^ . n_in): the edge's flux under the phase seed's own
-                        // assumption (contours along the edge), not the refracted ray's cosine
-                        const double dIn = (ax == 0) ? -double(sg) * d0 : -double(sg) * d1;
-                        if (dIn > 0.0) in += phi0 * dIn;
-                        continue;
-                    }
-                    const size_t nb = size_t(nj) * size_t(nx) + size_t(ni);
-                    if (h[nb] <= 0.0) continue;   // land sends nothing
-                    const double gn = -double(sg) * double(flux[2 * nb + size_t(ax)]);   // its flow toward this cell
-                    if (gn > 0.0) {
+                    for (int sg = -1; sg <= 1; sg += 2) {
+                        const int ni = (ax == 0) ? i + sg : i, nj = (ax == 1) ? j + sg : j;
+                        if (ni < 0 || nj < 0 || ni >= nx || nj >= ny) {
+                            // the incident swell, Phi0 (d^ . n_in): the edge's flux under the phase seed's own
+                            // assumption (contours along the edge), not the refracted ray's cosine
+                            const double dIn = (ax == 0) ? -double(sg) * d0 : -double(sg) * d1;
+                            if (dIn > 0.0) in += phi0 * dIn;
+                            continue;
+                        }
+                        const size_t nb = size_t(nj) * size_t(nx) + size_t(ni);
+                        if (h[nb] <= 0.0) continue;   // land sends nothing
+                        const float* Fn = &flux[2 * nb];
+                        const double gn = -double(sg) * double(Fn[ax]);   // its flow toward this cell
+                        if (!(gn > 0.0)) continue;
+                        if (!(double(Fn[0]) * double(F[0]) + double(Fn[1]) * double(F[1]) > 0.0)) continue;   // head-on
                         in += gn * (diffract ? arriving(ni, nj, dxm * std::abs(double(ray[3 * nb + size_t(ax)])), phi[idx])
                                              : N[nb]);
                     }
                 }
-                const double nNew = in / (std::max)(out, kCgFloor);
-                if (std::abs(nNew - N[idx]) > kStill * nDeep) moved = true;
+                double nNew = in / (std::max)(out, kCgFloor);
+                // A CELL HOLDS NO MORE ACTION THAN THE WATER LETS A WAVE STAND TO (2026-10-25): geometric
+                // optics focuses without bound (a caustic cell reached 505 x the deep amplitude once the
+                // ridges stopped leaking), and the water breaks what it cannot carry. One wave's height is
+                // bounded by Battjes-Janssen's Hmax (Miche's steepness 0.88 / k in deep water, 0.6 h at the
+                // shore: laws/Breaking.hlsli), so a component's amplitude here is at most Hmax / 2 and the
+                // rest is dissipated -- the sink the steady balance needs, counted by the ledger. (The sea's
+                // total limiter still acts on the sum, after the transport.)
+                {
+                    const double hc = h[idx], kc = kbuf[idx];
+                    const bool blk = blockedBits && ((blockedBits[idx >> 3] >> (idx & 7)) & 1u);
+                    const double sr = blk ? sig : (std::max)(sigmaR(kc, hc), 0.05 * sig);
+                    const double aLim = 0.5 * BreakHmax(kc, hc);
+                    const double nLim = aLim * aLim / sr;
+                    if (nNew > nLim) {
+                        brokenPass += (nNew - nLim) * (std::max)(out, kCgFloor);
+                        nNew = nLim;
+                    }
+                }
+                const double dN = std::abs(nNew - N[idx]) / nDeep;
+                if (dN > kStill) moved = true;
+                worst = (std::max)(worst, dN);
                 N[idx] = nNew;
             }
         }
+        if (stats) stats->broken = brokenPass;   // the last stage's last pass: the settled field's
         return passes;
     };
     const int roundsGeo = sweep(false);   // first: the operands of + are unsequenced
@@ -667,10 +722,13 @@ int ActionTransport(int nx, int ny, double dxm, double sig, double d0, double d1
                     if (stats) stats->onLand += q;
                     continue;
                 }
-                const double fn = double(flux[2 * nb + size_t(ax)]);
-                if ((fn > 0.0) != (fc > 0.0) || fn == 0.0) {   // the neighbour is fed from its other side
-                    if (stats) stats->atCrease += q;
+                const float* Fn = &flux[2 * nb];
+                const double fn = double(Fn[size_t(ax)]);
+                if (!(double(Fn[0]) * double(F[0]) + double(Fn[1]) * double(F[1]) > 0.0)) {   // head-on: refused
+                    if (stats) stats->turnedBack += q;
                     if (creaseOut) creaseOut[idx] += float(q / (std::max)(phi0, 1e-30));
+                } else if ((fn > 0.0) != (fc > 0.0) || fn == 0.0) {   // a crease, crossed and kept
+                    if (stats) stats->merged += q;
                 }
             }
             // the window's inflow edges where the cell's own flow does not leave by them
@@ -1249,7 +1307,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                 layers.Write(p + L"7_amp", [&](size_t i, uint8_t* px) {   // A / (2 a0)
                     LayerSink::Seq(double(am[i]) / (2.0 * aTot * wts[c]), px);
                 });
-                layers.Write(p + L"8_dropped", [&](size_t i, uint8_t* px) {   // dropped at a crease / the deep flux, x4
+                layers.Write(p + L"8_turned_back", [&](size_t i, uint8_t* px) {   // turned back at a head-on crease / the deep flux, x4
                     LayerSink::Seq(4.0 * double(cl[i]), px);
                 });
                 Log("[wave] layers: component %d (T %.1f s, from %.0f deg, a0 %.3f m): k/k_deep 1..4, cos phase, the "
@@ -1327,19 +1385,23 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             ++n;
             if (worst < 0 || carry[ic].max > carry[worst].max) worst = ic;
         }
-        double inj = 0.0, edge = 0.0, land = 0.0, crease = 0.0;
+        double inj = 0.0, edge = 0.0, land = 0.0, back = 0.0, merged = 0.0, broken = 0.0;
         for (int ic = 0; ic < nc; ++ic) {
             inj += carry[ic].injected;
             edge += carry[ic].outEdge;
             land += carry[ic].onLand;
-            crease += carry[ic].atCrease;
+            back += carry[ic].turnedBack;
+            merged += carry[ic].merged;
+            broken += carry[ic].broken;
         }
         if (inj > 0.0) {
             Log("[wave] the action's ledger, all components: of what the swell brings in at the window's edge, %.1f%% "
-                "leaves by the edge again, %.1f%% runs onto land (beaches, jetties), %.1f%% is dropped at creases "
-                "(where two ray families meet); %.1f%% unaccounted (the diffraction's mixing)",
-                100.0 * edge / inj, 100.0 * land / inj, 100.0 * crease / inj,
-                100.0 * (inj - edge - land - crease) / inj);
+                "leaves by the edge again, %.1f%% runs onto land (beaches, jetties), %.1f%% breaks at the water's limit "
+                "(a focus, a shoal), %.1f%% is turned back where a family meets a cell it did not reach first or does "
+                "not go the way of; %.1f%% unaccounted (the diffraction's mixing). Crease crossings kept, summed over "
+                "every crease a flux crosses: %.1f%% of the inflow",
+                100.0 * edge / inj, 100.0 * land / inj, 100.0 * broken / inj, 100.0 * back / inj,
+                100.0 * (inj - edge - land - broken - back) / inj, 100.0 * merged / inj);
         }
         if (worst >= 0) {
             Log("[wave] action vs the swell shoaled without refraction: mean p50 %.3f; worst component %d "
@@ -1358,11 +1420,10 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     double rmsFieldMax = 0.0, sumFieldMax = 0.0;
     for (size_t idx = 0; idx < cells; ++idx) {
         const double rmsRaw = std::sqrt(sumsq[idx]);
-        // F7b: the height the sea can stand to at this cell, by its energy-weighted wavenumber.
+        // F7b: the height the sea can stand to at this cell, by its energy-weighted wavenumber
+        // (laws/Breaking.hlsli SeaBreakAt: the bank's and the hull's one text).
         const double kEff = sumsqk[idx] / ((sumsq[idx] > 1e-12) ? sumsq[idx] : 1e-12);
-        const double rmsLim = BreakHmax(kEff, h[idx]) / (2.0 * std::sqrt(2.0));
-        const double exc = rmsRaw / ((rmsLim > 1e-6) ? rmsLim : 1e-6);
-        const double L = BreakFactor(exc);
+        const double L = SeaBreakAt(rmsRaw, kEff, h[idx]).factor;
         lim[idx] = L;
         rmsFieldMax = (std::max)(rmsFieldMax, rmsRaw * L);
         sumFieldMax = (std::max)(sumFieldMax, sumA[idx] * L);
@@ -1373,8 +1434,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         layers.Write(L"8_rms_raw", [&](size_t i, uint8_t* px) { LayerSink::Seq(std::sqrt(sumsq[i]) / (2.0 * rmsDeep), px); });
         layers.Write(L"9_excess", [&](size_t i, uint8_t* px) {
             const double kEff = sumsqk[i] / ((sumsq[i] > 1e-12) ? sumsq[i] : 1e-12);
-            const double rmsLim = BreakHmax(kEff, h[i]) / (2.0 * std::sqrt(2.0));
-            LayerSink::Seq(std::sqrt(sumsq[i]) / ((rmsLim > 1e-6) ? rmsLim : 1e-6) / 2.5, px);
+            LayerSink::Seq(SeaBreakAt(std::sqrt(sumsq[i]), kEff, h[i]).excess / 2.5, px);
         });
         layers.Write(L"10_limiter", [&](size_t i, uint8_t* px) { LayerSink::Seq(lim[i], px); });
         layers.Write(L"11_hs", [&](size_t i, uint8_t* px) {
@@ -1389,7 +1449,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     table.sumMax = float(sumMax);
 
     {   // env slice: (rms/envMax, excess/2.5, sum/sumMax, sqrt(tan beta))
-        // The bed's steepest slope at the cell (the surf-similarity number's tan beta, Jet.hlsli
+        // The bed's steepest slope at the cell (the surf-similarity number's tan beta, laws/Crest.hlsli
         // PlungeShare), by central differences of the BED over +-4 cells -- the slope of the face a
         // breaking crest runs up (land included: the beach), not of a single rock -- stored as its square
         // root so beach slopes of 0.01 to 0.1 keep their resolution in a byte (1 at 45 degrees).
@@ -1403,8 +1463,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                 const size_t idx = row + size_t(i);
                 const double rmsRaw = std::sqrt(sumsq[idx]);
                 const double kEff = sumsqk[idx] / ((sumsq[idx] > 1e-12) ? sumsq[idx] : 1e-12);
-                const double rmsLim = BreakHmax(kEff, h[idx]) / (2.0 * std::sqrt(2.0));
-                const double exc = rmsRaw / ((rmsLim > 1e-6) ? rmsLim : 1e-6);
+                const double exc = SeaBreakAt(rmsRaw, kEff, h[idx]).excess;
                 uint8_t* px = &atlas[arow + size_t(i) * 4];
                 px[0] = Quant8(rmsRaw * lim[idx], envMax);
                 px[1] = Quant8(exc, kExcessMax);
@@ -2825,11 +2884,9 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         // horizontal excursion is coth(kh) times the vertical -- Airy's ellipse at the surface, 1
         // in deep water. depthM <= 0 is the deep-water orbit (the instruments that read the field
         // alone); the hull's twin hands the depth it stands in.
-        const double coth = (depthM > 0.0) ? 1.0 / std::tanh(k * (std::max)(depthM, 0.3)) : 1.0;
+        const double coth = (depthM > 0.0) ? OrbitCothK(k, depthM) : 1.0;
         // ...and in the swash toward the raw one, on this component's run-up (L0 = 2 pi coth / k)
-        const double rawF = (rawW > 1.0)
-            ? 1.0 + SwashShare(2.0 * a * rawW, 6.283185307179586 * coth / (std::max)(k, 1e-4), depthM) * (rawW - 1.0)
-            : 1.0;
+        const double rawF = SwashFactor(rawW, 2.0 * a * rawW, 6.283185307179586 * coth / (std::max)(k, 1e-4), depthM);
         const double cothL = coth * rawF;            // the lateral's factor
         eta += aC;                                   // eta = a cos(theta)   <- the reference
         dxS -= aS * dX * cothL;                      // D_h = -a sin(theta) coth(kh) d^   (chop = 1;
@@ -2878,7 +2935,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix, double
         CrestState st;
         st.eta = eta; st.dx = dxS; st.dz = dzS; st.sx = sxS; st.sz = szS;
         st.jxx = jxxS; st.jxz = jxzS; st.jzz = jzzS;
-        CrestLaw(st, dBx, dBz, aEnv, excRaw, kBar, cothBar, aH, chopM, sqB * sqB, depthM);
+        st = CrestLaw(st, dBx, dBz, aEnv, excRaw, kBar, cothBar, aH, chopM, sqB * sqB, depthM).s;
         eta = st.eta; dxS = st.dx; dzS = st.dz; sxS = st.sx; szS = st.sz;
         jxxS = st.jxx; jxzS = st.jxz; jzzS = st.jzz;
     }
@@ -2978,6 +3035,14 @@ bool RunWaveFieldSelfTest() {
         for (const float x : a) worst = (std::max)(worst, std::abs(double(x) - 1.0));
         Log("[wavetest] action, deep and oblique: |A/a0 - 1| max %.2e over %d cells (%d rounds)", worst, ax * ay,
             rounds);
+        {   // where it is off (the instrument): rows of A/a0 across the grid, every 12th cell
+            for (int j = 0; j < ay; j += 12) {
+                char row[256];
+                int n = snprintf(row, sizeof(row), "[wavetest]   j %2d:", j);
+                for (int i = 0; i < ax; i += 12) n += snprintf(row + n, sizeof(row) - size_t(n), " %.3f", double(a[size_t(j) * ax + i]));
+                Log("%s", row);
+            }
+        }
         if (!(worst < 1e-3)) {
             Log("[wavetest] FAIL: the deep sea's action does not hand back the incident amplitude");
             ok = false;
@@ -2993,9 +3058,9 @@ bool RunWaveFieldSelfTest() {
         std::vector<float> a;
         const int rounds = carry(sx, sy, dx, hs, t0, t1, a);
         const double gW = PlanetGWave(), cg0 = 0.5 * gW / sig, c0 = gW / sig;
-        auto at = [&](double hc, double& cg, double& c) {
+        auto at = [&](double hc, double& cg, double& c, double& kk) {
             bool bl = false;
-            const double kk = SolveDispersion(sig, hc, 0.0, bl);
+            kk = SolveDispersion(sig, hc, 0.0, bl);
             const double kh = kk * hc;
             c = sig / kk;
             cg = 0.5 * (1.0 + 2.0 * kh / std::sinh(2.0 * kh)) * c;
@@ -3010,10 +3075,11 @@ bool RunWaveFieldSelfTest() {
             for (int i = 4; i < sx - 4; ++i) {
                 const double hc = hs[size_t(j) * sx + i];
                 if (hc < 3.0) continue;
-                double cg = 0.0, c = 0.0;
-                at(hc, cg, c);
+                double cg = 0.0, c = 0.0, kk = 0.0;
+                at(hc, cg, c, kk);
                 const double sn = std::sin(th0) * c / c0, cs = std::sqrt(1.0 - sn * sn);
-                const double want = std::sqrt((cg0 / cg) * (cos0 / cs));
+                // ...bounded by what the water lets a wave stand to (the march's own cap, a0 = 1 m)
+                const double want = (std::min)(std::sqrt((cg0 / cg) * (cos0 / cs)), 0.5 * BreakHmax(kk, hc));
                 err.push_back(std::abs(double(a[size_t(j) * sx + i]) / want - 1.0));
             }
         }

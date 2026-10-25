@@ -1150,6 +1150,13 @@ and the two processors read the bed's slope from different caches (the hull's He
 resident chain). So the fall's shape, the jet's parabola or the roller's slope, differs between them. A boat
 there is aground. The fix is one bed for both readers (the residency read of 2026-10-23, "two beds").
 
+### 12.16 The storm bar and the one text (2026-10-25)
+
+See docs/WATER_LAWS.md: the flat bar under the 3 m storm was the action transport dropping every ray
+convergence as a crease (80.9 % of the swell), fixed by conserving action (kSolverVersion 15); the solved
+field is no longer sheltered twice (the exposure page is the cascades' closure); and every closed-form law
+of the water is one text under `shaders/laws/`, compiled by the kernels and by `WaterTerms.h`.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);
