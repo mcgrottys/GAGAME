@@ -110,7 +110,11 @@ public:
     // 12 (2026-10-22): the envelope's fourth channel is sqrt(tan beta), the bed's slope (Jet.hlsli PlungeShare).
     // 13 (2026-10-24): W1, the amplitude is the action carried along the eikonal (no bar normal); W2, the
     // current is the manager's per cell (no proxy jet). Every cached solve re-solves.
-    static constexpr uint32_t kSolverVersion = 13;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
+    // 14 (2026-10-25): the same law as b28679e committed it -- but 13 also named the interim builds that led
+    // to it, and the wave TREE's pages (prefilled once per identity, kept on disk: TileTree::Prefill skips a
+    // tile it holds) were the first of them, so the drawn sea showed a discarded field under the hull's
+    // fresh one (0.2 m apart at the bar). A law that changes must change the identity; 14 is the law's own.
+    static constexpr uint32_t kSolverVersion = 14;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,

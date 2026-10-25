@@ -1436,8 +1436,14 @@ std::optional<int> FrameLoop::Session() {
         }
         if (waterScene.wfEnabled && waterScene.WaveWindowDeclared()) {
             waveSrc = std::make_shared<WaveFieldSource>(waveField.get(), waveFrame);
+            // THE BOOT TREE IS THIS RUN'S ALONE (2026-10-25): it stands under key 0 until the first solve's
+            // tree replaces it, and between the solve and the swap it paints its misses from that solve. On
+            // disk those tiles outlived the run under the one identity every boot shares, and the next run
+            // drew them -- the LAST run's field, decoded by this run's table -- until its own pages replaced
+            // them (2026-10-24, the bar hull: 0.2 m between the hull's water and the drawn sea for 300
+            // frames after the swap, the law having changed between the runs). In memory, as the blends are.
             waveTree = std::make_shared<std::shared_ptr<TileTree>>(
-                std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4));
+                std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4, nullptr, "mem:\\wave.boot"));
             // M12 step 3e: THE DECLARATION. Slices 6.. are the component planes on the wave
             // frame's z16 lattice (slice 6 + plane), painted by the tree in the holder -- a
             // bucket roll prefills a fresh tree on a worker and swaps it in; the cube faces
