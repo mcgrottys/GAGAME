@@ -129,8 +129,29 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
     // own cell (rec.arc spans the meshlet's 8 cells) -- the band the pixel's dryBand is at nadir -- so
     // the mesh and the pixels agree about the dry beach and the marsh platform, and an orbit cell's
     // mean never stands over the survey's sea.
+    // THE SHORE AT THE WATER'S OWN LEVEL (2026-10-23, Mark: "a footprint in the water" in the
+    // Merrimack's entrance; WATER_V2 question 5). The classifier held the bed against the frame's ONE
+    // waterline -- the entrance station's tide -- while the water drawn here stands at the bank's level,
+    // the tide plus the solver: inside the entrance 34 cm higher at noon, so a shoal between the two
+    // read as dry ground under drawn water, its aerial photo cut out along one bed contour. The bed
+    // is held against the level of the water this vertex draws: the waterline plus the bank's
+    // departure where a ring texel holds one (a NULL tile, or past every ring, reads 0: the waterline).
+    float4 bD = 0.0f, bP = 0.0f, bDet = 0.0f;
+    float bT = 0.0f;
+    float3 dDdx = 0.0f, dDdz = 0.0f;
+    bool inBank = false;
+    float wl = gWavesB.w;
+    if (gBankU.z != 0u) {
+        // A fine meshlet reads the bank at its exact point, the level's eye plus geo: the
+        // coordinate made from dir has a third of a metre of grain at the helm (REVIEW finding
+        // 42). A coarse one reads it as it always has; at its distances that grain is under a
+        // pixel.
+        const float2 bankXZ = fine ? BankXZ(geo) : BankXZOfDir(CsToTangent(dir));
+        inBank = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz);
+        if (inBank) wl = gWavesB.w + bP.x;
+    }
     float editLand, wetV;
-    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, gWavesB.w, 0.0f, max(0.4f, rec.arc / 8.0f), editLand, wetV);
+    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, wl, 0.0f, max(0.4f, rec.arc / 8.0f), editLand, wetV);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the
@@ -157,14 +178,7 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
     // Gerstner convention, same as the reference.
     float2 latW = 0.0f;
     if (gBankU.z != 0u) {
-        float4 bD, bP, bDet;
-        // A fine meshlet reads the bank at its exact point, the level's eye plus geo: the
-        // coordinate made from dir has a third of a metre of grain at the helm (REVIEW finding
-        // 42). A coarse one reads it as it always has; at its distances that grain is under a
-        // pixel.
-        const float2 bankXZ = fine ? BankXZ(geo) : BankXZOfDir(CsToTangent(dir));
-        float bT;
-        float3 dDdx, dDdz;
+        // (The bank was read above, for the shore.)
         // THE WATER STANDS AT THE WATERLINE WHERE THE BANK IS SILENT (2026-10-18). The bank's level
         // plane holds the DEPARTURE from the frame's live waterline (WaterBank.hlsl), so a texel of
         // a tile the rings left unmapped -- a NULL tile reads zero -- is the waterline, and so is a
@@ -173,7 +187,7 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
         // left the tile NULL, and at the tide where it had not -- a square of flooded marsh beside
         // the same marsh drawn dry (Mark, 2026-10-18, the Merrimack's mouth; the mix lens showed
         // the classifier calling all of it water).
-        dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (gWavesB.w + bP.x + bD.y) : gWavesB.w;
+        dispWater = inBank ? (wl + bD.y) : gWavesB.w;
         // THE LAGRANGIAN SHEET, DRAWN WHOLE (2026-10-20, Mark: "switch to drawing the Lagrangian
         // sheet"). The water vertex is its label at its particle: the label plus its lateral
         // displacement, at its level plus its vertical. Where the sea overturns, the sheet folds
@@ -198,7 +212,8 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
     o.lvl = rec.level;
     o.dir = dir;
     o.h = h;
-    o.dry = landness * (dispLand - gWavesB.w);   // its height over the water, by the share that is land
+    o.dry = landness * (dispLand - wl);   // its height over ITS water, by the share that is land
+    o.wl = wl;
     if (fine) {
         o.rel = geo + rec.upT * disp;
     } else {

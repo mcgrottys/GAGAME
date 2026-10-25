@@ -21,7 +21,7 @@
       "box": [-70.99074074074073, 42.70006172839506, -70.77, 42.845],
       "_box": "The Merrimack's solver: the estuary from the river's entry, where the 1/9\" CUDEM survey once painted at full weight, to the sea, and Plum Island Sound's north end to Salisbury -- 1788 x 1174 cells of cellM (the default 13.728 m, 4/9 arc-second): the window the per-place survey file drew until 2026-10-21."
     },
-    "wavefield": {"orgX": -1400, "orgZ": -800, "nx": 1600, "ny": 1000, "cellM": 2, "barNormalDeg": 285}
+    "wavefield": {"orgX": -1400, "orgZ": -800, "nx": 1600, "ny": 1000, "cellM": 2}
   },
   "views": [
     {

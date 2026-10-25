@@ -13,6 +13,7 @@
 #include "compose/ExposureSource.h"
 #include "compose/SurfaceFrame.h"
 #include "core/OceanFft.h"
+#include "core/Planet.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
 #include "core/GradeField.h"
@@ -147,6 +148,14 @@ public:
     uint32_t ExposureResSrv() const { return m_expRes; }
     // M7p: the peak propagation direction, for the bank's wave-current amplification.
     bool PeakDirValid() const { return m_peakDirValid; }
+    // THE CASCADES' CLOCK'S ORIGIN, unix s: the FFT is fed simUnix minus this, cast to float. Since the
+    // sea came from the global wave grid (PR 107) it is the GRID's cycle, not the SeaState's; every CPU
+    // reader of the cascades takes it from here (TreeWater::SetCascadeSea), or it samples the same sea
+    // at another instant -- right Hs, wrong crests (2026-10-23, Mark: "the water is not matching what
+    // the boat hits": coherence 0.1-0.4 between the hull's sea and the drawn one at every wavelength).
+    double CascadeCycleUnix() const;
+    // The peak partition's period, s (its deep-water phase speed c = g T / 2 pi)
+    double PeakPeriod() const { return 6.283185307179586 * double(m_cPeak) / PlanetGWave(); }
     float PeakDirX() const { return m_peakDirX; }
     float PeakDirZ() const { return m_peakDirZ; }
     // M8 foamlaw: unit-sea rms envelope per cascade band (sqrt(2 m0), exaggerated) --
@@ -209,10 +218,10 @@ public:
         return (m_fromGrid && m_grid) ? m_grid->CycleLabel() : m_sea ? m_sea->CycleLabel() : kNone;
     }
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
-    // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
-    // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak
-    // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
-    float sweCurrentGain = 3.2f;
+    // The solved current's gain into the waves: the scene's water.swe.gain, set at assembly (1: the
+    // current as solved). The 3.2 that stood here was one place's calibration (the Merrimack's
+    // ACT0816 against an old CUDEM window) and was always overwritten.
+    float sweCurrentGain = 1.0f;
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
 
     // M9bq: the cascades, evaluated on the CPU for the hull. Owned here because this is where

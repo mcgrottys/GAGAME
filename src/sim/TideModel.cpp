@@ -121,6 +121,25 @@ std::vector<int> TideModel::Nearest(double latDeg, double lonDeg, size_t k) cons
     return out;
 }
 
+bool TideModel::NavdAboveMsl(double latDeg, double lonDeg, double* outM, std::string* from) const {
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    double bestD2 = 0.0, best = 0.0;
+    bool got = false;
+    for (const TideStation& s : m_stations) {
+        if (s.mllwMinusNavdM <= -900.0 || s.riverKm > 0.0) continue;
+        const double dLat = s.lat - latDeg, dLon = (s.lon - lonDeg) * std::cos(latDeg * kD2R);
+        const double d2 = dLat * dLat + dLon * dLon;
+        if (!got || d2 < bestD2) {
+            bestD2 = d2;
+            best = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD88 zero above local MSL
+            got = true;
+            if (from) *from = s.name;
+        }
+    }
+    if (got && outM) *outM = best;
+    return got;
+}
+
 double TideModel::Height(size_t i, double unixT) const {
     const TideStation& s = m_stations[i];
     const double dt = unixT - m_epochUnix;

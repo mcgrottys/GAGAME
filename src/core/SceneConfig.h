@@ -30,17 +30,21 @@
 namespace ga {
 
 struct WaterSceneConfig {
-    // ---- the solved wave field's window (world metres, BathyModel frame) ----
+    // ---- the solved wave field's window (metres east/north of the scene's place.anchor) ----
+    // A PLACE'S, declared by its scene (water.wavefield: orgX, orgZ, nx, ny). None is
+    // the default, and with none there is no solve. These were the Merrimack mouth's numbers until
+    // 2026-10-24, so a scene that declared no window solved the Merrimack's about its own anchor, at
+    // the Merrimack bar's normal (gone with W1); and data/wave_scene.json, read under every scene, cannot say a
+    // window any more (LoadWaterScene).
     bool wfEnabled = true;
-    double wfOrgX = -1400.0, wfOrgZ = -800.0;
-    int wfNx = 1600, wfNy = 1000;
+    double wfOrgX = 0.0, wfOrgZ = 0.0;
+    int wfNx = 0, wfNy = 0;
     double wfCellM = 2.0;
     // M9bp: 32, not 16 -- sixteen components 1.6 deg apart sum to a fixed interference
     // lattice, the comb of straight ridges down a storm face (M9bl). Defaulted HERE and
     // not only in data/wave_scene.json, because that file is untracked.
     int wfComps = 32;
     double wfSpreadDeg = 26.0;
-    double wfBarNormalDeg = 285.0;      // the entrance bar's normal, compass
     double wfGammaHs = 0.60;            // Hs <= gamma * h (the total limiter)
     double wfMinSamplesPerLambda = 8.0; // upload gate; the cascades keep shorter bands
     double wfTideBucketM = 0.25;        // re-solve quantization
@@ -48,10 +52,13 @@ struct WaterSceneConfig {
     float wfFeatherM = 120.0f;          // window edge blend into the cascades
     float wfChop = 1.1f;                // Gerstner horizontal displacement (the ambient
                                         // sea's lambda; one look for both)
-    float wfExag = 1.15f;               // M8g: solved-field DISPLAY exaggeration, applied
+    float wfExag = 1.0f;                // M8g: solved-field DISPLAY exaggeration, applied
                                         // to the dequant tables at upload (cache stays
                                         // raw physics; ProbeAt reads the same table so
-                                        // the 9b/9c twin holds). vqview shipped 1.15.
+                                        // the 9b/9c twin holds). ONE STATED NUMBER
+                                        // (2026-10-22): water.heightScale (1.15) already
+                                        // scales the whole bank, the solved field with it;
+                                        // 1 here draws the whole sea at that one number.
     float bankTexelM = 1.2f;            // M9c: 1.2, not 2.4. The fold law
                                         // sheds any band the ring undersamples, so this
                                         // caps which wavelengths become GEOMETRY, and a band
@@ -118,6 +125,8 @@ struct WaterSceneConfig {
         {3.34, 6.0, 0.38, 900.0, 1},     // commercial skiff
         {4.86, 6.5, 0.44, 1800.0, -1},   // second recreational, inbound
     };
+    // The solved wave field stands only where its scene declared the window: cells both ways.
+    bool WaveWindowDeclared() const { return wfNx > 0 && wfNy > 0; }
 };
 
 inline void WriteDefaultWaterScene(const char* path) {
@@ -125,15 +134,15 @@ inline void WriteDefaultWaterScene(const char* path) {
     if (!f) return;
     const char* text =
         "{\n"
-        "  \"_readme\": [\"The water scene as data (M8): the solved wave field's window and\",\n"
-        "              \"the water closures. Hot-reloads on save; a changed window rolls the\",\n"
-        "              \"solver's cache key. Closures are engineering constants pinned by\",\n"
-        "              \"gates -- change them against evidence (ALGEBRA.md, priors #12).\"],\n"
+        "  \"_readme\": [\"The water scene as data (M8): the solved wave field's spectrum and\",\n"
+        "              \"the water closures. Hot-reloads on save. The WINDOW is a place's and\",\n"
+        "              \"is declared by its scene (water.wavefield), never here. Closures are\",\n"
+        "              \"engineering constants pinned by gates -- change them against evidence\",\n"
+        "              \"(ALGEBRA.md, priors #12).\"],\n"
         "  \"wavefield\": {\n"
         "    \"enabled\": true,\n"
-        "    \"orgX\": -1400.0, \"orgZ\": -800.0,\n"
-        "    \"nx\": 1600, \"ny\": 1000, \"cellM\": 2.0,\n"
-        "    \"comps\": 16, \"spreadDeg\": 26.0, \"barNormalDeg\": 285.0,\n"
+        "    \"cellM\": 2.0,\n"
+        "    \"comps\": 16, \"spreadDeg\": 26.0,\n"
         "    \"gammaHs\": 0.60, \"minSamplesPerLambda\": 8.0,\n"
         "    \"tideBucketM\": 0.25, \"currentBucketMs\": 0.10,\n"
         "    \"featherM\": 120.0, \"chop\": 1.1, \"exag\": 1.15,\n"
@@ -192,14 +201,22 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
     if (const JsonValue* w = v.Get("wavefield")) {
         const JsonValue* en = w->Get("enabled");
         out.wfEnabled = !en || en->type != JsonValue::Type::Bool || en->boolean;
-        out.wfOrgX = w->Num("orgX", out.wfOrgX);
-        out.wfOrgZ = w->Num("orgZ", out.wfOrgZ);
-        out.wfNx = static_cast<int>(w->Num("nx", out.wfNx));
-        out.wfNy = static_cast<int>(w->Num("ny", out.wfNy));
+        // THE WINDOW IS A PLACE'S (2026-10-24): this file is read under every scene, so a window
+        // said here stood about every scene's anchor. The scene's water.wavefield says it.
+        if (w->Get("barNormalDeg")) {
+            Log("[scene] %s: wavefield.barNormalDeg is not read -- the solve carries the action along its own "
+                "rays and needs no bar normal (W1, 2026-10-24)", path);
+        }
+        for (const char* k : {"orgX", "orgZ", "nx", "ny"}) {
+            if (w->Get(k)) {
+                Log("[scene] %s: wavefield.%s is a window's, and a window is a place's -- not read from here; "
+                    "delete it (a scene that includes this file takes it as its own) and declare it in the "
+                    "place's scene (water.wavefield)", path, k);
+            }
+        }
         out.wfCellM = w->Num("cellM", out.wfCellM);
         out.wfComps = static_cast<int>(w->Num("comps", out.wfComps));
         out.wfSpreadDeg = w->Num("spreadDeg", out.wfSpreadDeg);
-        out.wfBarNormalDeg = w->Num("barNormalDeg", out.wfBarNormalDeg);
         out.wfGammaHs = w->Num("gammaHs", out.wfGammaHs);
         out.wfMinSamplesPerLambda = w->Num("minSamplesPerLambda", out.wfMinSamplesPerLambda);
         out.wfTideBucketM = w->Num("tideBucketM", out.wfTideBucketM);

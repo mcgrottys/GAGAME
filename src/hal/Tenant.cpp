@@ -379,6 +379,9 @@ Tenant Tenant::Sparse(Gpu& gpu, ResidencyManager& mgr, TenantDesc desc) {
     }
     s->id = mgr.AddTexturePages(gpu, d.name, s->dim, d.fiber.fmt, std::move(dispatch), d.slices,
                                 std::move(top));
+    // A computed field's tiles load on the computing lane (ResidencyManager::SetComputed): a march
+    // that takes seconds a page never holds the Io lane the read tenants stream through.
+    if (d.residence == Residence::Recomputable) mgr.SetComputed(s->id);
     // The pages ledger (Residency.h pagesEvery) names each slice by the lattice it sits on --
     // the one fact about a slice the manager did not already hold. A block slice is named by
     // its block, and its mip-0 ground is the pyramid's at its rung.

@@ -38,7 +38,7 @@
 //  WHAT IS NOT HERE, named rather than half-built: one target chain per view; a second
 //  camera-anchored water bank and its own walk per view (the M10 "set B" bank is the precedent,
 //  and it stays hard-coded as set B this step -- no layer changes its keying here);
-//  WeatherManager::Update over a span of viewers; and the network replication of a remote
+//  WaterManager::Update over a span of viewers; and the network replication of a remote
 //  player's view motor, which is a `view` node whose placement is replicated and nothing else.
 //
 //  Prior art, named: a list of views with per-view constants and viewports is every engine's

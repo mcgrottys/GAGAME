@@ -5,7 +5,7 @@
 #include "core/Common.h"
 #include "hal/Gpu.h"
 #include "scene/SeaLayer.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <cstdio>
 #include <vector>
@@ -16,7 +16,7 @@ namespace ga::app::tools {
 // so proofs/inlet_storm.py -- the user's own vqview wave model -- can run
 // the independent 2D storm figure on the exact data this engine uses.
 void RunDumpWaterState(const Options&, Gpu& gpu, SeaLayer* sea, double simUnix,
-                       WeatherManager& weather, const Space::Anchor& chart) {
+                       WaterManager& weather, const Space::Anchor& chart) {
     // The export reads the solver mirrors through Query: bring them to this
     // instant first (the one readback of the run; the loop never did one).
     weather.RefreshMirrorsTo(gpu, simUnix);

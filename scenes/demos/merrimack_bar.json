@@ -1,0 +1,31 @@
+{
+  "_readme": [
+    "THE MERRIMACK'S ENTRANCE BAR IN DAYLIGHT, ON CLOCKS THE SCENE STATES (WATER_V2 section 12; scene/SceneClocks.h).",
+    "The scene's clock starts at 2026-10-23T18:59:47Z (time.start) and the DATA's clock -- the tide, the solver,",
+    "the currents, the sea state, the wind, the cascades -- is bound to it (water.clock), so every run is the same",
+    "water. The sun is held at local noon on its own two clocks (sun.clock, the season; sun.earth.clock, the time",
+    "of day; rate 0 holds them), so the bar can be judged in daylight whatever the tide is doing. A clock is a",
+    "constant ({start, rate}) or a binding ({bind, offset, rate}: {\"bind\": \"time\", \"offset\": \"-6h\"} puts the",
+    "water six hours before the scene's clock); the window's title shows each one resolved.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/merrimack_bar.json",
+    "",
+    "Views: bar_low (the default) looks south-west along the bar from just off its crest; entrance_east",
+    "looks out between the jetties over it; entrance_west looks up the river past the north jetty.",
+    "FLY: W A S D move, Q / E down / up, hold the right mouse button to look."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "merrimack-bar", "view": "bar_low"},
+  "time": {"start": "2026-10-23T18:59:47Z"},
+  "water": {"clock": {"bind": "time"}},
+  "sun": {
+    "clock": {"start": "2026-10-23T16:00:00Z", "rate": 0},
+    "earth": {"clock": {"start": "2026-10-23T16:00:00Z", "rate": 0}}
+  },
+  "views": [
+    {"name": "bar_low", "at": {"lat": 42.8135, "lon": -70.8085, "alt": 0, "heading": 234, "tilt": 80, "range": 300}, "fovY": 55, "gauge": "root"},
+    {"name": "entrance_east", "at": {"lat": 42.8183, "lon": -70.8130, "alt": 0, "heading": 80, "tilt": 78, "range": 220}, "fovY": 55, "gauge": "root"},
+    {"name": "entrance_west", "at": {"lat": 42.8186, "lon": -70.8080, "alt": 0, "heading": 260, "tilt": 78, "range": 220}, "fovY": 55, "gauge": "root"},
+    {"name": "entrance_above", "at": {"lat": 42.8190, "lon": -70.8060, "alt": 0, "heading": 0, "tilt": 0, "range": 1400}, "fovY": 55, "gauge": "root"}
+  ]
+}

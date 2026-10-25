@@ -88,7 +88,7 @@ float HpChainRead(Texture2DArray<float4> arr, Texture2DArray<float4> res, float3
                   float texelM, bool cube, float none) {
     float2 cuv;
     const uint face = HpCubeFace(dir, cuv);
-    const float haveC = clamp(round(HP_HAVE(HP_HAVE_CUBE(res, cuv, face))), 0.0f, kHpMaxMip);
+    const float haveC = clamp(floor(HP_HAVE(HP_HAVE_CUBE(res, cuv, face))), 0.0f, kHpMaxMip);
     float ground = cube ? PageGroundM(kHpCubeTexelM, haveC) : 3.0e38f;
     uint sl = face;
     float2 uv = cuv;
@@ -101,7 +101,7 @@ float HpChainRead(Texture2DArray<float4> arr, Texture2DArray<float4> res, float3
         if (want > HP_WINDOW_FLOOR) break;
         const uint s = WalkSlice(wc, k);
         const float2 u = WalkUv(wc, k);
-        const float haveB = round(HP_HAVE(HP_HAVE_WIN(res, u, s)));
+        const float haveB = floor(HP_HAVE(HP_HAVE_WIN(res, u, s)));
         if (haveB > HP_WINDOW_FLOOR) continue;
         const float m = max(haveB, want);
         const float gB = PageGroundM(g0, m);

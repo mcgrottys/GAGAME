@@ -37,21 +37,16 @@
     "bank": {"flatBed": false, "flatBedNavd": -30},
     "wavefield": {
       "enabled": true,
-      "orgX": -1400,
-      "orgZ": -800,
-      "nx": 1600,
-      "ny": 1000,
       "cellM": 2,
       "comps": 32,
       "spreadDeg": 26,
-      "barNormalDeg": 285,
       "gammaHs": 0.6,
       "minSamplesPerLambda": 8,
       "tideBucketM": 0.25,
       "currentBucketMs": 0.1,
       "featherM": 120,
       "chop": 1.1,
-      "exag": 1.15,
+      "exag": 1.0,
       "bankTexelM": 1.2
     },
     "closures": {

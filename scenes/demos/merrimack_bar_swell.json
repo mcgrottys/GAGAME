@@ -1,0 +1,16 @@
+{
+  "_readme": [
+    "THE MERRIMACK'S ENTRANCE BAR UNDER A DECLARED GROUNDSWELL (2026-10-23): merrimack_bar.json's clocks and",
+    "views, with the sea declared instead of read -- Hs 2.5 m, Tp 11 s, from 70 degrees (an east-northeast",
+    "groundswell, the bar's working sea) -- so the bar is judged at a size that breaks over it, not at the day's",
+    "buoys (0.3 m on 2026-10-23). sea.storm overrides the forecast grid and the buoys' assimilation alike.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/merrimack_bar_swell.json",
+    "",
+    "Views: bar_low (the default), entrance_east, entrance_west, entrance_above (merrimack_bar.json).",
+    "FLY: W A S D move, Q / E down / up, hold the right mouse button to look."
+  ],
+  "base": "scenes/demos/merrimack_bar.json",
+  "scene": {"name": "merrimack-bar-swell", "view": "bar_low"},
+  "sea": {"storm": {"hs": 2.5, "tp": 11, "dir": 70}}
+}

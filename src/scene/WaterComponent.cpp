@@ -48,17 +48,15 @@ const Schema& WavefieldTable() {
     static const Schema* s = [] {
         Schema* sc = new Schema("water.wavefield", &kCfg);
         sc->Bind("enabled", kCfg.wfEnabled, "the solved wave field, blended inside its feathered window", H)
-            .Bind("orgX", kCfg.wfOrgX, Q::Length, "m", "window origin, world x", H)
-            .Bind("orgZ", kCfg.wfOrgZ, Q::Length, "m", "window origin, world z", H)
-            .Bind("nx", kCfg.wfNx, Q::Dimensionless, "1", "cells east", H)
+            .Bind("orgX", kCfg.wfOrgX, Q::Length, "m", "window origin, m east of the place's anchor (a place's: no window by default)", H)
+            .Bind("orgZ", kCfg.wfOrgZ, Q::Length, "m", "window origin, m north of the place's anchor", H)
+            .Bind("nx", kCfg.wfNx, Q::Dimensionless, "1", "cells east (0: no window, no solve)", H)
             .Bind("ny", kCfg.wfNy, Q::Dimensionless, "1", "cells north", H)
             .Bind("cellM", kCfg.wfCellM, Q::Length, "m", "cell size", H)
             .Bind("comps", kCfg.wfComps, Q::Dimensionless, "1",
                   "spectral components (M9bp: 32 -- sixteen 1.6 deg apart sum to a fixed "
                   "interference lattice, the comb of straight ridges down a storm face)", H)
             .Bind("spreadDeg", kCfg.wfSpreadDeg, Q::Angle, "deg", "directional spread", H)
-            .Bind("barNormalDeg", kCfg.wfBarNormalDeg, Q::Angle, "deg",
-                  "the entrance bar's normal, compass", H)
             .Bind("gammaHs", kCfg.wfGammaHs, Q::Dimensionless, "1",
                   "Hs <= gamma * h (the total limiter)", H)
             .Bind("minSamplesPerLambda", kCfg.wfMinSamplesPerLambda, Q::Dimensionless, "1",
@@ -211,7 +209,7 @@ std::string ValueTextOf(const PropSet& set, const std::string& key) {
 bool IsSolverKey(const std::string& key) {
     static const char* kKeys[] = {"wavefield.orgX", "wavefield.orgZ", "wavefield.nx",
                                   "wavefield.ny", "wavefield.cellM", "wavefield.comps",
-                                  "wavefield.spreadDeg", "wavefield.barNormalDeg",
+                                  "wavefield.spreadDeg",
                                   "wavefield.gammaHs", "wavefield.minSamplesPerLambda",
                                   "wavefield.tideBucketM", "wavefield.currentBucketMs",
                                   "wavefield.featherM", "wavefield.exag"};
@@ -331,10 +329,10 @@ void WaterComponent::FanOut() {
     // Gated on the wave field because that is the block boot builds them in: no field, no
     // bank wiring, exactly as before.
     if (m_o.bank && m_o.waveField) {
-        m_o.bank->SetWaveField(cfg.wfEnabled ? m_o.waveField : nullptr);
+        m_o.bank->SetWaveField(cfg.wfEnabled && cfg.WaveWindowDeclared() ? m_o.waveField : nullptr);
         m_o.bank->SetScene(m_o.config);
         if (m_o.bankB) {
-            m_o.bankB->SetWaveField(cfg.wfEnabled ? m_o.waveField : nullptr);
+            m_o.bankB->SetWaveField(cfg.wfEnabled && cfg.WaveWindowDeclared() ? m_o.waveField : nullptr);
             m_o.bankB->SetScene(m_o.config);
         }
     }

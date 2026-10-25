@@ -11,6 +11,7 @@
 #include "hal/Root.h"
 #include "hal/Views.h"
 #include "scene/FieldSet.h"
+#include "sim/WaterProducer.h"
 
 #include <algorithm>
 #include <chrono>
@@ -201,13 +202,6 @@ int SeaLayer::PartsOfHour(const SeaHour& hr, bool storm, PartParam parts[4], boo
 }
 
 namespace {
-// A BUOY REACHES ONLY SO FAR -- the tide stations' law (compose/WaterAtlas.cpp StationWeight): 1 / d^2,
-// tapered to nought by smoothstep from 90 km to 270 km; and the share it may claim at all, by the
-// nearest one, the same taper. One open-ocean buoy speaks for a basin's sea, not a planet's.
-double BuoyTaper(double dM) {
-    const double t = std::clamp((dM - 90000.0) / 180000.0, 0.0, 1.0);
-    return 1.0 - t * t * (3.0 - 2.0 * t);
-}
 double GreatCircleM(double la0, double lo0, double la1, double lo1) {
     constexpr double kD2R = 3.14159265358979323846 / 180.0;
     const double a = std::sin(0.5 * (la1 - la0) * kD2R), b = std::sin(0.5 * (lo1 - lo0) * kD2R);
@@ -229,7 +223,10 @@ double SeaLayer::BuoyGainAt(double latDeg, double lonDeg, double simUnix, int ho
             SeaHour at;
             if (!m_grid->HourAt(b.lat, b.lon, hour, at) || !(at.combinedHs > 0.05)) continue;
             const double d = GreatCircleM(latDeg, lonDeg, b.lat, b.lon);
-            const double w = BuoyTaper(d) / (d * d + 1.0);
+            // A BUOY REACHES ONLY SO FAR -- a point's law (sim/WaterProducer.h): 1 / d^2 times its taper,
+            // and the share the buoys may claim at all, the nearest one's taper. One open-ocean buoy
+            // speaks for a basin's sea, not a planet's.
+            const double w = water::PointTaper(d) / (d * d + 1.0);
             if (w <= 0.0) continue;
             const double r = std::clamp(b.hs / at.combinedHs, 1.0 / buoyAssimGainMax, double(buoyAssimGainMax));
             sw += w;
@@ -239,7 +236,7 @@ double SeaLayer::BuoyGainAt(double latDeg, double lonDeg, double simUnix, int ho
         }
     }
     if (n) *n = k;
-    return sw > 0.0 ? std::exp(BuoyTaper(dmin) * slr / sw) : 1.0;
+    return sw > 0.0 ? std::exp(water::PointTaper(dmin) * slr / sw) : 1.0;
 }
 
 int SeaLayer::PartsAt(double latDeg, double lonDeg, double simUnix, PartParam parts[4], bool log,
@@ -420,6 +417,10 @@ int64_t SeaLayer::EyeKey(double latDeg, double lonDeg, int hour) const {
     return int64_t(hour) | (tb & 0xFFFF) << 16 | (db & 0xFF) << 32 | (fb & 0xFF) << 40;
 }
 
+double SeaLayer::CascadeCycleUnix() const {
+    return (m_fromGrid && m_grid) ? m_grid->CycleUnix() : (m_sea ? m_sea->CycleUnix() : 0.0);
+}
+
 void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double camZ) {
     if (!m_sea || !m_sea->Ready()) return;
     m_seaLevel = static_cast<float>(seaLevelM);   // first: the fetch's walk (B4) ends at ground above it
@@ -461,7 +462,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             m_fieldActive = (std::max)(0, PartsAt(m_fieldLat, m_fieldLon, simUnix, m_fieldParts, logIt, nullptr,
                                                   &m_fieldPending));
         }
-        const double cycle = m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix();
+        const double cycle = CascadeCycleUnix();
         const uint32_t seed = static_cast<uint32_t>(cycle / 3600.0) * 2654435761u;
         m_fft.SetSeaState(parts, activeParts, seed);
         // M9bq: THE CPU TWIN IS FED FROM THE SAME CALL SITE, with the same partitions and the
@@ -551,7 +552,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             //
             // Invert Pierson-Moskowitz on the height the caller actually asked for --
             // Hs = 0.0246 U19.5^2 -- and convert the 19.5 m anemometer height to U10 with the
-            // same 1.075 log-profile ratio SeaState::WindSeaPm uses. One anchor, the one the
+            // open-water log profile's 1.075 (U19.5 = 1.075 U10). One anchor, the one the
             // render is held to, and it scales with Hs the way a wind must.
             const double u195 = std::sqrt((std::max)(m_stormHs, 0.01f) / 0.0246);
             windMs = std::clamp(u195 / 1.075, 0.0, 40.0);
@@ -690,7 +691,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         }
     }
 
-    m_tSec = static_cast<float>(simUnix - (m_fromGrid ? m_grid->CycleUnix() : m_sea->CycleUnix()));
+    m_tSec = static_cast<float>(simUnix - CascadeCycleUnix());
 
     // Representative wavenumber per cascade band (geometric mid of the same 60 m / 12 m cuts
     // OceanFft uses). The SHADER turns these into phase speeds at the local depth -- in deep
@@ -925,7 +926,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
 }
 
 void SeaLayer::Simulate(const FrameContext& ctx) {
-    if (onSimulate) onSimulate(ctx);   // the owned windows with consumers (WeatherManager::Simulate)
+    if (onSimulate) onSimulate(ctx);   // the owned windows with consumers (WaterManager::Simulate)
     if (!m_haveData) return;
     if (!m_swe || !m_swe->Ready()) return;
     // THE SOLVER STEPS FOR ITS CONSUMERS, NOT FOR THE CAMERA (the water match, step 3). It stepped

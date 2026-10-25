@@ -236,9 +236,126 @@ inline double LipReach(double k, double coth, double Hc, double h) {
     const double eLand = std::sqrt(2.0 * H * (1.0 + H / wt::Max(h, 0.3)) / wt::Max(kJetFallRatio * k * coth, 1e-6));
     return 1.0 / wt::Max(k, 1e-4) + eLand;
 }
+// THE SPILLER'S ROLLER (2026-10-23; shaders/Jet.hlsli SpillReach is its twin and says what it is): the
+// crest over its limit, Hc (1 - 1 / eCr), runs down its own face, tan = k Hc / 2.
+inline double SpillReach(double Hc, double eCr, double k) {
+    const double face = wt::Max(wt::Max(k, 1e-4) * 0.5 * wt::Max(Hc, 0.0), 1e-4);
+    return wt::Max(Hc, 0.0) * (1.0 - 1.0 / wt::Max(eCr, 1.0)) / face;
+}
+// THE SWASH (2026-10-23; shaders/Jet.hlsli SwashShare is its twin and says what it is): the raw orbit's
+// share at a depth, exp(-h / R), R = 0.043 sqrt(Hs L0) (Stockdon et al. 2006, dissipative R2%).
+inline double SwashShare(double hsRaw, double L0, double depth) {
+    const double R = wt::Max(0.043 * std::sqrt(wt::Max(hsRaw, 0.0) * wt::Max(L0, 0.0)), 1e-3);
+    return std::exp(-wt::Max(depth, 0.0) / R);
+}
+// WHICH CRESTS PLUNGE (2026-10-22, Mark at the Merrimack bar: "we clip water heights"). The throw past
+// the fold onset (k A_h = 1, where the height field folds back on itself) is a PLUNGING breaker's, and a
+// beach makes plungers only where it is steep against the wave: the surf-similarity (Iribarren) number
+//     xi = tan(beta) / sqrt(H / L0),   L0 = 2 pi / (k tanh kh)   (the deep-water wavelength of k at h)
+// (Battjes 1974; Iribarren & Nogales 1949): SPILLING below ~0.4, PLUNGING to ~2.0, SURGING above (at the
+// breaking height). The share of the throw a crest takes is the plunging band's, the product of two
+// logistics in ln xi about those two bounds. Their width, s = ln(1.5) / (2 ln 9) = 0.092 (10 % to 90 %
+// across a factor of 1.5 in xi), is a CLOSURE: the classes are bands in the data, not lines. Measured on
+// the 10-22 16z solve: 75 % of the Merrimack's breaking cells spill (median xi 0.19); Mavericks' reef
+// (~1:15, 6 m, 16 s) is ~0.54. tan(beta) is the bed's steepest slope (waves refract to face the contours
+// before they break), carried by the solve per cell (WaveField: the envelope's fourth channel).
+inline double PlungeShare(double tanBeta, double Hc, double k, double h) {
+    const double kk = wt::Max(k, 1e-4);
+    const double L0 = 6.2831853 / (kk * std::tanh(kk * wt::Max(h, 0.3)));
+    const double xi = wt::Max(tanBeta, 1e-6) / std::sqrt(wt::Max(Hc, 1e-3) / L0);
+    const double lx = std::log(xi);
+    const double sw = 0.0922;
+    return 1.0 / ((1.0 + std::exp(-(lx - std::log(0.4)) / sw)) * (1.0 + std::exp((lx - std::log(2.0)) / sw)));
+}
 // d(LipFall)/d(ePast), H held
 inline double LipFallDe(double ePast, double k, double coth, double H, double h) {
     return kJetFallRatio * k * coth * ePast / (1.0 + wt::Max(H, 0.0) / wt::Max(h, 0.3));
+}
+
+// THE CREST LAW, ONE FOR EVERY DESCRIPTION OF THE SEA (2026-10-23, Mark: "give the cascades the solved
+// field's crest law"; WaterBank.hlsl CrestLaw is its twin, WATER_V2 12.13). It was the solved field's
+// alone (WaveField::ProbeAt); the cascades ran an older law, the raw amplitude in the orbit at every
+// phase -- the "sea mid-plunge at every phase" ALGEBRA.md priors 53 (c) retired for the solved field,
+// and it spent the energy the depth takes twice: the solver already turns it into the push and the
+// setup. The law, on one description's surface at a label:
+//   - the ORBIT is the description's own, on the amplitude the depth lets stand, raised toward the raw
+//     one in the swash (SwashShare: the caller's);
+//   - at the CREST alone (w = 1/2 + eta / 2 A_env), by the crest's own excess -- the sea's raw ratio,
+//     unclamped, times the crest over the significant amplitude -- EVERY breaking crest goes forward to
+//     the cusp (k A_h = 1: the kinematic criterion, a spiller's as much as a plunger's), and the jet
+//     flies on toward the landing (LipReach) only where the bed's slope says it plunges (PlungeShare,
+//     the Iribarren band, gates the flight alone: Mark, 2026-10-23);
+//   - water past the cusp falls, the flight's boost back (LipFall, LipFlightTau), bounded by the trough.
+// The state is the description's surface at the label: eta, its lateral offset (dx, dz) in the units
+// the caller holds it -- `post` is the factor the caller multiplies the lateral by afterwards (the
+// solved field's chop in ProbeAt, 1 where the lateral is already drawn) -- its slope and the offset's
+// Jacobian, carried through by the product rule (grad w = grad eta / 2 A_env inside the band). aH is
+// the DRAWN lateral amplitude of the sea (chop x A_env x coth), excRaw the sea's rms_raw / rms_limit.
+// The translator's sandwich on a point is its shift (Pga.h's Motor::Translation): p + tau.
+struct CrestState {   // one member a line: proofs/water_terms.py transpiles this header
+    double eta = 0.0;
+    double dx = 0.0;
+    double dz = 0.0;
+    double sx = 0.0;
+    double sz = 0.0;
+    double jxx = 0.0;
+    double jxz = 0.0;
+    double jzz = 0.0;
+};
+// The share of the crest's variance over the depth's limit: 0 below it, the plunge's gate.
+inline double CrestExcessShare(double eta, double aEnv, double excRaw) {
+    const double eCr = excRaw * wt::Max(eta / aEnv, 0.0);
+    return 1.0 - 1.0 / wt::Max(eCr * eCr, 1.0);
+}
+inline void CrestLaw(CrestState& s, double dBx, double dBz, double aEnv, double excRaw, double kBar,
+                     double cothBar, double aH, double post, double tanBeta, double depth) {
+    const double wRaw = 0.5 + 0.5 * s.eta / aEnv;
+    const double wCr = wt::Clamp(wRaw, 0.0, 1.0);
+    const bool inBand = wRaw > 0.0 && wRaw < 1.0;
+    const double Hc = aEnv + wt::Max(s.eta, 0.0);   // this crest's height over the trough
+    const double aLoop = LipReach(kBar, cothBar, Hc, depth);
+    const double share = CrestExcessShare(s.eta, aEnv, excRaw);
+    const double plunge = (share > 0.0) ? PlungeShare(tanBeta, Hc, kBar, depth) : 0.0;
+    // to the cusp for every breaker; past it, the plunging share's jet to the landing and the spilling
+    // share's roller down its own face (SpillReach; at plunge 1 the law of before)
+    const double cusp = 1.0 / wt::Max(kBar, 1e-4);
+    const double eCr = excRaw * wt::Max(s.eta / aEnv, 0.0);
+    const double past = SpillReach(Hc, eCr, kBar) + plunge * ((aLoop - cusp) - SpillReach(Hc, eCr, kBar));
+    const double rH = 1.0 / wt::Max(aH, 1e-3), cuspR = cusp * rH;
+    const double q1 = share * (wt::Max(cuspR - 1.0, 0.0) + wt::Max((cusp + past) * rH - wt::Max(cuspR, 1.0), 0.0));
+    const double face = wt::Max(kBar, 1e-4) * 0.5 * Hc;   // the roller's face, its drop per metre
+    const double g = 1.0 + q1 * wCr;
+    const double wx = inBand ? 0.5 * s.sx / aEnv : 0.0;   // grad(w) (s.sx is grad(eta) so far)
+    const double wz = inBand ? 0.5 * s.sz / aEnv : 0.0;
+    // the flight (LipFlightTau): the throw per unit of w along the sheet, horizontal in the state's
+    // units, vertical as drawn
+    const double m = dBx * s.sx + dBz * s.sz;
+    const double r = 1.0 / std::sqrt(1.0 + m * m);
+    const double aHu = aH / wt::Max(post, 1e-6);
+    const double shX = q1 * aHu * dBx * r, shZ = q1 * aHu * dBz * r;
+    const double shY = q1 * aH * m * r;
+    const double tx = q1 * s.dx + shX, tz = q1 * s.dz + shZ;   // d(D_new)/d(w)
+    s.jxx = s.jxx * g + tx * wx;
+    s.jzz = s.jzz * g + tz * wz;
+    s.jxz = s.jxz * g + 0.5 * (tx * wz + tz * wx);
+    // water past the cusp descends: the jet by the parabola of its fall, the roller by its face's slope
+    const double ePast = wt::Max(aH * g - cusp, 0.0);
+    const double fall = ePast * face + plunge * (LipFall(ePast, kBar, cothBar, Hc, depth) - ePast * face);
+    const double fallDe = face + plunge * (LipFallDe(ePast, kBar, cothBar, Hc, depth) - face);   // d(fall)/d(ePast)
+    const double px = s.dx * g + shX * wCr, py = s.eta + shY * wCr - fall, pz = s.dz * g + shZ * wCr;
+    const double floorY = wt::Min(s.eta, -aEnv);
+    if (py >= floorY) {
+        // the slope through w: the rise along the sheet up, the fall down (d(fall)/d(w))
+        const double dd = shY - (ePast > 0.0 ? fallDe : 0.0) * aH * q1;
+        s.sx += dd * wx;
+        s.sz += dd * wz;
+        s.eta = py;
+    } else {
+        s.sx = s.sz = 0.0;
+        s.eta = floorY;
+    }
+    s.dx = px;
+    s.dz = pz;
 }
 
 inline double ShoalFactor(double kBand, double depth) {

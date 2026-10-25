@@ -53,6 +53,26 @@ float LipFall(float ePast, float k, float coth, float H, float h) {
     return kJetFallRatio * 0.5f * k * coth * ePast * ePast / (1.0f + max(H, 0.0f) / max(h, 0.3f));
 }
 
+// WHICH CRESTS PLUNGE (2026-10-22, Mark at the Merrimack bar: "we clip water heights"). The throw past
+// the fold onset (k A_h = 1, where the height field folds back on itself) is a PLUNGING breaker's, and a
+// beach makes plungers only where it is steep against the wave: the surf-similarity (Iribarren) number
+//     xi = tan(beta) / sqrt(H / L0),   L0 = 2 pi / (k tanh kh)   (the deep-water wavelength of k at h)
+// (Battjes 1974; Iribarren & Nogales 1949): SPILLING below ~0.4, PLUNGING to ~2.0, SURGING above (at the
+// breaking height). The share of the throw a crest takes is the plunging band's, the product of two
+// logistics in ln xi about those two bounds. Their width, s = ln(1.5) / (2 ln 9) = 0.092 (10 % to 90 %
+// across a factor of 1.5 in xi), is a CLOSURE: the classes are bands in the data, not lines. Measured on
+// the 10-22 16z solve: 75 % of the Merrimack's breaking cells spill (median xi 0.19); Mavericks' reef
+// (~1:15, 6 m, 16 s) is ~0.54. tan(beta) is the bed's steepest slope (waves refract to face the contours
+// before they break), carried by the solve per cell (WaveField: the envelope's fourth channel).
+float PlungeShare(float tanBeta, float Hc, float k, float h) {
+    const float kk = max(k, 1e-4f);
+    const float L0 = 6.2831853f / (kk * tanh(kk * max(h, 0.3f)));
+    const float xi = max(tanBeta, 1e-6f) / sqrt(max(Hc, 1e-3f) / L0);
+    const float lx = log(xi);
+    const float s = 0.0922f;
+    return 1.0f / ((1.0f + exp(-(lx - log(0.4f)) / s)) * (1.0f + exp((lx - log(2.0f)) / s)));
+}
+
 // THE THROW'S BOUND IS THE LANDING (2026-10-20, Mark: "I see the lip but the waves don't seem to
 // barrel correctly"). Measured at Mavericks' close pose: the lip's lowest point stood at -1.79 m over a
 // trough at -3.61 m -- it hung at most 79 % of the wave's height (67 % at the median), so no tube
@@ -68,6 +88,35 @@ float LipReach(float k, float coth, float Hc, float h) {
     const float H = max(Hc, 0.0f);
     const float eLand = sqrt(2.0f * H * (1.0f + H / max(h, 0.3f)) / max(kJetFallRatio * k * coth, 1e-6f));
     return 1.0f / max(k, 1e-4f) + eLand;
+}
+
+// THE SWASH (2026-10-23, Mark: "the raw orbit near the waterline for the run-up and backwash"). Offshore
+// the orbit rides the amplitude the depth lets stand; at the waterline the bore that the breaking sea has
+// become runs up the slope and back with the momentum of the wave that was -- the raw amplitude's orbit,
+// forward under the crest, back under the trough (the backwash the next bore meets). The share of the
+// raw orbit is the swash zone's, exp(-h / R), R the run-up height: R = 0.043 sqrt(Hs L0), Stockdon,
+// Holman, Howd and Sallenger (Coastal Engineering 53, 2006), the dissipative beaches' R2% (xi < 0.3, the
+// Merrimack's: no slope in it). 1 at the waterline, ~e^-1 where the water is a run-up deep, nothing
+// offshore. L0 the deep-water wavelength of the band or component, 2 pi coth(kh) / k on its k in depth.
+// The orbit so raised is held to the landing reach, the cascades' bound since 2026-10-19 (a particle
+// thrown past it is a bore; the chips along the jetty): WaterTerms.h SwashShare is its twin.
+// THE SPILLER'S ROLLER (2026-10-23, Mark: "now that you are in the code where water affects the land mesh,
+// you should be able to deduce the right spiller roll method"). Water that cannot stand on a slope runs
+// down it: the run-up law the shore obeys, a height dH carried dH / tan(theta) along a slope tan(theta). A
+// spilling crest is that law on the wave's OWN front face: the part of the crest over the depth's limit,
+// dH = Hc (1 - 1 / eCr) (eCr the crest's own excess), cannot stand and runs down the face as the roller --
+// it does not leave it, as a plunger's jet does. The face is this crest's, tan(theta) = k Hc / 2 (Duncan
+// 1981 measured the roller riding a face at ~12 degrees; k Hc / 2 is 0.15 - 0.3 for a breaking crest).
+// Its reach past the cusp is dH / tan(theta) = 2 (1 - 1 / eCr) / k, nothing at the limit, the cusp's own
+// length at twice it; and its drop is the face's, linear in the distance (SpillDrop) where the jet's is
+// the parabola's (LipFall). WaterTerms.h is its twin.
+float SpillReach(float Hc, float eCr, float k) {
+    const float face = max(max(k, 1e-4f) * 0.5f * max(Hc, 0.0f), 1e-4f);
+    return max(Hc, 0.0f) * (1.0f - 1.0f / max(eCr, 1.0f)) / face;
+}
+float SwashShare(float hsRaw, float L0, float depth) {
+    const float R = max(0.043f * sqrt(max(hsRaw, 0.0f) * max(L0, 0.0f)), 1e-3f);
+    return exp(-max(depth, 0.0f) / R);
 }
 
 // Green's-law-style shoaling: amplitude grows as the group speed drops entering shallow water.

@@ -17,9 +17,9 @@
 //  step, --boat-drive).
 //
 //  THE SOLVER IS TRUTH (the water match, step 1 -- Mark, 2026-09-15). A hull queries the weather
-//  manager every step (TreeWater -> WeatherManager::Query), and inside a solver's domain the
+//  manager every step (TreeWater -> WaterManager::Query), and inside a solver's domain the
 //  water's surface and current are the SOLVER'S. The solver lives on the GPU, so the hull ASKS for
-//  the region around itself every frame (WeatherManager::RequestRegion: the texels copied through
+//  the region around itself every frame (WaterManager::RequestRegion: the texels copied through
 //  the frame ring and delivered two frames later, never by a stall) and reads the delivered texels
 //  through the kernel's own reconstruction. FrameInfo carries `asOf`, the instant those answers are
 //  coherent at, and TreeWater::Describe reports it. This replaced the step 5e cadence
@@ -61,7 +61,7 @@ class SeaState;
 class VesselLayer;
 class VesselRegistry;
 class WaveField;
-class WeatherManager;
+class WaterManager;
 struct InputState;
 struct WaterSceneConfig;
 }  // namespace ga
@@ -76,7 +76,7 @@ public:
     // reported by Configure and TreeWater reports a missing term as valid = false, never as
     // flat water (WaterSurfaceTree.h's banner).
     struct Observers {
-        WeatherManager* weather = nullptr;        // THE tree's point evaluator (and the solver's regions)
+        WaterManager* weather = nullptr;        // THE tree's point evaluator (and the solver's regions)
         const WaveField* waveField = nullptr;     // the solved field, when the session built one
         SeaLayer* sea = nullptr;                  // its cascades (Ocean()) and heightScale
         const SeaState* seaState = nullptr;

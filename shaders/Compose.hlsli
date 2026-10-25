@@ -91,6 +91,9 @@ static const float kCsHeightLodFloor = -9.0f;
 #define GA_BLOCK_RANKS 5
 #endif
 static const float kCsWindowFloor = 3.0f;
+// D2: the cube climbs without a bound of its own (its coarsest mips are the boot's held floor; a
+// clamp past the last mip reads the last).
+static const float kCsCubeTop = 15.0f;
 // PHASE A2: every level has its own windows, about ITS eye -- slot s of the level table (0 the
 // camera, then the Droste levels and the gate worlds), its rank k + 1 at row 5 s + k -- and its
 // readers address them by the level's own point (relative to its eye: the mesh stage's geo in that
@@ -128,8 +131,11 @@ float CsHaveWindow(uint mapSrv, float2 uv, uint slice) {
 
 float3 ComposedColorPages(float3 dir, float3 p CS_WC_PARAM) {
     // The cube, through the cube views over slices 0..5 (hardware-seamless across faces).
-    const float haveC = CsHaveCubeArr(gCsU.y, dir);
-    float3 c = PageSampleCube(gTexCubeArr[gCsU.x], sAniso, dir, haveC).rgb;
+    // D2: each read climbs where the hardware says it touched a NULL tile (PageSampleClimb); the
+    // level it read is the ground it holds.
+    float haveC = CsHaveCubeArr(gCsU.y, dir);
+    uint st;
+    float3 c = PageSampleCubeClimb(gTexCubeArr[gCsU.x], sAniso, dir, haveC, kCsCubeTop, st).rgb;
     const float3 g0 = CsGroundM();
     float ground = PageGroundM(g0.x, haveC);
     // PHASE A1: the eye's windows, the chain coarsest rank first, by the same ladder: a rank
@@ -147,8 +153,13 @@ float3 ComposedColorPages(float3 dir, float3 p CS_WC_PARAM) {
         if (!WalkEdgeOk(wc, k, max(lodB, haveB), 8.0f)) continue;   // the box's edge (Walk.hlsli)
         const float gB = PageGroundM(CsBlockGround(k), haveB);
         if (PageWins(gB, ground)) {
-            c = PageSample(gTexArr[gCsU5.x], sAnisoWrap, buv, sl, haveB).rgb;
-            ground = gB;
+            // A rank that still touches a NULL tile at its floor leaves the pixel to the rank above.
+            float h = haveB;
+            const float3 cb = PageSampleClimb(gTexArr[gCsU5.x], sAnisoWrap, buv, sl, h, kCsWindowFloor, st).rgb;
+            if (CheckAccessFullyMapped(st)) {
+                c = cb;
+                ground = PageGroundM(CsBlockGround(k), h);
+            }
         }
     }
     return c;
@@ -185,8 +196,9 @@ bool ComposedColorOn() { return gCsF.x > 0.5f; }
 bool CsBuildingFieldOn() { return gCsU5.z != 0xFFFFFFFFu; }
 float2 CsBuildingField(float3 dir, float3 p CS_WC_PARAM) {
     if (gCsU5.z == 0xFFFFFFFFu) return float2(0.0f, 0.0f);
-    const float haveC = CsHaveCubeArr(gCsU6.w, dir);
-    float4 b = PageSampleCube(gTexCubeArr[gCsU6.z], sAniso, dir, haveC);
+    float haveC = CsHaveCubeArr(gCsU6.w, dir);
+    uint st;
+    float4 b = PageSampleCubeClimb(gTexCubeArr[gCsU6.z], sAniso, dir, haveC, kCsCubeTop, st);   // D2
     // log2 of the footprint over the texel read: <= 0, and 0 where the wanted level is resident.
     float lr = min(0.0f, gTexCubeArr[gCsU6.z].CalculateLevelOfDetail(sAniso, dir) - haveC);
     float ground = PageGroundM(CsGroundM().x, haveC);
@@ -201,9 +213,13 @@ float2 CsBuildingField(float3 dir, float3 p CS_WC_PARAM) {
         if (!WalkEdgeOk(wc, k, max(lodB, haveB), 8.0f)) continue;   // the box's edge (Walk.hlsli)
         const float gB = PageGroundM(CsBlockGround(k), haveB);
         if (PageWins(gB, ground)) {
-            b = PageSample(gTexArr[gCsU5.z], sAnisoWrap, buv, sl, haveB);
-            lr = min(0.0f, lodB - haveB);
-            ground = gB;
+            float h = haveB;   // D2: as the colour's ladder
+            const float4 bb = PageSampleClimb(gTexArr[gCsU5.z], sAnisoWrap, buv, sl, h, kCsWindowFloor, st);
+            if (CheckAccessFullyMapped(st)) {
+                b = bb;
+                lr = min(0.0f, lodB - h);
+                ground = PageGroundM(CsBlockGround(k), h);
+            }
         }
     }
     // MIRRORS BuildingFieldSource::kFrontal. The size law: (r)^beta = exp2(lr beta).

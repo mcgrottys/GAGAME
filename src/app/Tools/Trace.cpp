@@ -12,7 +12,7 @@
 #include "scene/WaterBankLayer.h"
 #include "sim/WaterTerms.h"
 #include "sim/WaveScale.h"
-#include "sim/WeatherManager.h"
+#include "sim/WaterManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,7 +23,7 @@ namespace ga::app::tools {
 void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& compositor,
               int hgtCh, const WaterAtlas& waterAtlas, WaterBankLayer* waterBank,
               GlobeLayer* globe, const ResidencyManager& resMgr, double simUnix,
-              WeatherManager& weather, const Space::Anchor& chart) {
+              WaterManager& weather, const Space::Anchor& chart) {
     weather.RefreshMirrorsTo(gpu, simUnix);   // a no-op after the export above
     // PHASE C4: no point given = the scene's place.anchor.
     const bool given = !std::isnan(opt.traceLat) && !std::isnan(opt.traceLon);

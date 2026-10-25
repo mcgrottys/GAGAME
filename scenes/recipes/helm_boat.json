@@ -18,7 +18,7 @@
     "wavefield": {
       "_exag": "display exaggeration on the solved comps (vqview shipped 1.15; raise for readable geometry on calm days -- physics in the cache stays raw)",
       "_bankTexelM": "wave bank ring-0 texel (m): caps which wavelengths become GEOMETRY (fold law) -- a band contributes NOTHING until texel < lambda/2. 2.4 left the chop band at exactly zero even with the energy-weighted fold wavelength (3.55 m needs < 1.77 m). 1.2 matches the mesh vertex spacing (~1.19 m) and puts 39%% of the chop into geometry; outer ring reach halves to 9.8 km. Restart to apply (ring construction).",
-      "exag": 1.6
+      "exag": 1.0
     },
     "closures": {
       "_bandFoldWeight": "how far the FOLD's per-band wavelength follows the live spectrum instead of the band's geometric midpoint (cascade 2 spans lambda 0.41-12 m; a 4.6 m wind sea judged as 2.2 m is thrown out of geometry). 0 = the shipped constant, byte for byte.",

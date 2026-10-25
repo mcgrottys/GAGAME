@@ -292,7 +292,7 @@ private:
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
         float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
         uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
-        float waveA[4];       // window org xy (world m), 1/cellM, feather m
+        float waveA[4];       // window org xy (the root's m, less the tiles' eye), 1/cellM, feather m
         float waveB[4];       // envMax, sumMax, chop, solved-at level
         float foamA[4];       // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
         float foamB[4];       // crestHi, depthLo, depthHi, spare
@@ -355,12 +355,22 @@ private:
         // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (Jet.hlsli, the spray, the
         // wakes). Appended at the END on both sides.
         float planet[4];
+        // WATER V2, STAGE 2: THE TIDE'S ROTORS of this instant (WaterAtlas::Rotors), two constituents
+        // a row: cos, sin of constituent 2j, then of 2j + 1. Appended at the END on both sides.
+        float tideRot[36];
+        // THE MEAN-LEVEL MOMENT per cascade (OceanCpu::LiftMoment, the texture's E[h div D], m):
+        // the Lagrangian lift's cascade term (gBandLift); [3] the texture's chop, lambda. Appended at
+        // the END on both sides.
+        float bandLift[4];
+        // THE FOLDS HELD (gFoldClock): the sim clock in 0.1 s ticks, the hold in ticks, ring 0 re-anchored.
+        // Appended at the END on both sides.
+        float foldClock[4];
     };
     struct BankTile {
         float orgXZ[2];
         float texelM;
         uint32_t dstX, dstY;
-        float lvl[4];
+        float msl[4];   // MSL in NAVD88 at the corners (the tide's own datum, WaterAtlas::MslNavd)
         float bed[4];
         float hs[4];   // the local sea-state scale at the corners (sim/WaveScale.h)
         // M13 step 2: THE TILE'S PLACE, ADDRESSED ONCE. The kernel used to turn every texel's
@@ -388,11 +398,25 @@ private:
         float bandY[4];       // edgeY at the origin, d/dex, d/dez, charts valid (0 = none)
         // PHASE B2: the tile's point for the windows' address (WaterBank.hlsl BankTile): the
         // ground point at the tile's origin relative to the rows' eye in the tangent axes (w = 1
-        // valid), and its derivative along the ring's x and z at the tile's centre.
+        // valid), and its derivative along the ring's x and z at the tile's centre. pointX.w = 1:
+        // the point addresses the solved wave window (the root's flat x, z less the eye).
         float pointA[4];
         float pointX[4];
         float pointZ[4];
+        // WATER V2, STAGE 2: THE TIDE AS A FUNCTION OF TIME at the corners -- each corner's 18
+        // constituent phasors (re, im), two a row; the kernel turns them by this frame's rotors. They
+        // are a place's and never change with t, so the ring's lattice asks the atlas once per point
+        // (TideLattice), not every frame.
+        float tide[4][36];
     };
+    // The tide's phasors at a ring's lattice points, asked when the ring's origin moves.
+    struct TideLattice {
+        float orgX = 0.0f, orgZ = 0.0f;
+        bool ok = false;
+        float msl[(kRingTiles + 1) * (kRingTiles + 1)];
+        float p[(kRingTiles + 1) * (kRingTiles + 1)][36];
+    };
+    TideLattice m_tideLat[kMips];
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
     // A tile carries waves where the mask calls any of it water, or the height under it is low.
@@ -400,7 +424,8 @@ private:
     static bool MaskAnswer(const class GisVectorMask& mask, const double box[4]);
     void AskMask(int m, const std::vector<std::pair<int, std::array<double, 4>>>& tiles);
     bool HeightWet(double wx0, double wz0, double spanM, bool& provisional) const;
-    void CornerParams(double wx, double wz, float& lvl, float& bed) const;
+    void CornerParams(double wx, double wz, float& bed) const;
+    void CornerTide(double wx, double wz, float& msl, float p[36]) const;
     // M13 step 2: the place of a ring point, and the tile rows above. Both go through the
     // surface's chart where it carries the renderer's rows; without them (a bank built before a
     // surface, or Mars) they are the anchor-linear law, as everything here was.
@@ -433,6 +458,7 @@ private:
         uint32_t flagUav = 0xFFFFFFFFu;
         uint32_t texels = 0, tiles = 0;
         std::vector<uint8_t> mapped;          // tiles x tiles
+        std::vector<double> seen;             // tiles x tiles: the sim instant a fold last wanted it (FoldHold)
         uint32_t mappedCount = 0, logged = 0xFFFFFFFFu;
     };
     ColumnRing m_under[kColumnRingsUnderMax];
@@ -479,6 +505,12 @@ private:
     GpuTexture m_fold, m_foldDist;   // the fold grid (R32_UINT) and its distance (R32_FLOAT), 64 x 64
     uint32_t m_foldUav = 0, m_foldDistUav = 0, m_foldDistSrv = 0;
     std::vector<uint16_t> m_foldCells;
+    // THE FOLDS HELD (gFoldClock; CsBankScatter says why): the clock's origin and last instant, and the
+    // restart (the first frame, ring 0 re-anchored, the clock set back): the grid is cleared then.
+    double m_foldT0 = -1.0, m_foldLastT = 0.0;
+    bool m_foldRestart = true;
+    double FoldHoldS() const;      // two of the sea's peak periods, s
+    uint32_t FoldTick() const;     // the sim clock in 0.1 s ticks from m_foldT0, 1 at the origin
     hal::Pso m_foldDistPso;   // ...and its height over the chart's tangent plane (P.up - R): ChartRows' row 3 w
     double m_eyeFlat[3] = {};                       // ...and in the flat frame
     Space::Anchor m_chart{};                        // the rings' plane (Chart above)
