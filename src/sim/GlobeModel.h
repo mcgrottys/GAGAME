@@ -78,6 +78,11 @@ public:
     const std::vector<float>& Hs() const { return m_hs; }
     const std::vector<float>& Wind() const { return m_wind; }
     const std::string& WavesCycle() const { return m_cycle; }
+    // THE GLOBE'S SEA STATE at a forecast hour (sim/SeaGrid.h): its Hs and wind replace the snapshot
+    // globe.json named, on the same gfswave grid; the readers (WaveScale, the globe's far sea) read
+    // them as before. The version moves with every call (GlobeLayer re-uploads on it).
+    void SetWaves(std::vector<float> hs, std::vector<float> wind, const std::string& cycle);
+    uint32_t WavesVersion() const { return m_wavesVersion; }
 
     // Bilinear relief sample, metres (negative under the sea). lon in degrees east.
     double ElevAt(double latDeg, double lonDeg) const;
@@ -92,6 +97,7 @@ private:
     double m_wlat1 = 90, m_wlon1 = 0, m_wdlat = 0.25, m_wdlon = 0.25;
     std::vector<float> m_hs, m_wind;
     std::string m_cycle;
+    uint32_t m_wavesVersion = 0;
     int m_cnx = 0, m_cny = 0, m_cnz = 0;
     std::vector<float> m_clouds, m_cloudAlts;
     std::string m_cloudsCycle;

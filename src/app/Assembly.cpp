@@ -468,6 +468,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if (seaPoint < 0 || d2 < seaBestD2) { seaPoint = int(i); seaBestD2 = d2; }
     }
     if (seaState.Load(S.data.seastate, seaPoint)) {
+        // THE GLOBE'S SEA STATE (sim/SeaGrid.h, 2026-10-21): the composite's grid beside its points, when
+        // it carries one. Then the synthesis is the eye's own sea and the field is the grid's; the other
+        // points are not sources over it (the grid is their measurement, every node of it).
+        const bool seaGridOn = A->seaGrid.Load(S.data.seastate);
         // PHASE C2: THE SEA STATE IS A FIELD OF SOURCES. data.seastate's file stands where it says,
         // or where sea.box places a file that says nothing; every `sources` entry of kind "seastate"
         // is one more, a source by being a file.
@@ -489,7 +493,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             sea->AddSource(src.get());
             A->seaSources.push_back(std::move(src));
         }
-        for (int i = 0; i < int(seaPoints.size()); ++i) {
+        for (int i = 0; i < int(seaPoints.size()) && !seaGridOn; ++i) {
             if (i == seaPoint) continue;
             auto src = std::make_unique<SeaState>();
             if (!src->Load(S.data.seastate, i)) continue;
@@ -497,6 +501,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             A->seaSources.push_back(std::move(src));
         }
         sea->SetSurface(&surface);   // the world.flat chart, for the churn's tangent rows (PHASE C5)
+        sea->SetGrid(seaGridOn ? &A->seaGrid : nullptr);
         sea->sweCurrentGain = S.water.swe.gain;
         sea->heightScale = S.water.heightScale;
         sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -628,6 +633,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // place no survey file named had no waves at all. No box, no solver. PHASE B2 (D4): ONE STANDING
     // RANK-2 WINDOW about the anchor (rank 2: the finest whose texel is at most the solver's cell), held
     // whole before the solver starts.
+    // B4: the wind sea's fetch is walked over the same height tree (SeaLayer::FetchAt).
+    if (sea && hgtCh >= 0) sea->SetHeightRead(&compositor, hgtCh);
     if (hgtCh >= 0 && !marsMode) {
         const double* bx = S.water.swe.box;
         const double lon0 = bx[0], lat0 = bx[1], lon1 = bx[2], lat1 = bx[3];

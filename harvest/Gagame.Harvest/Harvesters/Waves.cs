@@ -300,6 +300,16 @@ public sealed class Waves : IHarvester
     public (DateTime cycDt, string ymd, int cyc, List<(int fh, List<(string name, Grib2Message m)> msgs)> hours) CycleOver(
         HarvestContext ctx, Polite polite, GribBox box, string cacheDir, string? ymd = null, int? cyc = null)
     {
+        var hours = new List<(int, List<(string, Grib2Message)>)>();
+        var (cycDt, y, c) = CycleEach(ctx, polite, box, cacheDir, (fh, msgs) => hours.Add((fh, msgs)), ymd, cyc);
+        return (cycDt, y, c, hours);
+    }
+
+    /// The same door one forecast hour at a time: `each` is handed an hour's messages and they are not
+    /// kept (the whole globe's thirteen hours of every partition are about 1.8 GB as doubles).
+    public (DateTime cycDt, string ymd, int cyc) CycleEach(HarvestContext ctx, Polite polite, GribBox box, string cacheDir,
+        Action<int, List<(string name, Grib2Message m)>> each, string? ymd = null, int? cyc = null)
+    {
         _ctx = ctx;
         _fetch ??= new SimpleFetcher(ctx, 0.6, 4);
         _polite = polite;
@@ -309,14 +319,13 @@ public sealed class Waves : IHarvester
         if (ymd is null || cyc is null) (cycDt, ymd, c) = FindCycle(cacheDir);
         else { cycDt = DateTime.ParseExact(ymd, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal).AddHours(cyc.Value); c = cyc.Value; }
         var keyToVar = KeyToVar(Calibrate(ymd, c, Path.Combine("cache", "gfswave")));
-        var hours = new List<(int, List<(string, Grib2Message)>)>();
         foreach (var fh in Fhs)
         {
             var msgs = new List<(string, Grib2Message)>();
             foreach (var m in Grib2.ReadMessages(FetchGrib(ymd, c, fh, Vars, cacheDir, "all")))
                 if (keyToVar.TryGetValue(m.Key, out var v)) msgs.Add((v is "SWELL" or "SWPER" or "SWDIR" ? $"{v}_{m.LevelValue}" : v, m));
-            hours.Add((fh, msgs));
+            each(fh, msgs);
         }
-        return (cycDt, ymd, c, hours);
+        return (cycDt, ymd, c);
     }
 }

@@ -301,9 +301,11 @@ void RegisterKnownWaterEdges() {
     // RAISES a sea on hours where GFS-Wave's partitioning reports none -- without it those
     // hours carry swell only (a 4 mHz Gaussian, no tail) and cascades 1-2 synthesise exactly
     // zero. Point scalar out of seastate.json: no raster, no frame change, no flip.
-    Register({"gfs.wind", "ocean.fft", "wind-sea fill (PM, when partitions have none)",
+    // B4 (2026-10-22): grown over its fetch in its depth (Young & Verhagen 1996), the fetch walked over
+    // the height tree toward the wind; PM is the law's open-sea limit.
+    Register({"gfs.wind", "ocean.fft", "wind-sea fill (fetch-grown, when partitions have none)",
               latlonW, latlonW, false, "m Hs / s Tp", "Hs 0..2 over U10 0..9", 1.0,
-              "SeaLayer::SetTime -> SeaState::WindSeaPm (closure windSeaFill)"});
+              "SeaLayer::SetTime -> SeaLayer::FetchAt -> SeaState::WindSeaGrown (closure windSeaFill)"});
     // M9bg: the M9 OPTICS EDGES ARE GONE FROM THE RENDERER. `ocean.colour -> globe.ps` (both
     // the Austin-Petzold K_d transfer and the Gordon deep albedo) and `gfs.icec -> globe.ps`
     // fed the two-ray water; a vertex-shaded sea has no ray path to put them in. The

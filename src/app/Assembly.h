@@ -88,6 +88,7 @@
 #include "scene/effects/SlicePlane.h"   // M12 step 5e: the cutaway plane as an effect node
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
+#include "sim/SeaGrid.h"
 #include "sim/SeaState.h"
 #include "sim/RiverModel.h"
 #include "sim/SweSolver.h"
@@ -127,6 +128,7 @@ struct Assembly {
     std::unique_ptr<TideLayer> tideOwned;
     TideLayer* tide = nullptr;
     SeaState seaState;
+    SeaGrid seaGrid;   // the globe's sea state, data.seastate's grid (sim/SeaGrid.h); not Ready without one
     std::vector<std::unique_ptr<SeaState>> seaSources;   // PHASE C2: `sources` of kind "seastate"
     SeaLayer* sea = nullptr;
     CurrentModel currents;
