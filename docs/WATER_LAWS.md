@@ -307,4 +307,53 @@ tier 0.9, tiled resources tier 4, resource binding tier 3. What the water asks o
 
 So: the water's kernels are not leaving a shader feature on the table that would change the physics; the
 two features that would change the frame are VRS on the water pixels and sampler feedback for the
-residency's wants. Both are proposed here, neither is in this branch.
+residency's wants. VRS is built below (7.4); sampler feedback stays proposed.
+
+### 7.4 Variable rate shading on the water (2026-10-25, Mark: "build it, here, with an A/B")
+
+The fold doctrine at the pixel: a feature the pixel cannot resolve needs no pixel of its own. The rate is
+the PRIMITIVE's, exported by the globe's mesh shader (`GlobeMesh.hlsl`, `PrimCull::rate : SV_ShadingRate`)
+from the water's own state, no screen-space image and no second pass:
+
+- a triangle of open water shades two pixels a side (`D3D12_SHADING_RATE_2X2`);
+- a triangle keeps its pixels (1x1) when any corner has FOAM (`bD.w` over 5 %, counted whole), stands
+  within a ring-0 block of a HELD FOLD (`FoldDist`, the lip's own reach in `Globe.hlsl`), has LAND in
+  it (the shore's classifier is a pixel edge), or is land, or is a seam band (a sliver).
+
+`CommandContext::ShadingRatePerPrimitive` sets `RSSetShadingRate(1X1, {OVERRIDE, PASSTHROUGH})` on the
+frame's List6 (a List5) before the water's dispatches and clears it after; `Gpu::VrsTier()` reads
+`D3D12_FEATURE_D3D12_OPTIONS6` and the globe asks only from tier 2. Scene key `render.vrs` (default on);
+the A/B is `--set render.vrs=false`. The lens, wire and probe pipelines are never rated.
+
+**The A/B** (the storm rail, `scenes/recipes/storm_rail.json --bench --gpu-time`, 300 frames, the
+timestamp table's mean; and the bar still `scenes/demos/merrimack_bar.json --storm 3,10,95`, 1600x900):
+
+| | VRS off | 4x4 beyond the chop texel, 2x2 nearer | 2x2 everywhere (shipped) |
+|---|---|---|---|
+| `globe.mesh` mean / p50 | 6.02 / 7.03 ms | 4.13 / 4.64 ms (-31 %) | 4.32 / 4.83 ms (-28 %) |
+| `whole-frame` mean | 8.39 ms | 6.64 ms | 6.37 ms |
+| `waterbank` (unrated, the control) | 1.84 ms | 1.79 ms | 1.53 ms |
+| bar still vs off: SSIM / PSNR | — | 0.9906 / 44.4 dB | 0.9952 / 47.3 dB |
+| pixels differing by > 8/255 | — | 1.0 % | 0.64 % |
+| the look at 3x (`out/review/vrs_on*/near_on_off_x3.png`) | — | BLOCKS in the near glitter | a 2-px stair in the same band |
+
+The first law was the footprint's: four a side where the pixel's footprint on the water passes the chop
+texture's texel (the sea's finest MODELLED structure, `gBankB.z / 256`), two a side nearer. The still
+refused it: the sea's finest DRAWN structure is not the texel but the glitter, the Cox-Munk lobe of a
+slope field sampled once a pixel, a grain of one pixel wherever the sun's band lies; four pixels a side
+turned that grain into blocks the eye reads as blocks. Two a side reads as glitter still, and gives 28 of
+the 31 %: the water's pixel cost is the per-pixel work (the two-ray water, the caustic tiers), and 2x2
+already takes three quarters of it. The CPU-side `[rail]` mean moved between runs (12.9-18.0 ms) with
+the residency, not the rate: the GPU table is the measure.
+
+The saving is on the GPU's share of a frame that is CPU-bound in these runs (`gpu.gap` 18 ms); it is
+headroom for the windowed frame and for a higher resolution, not frames per second here.
+
+Not done: a shading-rate IMAGE from the bank (a tile of 16 px by the foam and fold planes) would let a
+coarse rate follow the water's state inside a triangle, and a 4x4 beyond the glitter's band (the sun's
+reflection known per vertex) is the next step if the pixel cost returns; neither was needed for the win.
+
+**Run trap:** the rail bench hangs at exit in `ResidencyManager::Shutdown` waiting for `earth.color`
+megatexture loads that never return (one run took 24 min to leave, one never did); the stills exit
+cleanly. The table is printed before the wait: the A/B script stops the process once
+`per-frame GPU series` is logged.

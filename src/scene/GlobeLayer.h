@@ -589,6 +589,9 @@ public:
     // generation and the clouds'. Measured at a frozen eye (--gpu-time): Tokyo's globe.mesh 9.4 ->
     // the kept frame's composite + water; the mouth's 13.2 likewise -- the numbers in the PR.
     bool keepOn = true;
+    // VARIABLE RATE SHADING on the water (render.vrs; GlobeMesh.hlsl SV_ShadingRate, the law is there):
+    // the shipped look only (no lens, wire or probe), on a device of tier 2.
+    bool vrsOn = true;
     float keepSunGrainDeg = 0.01f, keepTideGrainM = 0.001f;
     uint64_t keepFull = 0, keepKept = 0, keepPlain = 0, keepWhy[8] = {};
     int m_keepWhySaid = 0;

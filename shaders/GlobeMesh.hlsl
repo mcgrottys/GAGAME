@@ -52,7 +52,8 @@ static const uint kSeamNone = 0u, kSeamCoarser = 1u;
 // and displaced, as the M6j path always computed it. MsMain's 81 vertices and the seam bands
 // below both come from here, so a band vertex is the neighbour's own arithmetic on the
 // neighbour's own record (the same doubles the neighbour amplifies from), not an estimate.
-VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut) {
+VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut, out float needOut) {
+    needOut = 0.0f;   // the water's need for a pixel of its own (the shading rate, MsMain)
     const float cx0 = float(rec.cell0 & 0xFFu);
     const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
     const bool fine = rec.arc <= 650.0f;
@@ -149,6 +150,12 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
         const float2 bankXZ = fine ? BankXZ(geo) : BankXZOfDir(CsToTangent(dir));
         inBank = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz);
         if (inBank) wl = gWavesB.w + bP.x;
+        // THE WATER'S NEED FOR A PIXEL (2026-10-25, variable rate shading): foam has edges a pixel wide,
+        // and a held fold draws the lip and the tube; everything else the sea draws is wider than the
+        // chop texture's texel. 1 at a fold, 0 a block of ring 0 away (the lip's own reach, Globe.hlsl
+        // ColumnLip's caller); foam over 5 % counting as whole.
+        if (inBank) needOut = saturate(bD.w * 20.0f);
+        if (rec.level == 0u) needOut = max(needOut, 1.0f - saturate(FoldDist(bankXZ) / (8.0f * gBankA.x)));
     }
     float editLand, wetV;
     const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, wl, 0.0f, max(0.4f, rec.arc / 8.0f), editLand, wetV);
@@ -237,8 +244,8 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
     return o;
 }
 VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
-    float land;
-    return SurfaceVertexL(rec, gid, g, land);
+    float land, need;
+    return SurfaceVertexL(rec, gid, g, land, need);
 }
 // ------------------------------------------------------------------------------------------
 // Step 23: THE SEAM BANDS -- the shell made watertight (docs/ALGEBRA.md priors 28).
@@ -410,12 +417,25 @@ uint3 BandTri(const Band bd, uint t) {
 // triangles -- the tube -- are drawn. Back means: the displaced triangle turns to the eye the side
 // its undisplaced self turns away from it (the flat triangle is seen from above, outside).
 // Seam bands never cull (they stand behind by construction).
+// THE SHADING RATE IS THE PRIMITIVE'S (2026-10-25, DX12 Ultimate tier 2): the fold doctrine at the pixel.
+// A feature the pixel cannot resolve needs no pixel of its own. The sea's finest MODELLED structure is
+// the chop texture's texel (the short cascade's patch over 256), but its finest DRAWN one is the glitter:
+// the specular of a slope field sampled once a pixel, a grain of one pixel wherever the sun's band lies.
+// Measured on the bar still (2026-10-25, out/review/vrs_on_4x4): four pixels a side where the footprint
+// passed the texel turned that grain into blocks the eye reads as blocks; two a side it reads as
+// glitter still. So the open sea shades two pixels a side, at every distance. Foam and a held fold (the
+// lip, the tube) have edges a pixel wide and keep their pixels, and so does a triangle with land in it
+// (the shore's classifier is a pixel edge) and land itself: this rate is the water's. Values are
+// D3D12's: 1x1 = 0, 2x2 = 5 (4x4 = 10, not used). GlobeLayer turns it on with the per-primitive
+// combiner; off, the pipeline ignores it.
 struct PrimCull {
     bool cull : SV_CullPrimitive;
+    uint rate : SV_ShadingRate;
 };
 groupshared float3 sMsRel[81];
 groupshared float3 sMsGeo[81];
 groupshared bool sMsWater[81];
+groupshared float sMsNeed[81];
 
 [outputtopology("triangle")]
 [numthreads(128, 1, 1)]
@@ -455,12 +475,13 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         // path was.
         const uint x = gtid % 9u, y = gtid / 9u;
         const float2 g = float2(cx0 + float(x), cy0 + float(y));
-        float landV;
-        const VsOut o = SurfaceVertexL(rec, gid, g, landV);
+        float landV, needV;
+        const VsOut o = SurfaceVertexL(rec, gid, g, landV, needV);
         verts[gtid] = o;
         sMsRel[gtid] = o.rel;
         sMsGeo[gtid] = o.geo;
         sMsWater[gtid] = landV < 0.999f;
+        sMsNeed[gtid] = needV;
         // Step 23: a seam vertex also writes its band copies -- itself, pushed behind, for
         // any band on its edge, and its outward copy for a hairline band. A corner vertex
         // sits on two edges.
@@ -498,6 +519,11 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         const bool back = faceOut * faceEye < 0.0f;
         const bool water = sMsWater[t.x] || sMsWater[t.y] || sMsWater[t.z];
         prims[gtid].cull = back && !water;
+        // the shading rate (the struct says the law): two a side for the open water; a pixel of its own
+        // for foam, a fold, the shore and the land
+        const bool allWater = sMsWater[t.x] && sMsWater[t.y] && sMsWater[t.z];
+        const float need = max(max(sMsNeed[t.x], sMsNeed[t.y]), sMsNeed[t.z]);
+        prims[gtid].rate = (allWater && need < 0.5f) ? 0x5u : 0u;
     }
 
     // Step 23: the coarse vertices of the level bands (five per band, threads 0..19 at most)
@@ -521,5 +547,6 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         const uint3 t = BandTri(bands[e], gtid - bands[e].tbase);
         tris[128u + gtid] = (mirror != (e == 0u || e == 3u)) ? t.xzy : t;
         prims[128u + gtid].cull = false;
+        prims[128u + gtid].rate = 0u;   // a seam band is a sliver: its pixels are its own
     }
 }

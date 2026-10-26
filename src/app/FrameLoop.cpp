@@ -5794,6 +5794,7 @@ void FrameLoop::WalkEye(const Eye& e, const EyeSky& es, bool dome,
         (void)win;     // (the first eye's windows were handed over with SetGates and its table)
         (void)rings;   // (and its rings with SetWaterBank)
         globe->keepOn = m_S.render.keep;
+        globe->vrsOn = m_S.render.vrs;
         globe->keepSunGrainDeg = static_cast<float>(m_S.render.keepSunGrainDeg);
         globe->keepTideGrainM = static_cast<float>(m_S.render.keepTideGrainM);
         globe->SetView(*e.cam, aspect, e.viewH, t);

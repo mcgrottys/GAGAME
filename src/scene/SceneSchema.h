@@ -490,6 +490,11 @@ struct RenderSection {
     // The water's mirror ray marched over the same field: where it meets land the reflection
     // is that land, not the sky behind it. A test (2026-10-15), off until the owner's eye says.
     bool reflectLand = false;
+    // VARIABLE RATE SHADING on the water (2026-10-25; shaders/GlobeMesh.hlsl SV_ShadingRate): the
+    // sea's pixels shared four a side where the pixel's footprint is wider than the chop texture's
+    // texel, two a side nearer; foam, a held fold, the shore and the land keep their pixels. On a
+    // device of tier 2; the A/B is `--set render.vrs=false`.
+    bool vrs = true;
     // THE DRAWN BUILDINGS' SHADOW (shaders/TerrainRay.hlsli SunMapClear; BuildingLayer::RenderSunMap;
     // docs/VISIBILITY_FIELD.md 9): the solids drawn about the eye, seen once more from the sun, a
     // depth map per CELL of the origin lattice -- the eye's ground cell at the finest lattice level

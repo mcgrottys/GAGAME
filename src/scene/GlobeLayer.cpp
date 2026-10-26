@@ -2922,6 +2922,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
     }
 
     // 2) The surface (which marches the sparse cloud bank on its way down).
+    bool vrsSet = false;   // the water's shading rate, set for the mesh path's dispatches and reset after
     if (m_msPath && m_msPso && !meshlets.empty()) {
         // M6j: the unified surface -- meshlet records ride a frame-indexed upload buffer,
         // one DispatchMesh amplifies them from the composed channels.
@@ -2943,6 +2944,10 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
         else if (ResidencyLensOn() && m_msPsoLens) msSel = m_msPsoLens.Get();
         if (cacheLens && m_msPsoCache) msSel = m_msPsoCache.Get();
+        // VARIABLE RATE SHADING (2026-10-25): the water's rate per primitive, the mesh shader's own
+        // (GlobeMesh.hlsl); the shipped pipeline alone, on a device of tier 2 (hal/Context.h).
+        vrsSet = vrsOn && msSel == m_msPso.Get() && !overdrawProbe && ctx.gpu->VrsTier() >= 2u;
+        if (vrsSet) ctx.cmd->ShadingRatePerPrimitive(true);
         ctx.cmd->Pipeline(msSel);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
@@ -3125,6 +3130,8 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                 }
             }
         }
+
+        if (vrsSet) ctx.cmd->ShadingRatePerPrimitive(false);   // every pass after the water shades 1x1
 
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
         // just drawn (SetView chose the slots, farthest first).

@@ -138,6 +138,9 @@ public:
     // 40". 0 when the query failed.
     uint32_t VaBitsPerResource() const { return m_vaBitsPerResource; }
     uint32_t VaBitsPerProcess() const { return m_vaBitsPerProcess; }
+    // Variable rate shading (D3D12_FEATURE_D3D12_OPTIONS6): 0 none, 1 per draw, 2 per primitive and
+    // per screen tile. The globe's water asks tier 2 (CommandContext::ShadingRatePerPrimitive).
+    uint32_t VrsTier() const { return m_vrsTier; }
 
     DescriptorHeap& SrvHeap() { return m_srvHeap; }
     // What the adapter actually has, for budget accounting across banks.
@@ -264,6 +267,7 @@ private:
     Com<ID3D12CommandAllocator> m_alloc[kFrameCount];
     Com<ID3D12GraphicsCommandList> m_cmdList;
     Com<ID3D12GraphicsCommandList6> m_cmdList6;   // the same list, as List6 (M12 step 3f)
+    uint32_t m_vrsTier = 0;                        // VrsTier()
     GpuBuffer m_cbArena[kFrameCount];
     uint64_t m_cbOffset[kFrameCount] = {};
 

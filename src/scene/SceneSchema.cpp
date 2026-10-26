@@ -291,6 +291,10 @@ const Schema& RenderSchema() {
                   "how far the terrain shadow's cast reaches from the lit point", H)
             .Bind("reflectLand", p.reflectLand,
                   "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H)
+            .Bind("vrs", p.vrs,
+                  "variable rate shading on the water: the sea's pixels shared four a side where the pixel's footprint "
+                  "is wider than the chop texture's texel, two a side nearer; foam, a held fold, the shore and the land "
+                  "keep their pixels (a device of tier 2)", H)
             .Bind("buildingShadowM", p.buildingShadowM, Q::Length, "m",
                   "the drawn buildings' shadow maps: the finest map is the eye's cell of the origin lattice at the "
                   "finest level whose cells are no wider than this (0 = the buildings cast no shadow)", H)
