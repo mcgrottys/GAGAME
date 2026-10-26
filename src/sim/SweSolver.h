@@ -537,7 +537,7 @@ private:
     std::vector<uint8_t> m_keep;           // state tiles never released (the boundary's exterior cells)
     double m_releaseS = 1800.0;            // the hysteresis: dry this long, released
     double m_surgeA = 0.0, m_surgePeak = 0.0, m_surgeTau = 3600.0;
-    double m_openSaidT = -1e18;   // the open side's level last said (sim s)
+    double m_openSaidT[4] = {-1e18, -1e18, -1e18, -1e18};   // each side's level last said (sim s)
     uint32_t m_stepBudget = kMaxSubsteps;   // SetStepBudget
     // M9h: grad(flow) -- residency derived from the Cayley closure, not a physics policy.
     GradeBank m_velGrad;

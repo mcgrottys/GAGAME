@@ -1289,8 +1289,8 @@ void SweSolver::OceanBoundary(float tideNavd, float tideRate) {
         // THE OPEN SIDE'S LEVEL, SAID (2026-10-25, the asteroid's arrival drew nothing: an instrument on the
         // path the faces ride): once a sim-minute while the departure stands, which side, the manager's
         // four departures, the surge, and the instant it was asked at.
-        if (m_simTime - m_openSaidT >= 60.0 && (std::fabs(y[0]) > 0.5 || std::fabs(y[3]) > 0.5)) {
-            m_openSaidT = m_simTime;
+        if (m_simTime - m_openSaidT[s] >= 60.0 && (std::fabs(y[0]) > 0.5 || std::fabs(y[3]) > 0.5)) {
+            m_openSaidT[s] = m_simTime;   // per side: one side's line must not silence another's (2026-10-26)
             Log("[swe] open side %d at t=%.0f: the level's departure from the tide plane %+.2f %+.2f %+.2f %+.2f m (surge %+.2f; source %s)",
                 s, m_simTime, y[0], y[1], y[2], y[3], surge, m_levelAt ? "the manager's Level" : "the tide plane");
         }
