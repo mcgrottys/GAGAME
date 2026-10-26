@@ -1308,6 +1308,16 @@ train has entered the Gulf (the bore scene: the 500 m impactor's front enters at
 16:45Z with a 1.5 h spin-up). The bank kernel's far field outside the Merrimack window still draws the
 bounded analytic wave, not the shelf's level: a seam at the window's edge in the drawn sea.
 
+What the bounded take showed (05:30, 2026-10-26): the shelf solver stable (a 1.5 s step, 8 m/s at 450 m of
+water), and the Merrimack's sea side fed ±30 to ±60 m by the train it carried, the four points along the
+face reading a crest crossing obliquely; the Merrimack solver answering with 90 m of water in the inlet and
+190 m/s at its front. The picture from 80 m over the jetty does not yet read as a rolling wave: the sea
+rises and falls as a whole under a fixed eye with a five-minute period, the ordinary swell's striations
+dominate the sheet at that height, and the bore's throw (a cusp's length, 1/k ≈ 13 m) is a line from
+there; the whitewater shows as patches. The eye for the roll is a few metres over the bar in the seconds
+the face arrives, with the column plane at ring 0 under it — a rail timed to the train's crests, which the
+instrument now prints a minute apart. The physics of the rung is in place.
+
 ### 13.7 What is not in this rung, stated
 
 * One depth for the propagation (the dispersion's h0): the shelf's slower speed and its refraction
