@@ -1489,6 +1489,18 @@ the chain's reduction for h (the fold is a sum over the fine cells' water: `Buil
 coarse mips must be written by the solver's own fold, stage 1), and a frontier cell's departure beyond
 the tide plane (the impact's, the shelf's: stage 3 makes them the field's own).
 
+**Stage 1a, built (2026-10-26): the coarse twin.** Every per-cell bank carries the chain's mip 1 and the
+same kernels step the same lattice at mip 1 -- cells twice the size, the whole box resident (35 tiles),
+its own constants (the lattice halved, the faces' runs halved, the cell steps about the same anchor), its
+own lists and views (the twin's tables read the same height page: without those two SRV slots the bed fill
+wrote zeros, the first probe's lesson), half as many steps of twice the size over mip 0's interval (the
+subcycling), uncoupled from mip 0. Gate: mip 0's level, u and v byte-identical to the baseline through
+the twin's addition; the twin's level at the anchor against mip 0's, said once a sim-minute through the
+hour of spin-up under the ebb: 2 to 5 cm under mip 0 (its bed from the page's coarse mip is 6 cm deeper;
+its own faces, its own prism). That is the uncoupled coarse solve's discretization, what 1a can show; the
+centimetre gate is the coupled system's (1c, 1d), where the fine solve sets the level inside and the
+coarse only feeds its faces. The twin costs a quarter of mip 0's cells at half its steps.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

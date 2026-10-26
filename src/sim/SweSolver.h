@@ -570,6 +570,26 @@ private:
                              std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
 
     SweCbData m_cb{};
+    // STAGE 1a OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14.4): THE COARSE TWIN. The same
+    // lattice at mip 1 -- cells twice the size, the whole box resident -- stepped by the same kernels
+    // over its own lists with its own constants and views, after mip 0's steps and over the same
+    // interval (half as many steps of twice the size: the subcycling), uncoupled from mip 0 until 1b
+    // (the fold) and 1c (the faces). Its level at the anchor against mip 0's is the gate.
+    bool m_coarse = true;
+    SweCbData m_cb1{};
+    hal::Table m_table1, m_tableB1;
+    std::vector<uint32_t> m_list1, m_fluxList1, m_live1;
+    bool m_coarseFresh = true;   // its tiles' first batch: cleared and reset to the stateless column
+    uint32_t m_velNew1 = 0;
+    double m_probeAt = -1e18, m_probeLat = 0.0, m_probeLon = 0.0;
+    bool m_probeOn = false;
+    void CoarseCb(int n, int n1);
+    void RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool reset);
+    void ProbeCoarse(Gpu& gpu);
+public:
+    // The gate's probe: the level at this place, mip 0 against mip 1, said once a sim-minute (AfterBatch).
+    void SetProbe(double latDeg, double lonDeg) { m_probeLat = latDeg; m_probeLon = lonDeg; m_probeOn = true; }
+private:
     double m_simTime = 0;
     float m_faceDEta[kMaxRiverFaces] = {};   // the faces' target deviations (m)
     float m_faceQ[kMaxRiverFaces] = {};      // their transport targets, m^3/s (+ inward)

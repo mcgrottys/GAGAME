@@ -1512,6 +1512,7 @@ std::optional<int> FrameLoop::Session() {
         if (swe.Ready() && sea) {
             waveField->SetSweCurrent(&swe, sea->sweCurrentGain, sea->sweCurrentRefreshS);
             swe.SetStepBudget(static_cast<uint32_t>(S.water.swe.stepsPerFrame));
+            swe.SetProbe(S.place.anchor[1], S.place.anchor[0]);   // stage 1a's gate: mip 0 against mip 1 at the anchor
         }
         // The owned windows (Boston) step on the frame's list too, when a hull asks them
         // (WaterManager::Simulate), in the sea layer's simulate pass beside the external one.

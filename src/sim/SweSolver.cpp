@@ -222,7 +222,7 @@ void SweSolver::LogCbFingerprint() {
 void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
                        const BedWindow& w) {
     (void)gpu;
-    for (hal::Table* t : {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1]}) {
+    for (hal::Table* t : {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1], &m_table1, &m_tableB1}) {   // stage 1a: the twin's tables read the same page
         t->SrvArray(0, heightArr, heightArr ? heightArr->GetDesc().Format : DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
         t->SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
     }
@@ -347,15 +347,48 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         while (((std::max)(nx, ny) >> d.mipLevels) >= 128u) ++d.mipLevels;
         m_h.Init(gpu, std::move(d), policy::All());
     }
-    m_bed.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.bed (the column's bed, a frame)");
-    m_soil.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.soil (the water the column's soil holds)");
-    m_eta.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.eta (the column's surface less the tide plane)");
-    m_flux.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.flux (signed face fluxes)");
-    m_velA.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.vel (the faces' velocities, one turn)");
-    m_velB.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.vel (the faces' velocities, the other turn)");
-    m_waveA.Init(gpu, nx, ny, DXGI_FORMAT_R16G16B16A16_FLOAT, L"swe.wave (the sea in the columns, one sweep)");
-    m_waveB.Init(gpu, nx, ny, DXGI_FORMAT_R16G16B16A16_FLOAT, L"swe.wave (the sea in the columns, the other)");
-    m_lim.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.lim (a column's share of its outgoing fluxes)");
+    m_bed.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.bed (the column's bed, a frame)", 64, 2);   // stage 1a: the chain's mip 1
+    m_soil.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.soil (the water the column's soil holds)", 64, 2);   // stage 1a: the chain's mip 1
+    m_eta.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.eta (the column's surface less the tide plane)", 64, 2);   // stage 1a: the chain's mip 1
+    m_flux.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.flux (signed face fluxes)", 64, 2);   // stage 1a: the chain's mip 1
+    m_velA.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.vel (the faces' velocities, one turn)", 64, 2);   // stage 1a: the chain's mip 1
+    m_velB.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.vel (the faces' velocities, the other turn)", 64, 2);   // stage 1a: the chain's mip 1
+    m_waveA.Init(gpu, nx, ny, DXGI_FORMAT_R16G16B16A16_FLOAT, L"swe.wave (the sea in the columns, one sweep)", 64, 2);   // stage 1a: the chain's mip 1
+    m_waveB.Init(gpu, nx, ny, DXGI_FORMAT_R16G16B16A16_FLOAT, L"swe.wave (the sea in the columns, the other)", 64, 2);   // stage 1a: the chain's mip 1
+    m_lim.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.lim (a column's share of its outgoing fluxes)", 64, 2);   // stage 1a: the chain's mip 1
+    // STAGE 1a: THE COARSE TWIN'S RESIDENCY -- every tile of mip 1 of every bank, the whole box, mapped once
+    // (a quarter of mip 0's count; stage 2 makes it demand's). Its lists and live words follow.
+    {
+        const auto mapAll = [&](TileAtlas2D& b) {
+            for (uint32_t ty = 0; ty < b.TilesY(1); ++ty) {
+                for (uint32_t tx = 0; tx < b.TilesX(1); ++tx) b.RequestMap(1, tx, ty);
+            }
+            b.CommitMappings(gpu, nullptr);
+        };
+        mapAll(m_h.Atlas());
+        for (TileAtlas2D* b : {&m_bed, &m_soil, &m_eta, &m_flux, &m_velA, &m_velB, &m_waveA, &m_waveB, &m_lim}) mapAll(*b);
+        m_list1.clear();
+        for (uint32_t ty = 0; ty < m_h.Atlas().TilesY(1); ++ty) {
+            for (uint32_t tx = 0; tx < m_h.Atlas().TilesX(1); ++tx) m_list1.push_back(ty * m_h.Atlas().TilesX(1) + tx);
+        }
+        m_fluxList1.clear();
+        for (uint32_t ty = 0; ty < m_flux.TilesY(1); ++ty) {
+            for (uint32_t tx = 0; tx < m_flux.TilesX(1); ++tx) m_fluxList1.push_back(ty * m_flux.TilesX(1) + tx);
+        }
+        m_live1.assign(m_list1.size(), 1u);
+        m_coarseFresh = true;
+        uint32_t resH = 0, resB = 0;
+        for (uint32_t ty = 0; ty < m_bed.TilesY(1); ++ty) {
+            for (uint32_t tx = 0; tx < m_bed.TilesX(1); ++tx) {
+                resH += m_h.Atlas().IsResident(1u, tx, ty) ? 1u : 0u;
+                resB += m_bed.IsResident(1u, tx, ty) ? 1u : 0u;
+            }
+        }
+        Log("[swe] stage 1a: after the mapping, mip 1 resident: the water %u, the bed %u of %u tiles (refused %u / %u)",
+            resH, resB, m_bed.TilesX(1) * m_bed.TilesY(1), m_h.Atlas().RefusedMaps(), m_bed.RefusedMaps());
+        Log("[swe] stage 1a: the coarse twin at mip 1 -- %u x %u tiles of the water (%u standard mips of %u), %u of the fluxes (%u standard mips), the whole box",
+            m_h.Atlas().TilesX(1), m_h.Atlas().TilesY(1), m_h.Atlas().StandardMips(), m_h.Atlas().MipCount(), static_cast<unsigned>(m_fluxList1.size()), m_flux.StandardMips());
+    }
     {
         // M9h: grad(flow). The first field here whose residency comes from the ALGEBRA rather
         // than from a physics policy. grad is a grade-1 operator and the flow is grade 1, so
@@ -702,6 +735,26 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                                      L"swe.tilestats (the water, tile by tile)");
     m_ledgerTex = gpu.CreateTexture2D(1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"swe.ledger (in through the open faces)");
+    // STAGE 1a: the coarse twin's tables -- the same slots, every per-cell bank's view at MIP 1 (the uv and
+    // gradient banks stay mip 0's: the derive does not run at mip 1; stats and ledger likewise unused there)
+    for (int k = 0; k < 2; ++k) {
+        hal::Table& t = k ? m_tableB1 : m_table1;
+        t = hal::Table::Alloc(gpu, 16, "swe.mip1");
+        t.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+        t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.Uav2D(6, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(7, (k ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+        t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(9, m_soil.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(10, (k ? m_velA : m_velB).Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+        t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+        t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+        t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+    }
     for (hal::Table* t : {&m_table, &m_tableB}) {
         t->Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
         t->Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
@@ -1030,6 +1083,7 @@ void SweSolver::SeaBoundary() {
 
 void SweSolver::AfterBatch(Gpu& gpu) {
     if (!m_ready || !m_testH.empty()) return;
+    ProbeCoarse(gpu);
     GpuTexture wrap = m_statsTex;
     wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     uint32_t pitch = 0;
@@ -1252,6 +1306,123 @@ void SweSolver::Volumes(Gpu& gpu, double& columns, double& soil, std::vector<flo
 // THE STATELESS COLUMN (a reset: the spin-up's first instant, a scrub): each column refills to the
 // water the tide plane stands over it and is still. Recorded inside Record, after the bed is cached
 // and with its root and table bound.
+// STAGE 1a: the coarse twin's constants from mip 0's -- the lattice halved, the cell doubled, the faces'
+// runs halved, the cell steps about the same anchor (the coarse cell's centre is its two fine cells'
+// midpoint), its step the interval over its own count (n1 = n / 2 steps of twice the size: the CFL
+// scales with the cell). The waves' push is off at mip 1 (its banks are not swept there).
+void SweSolver::CoarseCb(int n, int n1) {
+    m_cb1 = m_cb;
+    m_cb1.nx = (m_cb.nx + 1u) / 2u;
+    m_cb1.ny = (m_cb.ny + 1u) / 2u;
+    m_cb1.etaTilesX = m_h.Atlas().TilesX(1);
+    m_cb1.fluxTilesX = m_flux.TilesX(1);
+    m_cb1.listCount = static_cast<uint32_t>(m_list1.size());
+    m_cb1.dx = 2.0f * m_cb.dx;
+    m_cb1.dy = 2.0f * m_cb.dy;
+    m_cb1.dt = (n1 > 0) ? (float(n) * m_dt) / float(n1) : m_dt;
+    for (int f = 0; f < kMaxRiverFaces; ++f) {
+        m_cb1.faceA[4 * f + 1] = std::floor(m_cb.faceA[4 * f + 1] * 0.5f);
+        m_cb1.faceA[4 * f + 2] = std::floor(m_cb.faceA[4 * f + 2] * 0.5f);
+    }
+    m_cb1.cellX[1] = 2.0f * m_cb.cellX[1];
+    m_cb1.cellX[3] = 2.0f * m_cb.cellX[3];
+    m_cb1.cellX[0] = static_cast<float>((0.5 - 0.5 * double(m_cb1.nx)) * double(m_cb1.cellX[1]));
+    m_cb1.cellX[2] = static_cast<float>((0.5 * double(m_cb1.ny) - 0.5) * double(-m_cb1.cellX[3]));
+    m_cb1.sea[3] = 0.0f;
+}
+
+void SweSolver::RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool reset) {
+    PixScope scope(cmd.Native(), "swe.mip1 (the coarse twin)");
+    const int n1 = (std::max)(1, n / 2);
+    CoarseCb(n, n1);
+    if (m_coarseFresh) {
+        Log("[swe] stage 1a: the twin's first batch -- %d fine steps of %.3f s, %d coarse of %.3f s; lattice %u x %u, tiles %u across, cell %.2f x %.2f m",
+            n, m_dt, n1, m_cb1.dt, m_cb1.nx, m_cb1.ny, m_cb1.etaTilesX, m_cb1.dx, m_cb1.dy);
+    }
+    cmd.ComputeConstants(0, m_cb1);
+    cmd.ComputeTable(2, m_table1.Base());
+    cmd.ComputeSrvAt(3, gpu.PushConstants(m_live1.data(), m_live1.size() * 4));
+    const D3D12_GPU_VIRTUAL_ADDRESS hl = gpu.PushConstants(m_list1.data(), m_list1.size() * 4);
+    const D3D12_GPU_VIRTUAL_ADDRESS fl = gpu.PushConstants(m_fluxList1.data(), m_fluxList1.size() * 4);
+    const UINT hn = static_cast<UINT>(m_list1.size()), fn = static_cast<UINT>(m_fluxList1.size());
+    if (m_coarseFresh) {   // undefined memory under the new tiles: cleared, then the stateless column
+        cmd.ComputeSrvAt(1, hl);
+        cmd.Pipeline(m_clearTileK.Get());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
+        cmd.ComputeSrvAt(1, fl);
+        cmd.Pipeline(m_clearFlux.Get());
+        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fn);
+        cmd.UavBarriers({m_h.Atlas().Res(), m_soil.Res(), m_eta.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
+        cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
+    }
+    cmd.ComputeSrvAt(1, hl);
+    cmd.Pipeline(m_bedFillK.Get());
+    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
+    cmd.UavBarrier(m_bed.Res());
+    if (reset || m_coarseFresh) {
+        cmd.ComputeSrvAt(1, hl);
+        cmd.Pipeline(m_resetK.Get());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
+        cmd.ComputeSrvAt(1, fl);
+        cmd.Pipeline(m_clearFlux.Get());
+        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fn);
+        cmd.UavBarriers({m_h.Atlas().Res(), m_soil.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
+        cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
+    }
+    m_coarseFresh = false;
+    for (int i = 0; i < n1; ++i) {
+        cmd.ComputeTable(2, (m_velNew1 ? m_tableB1 : m_table1).Base());
+        cmd.ComputeSrvAt(1, fl);
+        cmd.Pipeline(m_fluxK.Get());
+        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fn);
+        cmd.UavBarriers({m_flux.Res(), m_velA.Res(), m_velB.Res()});
+        m_velNew1 ^= 1;
+        cmd.ComputeSrvAt(1, hl);
+        cmd.Pipeline(m_limitK.Get());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
+        cmd.UavBarrier(m_lim.Res());
+        cmd.ComputeSrvAt(1, hl);
+        cmd.Pipeline(m_heightK.Get());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
+        cmd.UavBarrier(m_h.Atlas().Res());
+    }
+}
+
+// THE GATE'S PROBE: the level at the place, mip 0 against mip 1 -- the water and the bed read back at the
+// cell each holds the place in (a drain each, once a sim-minute: an instrument, loud by design).
+void SweSolver::ProbeCoarse(Gpu& gpu) {
+    if (!m_probeOn || !m_coarse || !m_ready || m_coarseFresh) return;   // the twin has stepped
+    if (m_simTime - m_probeAt < 60.0) return;
+    m_probeAt = m_simTime;
+    double tx = 0.0, ty = 0.0;
+    if (!TexelOf(m_probeLat, m_probeLon, tx, ty)) return;
+    const auto readAt = [&](TileAtlas2D& bank, uint32_t mip, uint32_t cx, uint32_t cy, float& out) {
+        GpuTexture wrap;
+        wrap.res = bank.Res();
+        wrap.format = DXGI_FORMAT_R32_FLOAT;
+        wrap.width = bank.TilesX(mip) * bank.TileW();
+        wrap.height = bank.TilesY(mip) * bank.TileH();
+        wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        uint32_t pitch = 0;
+        const std::vector<uint8_t> raw = gpu.ReadbackTexture(wrap, &pitch, mip);
+        const size_t at = size_t(cy) * pitch + size_t(cx) * 4;
+        if (at + 4 > raw.size()) return false;
+        memcpy(&out, &raw[at], 4);
+        return true;
+    };
+    const uint32_t cx0 = uint32_t(std::clamp(tx, 0.0, double(m_cb.nx) - 1.0)), cy0 = uint32_t(std::clamp(ty, 0.0, double(m_cb.ny) - 1.0));
+    const uint32_t cx1 = cx0 / 2u, cy1 = cy0 / 2u;
+    float h0 = 0.0f, b0 = 0.0f, h1 = 0.0f, b1 = 0.0f;
+    if (!readAt(m_h.Atlas(), 0, cx0, cy0, h0) || !readAt(m_bed, 0, cx0, cy0, b0) ||
+        !readAt(m_h.Atlas(), 1, cx1, cy1, h1) || !readAt(m_bed, 1, cx1, cy1, b1)) {
+        return;
+    }
+    const float e0 = b0 + h0, e1 = b1 + h1;
+    Log("[swe] stage 1a at %.4f N %.4f E, t=%.0f: mip 0 level %+.3f m (h %.2f over bed %.2f), mip 1 level %+.3f m (h %.2f over bed %.2f): "
+        "the twin differs by %+.3f m (the tide plane %+.3f)",
+        m_probeLat, m_probeLon, m_simTime, e0, h0, b0, e1, h1, b1, e1 - e0, m_cb.tideNavd);
+}
+
 void SweSolver::RecordReset(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS hList, UINT hCount,
                             D3D12_GPU_VIRTUAL_ADDRESS fList, UINT fCount) {
     PixScope scope(cmd.Native(), "swe.reset (each column -> the stateless column)");
@@ -1483,6 +1654,13 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         cmd.UavBarrier(m_h.Atlas().Res());
     }
     m_simTime += n * m_dt;
+
+    // STAGE 1a: the coarse twin steps the same interval at mip 1, then mip 0's constants and lists return
+    if (m_coarse && m_testH.empty() && n > 0) {
+        RecordCoarse(cmd, gpu, n, reset);
+        cmd.ComputeConstants(0, m_cb);
+        cmd.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
+    }
 
     cmd.ComputeTable(2, m_table.Base());
     cmd.ComputeSrvAt(1, hlVa);
