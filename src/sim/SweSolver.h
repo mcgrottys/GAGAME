@@ -306,7 +306,7 @@ public:
                m_velA.ResidentCount() + m_velB.ResidentCount();
     }
     uint64_t ResidentBytes() const {
-        return m_h.ResidentBytes() + m_bed.ResidentBytes() + m_eta.ResidentBytes() + m_flux.ResidentBytes() +
+        return m_h.Atlas().ResidentBytes() + m_bed.ResidentBytes() + m_eta.ResidentBytes() + m_flux.ResidentBytes() +
                m_velA.ResidentBytes() + m_velB.ResidentBytes();
     }
     // The domain's wet area (m^2) at a level L: the cells whose spill level is under it (Init's priority
@@ -505,7 +505,12 @@ private:
     // C1: THE STATE -- the water each column holds (m_h), its bed cached a frame (m_bed), the faces'
     // velocities (m_velA and m_velB take turns: the advection reads the substep before), the soil's
     // water (m_soil, C2). m_flux holds each substep's fluxes. Every bank covers m_h's tiles.
-    TileAtlas2D m_h, m_bed, m_soil, m_velA, m_velB;
+    // STAGE 0 OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): the column field is a GradeBank
+    // -- grade 0, the water each column holds -- with the chain's mips in the one reserved resource
+    // (unbuilt at stage 0: mip 0 is today's window, byte for byte). The discharge (grade 1) joins it when
+    // the staggered faces are the vector's own home (stage 1); until then the faces' banks below.
+    GradeBank m_h;
+    TileAtlas2D m_bed, m_soil, m_velA, m_velB;
     // C4: the sea in the columns, two banks taking turns sweep by sweep (Swe.hlsl CsSweWaves); the solve
     // reads m_waveB, where an even number of sweeps ends. m_waveTable[0] writes A from B, [1] B from A.
     TileAtlas2D m_waveA, m_waveB;

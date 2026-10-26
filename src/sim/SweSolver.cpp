@@ -334,7 +334,19 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     // The banks over the bathy grid, padded up to tile multiples internally by the atlas. C1: the state
     // is the water each column holds and the fluxes (two banks, taking turns); the bed is cached a
     // frame; the published surface is what the readers read.
-    m_h.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.h (the water each column holds)");
+    {
+        // THE COLUMN FIELD (stage 0, WATER_V2.md 14): a GradeBank of grade 0 with the chain's mips in the
+        // one reserved resource -- as many as take the extent down to one tile; stage 0 fills mip 0 alone.
+        GradeBankDesc d;
+        d.name = "swe.h (the water each column holds)";
+        d.width = nx;
+        d.height = ny;
+        d.fmt = DXGI_FORMAT_R32_FLOAT;
+        d.gradeSig = kG0;
+        d.mipLevels = 1;
+        while (((std::max)(nx, ny) >> d.mipLevels) >= 128u) ++d.mipLevels;
+        m_h.Init(gpu, std::move(d), policy::All());
+    }
     m_bed.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.bed (the column's bed, a frame)");
     m_soil.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.soil (the water the column's soil holds)");
     m_eta.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.eta (the column's surface less the tide plane)");
@@ -678,7 +690,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         // Texture2D view of an array resource is invalid, and the solve would write nowhere.
         t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);   // M9ax: uv bank
         t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
-        t.Uav2D(6, m_h.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(6, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(7, (k ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
         t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(9, m_soil.Res(), DXGI_FORMAT_R32_FLOAT);
@@ -705,7 +717,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         t.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
         t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
         t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
-        t.Uav2D(6, m_h.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(6, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(7, m_velA.Res(), DXGI_FORMAT_R32G32_FLOAT);
         t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(9, m_soil.Res(), DXGI_FORMAT_R32_FLOAT);
@@ -1206,7 +1218,7 @@ void SweSolver::Volumes(Gpu& gpu, double& columns, double& soil, std::vector<flo
         }
     };
     std::vector<float> h, w, bed;
-    readR32(m_h, h);
+    readR32(m_h.Atlas(), h);
     readR32(m_soil, w);
     readR32(m_bed, bed);
     // the exterior cells are the boundary's (pinned), not the domain's: the kernel's test (Swe.hlsl
@@ -1256,7 +1268,7 @@ void SweSolver::RecordReset(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS 
     cmd.Pipeline(m_uvClear.Get());
     cmd.Dispatch((m_cb.nx + 15) / 16, (m_cb.ny + 15) / 16, 1);
 
-    cmd.UavBarriers({m_h.Res(), m_soil.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
+    cmd.UavBarriers({m_h.Atlas().Res(), m_soil.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
     cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res(), m_uvBank.Res()});
 }
 
@@ -1402,7 +1414,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     cmd.ComputeConstants(0, m_cb);
     cmd.ComputeTable(2, m_table.Base());
     cmd.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
-    const auto& hl = m_testH.empty() ? m_h.ResidentList() : m_testH;
+    const auto& hl = m_testH.empty() ? m_h.Atlas().ResidentList() : m_testH;
     const auto& fl = m_testF.empty() ? m_flux.ResidentList() : m_testF;
     const D3D12_GPU_VIRTUAL_ADDRESS hlVa = gpu.PushConstants(hl.data(), hl.size() * 4);
     const D3D12_GPU_VIRTUAL_ADDRESS flVa = gpu.PushConstants(fl.data(), fl.size() * 4);
@@ -1419,7 +1431,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
             cmd.Pipeline(m_clearFlux.Get());
             cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(m_freshF.size()));
         }
-        cmd.UavBarriers({m_h.Res(), m_soil.Res(), m_eta.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
+        cmd.UavBarriers({m_h.Atlas().Res(), m_soil.Res(), m_eta.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
         cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
         m_freshH.clear();
         m_freshF.clear();
@@ -1468,7 +1480,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         cmd.ComputeSrvAt(1, hlVa);
         cmd.Pipeline(m_heightK.Get());
         cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
-        cmd.UavBarrier(m_h.Res());
+        cmd.UavBarrier(m_h.Atlas().Res());
     }
     m_simTime += n * m_dt;
 
@@ -1517,7 +1529,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
 
     char s[96];
     snprintf(s, sizeof(s), "swe %ut %.0f/%.0fMB %dss", ResidentTiles(), ResidentBytes() / 1048576.0,
-             (m_h.VirtualBytes() + m_bed.VirtualBytes() + m_eta.VirtualBytes() + m_flux.VirtualBytes() +
+             (m_h.Atlas().VirtualBytes() + m_bed.VirtualBytes() + m_eta.VirtualBytes() + m_flux.VirtualBytes() +
               m_velA.VirtualBytes() + m_velB.VirtualBytes()) / 1048576.0, n);
     stats = s;
     return n;
@@ -1570,7 +1582,7 @@ bool SweSolver::TraceFace(Gpu& gpu, std::vector<FaceRow>& rows) {
         m_faceTable.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
         m_faceTable.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
         m_faceTable.Uav2D(6, m_faceTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-        m_faceTable.Uav2D(7, m_h.Res(), DXGI_FORMAT_R32_FLOAT);
+        m_faceTable.Uav2D(7, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT);
         m_faceTable.Uav2D(9, m_bed.Res(), DXGI_FORMAT_R32_FLOAT);
         m_faceTable.Uav2D(10, m_soil.Res(), DXGI_FORMAT_R32_FLOAT);
     }
@@ -1925,12 +1937,12 @@ bool SweSolver::RunSchemeTests(Gpu& gpu) {
             Record(up, gpu, m_simTime, level, 0);
             gpu.EndUpload();
         }
-        readR32(m_h, h0);
+        readR32(m_h.Atlas(), h0);
         readR32(m_bed, bed);
         const double t0 = m_simTime;
         const auto zero = [](int, double) { return 0.0; };
         AdvanceTo(gpu, t0 + seconds, [level](double) { return double(level); }, zero, zero);
-        readR32(m_h, h1);
+        readR32(m_h.Atlas(), h1);
         elapsed = m_simTime - t0;
     };
     const auto at = [&](int i, int j) { return size_t(j) * m_cb.nx + size_t(i); };
@@ -2141,7 +2153,7 @@ bool SweSolver::RunSchemeTests(Gpu& gpu) {
         m_dt = 0.15f;
         for (int k = 0; k < 300; ++k) {
             AdvanceTo(gpu, t0 + 2.0 * (k + 1), [](double) { return 0.0; }, zero, zero);
-            readR32(m_h, h1);
+            readR32(m_h.Atlas(), h1);
             for (int i = x0; i < x0 + side; ++i) {
                 const size_t c = at(i, jm);
                 if (h1[c] > m_cb.wetEps) runup = (std::max)(runup, double(bed[c]) + double(h1[c]));
