@@ -1473,6 +1473,22 @@ the waves' push, the churn, the bank and its column plane, the crest law and the
 
 Stage 0 is the one that proves the shape without changing a picture; it is where to start.
 
+**Stage 0, built (2026-10-26).** 0a: `SweSolver::m_h`, the water each column holds, is a `GradeBank` of
+grade 0 with as many mips as take the extent to one tile, in the one reserved resource; stage 0 fills
+mip 0 alone and the kernels run over its resident list as they did. 0b: the kernel's exterior is
+RESIDENCY'S EDGE, not the lattice's edge row -- `ExteriorLevel` answers for any cell no state tile holds
+(the tide plane as its level, the megatexture's bed as its sill in `FlatherFlux`), while the edge rows
+keep the side's cubic and the rivers' faces. The gate: `--dump-water-state` on the bar scene under the
+storm, 60 frames, before and after each half -- level, u, v and the shadow IDENTICAL byte for byte
+through both (the bed dump differs between any two runs: it reads the height stack at the dump's
+instant, 56,538 of 126,000 texels by up to 4.3 m, the loads' race). On this scene no live cell borders a
+NULL tile under its own surface, so the frontier never spoke; it is the law stage 2 extends the
+resident set against. Not in stage 0: the discharge as grade 1 in the same bank (the staggered faces are
+its home; stage 1 decides whether the vector lives on faces or at centres with a face reconstruction),
+the chain's reduction for h (the fold is a sum over the fine cells' water: `BuildChain` averages, so the
+coarse mips must be written by the solver's own fold, stage 1), and a frontier cell's departure beyond
+the tide plane (the impact's, the shelf's: stage 3 makes them the field's own).
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

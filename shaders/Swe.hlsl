@@ -241,6 +241,17 @@ bool ExteriorLevel(int2 e, out float etaX, out float uExt) {
         uExt = gOceanU;
         return true;
     }
+    // THE FRONTIER (stage 0b of one water on the tree, docs/WATER_V2.md 14; 2026-10-26): wherever the
+    // resident set ends, at whatever cell, the neighbour is the stateless sea -- the tide plane over the
+    // megatexture's bed (FlatherFlux reads that bed for a cell no state tile holds). The lattice's edge
+    // rows keep their law above (the side's cubic, the rivers' faces); this is the same Flather, standing
+    // at residency's edge instead of the box's. A NULL tile whose bed stands over the tide takes nothing,
+    // as before; one under it is open sea.
+    if (!LiveAt(e)) {
+        etaX = gTideNavd;
+        uExt = 0.0f;
+        return true;
+    }
     return false;
 }
 
@@ -501,7 +512,9 @@ static float4 gWtCells = 0.0f;  // the exterior cell's surface less the tide pla
 float2 FlatherFlux(int f, float etaX, float uExt, int2 e, int2 i, float L) {
     const float hI = HAt(i);
     const float etaI = SurfaceAt(i);
-    const float sill = max(BedC(e), BedC(i));
+    // the exterior's bed: the cached one where a state tile holds it, the megatexture's at the frontier
+    const float bedE = LiveAt(e) ? BedC(e) : BedAt(e);
+    const float sill = max(bedE, BedC(i));
     const float hf = max(max(etaX, etaI) - sill, 0.0f);
     float q = 0.0f;
     if (hf > 0.05f) {
