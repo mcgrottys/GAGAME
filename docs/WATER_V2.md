@@ -1248,7 +1248,19 @@ no event has begun.
   event at 130× first: the solver's step collapsed to nothing at that surge (a face velocity of 92 km/s
   in the log; the same event at 30× it survived at 350 m/s) and the record ended on a dry shore.
 
-### 13.5 What is not in this rung, stated
+### 13.5 The rolling wave on the coast (Mark, 2026-10-26: "if the impact is big enough")
+
+A surge's front over the marsh is a BORE: a hydraulic jump marching inland. Two things make it a wave to
+the eye, its whitewater and its face. The whitewater is one law (`Breaking.hlsli` BoreFoam): Belanger's
+jump from a column h1 to a column h2 loses the head (h2 − h1)³ / (4 h1 h2), and against the deeper
+column's own head that loss is the share of the water's energy turned to turbulence — nought at a tide's
+creep (Δh³ over metres of water), whole at a surge's wetting front. The bank kernel reads the solver's
+columns a cell behind and a cell ahead along the flow and takes that fraction into the foam, ungated by
+the drawn sea's crests (it is not one of them); the churn remembers it and the pixel stage textures it
+as every foam. The face is the solver's own (its shock spans two or three cells); making it ROLL — the
+column plane's overturn fed by the bore's face as a crest — is the next piece, not this one.
+
+### 13.6 What is not in this rung, stated
 
 * One depth for the propagation (the dispersion's h0): the shelf's slower speed and its refraction
   (rung 2, the eikonal per frequency) are not here; the arrival at Newburyport is the deep-water

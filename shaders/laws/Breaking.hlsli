@@ -70,4 +70,17 @@ inline real TroughBound(real dy, real depth) {
     return -colD * tanh(-dy / colD);
 }
 
+// THE BORE'S WHITEWATER (2026-10-26, the asteroid's surge over the marsh; Mark: "a rolling wave on the
+// coast if the impact is big enough"). A hydraulic jump from a column h1 to a column h2 loses the head
+// (h2 - h1)^3 / (4 h1 h2) (Belanger's jump); against the deeper column's own head h2 that loss is the
+// share of the water's energy turned to turbulence at the front -- the whitewater. Nought at a tide's
+// creep (dh^3 over metres of water), whole at a surge's wetting front (h1 the wet depth, h2 the bore).
+// One law, the jump's dissipation fraction, saturated; read in the bank kernel from the solver's
+// columns a cell behind and a cell ahead along the flow.
+inline real BoreFoam(real hAhead, real hBehind) {
+    const real a = max(hAhead, 1e-3), b = max(hBehind, 1e-3);
+    const real dh = max(b - a, 0.0);
+    return saturate(dh * dh * dh / (4.0 * a * b * b));
+}
+
 #endif

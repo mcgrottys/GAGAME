@@ -602,6 +602,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     }
     float lvl = level + impactEta;
     float2 cur = 0.0f;
+    float boreFoam = 0.0f;   // the solver's front's whitewater (laws/Breaking.hlsli BoreFoam), into the foam below
     // The solver is read where the texel's GROUND lies in its chart (PHASE C1: the domain's planes at
     // the point the windows' chain is given); the planes give the cell.
     if (gSvO.z > 0.0f && t.pointA.w != 0.0f && SolverDen(pT) > 0.0f) {
@@ -614,6 +615,19 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             lvl = lerp(level + impactEta, gSweB.x + dEta, wDom);
             const float4 s = LoadBilinearClamp(gSlotsB.x, texel, gSweDims.xy);
             if (s.w > 0.5f) cur = s.xy;
+            // THE BORE'S WHITEWATER (2026-10-26): the columns a cell behind and a cell ahead along the flow
+            // (the solver's current, east and north; the page's rows run south, so the texel step flips v),
+            // and the jump between them is the front's (BoreFoam). A surge's wetting front is whole white;
+            // a tide's creep is nought.
+            if (s.w > 0.5f && dot(s.xy, s.xy) > 1e-4f) {
+                const float2 fd = normalize(float2(s.x, -s.y));
+                const int2 dims = int2(gSweDims.xy) - int2(1, 1);
+                const int2 tA = clamp(int2(floor(texel - fd)), int2(0, 0), dims);   // behind the flow: the bore
+                const int2 tB = clamp(int2(floor(texel + fd)), int2(0, 0), dims);   // ahead of it: the shallow
+                const float hBehind = max(gT[gSlotsB.x][tA].z, 0.0f);
+                const float hAhead = max(gT[gSlotsB.x][tB].z, 0.0f);
+                boreFoam = BoreFoam(hAhead, hBehind) * wDom;
+            }
         }
     }
     // --flat-bed: substitute a constant floor AFTER every real sample, so the only thing that
@@ -1259,6 +1273,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const float depthFoam = smoothstep(gFoamB.y, gFoamB.z, excess);
     const float crest = smoothstep(gFoamA.w, gFoamB.x, d.y / max(envRms, 1e-3f));
     float foam = saturate(max(steepFoam, max(depthFoam, blockFoam)) * crest);
+    foam = max(foam, boreFoam);   // the solver's front's whitewater, ungated: it is not a crest of the drawn sea
 
     // M7e/M8: THE FOAM MEMORY. The churn atlas remembers where water has been aerated
     // (breaking deposits advected by the solved current -- the seaward streaks off an
