@@ -2,10 +2,12 @@
   "_readme": [
     "THE BORE AT THE MOUTH (2026-10-26, Mark: \"a rolling wave on the coast\"). A 500 m impactor 800 km off the Merrimack (40.5 N 63 W;",
     "a 1 km one there swung the sea side -110 to +130 m and swallowed the eye; Ward & Asphaug's 1950 DA stood at 35 N 70 W), the eye",
-    "80 m over the north jetty's tip looking out to sea, from 16:02Z through the arrival at 30x: the sea drains off the bar, then the",
-    "surge comes over it into the standing water of the inlet as a BORE, and the bank kernel feeds its face to the crest law (the cusp,",
-    "the roller, the flight where the bed is steep), the column plane folds where the labels overtake, its whitewater Belanger's.",
-    "The mid-Atlantic 1 km event's rise here was minutes long and showed no face; the bore wants a front that is steep at the shore.",
+    "to sea, 80 m up, from 16:45Z through the arrival at 30x. THE SHELF RUNG (section 6's rung 2): a second solver window over the",
+    "Gulf of Maine (`solvers`: 1600 x 1150 cells of ~260 m, the stack's coarse tier its bed, Boston's station its tide: the one near with a NAVD88 link) takes the",
+    "impact's level at its open sea by the same law and carries the train across the Gulf in nonlinear shallow water until its crests",
+    "shock; the Merrimack window's faces read the shelf's level (WaterManager::OwnedLevelAt), and the bore comes over the bar into the",
+    "standing water of the inlet. The bank kernel feeds its face to the crest law, the column plane folds where the labels overtake,",
+    "its whitewater is Belanger's. Without the shelf the train reached the window as kilometre-long gentle rises (2026-10-26).",
     "",
     "Record:  build\bin\\gagame.exe scenes\\demos\\impact_bore.json --mp4 out\review\\impact\\impact_bore.mp4"
   ],
@@ -15,7 +17,7 @@
     "view": "jetty"
   },
   "time": {
-    "start": "2026-08-28T16:02:00Z",
+    "start": "2026-08-28T16:45:00Z",
     "timeScale": 30
   },
   "impacts": [
@@ -34,7 +36,8 @@
   "water": {
     "swe": {
       "currentRefreshS": 1000000,
-      "stepsPerFrame": 256
+      "stepsPerFrame": 256,
+      "spinupH": 1.5
     }
   },
   "views": [
@@ -59,5 +62,19 @@
     "headless": true,
     "frames": 1200,
     "railDir": "out/rail_impact_bore"
-  }
+  },
+  "solvers": [
+    {
+      "name": "gulf_of_maine",
+      "box": [
+        -70.95,
+        41.75,
+        -66.0,
+        44.6
+      ],
+      "nx": 1600,
+      "ny": 1150,
+      "station": "8443970"
+    }
+  ]
 }

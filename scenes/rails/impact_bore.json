@@ -1,5 +1,5 @@
 {
-  "_readme": "The bore at the mouth (scenes/demos/impact_bore.json): 80 m over the north jetty's tip looking out to sea (the base's `sea` view turned seaward) for 28 s, then back and up. 40 s at 30 fps = 20 min at 30x, from 16:02Z, the 500 m impactor 800 km out.",
+  "_readme": "The bore at the mouth (scenes/demos/impact_bore.json): 80 m over the north jetty's tip looking out to sea for 28 s, then back and up. 40 s at 30 fps = 20 min at 30x, from 16:45Z, the 500 m impactor 800 km out carried across the Gulf of Maine by the shelf window.",
   "name": "impact_bore",
   "tower": false,
   "poses": [],

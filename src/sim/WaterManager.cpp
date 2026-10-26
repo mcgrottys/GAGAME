@@ -105,18 +105,41 @@ bool WaterManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
         w.owned->Init(gpu, sc, shaderDir, dom, cfg);
         LogWindowHoldsWater(w.owned->Domain(), cfg, "on activation: on the CPU bed, the stack at the cells");
         w.owned->SetBed(gpu, m_hgtArr, m_hgtRes, m_hgtMips, m_bed);   // PHASE B2: the standing window
-        if (m_atlas) {   // C1: the open sea rides the manager's Level
+        if (m_atlas) {   // C1: the open sea rides the manager's Level -- the atlas, and the departure given (the asteroid's wave)
             const WaterAtlas* atlas = m_atlas;
-            w.owned->SetLevelSource([atlas](double la, double lo, double t) {
-                return atlas->Ready() ? atlas->MslNavd(la, lo) + atlas->Level(la, lo, t) : NAN;
+            std::function<double(double, double, double)> dep = m_levelDep;
+            w.owned->SetLevelSource([atlas, dep](double la, double lo, double t) -> double {
+                if (!atlas->Ready()) return std::nan("");
+                const double tide = atlas->MslNavd(la, lo) + atlas->Level(la, lo, t);
+                return dep ? tide + dep(la, lo, t) : tide;
             });
         }
+        if (m_stepBudget) w.owned->SetStepBudget(m_stepBudget);
         w.solver = w.owned.get();
         w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, w.faceAt, w.faceQAt);
         w.active = true;
         // No mirror read here: the window's mirror fills on the first RefreshMirrorsTo (the
         // probe harness calls it right after Update); the camera-rule activation in the
         // loop has no reader to fill it for.
+        return true;
+    }
+    return false;
+}
+
+void WaterManager::RequestRegionOwned(double latDeg, double lonDeg, double radiusM) {
+    for (Window& w : m_windows) {
+        if (!w.active || !w.owned || !w.solver || !w.solver->Ready()) continue;
+        w.solver->RequestRegion(latDeg, lonDeg, radiusM);
+    }
+}
+
+bool WaterManager::OwnedLevelAt(double latDeg, double lonDeg, double unixT, double& level) const {
+    for (const Window& w : m_windows) {
+        if (!w.active || !w.owned || !w.solver || !w.solver->Ready()) continue;
+        if (!w.solver->Domain().Holds(latDeg, lonDeg)) continue;
+        SweSolver::Deviation d;
+        if (!w.solver->DeviationAt(latDeg, lonDeg, d)) continue;
+        level = w.oceanAt(unixT) + double(d.dEta);
         return true;
     }
     return false;

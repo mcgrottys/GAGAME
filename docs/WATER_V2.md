@@ -1281,7 +1281,34 @@ and the train's crests reach its faces as long gentle rises. The rolling face wa
 Gulf of Maine at 250 m, section 6's rung 2) carrying the train in nonlinear shallow water until its
 crests shock, and the window's faces fed by that. The mechanism at the face is ready for it.
 
-### 13.6 What is not in this rung, stated
+### 13.6 The shelf rung (2026-10-26, Mark: "build the shelf rung")
+
+Section 6's rung 2, as the engine already had the pieces: a second solver window over the Gulf of Maine
+(`solvers` in the scene: 1600 × 1150 cells of ~260 m from 41.75 N to 44.6 N, 71 W to 66 W, the entrance
+station's tide), asleep until the eye comes under 30 km inside its box, its bed the one height tree at its
+own level (Mark: "coarse and fine heights should be part of the same mega mega-texture" — the standing
+window where the page holds its cells, the tree's coarser levels elsewhere; no second bed, no coarse cache
+of its own; the bed before the water, as finding 48 has it). Its open sea rides the atlas plus the
+asteroid's wave by Green's law to the depth there (`WaterManager::SetLevelDeparture`), unbounded: at the
+Gulf's mouth that is ×2 of the deep wave over 200 m of water, and from there the solver's own nonlinear
+shallow water carries the train 120 km across the Gulf, shoaling and steepening it. The Merrimack window's
+faces read the shelf's level (`WaterManager::OwnedLevelAt`, from a region about the window the frame loop
+asks for every frame; a demanded owned window steps on the frame), the analytic wave only where no shelf
+answers. One-way nesting, level alone (no transport yet). The owned solver takes the scene's step budget.
+
+Its faces take the BOUNDED law (the shore's saturation): the box's landward sides cut coastal water, and
+Green's law unbounded into a few metres of depth forced those faces by ten times the deep wave and blew
+the solver up (820 m/s on 250 m cells; the Merrimack's faces, fed that noise, followed). At the Gulf's
+mouth, 200 m deep, the bound stands far above the wave. Newburyport's station carries no NAVD88 link in
+the tide data, so the window rides Boston's.
+
+Stated: the shelf activates on the first frame, after the Merrimack's own spin-up, which therefore ran on
+the analytic wave; the shelf spins up `water.swe.spinupH` before the start, so a scene starts after the
+train has entered the Gulf (the bore scene: the 500 m impactor's front enters at 15:50Z, the scene starts
+16:45Z with a 1.5 h spin-up). The bank kernel's far field outside the Merrimack window still draws the
+bounded analytic wave, not the shelf's level: a seam at the window's edge in the drawn sea.
+
+### 13.7 What is not in this rung, stated
 
 * One depth for the propagation (the dispersion's h0): the shelf's slower speed and its refraction
   (rung 2, the eikonal per frequency) are not here; the arrival at Newburyport is the deep-water

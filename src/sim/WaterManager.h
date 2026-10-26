@@ -158,6 +158,16 @@ public:
     // Returns the samples taken.
     uint64_t ClaimedMips(const ResidencyManager& res, int hgtTenant, uint64_t hist[16],
                          const char* only = nullptr) const;
+    // THE SHELF RUNG (2026-10-26, docs/WATER_V2.md section 6 rung 2, built for the asteroid's bore): a
+    // dormant window's open sea rides the atlas PLUS this departure (the asteroid's wave by Green's law
+    // to the depth there; the frame loop gives it), its solver takes the scene's step budget, and the
+    // window inside it (the Merrimack) reads its level at the faces: OwnedLevelAt answers from the
+    // newest region an OWNED window holding the point delivered (RequestRegionOwned each frame, answered
+    // on the frame ring), as its tide plane plus its deviation. One-way nesting, level alone.
+    void SetLevelDeparture(std::function<double(double, double, double)> f) { m_levelDep = std::move(f); }
+    void SetStepBudget(uint32_t steps) { m_stepBudget = steps; }
+    void RequestRegionOwned(double latDeg, double lonDeg, double radiusM);
+    bool OwnedLevelAt(double latDeg, double lonDeg, double unixT, double& level) const;
     // Force a dormant window up (the probe harness; interactive uses the camera rule).
     bool Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
                   const char* name, double simUnix);
@@ -238,6 +248,8 @@ private:
         char currentTag[48] = {0};
     };
     static constexpr double kMirrorDt = 2.0;      // a mirror may lag the asking clock this much
+    std::function<double(double, double, double)> m_levelDep;   // SetLevelDeparture
+    uint32_t m_stepBudget = 0;                                  // SetStepBudget (0 = the solver's own)
     void ReadMirrors(Gpu& gpu, double simUnix, double maxAge);
     // A window's lattice as a rectangle of the height page's uv (the pin's, and the bed wait's);
     // false where it does not reach inside the page.
