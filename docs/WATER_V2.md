@@ -1370,6 +1370,109 @@ instrument now prints a minute apart. The physics of the rung is in place.
   capture waits for. The beach scene holds the first current for its length; the cadence is a scene
   value now.
 
+## 14. One water on the tree (2026-10-26, Mark: "big refactor time ... we deviated from the Cayley structure that would allow better water simulations at fine and coarse scale without ad hoc solvers")
+
+### 14.1 The deviation, named
+
+SPARSE_GA.md's own tests: the type IS the algebra (a product's grades from the Cayley table, at compile
+time); a product's residency comes from the Cayley closure, `And(algebra, physics)`; one reserved
+resource with mips, so that ZOOM CHANGES WHICH TILES ARE RESIDENT, NEVER WHICH CODE RUNS; the packed
+tail pinned as the floor a miss cannot fall through. The wave field passed into that structure (stage 2,
+byte-identical). The water's solvers did not:
+
+| piece today | how it deviates |
+|---|---|
+| `SweSolver` on a fixed lat/lon box (`water.swe.box`), its sponge, its Flather faces at the box's edge | a dense window where the tree has levels; the box is a policy, not residency; the open sea is a special case at a line the scene drew |
+| the dormant windows (`solvers`), `AddDormantWindow`, the activation altitude | more boxes, awake by a camera rule, each its own bed binding and tide station |
+| the shelf rung of 13.6: `SetLevelDeparture`, `OwnedLevelAt`, `RequestRegionOwned` | one box nested in another by a level lambda and a per-frame region; level alone; a seam the bank cannot see |
+| the impact's Bessel sum + Green's law at every reader (13.1-13.3) | an analytic law stitched to the solvers at their faces, bounded here and unbounded there, with a second shoaling (Green) the solver would do itself |
+| the bank kernel's level: `lerp(atlas + impact, solver, wDom)` | the stitching, drawn |
+
+Every edge case of 13.4-13.6 (the starving budget, the bound at the coastal edges, the land point's
+Green factor, the spin-up order, the station's datum link, the seam at the window's edge) is a seam
+between two of these. The structure that removes them is the one the rest of the engine already stands
+on: the column field on the tree, one law at every level, residency as the extent.
+
+### 14.2 The object
+
+**The column field.** One `GradeBank` on the planet's tree, mipped, the one reserved resource: per cell
+the water the column holds, h (grade 0), and its discharge, q = h v (grade 1). Two grades in one bank
+(SPARSE_GA.md 7: many GA objects per body; the current-field loader already carries a vector). The bed B
+is the height tree at the same cell (the same mega-texture: "coarse and fine heights should be part of
+the same mega mega-texture"); the level eta = B + h is an EXPRESSION, never stored (`Field<kG0> + Field<kG0>`);
+wet is h > 0, the classifier of 13.4 become the datum itself. A NULL tile is absence: no column there
+holds water the tree knows of, and the stateless sea answers (the tide atlas over the bed); the pinned
+tail guarantees every point resolves.
+
+**The law.** Shallow water in geometric calculus on the column field, written once:
+
+    dh/dt = -div q
+    dq/dt = -div(q q / h) - g h grad(B + h) + F
+
+with grad and div the vector derivative on the tree (`GradExpr<kG0>` is a scalar's gradient; the
+expression algebra already types it), F the forcing (wind stress, the waves' push -div S of 12.3, the
+rivers' discharge as sources at their cells, the soil's intake as a sink). The KERNEL BODY is
+`Swe.hlsl`'s as it is (Stelling & Duinmeijer's momentum advection, the hydrostatic face depth,
+positivity by the donor's water, wetting and drying, the soil), run over the RESIDENT LIST of a mip, as
+every `GradeBank` fill is (a fill dispatches from `ResidentList()`, never over the full domain). The mip
+is the scale: a cell at mip m is 2^m of the finest; its step is its own CFL; a coarse mip takes one step
+while the mip under it takes two (Berger & Oliger's subcycling, the standard of adaptive shallow water:
+GeoClaw, TRITON-G's tree refinement). The same code at every altitude.
+
+**The faces between levels are the tree's own laws** (HIERARCHY.md 4.20, the five relative laws): a
+coarse face bordering fine cells takes the SUM of the fine faces' fluxes (the fold: conservative
+restriction); a fine face bordering a coarse cell reads the coarse state magnified (the magnify law);
+the state of a coarse cell under fine ones is their sum (the fold again, after each fine step). No
+Flather face inside the resident set. The ONE boundary is the frontier of residency, wherever the
+resident set ends, at whatever level, and there the neighbour is the stateless sea: the Flather law
+once, written against the atlas's level and transport at that point. It is the same Flather the window
+has today; what changes is where it stands (the frontier, not a box) and that it is the only one.
+
+**Residency is the extent.** `DeriveDemand` as SPARSE_GA.md 13 has it, `And(algebra, physics)`: the
+algebra bounds where h can be non-zero (a column whose bed stands over the stateless level and holds
+nothing is NULL); the physics says which of the inside is carried at which mip: the eye's demand (fine
+at the inlet, as the tiled atlas asks for texels) and THE WATER'S OWN (a step asks for the cells its
+fluxes will reach next step: 12.3's "residency follows the water", now the law of extent, not a window's
+growth), so a tsunami's front demands its residency ahead of itself at the mip its wavelength needs.
+The pinned tail is the planet's water at the coarsest mips, always resident and always stepping: the
+basin solve is free, and nothing arrives from nowhere.
+
+**The sources are initial conditions and forcing, not solvers.** The impact of 13 becomes the cavity
+IMPOSED on the column field at t0 at the mip its radius needs (R_D over 8 cells), and the law carries
+it; the Bessel sum stays as the dispersive CHECK of the far field (the Hankel law is exact linear
+theory; shallow water is not dispersive: a 10 km cavity's train loses little, a 300 m one's loses the
+dispersion that spreads it; a Boussinesq term is a later grade-2 correction to F, stated, not built).
+Green's law goes: the solver shoals. The tide is the stateless fill and the frontier's exterior. The
+rivers are sources. The events' record (13.2) stays: an event writes its cavity into the field.
+
+**The readers do not change their contract.** The bank kernel, the twin, the hull, the globe read the
+column at the texel's level ("one water, two readers"): h and q where a tile is resident, the stateless
+sea where none is. The `lerp(atlas, solver, wDom)` goes, and the seam with it.
+
+### 14.3 What goes, what stays
+
+Goes: `SweDomain`'s box and sponge, `water.swe.box`, `solvers`, `AddDormantWindow`, the activation
+altitude, `SetLevelDeparture`, `OwnedLevelAt`, `RequestRegionOwned`, `SetLevelSource` as a box's
+exterior (it becomes the frontier's), the impact's readers in the bank kernel and the globe
+(`ImpactRead.hlsli`, `ImpactAt`), Green's law, the shoaling bound, `stepsPerFrame` (a mip's step is
+its CFL; the frame carries the mips it can and the rest starve honestly at the coarsest, never the
+finest), the shelf scene key.
+Stays: `Swe.hlsl`'s flux and update laws, wetting and drying, the soil, the rivers' faces (as sources),
+the waves' push, the churn, the bank and its column plane, the crest law and the bore's face (13.5),
+`ImpactWave` as the source's cavity and the far field's check, the events' record, `laws/`.
+
+### 14.4 Stages, each with its gate (self-tests are a privilege: one run before, one after)
+
+| stage | what | gate |
+|---|---|---|
+| 0 | the column field as a `GradeBank` with mips over today's Merrimack extent; the kernel over the resident list of mip 0 instead of the box; the frontier's Flather at the resident set's edge (which IS the box, today) | the storm rail's `--water-probe` twin match byte for byte against today's window; the bar still |
+| 1 | mip 1 around mip 0 (the surround, the Gulf's near shelf at 2x), the fold and magnify faces between them, subcycling | the tide through the inlet: the anchor's level within a centimetre of today's; the prism by continuity closes |
+| 2 | the extent by demand: the eye's and the water's; the tail pinned and stepping; no `solvers`, no box | Boston Harbor floods with the eye there and no scene key; the wave probe at the Merrimack unchanged |
+| 3 | the impact as the cavity imposed at its mip; the train crosses in the tail's solve | arrival at the Merrimack within 10 % of sqrt(g h) from the Bessel law; amplitude at 2600 km against it within its dispersion |
+| 4 | the bore at the mouth: the front demands its own residency; the eye low over the bar | the clip Mark asked for on 2026-10-26 |
+
+Stage 0 is the one that proves the shape without changing a picture; it is where to start.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);
