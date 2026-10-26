@@ -871,6 +871,31 @@ void CsSweClearTile(uint3 id : SV_DispatchThreadID) {
     gLim[t] = 1.0f;
 }
 
+// STAGE 1b OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): THE FOLD. A coarse cell under four
+// resident fine cells IS their fold -- the water their mean (the column's water per area), the bed their
+// mean (so the level's mean follows), a face's velocity the mean of the two fine faces that lie on it (the
+// flux-weighted fold, by the faces' water, is 1c's). Dispatched over the coarse tiles whose four children
+// are resident, with the twin's constants and the FOLD TABLE: gH, gBedC and gVelPrev are the fine banks at
+// mip 0 (read), gEta, gSoilW and gFlux the water, the bed and the twin's read velocity bank at mip 1
+// (written) -- the registers are the kernel's names, the views the fold's. The twin's own evolution
+// under the fine set is discarded each batch; the fine solve is the truth there, the twin carries the
+// rest and reads the folded cells at its edge.
+[numthreads(16, 16, 1)]
+void CsSweFold(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
+    const uint2 c = EtaTexel(id);
+    if (c.x >= gNx || c.y >= gNy) return;
+    const int2 f = int2(c) * 2;
+    const int2 fE = f + int2(1, 0), fS = f + int2(0, 1), fSE = f + int2(1, 1);
+    const float h = 0.25f * (gH[f] + gH[fE] + gH[fS] + gH[fSE]);
+    const float b = 0.25f * (gBedC[f] + gBedC[fE] + gBedC[fS] + gBedC[fSE]);
+    // the coarse east face is the right column's two east faces; its south face the bottom row's two
+    const float2 v = float2(0.5f * (gVelPrev[fE].x + gVelPrev[fSE].x), 0.5f * (gVelPrev[fS].y + gVelPrev[fSE].y));
+    gEta[c] = h;
+    gSoilW[c] = b;
+    gFlux[c] = v;
+}
+
 // M9h: THE DERIVED FIELD. Central differences on the derived current, one dispatch over the
 // gradient bank's OWN resident list -- which is the eta bank's list dilated by one tile,
 // because this stencil reads its neighbours and a null tile would silently swallow the write

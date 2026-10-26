@@ -581,6 +581,12 @@ private:
     std::vector<uint32_t> m_list1, m_fluxList1, m_live1;
     bool m_coarseFresh = true;   // its tiles' first batch: cleared and reset to the stateless column
     uint32_t m_velNew1 = 0;
+    // STAGE 1b: THE FOLD -- the coarse cells under four resident fine cells take their fold each batch
+    // (Swe.hlsl CsSweFold); one table per parity pair (the fine's newest velocity bank, the twin's read bank).
+    hal::Pso m_foldK;
+    hal::Table m_tableFold[2][2];
+    std::vector<uint32_t> m_foldList;
+    std::vector<uint32_t> m_stepList1;   // the twin's tiles outside the fine set: the ones its height and limit step
     double m_probeAt = -1e18, m_probeLat = 0.0, m_probeLon = 0.0;
     bool m_probeOn = false;
     void CoarseCb(int n, int n1);

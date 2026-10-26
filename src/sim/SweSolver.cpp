@@ -222,7 +222,8 @@ void SweSolver::LogCbFingerprint() {
 void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
                        const BedWindow& w) {
     (void)gpu;
-    for (hal::Table* t : {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1], &m_table1, &m_tableB1}) {   // stage 1a: the twin's tables read the same page
+    for (hal::Table* t : {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1], &m_table1, &m_tableB1,
+                          &m_tableFold[0][0], &m_tableFold[0][1], &m_tableFold[1][0], &m_tableFold[1][1]}) {   // stage 1a/1b: every table reads the same page
         t->SrvArray(0, heightArr, heightArr ? heightArr->GetDesc().Format : DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
         t->SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
     }
@@ -711,6 +712,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     makePso(L"CsSweHeight", m_heightK);
     makePso(L"CsSweDerive", m_deriveK);
     makePso(L"CsSweVelGrad", m_velGradK);
+    makePso(L"CsSweFold", m_foldK);   // stage 1b
 
     // t1, t2 filled by SetBed; the UAVs here. m_table reads m_velA (u7) and writes m_velB (u10);
     // m_tableB the other way (the substeps take turns: Record).
@@ -754,6 +756,29 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+    }
+    // STAGE 1b: the fold's tables -- the fine banks at mip 0 in the read slots (gH, gBedC, gVelPrev = the
+    // fine's newest velocities), the twin's at mip 1 in the written ones (gEta = the water, gSoilW = the bed,
+    // gFlux = the twin's read velocity bank), one per parity pair [fine newest][twin's read]
+    for (int fp = 0; fp < 2; ++fp) {
+        for (int cp = 0; cp < 2; ++cp) {
+            hal::Table& t = m_tableFold[fp][cp];
+            t = hal::Table::Alloc(gpu, 16, "swe.fold");
+            t.Uav2D(2, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 1);
+            t.Uav2D(3, (cp ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+            t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+            t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+            t.Uav2D(6, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 0);
+            t.Uav2D(7, (fp ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 0);
+            t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 0);
+            t.Uav2D(9, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+            t.Uav2D(10, m_velA.Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+            t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+            t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+            t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+            t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+            t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        }
     }
     for (hal::Table* t : {&m_table, &m_tableB}) {
         t->Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
@@ -1370,6 +1395,45 @@ void SweSolver::RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool res
         cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
     }
     m_coarseFresh = false;
+    // STAGE 1b: THE FOLD -- the coarse tiles whose four fine children are resident take the fine's fold
+    // (the water, the bed, the twin's read velocity bank), after the twin's bed fill and reset, before its steps
+    {
+        m_foldList.clear();
+        const uint32_t tx1 = m_h.Atlas().TilesX(1), ty1 = m_h.Atlas().TilesY(1);
+        for (uint32_t ty = 0; ty < ty1; ++ty) {
+            for (uint32_t tx = 0; tx < tx1; ++tx) {
+                bool all = true;
+                for (uint32_t j = 0; j < 2 && all; ++j) {
+                    for (uint32_t i = 0; i < 2 && all; ++i) {
+                        const uint32_t fx = 2 * tx + i, fy = 2 * ty + j;
+                        if (fx >= m_h.TilesX() || fy >= m_h.TilesY() || !m_h.IsResident(fx, fy)) all = false;
+                    }
+                }
+                if (all) m_foldList.push_back(ty * tx1 + tx);
+            }
+        }
+        // the folded tiles are the fine's: readable by the twin's flux kernel (their faces to the outside
+        // are computed), not stepped by its height and limit kernels (their state stays the fold's between
+        // batches; stepped, the twin drifted 17 cm from the fine at the anchor over one batch of the spin-up's
+        // first transient)
+        m_stepList1.clear();
+        {
+            std::vector<uint8_t> folded(m_list1.size(), 0);
+            for (uint32_t t : m_foldList) if (t < folded.size()) folded[t] = 1;
+            for (uint32_t t : m_list1) if (!folded[t]) m_stepList1.push_back(t);
+        }
+        if (!m_foldList.empty()) {
+            const uint32_t fineNewest = m_velNew ? 1u : 0u;   // the bank the fine's last step wrote (velB when m_velNew)
+            const uint32_t twinRead = m_velNew1 ? 1u : 0u;    // the bank the twin's next step reads (velB when m_velNew1)
+            cmd.ComputeTable(2, m_tableFold[fineNewest][twinRead].Base());
+            cmd.ComputeSrvAt(1, gpu.PushConstants(m_foldList.data(), m_foldList.size() * 4));
+            cmd.Pipeline(m_foldK.Get());
+            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(m_foldList.size()));
+            cmd.UavBarriers({m_h.Atlas().Res(), m_bed.Res(), m_velA.Res(), m_velB.Res()});
+        }
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS sl = m_stepList1.empty() ? hl : gpu.PushConstants(m_stepList1.data(), m_stepList1.size() * 4);
+    const UINT sn = static_cast<UINT>(m_stepList1.size());
     for (int i = 0; i < n1; ++i) {
         cmd.ComputeTable(2, (m_velNew1 ? m_tableB1 : m_table1).Base());
         cmd.ComputeSrvAt(1, fl);
@@ -1377,14 +1441,16 @@ void SweSolver::RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool res
         cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fn);
         cmd.UavBarriers({m_flux.Res(), m_velA.Res(), m_velB.Res()});
         m_velNew1 ^= 1;
-        cmd.ComputeSrvAt(1, hl);
-        cmd.Pipeline(m_limitK.Get());
-        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
-        cmd.UavBarrier(m_lim.Res());
-        cmd.ComputeSrvAt(1, hl);
-        cmd.Pipeline(m_heightK.Get());
-        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
-        cmd.UavBarrier(m_h.Atlas().Res());
+        if (!m_stepList1.empty()) {   // the twin's own cells, outside the fine set
+            cmd.ComputeSrvAt(1, sl);
+            cmd.Pipeline(m_limitK.Get());
+            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, sn);
+            cmd.UavBarrier(m_lim.Res());
+            cmd.ComputeSrvAt(1, sl);
+            cmd.Pipeline(m_heightK.Get());
+            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, sn);
+            cmd.UavBarrier(m_h.Atlas().Res());
+        }
     }
 }
 

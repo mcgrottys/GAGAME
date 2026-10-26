@@ -1501,6 +1501,20 @@ its own faces, its own prism). That is the uncoupled coarse solve's discretizati
 centimetre gate is the coupled system's (1c, 1d), where the fine solve sets the level inside and the
 coarse only feeds its faces. The twin costs a quarter of mip 0's cells at half its steps.
 
+**Stage 1b, built (2026-10-26): the fold.** A coarse cell under four resident fine cells IS their fold
+(`Swe.hlsl` CsSweFold): the water their mean (the column's water per area), the bed their mean (so the
+level's mean follows), a face's velocity the mean of the two fine faces on it (the flux-weighted fold by
+the faces' water is 1c's). It runs each batch over the coarse tiles whose four children are resident,
+after the twin's bed fill and reset and before its steps, through a fold table per parity pair (the fine's
+newest velocity bank, the twin's read bank) that puts the fine banks at mip 0 in the kernel's read slots
+and the twin's at mip 1 in its written ones. The folded tiles are the fine's: the twin's flux kernel
+reads them (their faces to the outside are computed), its height and limit kernels leave them (stepped,
+the twin drifted 17 cm from the fine at the anchor over one batch of the spin-up's first transient, and
+2 cm after). Gate: mip 0 byte-identical; the twin at the anchor within 1 mm of mip 0 through the hour
+(the mean of four cells against the one). On this scene the fine set is the whole wet box, so the twin
+has no cells of its own yet; 1c gives the fine set's edge the coarse neighbour (the magnify) and 1d lets
+mip 0 be demand's, which is where the centimetre gate means something.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);
