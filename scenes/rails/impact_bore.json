@@ -1,5 +1,5 @@
 {
-  "_readme": "The bore at the mouth (scenes/demos/impact_bore.json): the north jetty's tip looking ESE to sea for 25 s, then up to 60 m over the inlet. 40 s at 30 fps = 20 min at 30x.",
+  "_readme": "The bore at the mouth (scenes/demos/impact_bore.json): 80 m over the north jetty's tip looking out to sea (the base's `sea` view turned seaward) for 28 s, then back and up. 40 s at 30 fps = 20 min at 30x, from 16:02Z, the 500 m impactor 800 km out.",
   "name": "impact_bore",
   "tower": false,
   "poses": [],
@@ -14,27 +14,23 @@
         {
           "t": 0,
           "at": {
-            "lat": 42.8167,
-            "lon": -70.803,
-            "alt": 12,
-            "lookAt": {
-              "lat": 42.805,
-              "lon": -70.74
-            }
+            "x": 522,
+            "alt": 80,
+            "z": 72,
+            "az": 70,
+            "pitch": -12
           },
           "view": "",
           "pose": ""
         },
         {
-          "t": 25,
+          "t": 28,
           "at": {
-            "lat": 42.8167,
-            "lon": -70.803,
-            "alt": 12,
-            "lookAt": {
-              "lat": 42.805,
-              "lon": -70.74
-            }
+            "x": 522,
+            "alt": 80,
+            "z": 72,
+            "az": 70,
+            "pitch": -12
           },
           "view": "",
           "pose": ""
@@ -42,13 +38,11 @@
         {
           "t": 40,
           "at": {
-            "lat": 42.8185,
-            "lon": -70.808,
-            "alt": 60,
-            "lookAt": {
-              "lat": 42.812,
-              "lon": -70.775
-            }
+            "x": 300,
+            "alt": 160,
+            "z": 60,
+            "az": 80,
+            "pitch": -25
           },
           "view": "",
           "pose": ""

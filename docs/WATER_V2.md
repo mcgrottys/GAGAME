@@ -1270,6 +1270,17 @@ pulled along the topology like an extension of the seabed"): the bed is one surf
 ride it, and a creeping sheet throws centimetres. Not mirrored on the CPU twin yet: the hull rides the
 solver's level, not the bore's throw.
 
+What the clips of 2026-10-26 showed, stated: no rolling face yet, at any of four events. The mid-Atlantic
+1 km event rises at the Merrimack over minutes and floods the marsh as a thin tongue (a wetting front over
+dry ground has no face: a dam-break's tongue); the same impactor 800 km out swings the sea side −110 to
++130 m and swallows a 15 m eye; a 500 m one 800 km out (`impact_bore.json`, the eye 80 m over the jetty
+looking to sea) raises the sea +5 to +23 m over ten minutes in swings of a few metres, each crest of the
+train a kilometre long with a slope of a hundredth: nothing the crest law throws far. A bore steepens
+over a LONG shallow run (a river's tidal bore, the Qiantang's); this window's shelf is five kilometres,
+and the train's crests reach its faces as long gentle rises. The rolling face wants the shelf rung (the
+Gulf of Maine at 250 m, section 6's rung 2) carrying the train in nonlinear shallow water until its
+crests shock, and the window's faces fed by that. The mechanism at the face is ready for it.
+
 ### 13.6 What is not in this rung, stated
 
 * One depth for the propagation (the dispersion's h0): the shelf's slower speed and its refraction
