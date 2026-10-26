@@ -1,0 +1,64 @@
+{
+  "_readme": [
+    "THE BORE AT THE MOUTH (2026-10-26, Mark: \"a rolling wave on the coast\"). The 1 km event of impact_newburyport_1km.json,",
+    "the eye on the north jetty's tip looking out to sea, 12 m up, from 19:55Z through the train's peak at 30x: the surge",
+    "comes over the bar into the standing water of the inlet as a BORE -- a jump of metres over tens of metres -- and the",
+    "bank kernel feeds its face to the crest law (the cusp, the roller, the flight where the bed is steep), the column",
+    "plane folds where the labels overtake, and its whitewater is Belanger's. Over the dry marsh the surge runs as a thin",
+    "tongue and shows no face; the bore forms on water. Then the eye rises to 60 m over the inlet.",
+    "",
+    "Record:  build\bin\\gagame.exe scenes\\demos\\impact_bore.json --mp4 out\review\\impact\\impact_bore.mp4"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-bore",
+    "view": "jetty"
+  },
+  "time": {
+    "start": "2026-08-28T19:55:00Z",
+    "timeScale": 30
+  },
+  "impacts": [
+    {
+      "lat": 35.0,
+      "lon": -42.0,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 4000,
+      "exag": 1
+    }
+  ],
+  "water": {
+    "swe": {
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 256
+    }
+  },
+  "views": [
+    {
+      "name": "jetty",
+      "at": {
+        "lat": 42.8167,
+        "lon": -70.803,
+        "alt": 12,
+        "heading": 100,
+        "tilt": 88,
+        "range": 0
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "rails": {
+    "file": "scenes/rails/impact_bore.json"
+  },
+  "capture": {
+    "headless": true,
+    "frames": 1200,
+    "railDir": "out/rail_impact_bore"
+  }
+}

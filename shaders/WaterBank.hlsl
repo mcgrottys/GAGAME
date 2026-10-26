@@ -603,6 +603,10 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float lvl = level + impactEta;
     float2 cur = 0.0f;
     float boreFoam = 0.0f;   // the solver's front's whitewater (laws/Breaking.hlsli BoreFoam), into the foam below
+    // THE BORE'S FACE, for the crest law after the sheet is made (below): the jump across the front, the
+    // surface's mid-height there, the columns ahead and behind, the flow's direction (east, north)
+    float boreDh = 0.0f, boreMid = 0.0f, boreHA = 0.0f, boreHB = 0.0f;
+    float2 boreDir = 0.0f;
     // The solver is read where the texel's GROUND lies in its chart (PHASE C1: the domain's planes at
     // the point the windows' chain is given); the planes give the cell.
     if (gSvO.z > 0.0f && t.pointA.w != 0.0f && SolverDen(pT) > 0.0f) {
@@ -627,6 +631,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
                 const float hBehind = max(gT[gSlotsB.x][tA].z, 0.0f);
                 const float hAhead = max(gT[gSlotsB.x][tB].z, 0.0f);
                 boreFoam = BoreFoam(hAhead, hBehind) * wDom;
+                const float eBehind = gT[gSlotsA.w][tA].x, eAhead = gT[gSlotsA.w][tB].x;   // the surface either side
+                boreDh = max(eBehind - eAhead, 0.0f) * wDom;
+                boreMid = 0.5f * (eBehind + eAhead) + gSweB.x;   // the solver's surface is a departure from its plane
+                boreHA = hAhead;
+                boreHB = hBehind;
+                boreDir = normalize(s.xy);
             }
         }
     }
@@ -1292,6 +1302,52 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // Stern turbulence: a thin aerated tail (the reference's 0.42 weight; the PS
     // noise textures it with everything else).
     foam = max(foam, sternF * 0.42f);
+
+    // THE BORE'S FACE INTO THE SHEET (2026-10-26, Mark: "feed the bore's face into the column plane so the
+    // surge's front overturns"; "the voxels get pushed and pulled along the topology like an extension of
+    // the seabed"). The solver's front is a crest of the sheet like any other: its elevation across the
+    // front is the crest's eta about the mid-height, its half-jump the significant amplitude, its width
+    // the wavelength (the shock spans about three cells), its excess the jump over the depth's limit in the
+    // water ahead, the bed's slope under it the same chain the cascades read -- and THE CREST LAW throws
+    // its labels: to the cusp at the top of the face, down the face as the roller (the marsh: spilling),
+    // into the flight where the bed is steep (the dune: plunging). The column plane folds where the
+    // labels overtake and MsLip draws the lip. No law of the land: the bed is one surface, the columns
+    // ride it, and a creeping sheet (a jump of centimetres) throws centimetres.
+    if (boreDh > 0.02f && boreHB > 0.05f && gDebugA.z == 0.0f) {
+        const float cellM = max(gSweB.z, 1.0f);
+        const float kB = 3.14159265f / (3.0f * cellM);
+        const float hB = max(boreHB, 0.3f);
+        const float cothB = OrbitCoth(kB, hB);
+        const float aEnvB = 0.5f * boreDh;
+        const float excB = SeaBreakAt(boreDh * 0.3536f, kB, max(boreHA, 0.05f)).excess;   // the jump as a crest's height over the limit ahead
+        const float aHB = aEnvB * cothB;   // its lateral: the orbit's, in this depth
+        // the bed's slope along the flow, a cell each way, by the bank's own bed (the cascades' chain)
+        float tanBB = 0.0f;
+        {
+            float gx, gz;
+            if (gSlotsD.x != 0xFFFFFFFFu) {
+                const float2 pe = TilePlace(t, exz + float2(cellM, 0.0f)) * 0.01745329252f;
+                const float2 pn = TilePlace(t, exz + float2(0.0f, cellM)) * 0.01745329252f;
+                const float3 dE = float3(cos(pe.x) * cos(pe.y), sin(pe.x), cos(pe.x) * sin(pe.y));
+                const float3 dN = float3(cos(pn.x) * cos(pn.y), sin(pn.x), cos(pn.x) * sin(pn.y));
+                gx = (HpHeightChain(gTA[gSlotsD.x], gTA[gSlotsD.y], dE, wcT, t.texelM) - bed) / cellM;
+                gz = (HpHeightChain(gTA[gSlotsD.x], gTA[gSlotsD.y], dN, wcT, t.texelM) - bed) / cellM;
+            } else {
+                const float span = max(gMisc.x * t.texelM, 1e-3f);
+                gx = lerp(t.bed10 - t.bed00, t.bed11 - t.bed01, f.y) / span;
+                gz = lerp(t.bed01 - t.bed00, t.bed11 - t.bed10, f.x) / span;
+            }
+            tanBB = min(max(-(gx * boreDir.x + gz * boreDir.y), 0.0f), 1.0f);   // the bed rising ahead of the flow
+        }
+        CrestState bs;
+        bs.eta = lvl - boreMid;   // where this label stands on the face
+        bs.dx = 0.0f; bs.dz = 0.0f;
+        const float sB = -boreDh / (2.0f * cellM);   // the surface drops ahead
+        bs.sx = sB * boreDir.x; bs.sz = sB * boreDir.y;
+        bs.jxx = 0.0f; bs.jxz = 0.0f; bs.jzz = 0.0f;
+        const CrestOut bo = CrestLaw(bs, boreDir.x, boreDir.y, aEnvB, excB, kB, cothB, aHB, 1.0f, tanBB, hB);
+        d += float3(bo.s.dx - bs.dx, bo.s.eta - bs.eta, bo.s.dz - bs.dz);   // the bore's throw, on the sheet's own
+    }
 
     // THE LIFT: THE DRAWN SEA'S MEAN IS THE WATER'S LEVEL (2026-10-23, Mark: "so the drawn sea's mean
     // equals the solver's level"). The mesh carries each label L to L + D(L) at height lvl + eta(L), so

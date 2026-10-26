@@ -1257,8 +1257,18 @@ column's own head that loss is the share of the water's energy turned to turbule
 creep (Δh³ over metres of water), whole at a surge's wetting front. The bank kernel reads the solver's
 columns a cell behind and a cell ahead along the flow and takes that fraction into the foam, ungated by
 the drawn sea's crests (it is not one of them); the churn remembers it and the pixel stage textures it
-as every foam. The face is the solver's own (its shock spans two or three cells); making it ROLL — the
-column plane's overturn fed by the bore's face as a crest — is the next piece, not this one.
+as every foam. The face is the solver's own (its shock spans two or three cells), and it ROLLS by the
+same crest law as every crest (Mark: "feed the bore's face into the column plane so the surge's front
+overturns"): the bank kernel makes a crest of the front — its elevation across the front as the crest's
+eta about the mid-height, its half-jump the significant amplitude, three cells the wavelength, the jump
+over the depth's limit in the water ahead its excess, the bed's slope along the flow by the same height
+chain the cascades read — and `CrestLaw` throws its labels: to the cusp at the top of the face, down the
+face as the roller where the bed is flat (the marsh: spilling), into the flight where the bed is steep
+(the dune: plunging). The throw is added to the sheet's own displacement; the column plane folds where
+the labels overtake and MsLip draws the lip. No law of the land (Mark: "the voxels should get pushed and
+pulled along the topology like an extension of the seabed"): the bed is one surface and the columns
+ride it, and a creeping sheet throws centimetres. Not mirrored on the CPU twin yet: the hull rides the
+solver's level, not the bore's throw.
 
 ### 13.6 What is not in this rung, stated
 

@@ -1,0 +1,59 @@
+{
+  "_readme": "The bore at the mouth (scenes/demos/impact_bore.json): the north jetty's tip looking ESE to sea for 25 s, then up to 60 m over the inlet. 40 s at 30 fps = 20 min at 30x.",
+  "name": "impact_bore",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {
+          "t": 0,
+          "at": {
+            "lat": 42.8167,
+            "lon": -70.803,
+            "alt": 12,
+            "lookAt": {
+              "lat": 42.805,
+              "lon": -70.74
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 25,
+          "at": {
+            "lat": 42.8167,
+            "lon": -70.803,
+            "alt": 12,
+            "lookAt": {
+              "lat": 42.805,
+              "lon": -70.74
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 40,
+          "at": {
+            "lat": 42.8185,
+            "lon": -70.808,
+            "alt": 60,
+            "lookAt": {
+              "lat": 42.812,
+              "lon": -70.775
+            }
+          },
+          "view": "",
+          "pose": ""
+        }
+      ]
+    }
+  ]
+}

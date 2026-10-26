@@ -1230,7 +1230,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.bandLift[3] = float(m_sea->Ocean().Lambda());   // the chop: the crest law's drawn orbit
     cb.sweB[0] = m_tidePlane;   // the solver is truth: its level is this plane plus its deviation
     cb.sweB[1] = (m_swe && m_swe->Ready()) ? m_swe->WetDepth() : 0.01f;   // its wet depth (SolverSurfaceDev)
-    cb.sweB[2] = cb.sweB[3] = 0.0f;
+    cb.sweB[2] = (m_swe && m_swe->Ready()) ? m_swe->CellM() : 0.0f;   // its cell (m): the bore's face is read a cell each way
+    cb.sweB[3] = 0.0f;
     // THE IMPACTS (SetImpact): the record's buffer and the instant
     cb.impA[0] = m_imp.tRel;
     cb.impA[1] = m_imp.planetR;
