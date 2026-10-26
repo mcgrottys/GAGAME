@@ -157,8 +157,14 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
         if (inBank) needOut = saturate(bD.w * 20.0f);
         if (rec.level == 0u) needOut = max(needOut, 1.0f - saturate(FoldDist(bankXZ) / (8.0f * gBankA.x)));
     }
+    // THE IMPACT'S WAVE (2026-10-25, ImpactAt): past the rings this vertex carries it in its level;
+    // inside them the bank's level plane does (the kernel sums the same table). The pixel reads imp.
+    const float3 imp = ImpactAt(dir, gWavesB.w - h);
+    if (!inBank) wl += imp.x;
     float editLand, wetV;
-    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, wl, 0.0f, max(0.4f, rec.arc / 8.0f), editLand, wetV);
+    // the column's own answer where a ring texel holds one (the detail plane's water weight, DryWeight)
+    const float colWet = inBank ? bDet.y : -1.0f;
+    const float landness = ComposedLandnessEdit(dir, pA CS_WC, h, wl, 0.0f, max(0.4f, rec.arc / 8.0f), colWet, editLand, wetV);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the
@@ -194,7 +200,7 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
         // left the tile NULL, and at the tide where it had not -- a square of flooded marsh beside
         // the same marsh drawn dry (Mark, 2026-10-18, the Merrimack's mouth; the mix lens showed
         // the classifier calling all of it water).
-        dispWater = inBank ? (wl + bD.y) : gWavesB.w;
+        dispWater = inBank ? (wl + bD.y) : wl;   // past the rings wl is the waterline plus the impact's wave
         // THE LAGRANGIAN SHEET, DRAWN WHOLE (2026-10-20, Mark: "switch to drawing the Lagrangian
         // sheet"). The water vertex is its label at its particle: the label plus its lateral
         // displacement, at its level plus its vertical. Where the sea overturns, the sheet folds
@@ -221,6 +227,8 @@ VsOut SurfaceVertexL(const MeshletRec rec, uint gid, float2 g, out float landOut
     o.h = h;
     o.dry = landness * (dispLand - wl);   // its height over ITS water, by the share that is land
     o.wl = wl;
+    o.imp = imp;
+    o.colWet = colWet;
     if (fine) {
         o.rel = geo + rec.upT * disp;
     } else {

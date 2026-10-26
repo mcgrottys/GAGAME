@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "sim/ImpactGpu.h"
 namespace ga {
 
 class SeaLayer;
@@ -145,6 +146,9 @@ public:
     // DEPARTURE from this (WaterBank.hlsl), so a tile the rings never mapped reads as the
     // waterline and not as 0 m NAVD; every reader adds it back, this layer's own included.
     void SetWaterline(double navdM) { m_waterline = static_cast<float>(navdM); }
+    // THE IMPACTS (2026-10-25): the record's buffer and the instant, to the kernel's level.
+    void SetImpact(const ImpactGpu& g) { m_imp = g; }
+    ImpactGpu m_imp;
 
     uint32_t DispSrv() const { return m_disp.Srv(); }
     uint32_t ParamSrv() const { return m_param.Srv(); }
@@ -365,6 +369,11 @@ private:
         // THE FOLDS HELD (gFoldClock): the sim clock in 0.1 s ticks, the hold in ticks, ring 0 re-anchored.
         // Appended at the END on both sides.
         float foldClock[4];
+        // THE IMPACTS (gImpA / gImpU; sim/ImpactField.h, shaders/ImpactRead.hlsli): the instant on the
+        // record's base, the planet's radius, g; the events' buffer SRV and their count. Appended at
+        // the END on both sides.
+        float impA[4];
+        uint32_t impU[4];
     };
     struct BankTile {
         float orgXZ[2];

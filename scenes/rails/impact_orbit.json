@@ -1,0 +1,22 @@
+{
+  "_readme": "The impact from above (scenes/demos/impact_orbit.json): over the cavity at 3000 km, then west with the wave toward the American shelf. 60 s at 30 fps = 4 h at the scene's 240x.",
+  "name": "impact_orbit",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {"t": 0, "at": {"lat": 35.0, "lon": -42.0, "alt": 3000000, "lookAt": {"lat": 35.0, "lon": -42.0}}, "view": "", "pose": ""},
+        {"t": 12, "at": {"lat": 33.0, "lon": -44.0, "alt": 2200000, "lookAt": {"lat": 35.5, "lon": -42.5}}, "view": "", "pose": ""},
+        {"t": 30, "at": {"lat": 34.0, "lon": -52.0, "alt": 2000000, "lookAt": {"lat": 37.0, "lon": -55.0}}, "view": "", "pose": ""},
+        {"t": 48, "at": {"lat": 36.0, "lon": -60.0, "alt": 1600000, "lookAt": {"lat": 40.0, "lon": -68.0}}, "view": "", "pose": ""},
+        {"t": 60, "at": {"lat": 38.0, "lon": -64.0, "alt": 1200000, "lookAt": {"lat": 41.5, "lon": -70.0}}, "view": "", "pose": ""}
+      ]
+    }
+  ]
+}

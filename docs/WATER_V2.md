@@ -1157,6 +1157,149 @@ convergence as a crease (80.9 % of the swell), fixed by conserving action (kSolv
 field is no longer sheltered twice (the exposure page is the cascades' closure); and every closed-form law
 of the water is one text under `shaders/laws/`, compiled by the kernels and by `WaterTerms.h`.
 
+## 13. The asteroid (2026-10-25, Mark: "a massive impact in the middle of the Atlantic; two recordings")
+
+Built on PR 109's branch the evening the laws became one text. Section 6's ladder said how a tsunami
+reaches Newburyport; this is its first rung as ONE LAW with no stepping, and the two eyes Mark asked for.
+
+### 13.1 The law (`shaders/laws/Impact.hlsli`, one text for the GPU and the CPU)
+
+Ward & Asphaug (2000, 2003): the impact is a transient CAVITY, a parabola of depth D_c and radius R_c
+with a lip out to R_D = √2 R_c holding its water (net volume nought); its evolution is linear dispersive
+theory over a basin of one depth h0:
+
+    η(r, t) = ∫₀^∞ F(k) J₀(k r) cos(ω(k) t) k dk,     ω² = g k tanh(k h0),
+    F(k)    = D_c [ R_D J₁(k R_D) / k − 4 J₂(k R_D) / k² ]      (the lipped parabola's Hankel transform)
+
+evaluated as a SUM over a table of wavenumbers the host builds once (`sim/ImpactWave.h`: n terms from
+0 to 12 / R_D, A_n = F(k_n) k_n Δk). It holds at every r and t: the cavity at t = 0, the first ring,
+the dispersive train behind it. The discrete sum's image returns at r = 2π/Δk, so the terms follow from
+the REACH the scene asks (`reachM`, 6000 km by default): n = 12 reach / (π R_D), at most 4096 -- 880 for
+the 10 km impactor, 1600 for a 1 km one, 4000 for 300 m. (512 terms held a 1 km impactor's sum to
+3900 km only, and the image's wave stood at the Merrimack, 2625 km out, before the front: the numpy
+check showed ±50 m at the faces an hour early. The terms are the law's cost, a vertex and a texel each.) Near land the wave shoals by Green's law from h0 to the depth
+there, BOUNDED by the shore's saturation with one odd smooth law, a = b tanh(G η / b), b = γ h / 2
+(`Breaking.hlsli` kGammaHs: Hs ≤ γ h): a linear reader's wave stands no taller than a breaking one,
+and the solver's columns say the rest. The first bound was the depth itself; from orbit a trough at
+−h drained the coarse globe's banks to their bed and drew them as sea floor (the slabs of the first
+clip).
+
+The cavity from the impactor: the diameter by the pi-scaling form (Schmidt & Holsapple; Collins, Melosh
+& Marcus 2005 for rock) with its constant FITTED to W&A 2003's published case (1100 m, 2.2 g/cc,
+17.8 km/s → 18.9 km across: C = 1.374); the depth by the energy argument (9.4 % of the impactor's
+kinetic energy as the lipped parabola's potential energy π ρ g D_c² R_c² / 3), capped at the ocean's
+depth. Checked in numpy against W&A's figures for 1950 DA: 14 m at 800 km after an hour (×4.7 by
+Green's law to a 25 m beach: their "120 m from Cape Cod to Hatteras"), 3–5 m at 2800 km (their "about
+9 m mid-ocean"). The Bessel functions are Abramowitz & Stegun's polynomial forms, 5e-8 absolute,
+checked against the integral definition.
+
+### 13.2 The record of events (Mark: "a player or some director can cause impacts at will")
+
+An impact is an EVENT -- an impactor, where it lands, the instant it does -- and the water carries a
+RECORD of them (`sim/ImpactField.h`), appended to at any instant: the scene's `impacts` list at boot
+(each with its own `at`, or the water clock's first instant), the I key at the point under the cursor
+(`sea.impactor`, at the clock's instant; the globe's sea-level sphere from altitude, the ground below
+it), and anything else that holds the field. Each event keeps its own clock zero and its own table;
+the CPU sums every event's law, and the GPU readers sum the same tables from ONE buffer the field
+packs when the record changes (a header of eight words an event -- direction, zero on the record's
+base, basin depth, exaggeration, its terms' place and count -- then the terms; `shaders/ImpactRead.hlsli`
+reads it in the globe's vertex stage and the bank kernel, through the bindless uint buffers). A
+retired buffer lives until the run ends: the frames in flight read it. The record is replayable: a
+second player handed the same events sees the same sea. Hot-reloading the list is not here (a new list
+element is "needs a restart" to the scene reload, by its own law); the key is the live path.
+
+The exaggeration is applied to the DEEP wave before the shoaling's bound, so a wave over a shelf
+stands no taller than the shelf's water whatever the exaggeration: the first orbit clip exaggerated
+after the bound and drew the Gulf of Maine's banks as flat slabs ten times their depth.
+
+### 13.3 Where the law is read
+
+| reader | how |
+|---|---|
+| the hull, the twin | `WaterManager` Level producer `impacts` (SUM with the tide); `ImpactField::EtaAt` sums every event's wave with the depth from the height stack |
+| the solver's open faces | `SweSolver::SetLevelSource`: tide + the impact's level shoaled to the face's depth by Green's law UNBOUNDED (the solver is the nonlinear reader; the saturation bound is the drawn far field's and the hull's -- bounded, the asteroid's surge at the Merrimack's faces was six metres and the town stayed dry); the solver carries it inland and over the land |
+| the bank kernel (`CsBankFill`) | the same tables from the record's buffer (`ImpactRead.hlsli`); the texel's lat/lon (`TilePlace`) as a direction, the sum, the shoaling — added to the atlas level wherever the solver is silent |
+| the globe's vertices (`GlobeMesh.hlsl`) | `ImpactAt(dir, depth)` past the rings: the level, and the slope east/north into `VsOut.imp`; inside the rings the bank's level plane carries it |
+| the far sea's pixel (`WaterPixelColor`) | the level and the normal's tilt from `imp` past the rings (inside them the ring's slope) |
+
+`exag` exaggerates the DRAWN wave alone (the globe and the bank); the hull and the solver read it raw.
+The sum costs n Bessel evaluations a vertex and a texel per event (512 terms by default), nothing while
+no event has begun.
+
+### 13.4 The two scenes
+
+* `scenes/demos/impact_orbit.json` + `scenes/rails/impact_orbit.json`: 10 km at 20 km/s into 35 N
+  42 W at 15:00Z, the clock at 240×, the eye 3000 km over the cavity then west with the wave; the
+  drawn wave 10×. The cavity is 110 km across and 4000 m deep (the energy says 31 km: the ocean caps
+  it); 2.95e22 J ride the wave.
+* `scenes/demos/impact_newburyport.json` + `scenes/rails/impact_shore.json`: the same event; the first
+  wave reaches the Merrimack's mouth (2625 km) 3.68 h after it at √(g h0), 18:41Z; the scene starts at
+  18:20Z and runs 30× from the Plum Island dune by the north jetty, then up to 400 and 900 m over the
+  river. No exaggeration. By the law the faces see ±12 m before the front and hundreds of metres at it
+  (Green's law ×4 from the deep train's ±200 m): a 10 km impactor drowns everything in this window.
+* `scenes/demos/impact_newburyport_1km.json`: the same shore and instant under a 1 km impactor (1950
+  DA's class, Ward & Asphaug 2003): tens of metres at the faces, the dunes and the low town under, the
+  high ground standing -- the water washing over the land in view, which Mark asked to see.
+* `scenes/demos/impact_descent.json` + `scenes/rails/impact_descent.json` (Mark: "like the orbit one but
+  two minutes, the orbit going all the way down to a bird's eye view following the waves crashing onto
+  land"): the 1 km event on ONE clock at 170×, so the front reaches the mouth at 78 s of 120 and the
+  train's peak near 106 s, the eye 40 km over the inlet to meet it and 3 km over Plum Island through the
+  peak. The solver's window is on; the drawn far wave 10×, the solver's water raw. It was the 10 km
+  event at 130× first: the solver's step collapsed to nothing at that surge (a face velocity of 92 km/s
+  in the log; the same event at 30× it survived at 350 m/s) and the record ended on a dry shore.
+
+### 13.5 What is not in this rung, stated
+
+* One depth for the propagation (the dispersion's h0): the shelf's slower speed and its refraction
+  (rung 2, the eikonal per frequency) are not here; the arrival at Newburyport is the deep-water
+  clock's, early by the Gulf of Maine's share. Green's law takes the depth's effect on the AMPLITUDE
+  only.
+* The cavity's cliff at R_D (the lip's edge) is under-resolved by the table (Gibbs ringing in the
+  cavity's own profile at t = 0: ±8 % of D_c); the far field is unaffected.
+* No reflection, no refraction, no breaking at sea: linear theory, as W&A's.
+* The classifier on the globe past the solver reads the raised level as the waterline (the coarse
+  globe's coast moves with the wave): the inundation picture from orbit is the mesh's, not a solver's.
+  Inside the solver's reach the survey's shoreline used to stand under 18 m of water (the mesh drew
+  teeth along the river: land vertices at their height beside water at the flood's). Mark, 2026-10-25:
+  "think of the water layer as always being a global sparse voxel tree; we might not have water in all
+  of its places, but it's there for water to flow into" -- land is a column with no water in it, and
+  the survey names the shore's shape at its datum, not the water now. So the classifier takes THE
+  COLUMN'S OWN ANSWER wherever a ring texel holds one: the bank's detail plane carries each column's
+  water weight (`DryWeight` of the solver's surface over the bed where the solver speaks), the mesh
+  hands it to `ComposedLandnessEdit` (`columnWet`; the pixel through `VsOut.colWet`), and a column
+  holding water is water whatever the survey said, with no band (a first cut used a 3 m band; Mark:
+  "why more than 3 m? we have everything designed to be sparse"). One direction only tonight: a
+  column's emptiness does not make land of the survey's water, because past the solver's domain the
+  bank's weight is the coarse bed's against the tide and the bank carries no domain weight to tell
+  the two apart. Next: the solver's domain weight in the bank, so the column decides both ways where
+  it is stepped, and the stateless column (tide over bed) past the rings.
+  Mark, on the classifier itself: "why do we care about wet/dry other than the visual look of wet
+  sand?" -- the answer is that today three things read it (which height a vertex takes, which shading
+  runs, the swash band), and under the column law the first two are the column's depth (the drawn
+  surface is max(bed, surface); the shading is whether the column holds water here) and only the third
+  is visual, a memory on the column like the foam's. The classifier is to collapse to that.
+* The solver STARVED at 30x: `SweSolver::kMaxSubsteps` (16 a frame since M5) is the budget past which
+  its clock re-anchors and its dynamics run time-dilated -- the surge rose at its faces at the scene's
+  rate and the water inside answered at a fraction of it, so the first beach clips stayed dry through a
+  600 m surge (the probe with the spin-up's batch, which steps whole, drowned the eye). The budget is a
+  scene value now (`water.swe.stepsPerFrame`): the beach records say 256, the descent 512.
+* A face point on land (the side's cubic asks four points; a window's corner can be land) took Green's
+  law at the depth floor, ×12.8: −1400 m at the north side's west end. A point with no water column
+  takes the deep wave as it is.
+* A small cavity's train peaks well after the √(g h0) front: the 1 km impactor's deep wave at the
+  Merrimack is 1 m at 3.7 h, 3 m at 4.0 h, 9 m by 5.2 h (the dominant 60 km wavelength's group speed
+  in 4000 m is 0.9 of the long-wave speed); a 512-term table (alias at 3900 km) had shown ±50 m at
+  3.3 h, the image's wave. The 1 km beach scene starts at 19:45Z.
+* THE SOLVER UNDER A SURGE FAR TALLER THAN ITS WATER: the 10 km event's faces rise hundreds of metres
+  over a 15 m column; at 30× the scheme carried it (velocities to 350 m/s, the step 0.012 s), at 130×
+  its step collapsed to nothing (92 km/s at a face) and the water never moved. The Flather face's flux is
+  positivity-clamped; the blow-up is inside. The open item for a forcing of that class; the 1 km event
+  (tens of metres at the faces) is carried at both clocks.
+* The wave solve re-keys on the solver's current every `water.swe.currentRefreshS` (90 s since F13): a
+  scene run at 30x re-solved 46 times in an hour of record, each a three-minute solve a headless
+  capture waits for. The beach scene holds the first current for its length; the cadence is a scene
+  value now.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

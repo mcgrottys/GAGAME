@@ -201,11 +201,33 @@ const Schema& DatumSchema() {
     }();
     return *s;
 }
+const Schema& ImpactSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.sea.impactor;
+        Schema* sc = new Schema("sea.impactor", &p);
+        sc->Bind("enabled", p.enabled, "an asteroid into the sea: its cavity's linear dispersive wave, everywhere the water is read (in `impacts`, the event stands; in `sea.impactor`, the I key is armed)", R)
+            .Bind("lat", p.lat, Q::Angle, "deg", "where it lands", R)
+            .Bind("lon", p.lon, Q::Angle, "deg", "where it lands", R)
+            .Bind("diameterM", p.diameterM, Q::Length, "m", "the impactor's diameter", R)
+            .Bind("speedMs", p.speedMs, Q::Dimensionless, "1", "its speed, m/s", R)
+            .Bind("densityKgM3", p.densityKgM3, Q::Dimensionless, "1", "its density, kg/m^3", R)
+            .Bind("angleDeg", p.angleDeg, Q::Angle, "deg", "its angle from the horizontal", R)
+            .Bind("at", p.at, "the impact's instant: UTC text or unix seconds; \"\" = the water clock's first instant", R)
+            .Bind("basinDepthM", p.basinDepthM, Q::Length, "m", "the ocean's depth at the impact and across the basin (the dispersion's one depth; the cavity cannot be deeper)", R)
+            .Bind("energyShare", p.energyShare, Q::Dimensionless, "", "the share of the impactor's kinetic energy the cavity holds (Ward & Asphaug 2003: 0.094)", R)
+            .Bind("terms", p.terms, Q::Dimensionless, "", "the wavenumber table's size, 16..4096; 0 = from reachM", R)
+            .Bind("reachM", p.reachM, Q::Length, "m", "how far the sum must hold before its image returns (sets the terms: 12 reach / (pi R_D))", R)
+            .Bind("exag", p.exag, Q::Dimensionless, "", "display exaggeration of the drawn wave (the globe, the bank); the hull and the solver read it raw", R);
+        return sc;
+    }();
+    return *s;
+}
 const Schema& SeaSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.sea;
         Schema* sc = new Schema("sea", &p);
         sc->Nest("storm", StormSchema(), &p.storm, "the sandbox sea-state override")
+            .Nest("impactor", ImpactSchema(), &p.impactor, "the asteroid the I key drops at the point under the cursor, at the clock's instant (its lat, lon and at are ignored)")
             .Nest("datum", DatumSchema(), &p.datum, "the MLLW -> NAVD88 link")
             .BindBox("box", p.box, "where data.seastate's forecast stands when its file carries no box, [lon0, lat0, lon1, lat1] degrees; zeros = nowhere (the grid alone)", R);
         return sc;
@@ -221,6 +243,10 @@ const Schema& SweSchema() {
             .Bind("riverTide", p.riverTide, "the river faces' tide deviation; false = zeroed (--swe-river-off)", R)
             .Bind("spinupH", p.spinupH, Q::Time, "h", "history integrated before the first frame (--swe-spinup)", R)
             .Bind("gain", p.gain, Q::Dimensionless, "1", "solved-current gain (--swe-gain)", H)
+            .Bind("stepsPerFrame", p.stepsPerFrame, Q::Dimensionless, "1",
+                  "the solver's substeps a frame before it starves (its clock re-anchors, its dynamics run time-dilated); a fast clock's record sets what it needs", R)
+            .Bind("currentRefreshS", p.currentRefreshS, Q::Time, "s",
+                  "how often (sim s) the wave solve reads the solver's current and re-keys (a solve each); past the run's length = the first current throughout", R)
             .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)", R)
             .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
@@ -888,6 +914,7 @@ const Schema& SceneFileSchema() {
             .List("sources", &SourceSchema(), "the scene's sources by name: a derived scene ADDS to its base's (merged in place by name, `remove: true` drops one), as every named list; their order is StackOrder's (`over`, then the coarser under the finer), not the list's")
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say; by name, merged as every named list")
             .List("solvers", &SolverSchema(), "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide; by name, merged as every named list")
+            .List("impacts", &ImpactSchema(), "the asteroids into the sea, each an event with its own instant (sim/ImpactField.h: the record the I key appends to)", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .Nest("hud", HudSchema(), &kDoc.hud, "the windshield: readouts and the minimap on the glass")
             .List("views", &ViewSchema_(), "the cameras, by name")

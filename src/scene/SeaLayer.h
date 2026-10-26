@@ -222,6 +222,7 @@ public:
     // current as solved). The 3.2 that stood here was one place's calibration (the Merrimack's
     // ACT0816 against an old CUDEM window) and was always overwritten.
     float sweCurrentGain = 1.0f;
+    double sweCurrentRefreshS = 90.0;   // water.swe.currentRefreshS (WaveField::SetSweCurrent)
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
 
     // M9bq: the cascades, evaluated on the CPU for the hull. Owned here because this is where

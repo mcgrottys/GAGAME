@@ -150,6 +150,11 @@ cbuffer BankCb : register(b0) {
     // hold in ticks (two of the sea's peak periods), z 1 where ring 0 re-anchored (the grid restarts).
     // Appended at the END on both sides.
     float4 gFoldClock;
+    // THE IMPACTS (2026-10-25; sim/ImpactField.h, shaders/ImpactRead.hlsli): gImpA = the instant on
+    // the record's base (s), the planet's radius, g; gImpU = the events' buffer SRV (gBufU), their
+    // count. Appended at the END on both sides.
+    float4 gImpA;
+    uint4  gImpU;
 };
 
 // The ladder's ring under k: its texel over ring 0's, its mapped set.
@@ -272,6 +277,8 @@ typedef float real;   // the laws' type: float in a kernel (shaders/laws/Laws.hl
 // bring-up; the mesh stage showed the same).
 Texture2D gT[] : register(t0, space1);
 Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's array views
+StructuredBuffer<uint> gBufU[] : register(t0, space8);   // the heap as uint buffers (the impacts' tables)
+#include "ImpactRead.hlsli"
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
 RWTexture2D<float4> gU[] : register(u0, space2);
@@ -582,7 +589,18 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // from a UNIFORM plane to the spatially varying atlas, and a hard 0.1 % edge cut the domain.
     // TreeWater reads this expression (WeatherManager::SolverRefine) from the same texels,
     // delivered through a region readback; --water-probe is the gate that the two stand together.
-    float lvl = level;
+    // THE IMPACTS' WAVE (2026-10-25, ImpactRead.hlsli): a departure of the level wherever the solver
+    // is silent (inside its domain the solver carries it in from its faces, and the lerp below takes
+    // the solver's); the same tables the globe's vertices and the CPU sum. The texel's place is its
+    // lat/lon (TilePlace), made a direction in the planet's frame (lat = asin(y), lon = atan2(z, x)).
+    float impactEta = 0.0f;
+    if (gImpU.y > 0u) {
+        const float la = place.x * 0.017453292519943295f, lo = place.y * 0.017453292519943295f;
+        const float3 dirP = float3(cos(la) * cos(lo), sin(la), cos(la) * sin(lo));
+        float3 slP;
+        impactEta = ImpactSumAt(gImpU.x, gImpU.y, gImpA.x, gImpA.y, dirP, level - bed, slP);
+    }
+    float lvl = level + impactEta;
     float2 cur = 0.0f;
     // The solver is read where the texel's GROUND lies in its chart (PHASE C1: the domain's planes at
     // the point the windows' chain is given); the planes give the cell.
@@ -593,7 +611,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float wDom = smoothstep(0.0f, 1.0f, eCells);
         if (wDom > 0.0f) {
             const float dEta = SolverSurfaceDev(texel);   // the wet columns' surface (above)
-            lvl = lerp(level, gSweB.x + dEta, wDom);
+            lvl = lerp(level + impactEta, gSweB.x + dEta, wDom);
             const float4 s = LoadBilinearClamp(gSlotsB.x, texel, gSweDims.xy);
             if (s.w > 0.5f) cur = s.xy;
         }

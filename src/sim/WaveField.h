@@ -1,4 +1,4 @@
-﻿// ================================================================================================
+// ================================================================================================
 //  WaveField - M8: THE SOLVED WAVE FIELD. The stationary wave boundary-value problem, solved
 //  per cell over the inlet window and CACHED: per spectral component, a per-cell amplitude
 //  (shoaling * refraction * the total-Hs limiter), wavenumber (current-Doppler finite-depth
@@ -129,9 +129,10 @@ public:
     // thread at a quantized cadence, resampled onto the solve grid (row-0-north flip
     // declared), scaled by the scene's gain, and their quantized bytes join the bucket key:
     // content identity, not a clock.
-    void SetSweCurrent(class SweSolver* swe, float gain) {
+    void SetSweCurrent(class SweSolver* swe, float gain, double refreshS = 90.0) {
         m_swe = swe;
         m_sweGain = gain;
+        m_sweRefreshS = refreshS;
     }
     // F25 (the instrument): every solve is made twice, with the memo and cold, and against the
     // cache's entry for its key when one stands; the differing bytes are printed ([wave-audit]).
@@ -422,6 +423,7 @@ private:
     mutable std::shared_ptr<wavecore::Memo> m_memo;
     uint64_t m_curSig = 0;                        // quantized content hash -> bucket key
     double m_curReadT = -1e18;                    // last refresh (sim s)
+    double m_sweRefreshS = 90.0;                  // the cadence (water.swe.currentRefreshS)
     // F13: the resample of the read-back flow, on a worker; adopted on the main thread when done.
     struct CurJob {
         SweSolver::FieldsRead read;   // the two readbacks, mapped and unpacked on the worker

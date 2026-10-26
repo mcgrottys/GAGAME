@@ -48,6 +48,7 @@
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": true, "reload": "hot", "doc": "the scene's sources by name: a derived scene ADDS to its base's (merged in place by name, `remove: true` drops one), as every named list; their order is StackOrder's (`over`, then the coarser under the finer), not the list's" },
       { "key": "stations", "type": "list", "field": "none", "element": "station", "named": true, "reload": "hot", "doc": "where a station of the data stands when its file does not say; by name, merged as every named list" },
       { "key": "solvers", "type": "list", "field": "none", "element": "solver", "named": true, "reload": "hot", "doc": "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide; by name, merged as every named list" },
+      { "key": "impacts", "type": "list", "field": "none", "element": "sea.impactor", "named": false, "reload": "hot", "doc": "the asteroids into the sea, each an event with its own instant (sim/ImpactField.h: the record the I key appends to)" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
       { "key": "hud", "type": "object", "field": "none", "schema": "hud", "reload": "hot", "doc": "the windshield: readouts and the minimap on the glass" },
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
@@ -125,6 +126,7 @@
     ] },
     { "type": "sea", "keys": [
       { "key": "storm", "type": "object", "field": "none", "schema": "sea.storm", "reload": "hot", "doc": "the sandbox sea-state override" },
+      { "key": "impactor", "type": "object", "field": "none", "schema": "sea.impactor", "reload": "hot", "doc": "the asteroid the I key drops at the point under the cursor, at the clock's instant (its lat, lon and at are ignored)" },
       { "key": "datum", "type": "object", "field": "none", "schema": "sea.datum", "reload": "hot", "doc": "the MLLW -> NAVD88 link" },
       { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "where data.seastate's forecast stands when its file carries no box, [lon0, lat0, lon1, lat1] degrees; zeros = nowhere (the grid alone)" }
     ] },
@@ -132,6 +134,21 @@
       { "key": "hs", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "significant height; 0 = the forecast sea (--storm)" },
       { "key": "tp", "type": "number", "field": "f32", "quantity": "time", "unit": "s", "default": 10, "reload": "restart", "doc": "peak period" },
       { "key": "dir", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 90, "reload": "restart", "doc": "from-direction, compass" }
+    ] },
+    { "type": "sea.impactor", "keys": [
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "an asteroid into the sea: its cavity's linear dispersive wave, everywhere the water is read (in `impacts`, the event stands; in `sea.impactor`, the I key is armed)" },
+      { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 35, "reload": "restart", "doc": "where it lands" },
+      { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": -42, "reload": "restart", "doc": "where it lands" },
+      { "key": "diameterM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 10000, "reload": "restart", "doc": "the impactor's diameter" },
+      { "key": "speedMs", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 20000, "reload": "restart", "doc": "its speed, m/s" },
+      { "key": "densityKgM3", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 3000, "reload": "restart", "doc": "its density, kg/m^3" },
+      { "key": "angleDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 45, "reload": "restart", "doc": "its angle from the horizontal" },
+      { "key": "at", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the impact's instant: UTC text or unix seconds; \"\" = the water clock's first instant" },
+      { "key": "basinDepthM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 4000, "reload": "restart", "doc": "the ocean's depth at the impact and across the basin (the dispersion's one depth; the cavity cannot be deeper)" },
+      { "key": "energyShare", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.094, "reload": "restart", "doc": "the share of the impactor's kinetic energy the cavity holds (Ward & Asphaug 2003: 0.094)" },
+      { "key": "terms", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the wavenumber table's size, 16..4096; 0 = from reachM" },
+      { "key": "reachM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6000000, "reload": "restart", "doc": "how far the sum must hold before its image returns (sets the terms: 12 reach / (pi R_D))" },
+      { "key": "exag", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "display exaggeration of the drawn wave (the globe, the bank); the hull and the solver read it raw" }
     ] },
     { "type": "sea.datum", "keys": [
       { "key": "fromStation", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "CO-OPS resolves MLLW -> NAVD88 per station; false = mllwToNavd" },
@@ -160,6 +177,8 @@
       { "key": "riverTide", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the river faces' tide deviation; false = zeroed (--swe-river-off)" },
       { "key": "spinupH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 1, "reload": "restart", "doc": "history integrated before the first frame (--swe-spinup)" },
       { "key": "gain", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "solved-current gain (--swe-gain)" },
+      { "key": "stepsPerFrame", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 16, "reload": "restart", "doc": "the solver's substeps a frame before it starves (its clock re-anchors, its dynamics run time-dilated); a fast clock's record sets what it needs" },
+      { "key": "currentRefreshS", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 90, "reload": "restart", "doc": "how often (sim s) the wave solve reads the solver's current and re-keys (a solve each); past the run's length = the first current throughout" },
       { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)" },
       { "key": "bedWait", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "whole", "names": ["none", "map", "whole"], "reload": "restart", "doc": "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)" },
       { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells `cellM` over it in true metres at that latitude, its bed the one height stack's; zeros = no solver" },

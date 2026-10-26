@@ -2558,6 +2558,14 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.farSea[0] = m_farHsRef > 1e-6 ? static_cast<float>(1.0 / m_farHsRef) : 0.0f;
     m_cb.farSea[1] = m_farStorm ? 1.0f : 0.0f;
     m_cb.farSea[2] = m_cb.farSea[3] = 0.0f;
+    // THE IMPACTS (SetImpact): the record's buffer and the instant
+    m_cb.impA[0] = m_imp.tRel;
+    m_cb.impA[1] = m_imp.planetR;
+    m_cb.impA[2] = m_imp.g;
+    m_cb.impA[3] = 0.0f;
+    m_cb.impU[0] = m_imp.slot;
+    m_cb.impU[1] = m_imp.events;
+    m_cb.impU[2] = m_cb.impU[3] = 0u;
     m_cb.colA[0] = m_colScale;
     m_cb.colA[1] = m_colBias;
     m_cb.colA[2] = m_cb.colA[3] = 0.0f;

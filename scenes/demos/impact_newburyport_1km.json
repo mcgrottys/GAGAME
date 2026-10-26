@@ -1,0 +1,63 @@
+{
+  "_readme": [
+    "THE SAME SHORE UNDER A 1 KM IMPACTOR (2026-10-25): 1950 DA's class (Ward & Asphaug 2003), the same place and",
+    "instant as impact_newburyport.json. A small cavity's train peaks well after the front: at the Merrimack the",
+    "deep wave is 3 m at 4.0 h and 9 m by 5.2 h (Green's law x4 at the faces), so the scene starts at 19:45Z,",
+    "4.75 h after the impact, and runs 30x: the dunes and the town's low ground go under, the high ground",
+    "stands, and the water washes over the land in view.",
+    "",
+    "Record:  build\bin\\gagame.exe scenes\\demos\\impact_newburyport_1km.json --mp4 out\review\\impact\\impact_newburyport_1km.mp4"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-newburyport-1km",
+    "view": "beach"
+  },
+  "time": {
+    "start": "2026-08-28T19:45:00Z",
+    "timeScale": 30
+  },
+  "impacts": [
+    {
+      "lat": 35.0,
+      "lon": -42.0,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 4000,
+      "exag": 1
+    }
+  ],
+  "water": {
+    "swe": {
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 256
+    }
+  },
+  "views": [
+    {
+      "name": "beach",
+      "at": {
+        "lat": 42.8125,
+        "lon": -70.8075,
+        "alt": 18,
+        "heading": 75,
+        "tilt": 88,
+        "range": 0
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "rails": {
+    "file": "scenes/rails/impact_shore.json"
+  },
+  "capture": {
+    "headless": true,
+    "frames": 1800,
+    "railDir": "out/rail_impact_shore_1km"
+  }
+}

@@ -34,6 +34,7 @@
 //      Crest.hlsli        the lip's fall and flight, the landing, the spiller's roller, the swash,
 //                         which crests plunge, THE CREST LAW
 //      Wake.hlsli         the Kelvin wake, signed stationary phase
+//      Impact.hlsli       an asteroid's cavity and its linear dispersive wave (the Bessel sum)
 // ================================================================================================
 #ifndef GA_LAWS_HLSLI
 #define GA_LAWS_HLSLI
@@ -45,4 +46,5 @@
 #include "Bands.hlsli"
 #include "Crest.hlsli"
 #include "Wake.hlsli"
+#include "Impact.hlsli"
 #endif

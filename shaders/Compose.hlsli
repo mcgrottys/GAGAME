@@ -417,8 +417,14 @@ float2 CsEditMask(float3 dir, float3 p CS_WC_PARAM) {
 //   which is the law before it. One-sided: survey land below the waterline stays land (Tokyo's
 //   polders, a dike's lee), because land can stand under the sea's level and water cannot stand above
 //   its own. The hand edits are law over this too (they are applied after it).
+// `columnWet`: THE COLUMN'S OWN ANSWER (2026-10-25, Mark: "we have everything designed to be sparse"):
+// the water bank's detail plane carries, per texel, the weight of the water its column holds (the
+// solver's wet depth where the solver speaks, WaterBank.hlsl DryWeight); a column holding water is
+// water whatever the survey said of its shore, with no band -- the survey's witness is the shoreline
+// at its datum, the column's is the water now (the asteroid's surge over Plum Island). < 0 = no column
+// here (past the rings): the survey and the height decide as before.
 float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel, float dryOver,
-                           float overBand, out float editLand, out float wet) {
+                           float overBand, float columnWet, out float editLand, out float wet) {
     float4 m;
     const bool op = CsMaskSample(dir, p CS_WC, m);
     const float a = max(m.a, 0.001f);
@@ -444,8 +450,14 @@ float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float wat
         landH = lerp(landH, ev, ed);
         editLand = ed * ev;
     }
+    // the column's water covers the survey's land and the hand edits alike (the jetty under the wave);
+    // one direction only: a column's dryness does not make land of the survey's water (past the
+    // solver's domain the bank's weight is the coarse bed's against the tide, a weaker witness)
+    const float colW = saturate(columnWet);
+    land *= (1.0f - colW);
+    landH *= (1.0f - colW);
     land = max(land, dryOver);
-    wet = lerp((lm >= 0.0f) ? (1.0f - lm) : hWet, hWet, finer) * (1.0f - over);   // no water stands on a bed above the sea's level
+    wet = max(lerp((lm >= 0.0f) ? (1.0f - lm) : hWet, hWet, finer) * (1.0f - over), colW);   // no water stands on a bed above the sea's level; a column's water is wet
     return lerp(land, landH, finer);
 }
 

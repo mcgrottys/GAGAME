@@ -94,6 +94,17 @@ using law::WaveCurrentGain;
 using law::WindowEdgeM;
 using law::WindowWeight;
 using law::YieldShare;
+using law::BesselJ0;
+using law::BesselJ1;
+using law::BesselJ2;
+using law::ImpactCavityDiameter;
+using law::ImpactCavityDepth;
+using law::ImpactSpectrum;
+using law::ImpactOmega;
+using law::ImpactTerm;
+using law::ImpactTermSlope;
+using law::ImpactShoal;
+using law::ImpactShoalSlope;
 using law::kGammaHs;
 using law::kJetFallRatio;
 

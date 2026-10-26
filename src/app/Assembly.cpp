@@ -470,6 +470,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         sea->SetSurface(&surface);   // the world.flat chart, for the churn's tangent rows (PHASE C5)
         sea->SetGrid(seaGridOn ? &A->seaGrid : nullptr);
         sea->sweCurrentGain = S.water.swe.gain;
+        sea->sweCurrentRefreshS = S.water.swe.currentRefreshS;
         sea->heightScale = S.water.heightScale;
         sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         if (S.sea.storm.hs > 0.01f) sea->SetStorm(S.sea.storm.hs, S.sea.storm.tp, S.sea.storm.dir);

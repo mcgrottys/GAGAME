@@ -161,8 +161,28 @@ struct DatumProps {
     bool fromStation = true;          // CO-OPS resolves MLLW -> NAVD88; false = mllwToNavd
     float mllwToNavd = 0.0f;          // PHASE C3: no place's number; the scene declares its own
 };
+// AN ASTEROID INTO THE SEA (2026-10-25; laws/Impact.hlsli, sim/ImpactWave.h): the impactor and where
+// and when it lands; the wave is the one law's, evaluated everywhere (the globe's vertices, the
+// bank, the hull, the solver's faces). The scene's `impacts` list is the RECORD of events (each with
+// its `at`; "" = the water clock's first instant); `sea.impactor` is the one the I key drops at the
+// point under the cursor, at the clock's instant (sim/ImpactField.h holds the record).
+// `exag` exaggerates the DRAWN wave alone (the hull and the solver read it raw); `reachM` is how far
+// the sum must hold (the discrete sum's image returns at 2 pi / dk, dk = 12 / (R_D terms)): the terms
+// follow from it (12 reach / (pi R_D), at most 4096), or `terms` names them.
+struct ImpactProps {
+    bool enabled = true;
+    double lat = 35.0, lon = -42.0;
+    double diameterM = 10000.0, speedMs = 20000.0, densityKgM3 = 3000.0, angleDeg = 45.0;
+    std::string at;
+    double basinDepthM = 4000.0;
+    double energyShare = 0.094;
+    double terms = 0.0;        // 0 = by the reach: 12 reach / (pi R_D), the alias past the reach
+    double reachM = 6.0e6;     // how far the sum must hold before its image returns (the Atlantic)
+    double exag = 1.0;
+};
 struct SeaSection {
     StormProps storm;
+    ImpactProps impactor;   // the impactor the I key drops at the point under the cursor
     DatumProps datum;
     double box[4] = {0.0, 0.0, 0.0, 0.0};   // PHASE C2: data.seastate's place when its file says none
 };
@@ -171,6 +191,13 @@ struct SweProps {
     bool riverTide = true;            // the river faces' tide deviation; false = zeroed (--swe-river-off)
     double spinupH = 1.0;
     float gain = 1.0f;
+    // THE WAVE SOLVE'S READ OF THE SOLVER'S CURRENT, every this many sim seconds (WaveField::RefreshSweCurrent;
+    // 90 since F13): a new current is a new key and a new solve (~3 min), and a headless record waits for
+    // each. A scene run fast (the asteroid's arrival at 30x) sets it past its length and keeps the first.
+    double currentRefreshS = 90.0;
+    // THE SOLVER'S SUBSTEPS A FRAME (SweSolver::SetStepBudget; 16 since M5): past it the solver starves and
+    // runs time-dilated. A record at 30x with a surge's 0.012 s step needs ~90; the descent at 130x ~360.
+    double stepsPerFrame = 16.0;
     // m^3/s at the first river face; < 0 = its gauge's, from data.river (sim/RiverModel.h DischargeAt)
     double riverQ = -1.0;
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)

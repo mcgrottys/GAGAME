@@ -1861,7 +1861,7 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix, bool block) {
         return;
     }
     if (!m_swe->ReadFieldsPending()) {
-        if (simUnix - m_curReadT < 90.0 && !m_curU.empty()) return;   // solve-cadence refresh
+        if (simUnix - m_curReadT < m_sweRefreshS && !m_curU.empty()) return;   // solve-cadence refresh (water.swe.currentRefreshS)
         if (m_inFlight.load()) return;
         if (!m_swe->ReadFieldsBegin(gpu)) return;
         if (!block) return;

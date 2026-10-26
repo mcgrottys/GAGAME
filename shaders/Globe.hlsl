@@ -148,7 +148,13 @@ cbuffer GlobeCb : register(b1) {
     // (SeaLayer's WaveScale::hsRef), y = 1 while a declared storm stands (the scale is 1). Appended
     // at the END on both sides (priors 22).
     float4 gFarSea;
+    // THE IMPACTS (2026-10-25; sim/ImpactField.h, shaders/ImpactRead.hlsli): gImpA = the instant on
+    // the record's base (s), the planet's radius, g; gImpU = the events' buffer SRV (gBufU), their
+    // count. Appended at the END on both sides.
+    float4 gImpA;
+    uint4  gImpU;
 };
+
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
 // said about the TANGENT POINT A = R up. The chart's law is written in the planet frame and this
@@ -718,6 +724,28 @@ float2 ReliefUv(float3 dir) {
 //
 // h is the vertex's own composed height, already fetched for displacement -- the shelf tint
 // rides it for free, so shallows still read green without a single extra fetch.
+// THE IMPACTS' WAVE AT A POINT OF THE PLANET (2026-10-25): every event's Bessel sum at the great-circle
+// distance from it, shoaled to the depth here (ImpactRead.hlsli; laws/Impact.hlsli says the law; the bank
+// kernel and the CPU sum the same tables). Returns the level's departure (m) and its slope east and north
+// in the TANGENT frame (the frame the water's normals are made in); zero while no event has begun.
+// Evaluated at the globe's VERTICES; the pixel interpolates (a wave tens of kilometres long against a
+// mesh cell of hundreds of metres).
+typedef float real;
+#define GA_PLANET_G (gImpA.z)
+#include "laws/Impact.hlsli"
+#include "ImpactRead.hlsli"
+float3 ImpactAt(float3 dir, float depth) {
+    if (gImpU.y == 0u) return 0.0f;
+    float3 slP;
+    const float eta = ImpactSumAt(gImpU.x, gImpU.y, gImpA.x, gImpA.y, dir, depth, slP);
+    const float3 slT = CsToTangent(slP);
+    const float3 upT = CsToTangent(dir);
+    const float3 axisT = float3(gCsR0.y, gCsR1.y, gCsR2.y);
+    float3 east = cross(axisT, upT);
+    east = (dot(east, east) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(east);
+    const float3 north = cross(upT, east);
+    return float3(eta, dot(slT, east), dot(slT, north));
+}
 float3 WaterVertexColor(float3 dir, float3 rel, float h) {
     const float3 upT = CsToTangent(dir);
     const float3 v = normalize(-rel);
@@ -810,6 +838,12 @@ struct VsOut {
     // M9bg: the water's finished colour, shaded at this vertex and INTERPOLATED across the
     // triangle -- old-school Gouraud. PsMain reads it; it never recomputes it.
     float3 wcol : TEXCOORD4;
+    // THE IMPACT'S WAVE at this vertex (ImpactAt): the level's departure past the rings (inside them the
+    // bank's level plane carries it), and its slope east and north for the far sea's normal.
+    float3 imp : TEXCOORD9;
+    // THE COLUMN'S WATER at this vertex (the bank's detail plane, DryWeight; -1 past the rings): the
+    // classifier's witness that a column holds water over the survey's land (Compose.hlsli).
+    float colWet : TEXCOORD10;
     // M10: which Droste level drew this fragment -- a slot in the level table. rel above is in
     // THAT level's own frame (the gauge), so PsMain must load the level before it reads rel.
     nointerpolation uint lvl : TEXCOORD5;
@@ -878,6 +912,8 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     o.wcol = WaterVertexColor(dir, o.rel, h);   // M9bg: the sea, shaded here and nowhere else
     o.dry = 0.0f;
     o.wl = gWavesB.w;
+    o.imp = 0.0f;
+    o.colWet = -1.0f;
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
@@ -1023,7 +1059,7 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
                        float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl,
-                       float lipThick, float lipCov, float3 drawnAt) {
+                       float lipThick, float lipCov, float3 drawnAt, float3 imp) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -1095,6 +1131,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
                                        bP.y);
             if (inRing) s2 = max(bP.y + max(s2 - mssModel, 0.0f), 0.0015f);   // past the rings s2 stays the whole sea's
             lvlW = gWavesB.w + bP.x;   // the bank holds the DEPARTURE from the waterline (WaterBank.hlsl); a NULL tile's 0 is the waterline
+            if (!inRing) lvlW += imp.x;   // past the rings the vertex carries the impact's wave (ImpactAt)
             dispW = bD.y;
             // The wave normal: the tangent bivector's dual, analytic from the reconstruction
             // kernel (priors 21 -- the derivative is still taken at the DATA's grain, because
@@ -1114,8 +1151,8 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             const float wRingPx = 1.0f - smoothstep(2.0f * bT, 8.0f * bT, footPx);
             const float2 sRing = sRing0 * wRingPx;
             s2 += (1.0f - wRingPx * wRingPx) * 0.5f * dot(sRing0, sRing0);
-            float sx = sRing.x;
-            float sz = sRing.y;
+            float sx = sRing.x + (inRing ? 0.0f : imp.y);   // the impact's wave tilts the far sea (its slope, ImpactAt)
+            float sz = sRing.y + (inRing ? 0.0f : imp.z);
             nSmooth = normalize(upT - east * sx - north * sz);
             {   // the bivector's dual itself, before the slope form folds it up and caps it
                 const float3 nL = cross(float3(bDdz.x, bDdz.y, 1.0f + bDdz.z), float3(1.0f + bDdx.x, bDdx.y, bDdx.z));
@@ -1637,7 +1674,7 @@ float4 PsSurface(VsOut i, out float land) {
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
                             : ComposedLandnessEdit(up, pA CS_WC, hp, i.wl, saturate(i.dry / dryBand),
-                                                   dryBand, editLandPx, wet);
+                                                   dryBand, i.colWet, editLandPx, wet);
     land = landness;
     float3 n = upT;
     float3 alb;
@@ -1981,7 +2018,7 @@ float4 PsSurface(VsOut i, out float land) {
             }
         }
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipThick, lipCov, float3(xzD, aD));
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl, lipThick, lipCov, float3(xzD, aD), i.imp);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 

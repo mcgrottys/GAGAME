@@ -1286,6 +1286,14 @@ void SweSolver::OceanBoundary(float tideNavd, float tideRate) {
             y[k] = (std::isfinite(v) ? v - double(tideNavd) : 0.0) + surge;
             m_cb.oceanEta[4 * s + k] = static_cast<float>(y[k]);
         }
+        // THE OPEN SIDE'S LEVEL, SAID (2026-10-25, the asteroid's arrival drew nothing: an instrument on the
+        // path the faces ride): once a sim-minute while the departure stands, which side, the manager's
+        // four departures, the surge, and the instant it was asked at.
+        if (m_simTime - m_openSaidT >= 60.0 && (std::fabs(y[0]) > 0.5 || std::fabs(y[3]) > 0.5)) {
+            m_openSaidT = m_simTime;
+            Log("[swe] open side %d at t=%.0f: the level's departure from the tide plane %+.2f %+.2f %+.2f %+.2f m (surge %+.2f; source %s)",
+                s, m_simTime, y[0], y[1], y[2], y[3], surge, m_levelAt ? "the manager's Level" : "the tide plane");
+        }
         // The side's live section under that Level (the kernel's cubic, Swe.hlsl OceanEtaAt).
         const double cellL = s < 2 ? double(m_cb.dx) : double(m_cb.dy);
         for (int i = 0; i < int(len); ++i) {
@@ -1307,7 +1315,7 @@ void SweSolver::OceanBoundary(float tideNavd, float tideRate) {
 }
 
 int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd) {
-    return Record(cmd, gpu, simUnix, tideNavd, kMaxSubsteps);
+    return Record(cmd, gpu, simUnix, tideNavd, m_stepBudget);
 }
 
 int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,

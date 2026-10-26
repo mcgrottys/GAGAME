@@ -167,6 +167,12 @@ bool RunWaterHoldSelfTest();
 class SweSolver {
 public:
     static constexpr uint32_t kMaxSubsteps = 16;
+    // THE FRAME'S STEP BUDGET (2026-10-25, the asteroid's arrival at 30x): a fast clock asks more substeps
+    // than kMaxSubsteps a frame and the solver STARVES -- its clock re-anchors each frame and its
+    // dynamics run time-dilated, the surge at its faces rising at the scene's rate and the water inside
+    // answering at a fraction of it (the beach clip stayed dry through a 600 m surge). A scene says the
+    // budget (water.swe.stepsPerFrame); a headless record sets it to what its clock needs.
+    void SetStepBudget(uint32_t steps) { m_stepBudget = steps ? steps : kMaxSubsteps; }
 
     // M9ar: bind the bed -- the height tenant's array with its residency map, so the solver reads
     // the same megatexture the water shading and the globe read. Must be called before the first
@@ -531,6 +537,8 @@ private:
     std::vector<uint8_t> m_keep;           // state tiles never released (the boundary's exterior cells)
     double m_releaseS = 1800.0;            // the hysteresis: dry this long, released
     double m_surgeA = 0.0, m_surgePeak = 0.0, m_surgeTau = 3600.0;
+    double m_openSaidT = -1e18;   // the open side's level last said (sim s)
+    uint32_t m_stepBudget = kMaxSubsteps;   // SetStepBudget
     // M9h: grad(flow) -- residency derived from the Cayley closure, not a physics policy.
     GradeBank m_velGrad;
     ShaderCompiler* m_sc = nullptr;   // M9h: BuildChain compiles the reducer on first use
