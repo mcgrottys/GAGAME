@@ -1724,12 +1724,59 @@ spreads. The Merrimack without an event is byte-identical through the change (me
 The exterior still reads the Bessel law at every edge cell (the one edge law), so the solver's own train
 meets the law's at the edge: the east edge's Level stood +2.16 m at T = 256 s.
 
-*Not built, stated:* the tail. The gate's second clause -- the train crossing 2600 km in the tail's own solve,
-its amplitude against the law within its dispersion -- needs the planet's coarse mips always resident and
-stepping (14.2), which stage 2 left as the window's twin at mip 1 (28 km): a far event still enters through the
-edge's analytic Level as before, and its state is imposed on the window only where its train already stands
-when the field first stands (the linear theory's level and velocity then, exact for linear). That is stage 2b,
-the N-mip tail on the tree, and it is the next piece of this section.
+*Then not built:* the tail -- built the same day, below.
+
+**Stage 2b, built (2026-10-27, Mark: "build the tail"): the train crosses the ocean in the tail's own solve.**
+The tail is a third lattice of the same solver: the window's chart coarsened by 2^rank about the same anchor,
+`water.swe.tailCells` a side (2048 of 2^9: 5.2 x 7.0 km at the Merrimack, 10,560 x 14,395 km across on the
+tangent plane, the far corners' cells 0.44 of their size on the sphere), the window whole in its central cells
+(1022..1026 of 2048: its corner lies on the tail's lattice by construction), its CPU bed the one stack at the
+tail's grain (4 M cells in under 5 s) and its GPU bed the cube's mip 3 (wanted with the window's, `WantDomain`),
+its residency the tiles the sea reaches from its edge at mean sea (63 % of the cells, 213 tiles, for the run),
+its own constants, lists and step (1.77 s: the CFL at the deepest water, 8384 m, over the far corners' true cell,
+and as much again for the water's own speed under a falling lip), stepped ahead of each batch on its own clock
+(`RecordTail`). Its gauge is MEAN SEA: its columns rest at 0 m NAVD over their bed, its tide plane is 0, and what it
+carries is the DEPARTURE -- the train, a surge -- not the tide (an ocean tide solve at 5 km with no Coriolis would
+have fed the Merrimack a wrong tide; the tide is the atlas's, as before). Its own far edge reads the impacts' law
+alone (`SetTailLevelSource`). THE WINDOW'S EDGE KEEPS ITS ONE LAW, and the Level there is the atlas's PLUS the
+tail's departure and its velocity at the tail cell just beyond the side (`Swe.hlsl TailDepAt`, `TailUAt`: Berger
+and Oliger's ghost, never the cell the window lies in); the analytic law is no longer read at the window's edge
+where a tail stands. THE CHART'S METRIC (`CellM`): every kernel takes a cell's true size from its place in the
+tangent plane, the gnomonic chart's diagonal metric (R ds sqrt(1 + t^2) / q along s, R dt sqrt(1 + s^2) / q
+along t, q = 1 + s^2 + t^2; the shear s t / q left out, 0.2 at the tail's far corners) -- the window's cells
+change by 5e-6, and the Merrimack with the tail standing is within 0.16 mm of level and 2 mm/s of current of
+the run before. An impact is imposed on the levels that hold its cavity (the tail: yes; the window: not for a
+far event), and AT ITS INSTANT AS THE CAVITY ITSELF, closed (`laws/Impact.hlsli ImpactCavityAt`, while the front
+has moved less than a tenth of the lip): the table's sum, imposed at T = 6 s, had planted +-2 m at the window
+2600 km out and +-12 m before the front at the window's edge -- the truncation's leakage, a wave from nowhere.
+The fold of the twin into the tail is written (`CsSweFoldTail`) and OFF: the twin's departure from the window's
+tide plane carries the estuary's own lag against that plane, which folded into a 5 km ocean cell radiated back
+to the window's edge as a sea-level change before any event; the tail is one-way (the window's water does not
+return to the ocean; its feedback on a 5 km cell is nil). The spin-up stops itself, and says so, when the step
+collapses under 5 ms (a blow-up), instead of crawling for hours.
+
+*The gate* (`scenes/demos/impact_tail.json`, out/review/stage3/impact_tail2; impact_tail1_ray is the same run
+before the fastest-path instrument): the 10 km stone of 13.4 into 35 N 42 W at 15:00Z, 2625 km from the
+Merrimack's mouth, the spin-up from 14:30Z for 8 h (139 s of wall clock). The cavity (109.9 km across, 4000 m
+deep, 21 cells) imposed on the tail at T = 6 s; the tail SILENT at the window for five hours (0.000 m at the
+anchor's cell and east of the window); then the train. Its first 0.1 m of motion reaches the tail cell east of
+the window at 5.15 h and the anchor's cell at 5.31 h, the half-crest about 5.5 h, the crest at 5.70 h (east,
++9.4 m) and 5.85 h (the anchor's cell, +11.9 m), the trough -4.5 and -7.1 m at 6.7 h. The reference, two
+instruments on the tail's own bed at sqrt(g h): the great-circle ray 5.84 h (16 m of water at its shallowest,
+Nantucket's shoals) and the fastest path 5.90 h (Dijkstra over the sea cells at the chart's metric: the ray is
+already the quickest way on this bed); the one-depth law said 3.68 h, 2.2 h early, the shelf's share. So the
+crest rides sqrt(g h) over the bed to within 3 %, and the first motion runs 12 % ahead of it: the lip's step
+front, smeared by the first-order scheme over about 150 km after 500 cells of travel. The gate's first clause is
+met on the crest; its second (the amplitude at 2600 km within the law's dispersion) is not judged here: the law's
+far field is its one-depth train and the tail's is the bed's, and the 10 km stone's train at the Merrimack --
++10.7 m at the twin's sea point, +10.0 m at the anchor, then a 6 m trough -- collapses the window's step at 7.06 h
+(the guard stopped the spin-up with 0.43 h left): the window does not survive this stone, which is the window's
+matter and not the tail's.
+
+*Stated, not built:* the levels between the twin and the tail (a telescope of mips, so a 1 km stone's 19 km
+cavity, three tail cells, is resolved where it falls); the tail is not drawn (the readers' far field is the
+analytic law still; the bank and the globe read the window or the plane); the tail's residency is the run's
+(static, the sea from its edge); one tail, no second window; the metric's shear; the fold into the tail, kept off.
 
 ## Sources
 

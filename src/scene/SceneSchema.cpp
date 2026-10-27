@@ -253,7 +253,9 @@ const Schema& SweSchema() {
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
             .Bind("windowTiles", p.windowTiles, Q::Dimensionless, "1",
                   "the solver's window: this many tiles of 128 cells a side about the eye's start (the place's anchor), its corner on the global lattice of the cell's angle, its bed the one height stack's, its open sea the tide atlas's; 0 = no solver (stage 2 of one water on the tree)", R)
-            .Bind("cellM", p.cellM, Q::Length, "m", "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)", R);
+            .Bind("cellM", p.cellM, Q::Length, "m", "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)", R)
+            .Bind("tailCells", p.tailCells, Q::Dimensionless, "1", "the tail across the ocean (stage 2b of one water on the tree): this many cells a side about the same anchor, the window whole in its central cells; 0 = no tail", R)
+            .Bind("tailRank", p.tailRank, Q::Dimensionless, "1", "the tail's cell as a power of two of the window's (9: 512 window cells, 5 x 7 km at the Merrimack)", R);
         return sc;
     }();
     return *s;

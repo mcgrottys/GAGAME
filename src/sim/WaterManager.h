@@ -233,6 +233,8 @@ private:
         std::string name;
         SweSolver* solver = nullptr;              // the frame loop's (AddExternalWindow)
         double box[4] = {0.0, 0.0, 0.0, 0.0}; // PHASE C1: lat0, lon0, lat1, lon1 (degrees)
+        double tailBox[4] = {0.0, 0.0, 0.0, 0.0};   // stage 2b: the tail's lat/lon bounds (lat1 <= lat0: none)
+        uint32_t tailMip = 0;                       // the cube's mip its cells read
         bool InBox(double latDeg, double lonDeg) const {
             return latDeg > box[0] && latDeg < box[2] && lonDeg > box[1] && lonDeg < box[3];
         }

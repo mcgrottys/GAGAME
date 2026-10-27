@@ -1,0 +1,27 @@
+{
+  "_readme": [
+    "STAGE 2b OF ONE WATER ON THE TREE: THE TRAIN CROSSES THE OCEAN IN THE TAIL'S OWN SOLVE (2026-10-27, docs/WATER_V2.md",
+    "14.4, stage 3's far gate). The same event as impact_newburyport.json -- 10 km at 20 km/s into 35 N 42 W at 15:00Z on",
+    "2026-08-28, 2625 km from the Merrimack's mouth -- imposed on the tail at its instant (the scene's spin-up starts",
+    "before it) and carried across the Atlantic, over the stack's bed, to the window's edge. The gate: the tail's",
+    "arrival at the window against the ray's sqrt(g h) over the tail's bed ('[impact] stage 2b' says it) within 10 %;",
+    "the probe line every sim-minute ('tail: at the anchor ..., east of the window ...'). The window itself does not",
+    "survive this stone: its +11 m crest at the bar collapses the step and the spin-up stops there, said in the log.",
+    "",
+    "Gate:  build\\bin\\gagame.exe scenes\\demos\\impact_tail.json --headless --frames 60 --dump-water-state --set streaming.offline=true --set water.swe.fineReachM=1500"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "impact-tail", "view": "entrance_above"},
+  "time": {"start": "2026-08-28T22:30:00Z"},
+  "water": {"clock": {"bind": "time"}, "swe": {"spinupH": 8.0, "currentRefreshS": 1000000}},
+  "sun": {
+    "clock": {"start": "2026-08-28T16:00:00Z", "rate": 0},
+    "earth": {"clock": {"start": "2026-08-28T16:00:00Z", "rate": 0}}
+  },
+  "impacts": [
+    {"lat": 35.0, "lon": -42.0, "at": "2026-08-28T15:00:00Z", "diameterM": 10000, "speedMs": 20000, "densityKgM3": 3000, "angleDeg": 45, "basinDepthM": 4000, "exag": 1}
+  ],
+  "views": [
+    {"name": "entrance_above", "at": {"lat": 42.8190, "lon": -70.8060, "alt": 0, "heading": 0, "tilt": 0, "range": 1400}, "fovY": 55, "gauge": "root"}
+  ]
+}

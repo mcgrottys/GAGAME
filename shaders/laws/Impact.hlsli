@@ -78,6 +78,13 @@ inline real ImpactCavityDiameter(real impactorDiamM, real speedMs, real rhoImpac
 inline real ImpactCavityDepth(real waveEnergyJ, real cavityRadiusM, real rhoWater) {
     return sqrt(3.0 * waveEnergyJ / (3.141592653589793 * rhoWater * GA_PLANET_G * cavityRadiusM * cavityRadiusM));
 }
+// THE CAVITY ITSELF at distance r (m): the lipped parabola eta0(r) = D_c (r^2 / R_c^2 - 1) over r < R_D,
+// nought beyond -- the sum's value at t = 0, closed (the sum's truncation rings +-8 % of D_c across the
+// cavity and leaks metres thousands of km out; the profile does neither).
+inline real ImpactCavityAt(real r, real cavityRadiusM, real cavityDepthM) {
+    const real RD = kImpactLipRatio * cavityRadiusM;
+    return (r < RD) ? cavityDepthM * (r * r / (cavityRadiusM * cavityRadiusM) - 1.0) : 0.0;
+}
 // THE CAVITY'S SPECTRUM F(k) (m^3): the Hankel transform of eta0(r) = D_c (r^2 / R_c^2 - 1) over
 // r < R_D = sqrt(2) R_c, which is D_c [R_D J1(k R_D) / k - 4 J2(k R_D) / k^2].
 inline real ImpactSpectrum(real k, real cavityRadiusM, real cavityDepthM) {

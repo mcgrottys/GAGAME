@@ -1282,9 +1282,23 @@ std::optional<int> FrameLoop::Session() {
         // it inland from here (the bank and the hull read the same law where the solver is silent).
         std::shared_ptr<ImpactField> imp = m_impacts;
         swe.SetImpacts(imp);   // stage 3 (2026-10-27): an event the field holds is imposed on its columns at its zero
+        // STAGE 2b: the tail's far edge reads the impacts' law alone -- a departure from mean sea over the depth there
+        {
+            Compositor* compT = &compositor;
+            const int hgtT = hgtCh;
+            swe.SetTailLevelSource([imp, compT, hgtT](double la, double lo, double t) -> double {
+                constexpr double kDeg = 3.141592653589793 / 180.0;
+                if (!imp || !imp->Begun(t)) return 0.0;
+                const double bed = compT->SampleHeightResident(hgtT, la * kDeg, lo * kDeg, 5000.0);
+                const double h0 = imp->Events().front().props.basinDepthM;
+                const double depth = (std::isfinite(bed) && bed < 0.0) ? -bed : h0;
+                return imp->EtaAt(la, lo, t, depth, false);
+            });
+        }
         Compositor* compP = &compositor;
         const int hgtChP = hgtCh;
-        swe.SetLevelSource([atlas, imp, compP, hgtChP](double la, double lo, double t) -> double {
+        const SweSolver* sweP = &swe;
+        swe.SetLevelSource([atlas, imp, compP, hgtChP, sweP](double la, double lo, double t) -> double {
             constexpr double kDeg = 3.141592653589793 / 180.0;
             if (!atlas->Ready()) return std::nan("");
             // (The shelf rung -- a Gulf of Maine window about this one, answering the faces with the train it
@@ -1292,6 +1306,9 @@ std::optional<int> FrameLoop::Session() {
             // analytic wave stands at the faces until stage 3 imposes the cavity in the tail's own solve.)
             const double tide = atlas->MslNavd(la, lo) + atlas->Level(la, lo, t);
             if (!imp || !imp->Begun(t)) return tide;
+            // STAGE 2b: where the tail stands, the window's edge reads the field (the tail's departure, in the kernel);
+            // the law is read at the tail's far edge alone. Without a tail the law stands here, as before.
+            if (sweP->HasTail()) return tide;
             const double bed = compP->SampleHeightResident(hgtChP, la * kDeg, lo * kDeg, 10.0);
             // the depth the shoaling takes: the water over the bed here. A bed not held, or one above the
             // water (the side's cubic asks four points, and a window's corner can be land), takes the deep

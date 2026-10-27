@@ -214,6 +214,11 @@ struct SweProps {
     // enter the window is data (data.river's reaches, sim/RiverModel.h).
     uint32_t windowTiles = 16;
     float cellM = 13.728f;
+    // STAGE 2b: THE TAIL -- the coarse lattice across the ocean about the same anchor: tailCells a side of cells
+    // 2^tailRank of the window's (2048 of 2^9: 5 x 7 km at the Merrimack, 10,000 x 14,000 km on the plane, the
+    // window whole in its central cells); 0 = no tail.
+    uint32_t tailCells = 2048;
+    uint32_t tailRank = 9;
 };
 struct BankProps {
     bool flatBed = false;

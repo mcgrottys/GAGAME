@@ -61,6 +61,13 @@ struct SweConfig {
         double lat = 0.0, lon = 0.0; // where the river's line crosses the edge
         std::string name;
     };
+    // STAGE 2b OF ONE WATER ON THE TREE (2026-10-27): THE TAIL -- a coarse lattice across the ocean about the same
+    // anchor, tailCells a side of cells 2^tailRank of the window's, on the window's own lattice (the window sits
+    // whole in its central cells); its bed the one stack at that grain (bedAt: lat, lon degrees, the grain m);
+    // 0 cells = no tail (water.swe.tailCells, water.swe.tailRank).
+    uint32_t tailCells = 2048;
+    uint32_t tailRank = 9;
+    std::function<float(double, double, double)> bedAt;
     std::vector<RiverFace> faces;    // at most kMaxRiverFaces
     // C2: THE LAND SOAKS -- one stated soil for now (WATER_V2 12.3): the water a dry column's soil can
     // take (m), its saturated conductivity (m/s: a sandy loam's 36 mm/h) and Green and Ampt's suction
@@ -247,6 +254,12 @@ public:
     // velocity then (its cavity at T = 0), shoaled to the column's water -- and the law carries it from there
     // (Swe.hlsl CsSweImpose; BeginImpose, RecordImpose). One event a batch; the next batch takes the next.
     void SetImpacts(std::shared_ptr<const ImpactField> impacts) { m_impacts = std::move(impacts); }
+    // STAGE 2b: THE TAIL'S OWN EXTERIOR -- the departure from mean sea (m) at a place and instant at the tail's
+    // far edge: the impacts' law for events outside the tail (FrameLoop); unset, nothing.
+    void SetTailLevelSource(std::function<double(double, double, double)> at) { m_tailLevelAt = std::move(at); }
+    bool HasTail() const { return m_tail; }
+    const SweDomain& TailDomain() const { return m_domT; }
+    uint32_t TailBedMip() const { return m_tailBedMip; }   // the cube's mip the tail's cells read (WaterManager's want)
 
     // Advance toward simUnix (records compute through cmd) and leave eta + uv sampleable.
     // tideNavd = the analytic water level, NAVD88 m. Returns substeps executed this frame.
@@ -258,6 +271,12 @@ public:
     template <typename F, typename G, typename Q>
     void AdvanceTo(Gpu& gpu, double targetUnix, F tideAt, G faceAt, Q faceQAt) {
         while (m_simTime < targetUnix - m_dt) {
+            // a step under 5 ms on these cells is a blow-up (a face at hundreds of metres a second), and the
+            // spin-up would crawl for hours: it stops here and says so (the 10 km stone's crest at the bar, 2026-10-27)
+            if (m_dt < 0.005f) {
+                Log("[swe] the step collapsed to %.4f s at t=%.0f (%.2f h of the spin-up left): the spin-up stops here", m_dt, m_simTime, (targetUnix - m_simTime) / 3600.0);
+                break;
+            }
             const double target = (std::min)(m_simTime + 64.0 * m_dt, targetUnix);
             for (int f = 0; f < FaceCount(); ++f) {
                 m_faceDEta[f] = static_cast<float>(faceAt(f, m_simTime));
@@ -505,6 +524,11 @@ private:
         // count (0 = nothing this batch), 0, 0, 0.
         float impactA[4];
         float impactB[4];
+        // STAGE 2b: the tail under this lattice (Swe.hlsl gTail/gTail2): the shift to its cells (< 0 none), the
+        // tail cell the window's corner lies in, its cells across; its cells down, its tiles across, 0, 0.
+        float tail[4];
+        float tail2[4];
+        float impactC[4];   // stage 3: the event's cavity radius and depth (m), 0, 0
     };
 
     bool m_ready = false;
@@ -598,7 +622,7 @@ private:
     std::vector<uint32_t> m_foldList;
     // STAGE 1c: THE CHAINS' TABLE (Swe.hlsl gHChain/gBedChain/gVelChain, root param 4): h and the bed at every
     // mip, the velocity bank each mip reads, one table per parity pair [the fine's read][the twin's read].
-    hal::Table m_tableChain[2][2];
+    hal::Table m_tableChain[2][2][2];   // stage 2b: [fine parity][twin parity][tail parity]
     // STAGE 1d: THE EYE'S DEMAND -- mip 0 is wanted within reachM of the eye's ground point (0 = everywhere);
     // the twin carries the rest as its own cells (UpdateResidency).
     bool m_eyeOn = false;
@@ -612,10 +636,40 @@ private:
     std::vector<uint8_t> m_imposed;
     double m_imposedAt = -1e18;
     int m_imposeEvent = -1;
+    float m_imposeTailN = 0.0f;   // this batch's event's terms where its cavity lies in the tail (else 0)
     D3D12_GPU_VIRTUAL_ADDRESS m_imposeVa = 0;
     hal::Pso m_imposeK;
-    bool BeginImpose(Gpu& gpu);
+    bool BeginImpose(Gpu& gpu, bool reset);
     void RecordImpose(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS listVa, UINT count, const hal::Table& table);
+    // STAGE 2b (2026-10-27): THE TAIL. The same kernels on a third lattice -- the window's chart coarsened by
+    // 2^rank, tailCells a side, the window whole in its central cells -- carrying the ocean's DEPARTURE from mean
+    // sea (its columns rest at MSL over the stack's bed at its grain; its tide plane is 0 m; its own edge reads the
+    // impacts' law), stepped on its own clock at its own CFL ahead of each batch, every tile the sea reaches from
+    // its edge resident for the run. The window's lattice edge keeps its one law, with the Level there the tide
+    // atlas's PLUS the tail's departure and its velocity (Swe.hlsl TailDepAt, TailUAt); the twin's wet cells fold
+    // into the tail's cells under the window before each tail step (CsSweFoldTail); an impact is imposed on the
+    // tail as on the window. The chart's metric (CellM) makes the tail's far cells their true size.
+    bool m_tail = false;
+    SweDomain m_domT;
+    SweCbData m_cbT{};
+    TileAtlas2D m_hT, m_bedT, m_soilT, m_etaT, m_fluxT, m_velAT, m_velBT, m_limT;
+    hal::Table m_tableT, m_tableBT;          // the tail's step tables (its read velocity bank in turn)
+    hal::Table m_tableFoldT[2][2];           // [the twin's newest bank][the tail's read bank]
+    std::vector<uint32_t> m_listT, m_fluxListT, m_liveT;
+    uint32_t m_velNewT = 0;
+    double m_simTimeT = 0.0;
+    float m_dtT = 1.0f;
+    bool m_tailFresh = true;
+    uint32_t m_tailCorner = 0, m_tailShift = 9, m_tailBedMip = 3;
+    hal::Pso m_foldTailK;
+    D3D12_GPU_VIRTUAL_ADDRESS m_liveTVa = 0, m_hlTVa = 0, m_flTVa = 0;
+    std::function<double(double, double, double)> m_tailLevelAt;
+    void InitTail(Gpu& gpu, const SweConfig& cfg);
+    void TailCb();
+    void TailBoundary();
+    void RecordTail(hal::CommandContext& cmd, Gpu& gpu, double batchEnd, bool reset);
+    double TailRayArrivalS(double latDeg, double lonDeg, double h0, double& shallowest) const;
+    double TailFastestArrivalS(double latDeg, double lonDeg) const;   // the fastest sqrt(g h) path over the tail's sea (Fermat)
     void CoarseCb(int n, int n1);
     // STAGE 1c (2026-10-26): THE TWIN INTERLEAVED -- Berger and Oliger's order. Begin: the twin's constants, lists,
     // clear, bed, reset and sea sweeps for the batch; Step: the fold of the fine's state, then ONE coarse step,
