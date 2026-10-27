@@ -245,6 +245,8 @@ const Schema& SweSchema() {
             .Bind("gain", p.gain, Q::Dimensionless, "1", "solved-current gain (--swe-gain)", H)
             .Bind("stepsPerFrame", p.stepsPerFrame, Q::Dimensionless, "1",
                   "the solver's substeps a frame before it starves (its clock re-anchors, its dynamics run time-dilated); a fast clock's record sets what it needs", R)
+            .Bind("fineReachM", p.fineReachM, Q::Length, "m",
+                  "the eye's demand for the solver's finest mip: its tiles within this reach of the eye's ground point; 0 = the whole window (stage 1d of one water on the tree)", R)
             .Bind("currentRefreshS", p.currentRefreshS, Q::Time, "s",
                   "how often (sim s) the wave solve reads the solver's current and re-keys (a solve each); past the run's length = the first current throughout", R)
             .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)", R)

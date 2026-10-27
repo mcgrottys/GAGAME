@@ -52,7 +52,9 @@ cbuffer SweCb : register(b0) {
     float4 gFaceB[4];
     float gOceanU;               // the open sides' Flather u_ext, m/s + inward (SweSolver::Record: the
                                  // domain's stateless prism less the rivers' transport, over the sides' section)
-    float gPadA, gPadB, gPadC;
+    // STAGE 1c OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): the mip this dispatch runs at, how
+    // many mips the chain holds, and the tiles across at the mip above (UpLiveAt's row stride).
+    float gMip, gMips, gEtaTilesXUp;
     // PHASE C1: a cell's place in the domain's chart (SweSolver::SetBed): the first cell's centre in
     // the anchor's tangent plane over R and the steps (s0, ds, t0, dt); the anchor's up and R; its
     // east and the cell's grain (m). North = east x up.
@@ -98,6 +100,8 @@ StructuredBuffer<uint> gTileList : register(t0);
 // THE LIVE TILES (C1): one word a tile of the state's bank, 1 where it is resident. A NULL tile holds
 // no water and takes none: its faces are walls until the residency maps it (SweSolver::Record).
 StructuredBuffer<uint> gLive : register(t3);
+// STAGE 1c: the live words of the mip above this dispatch's (SweSolver: m_live1 under mip 0; none above mip 1)
+StructuredBuffer<uint> gLiveUp : register(t4);
 // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. M9ax: the tenant's WHOLE array (cube faces 0..5 and
 // the eye's windows and the standing window: PHASE B2/B3) with its residency-map array, resolved by HeightPages.hlsli
 // exactly as the pixel stage resolves it. There is no solver-private copy of the bed, and no
@@ -148,6 +152,13 @@ RWTexture2D<float4> gWavePrev : register(u14);
 // min(1, V / (out dt)) -- Bollermann, Chen, Kurganov and Noelle's limit on draining cells (2013). Every
 // reader of a face's flux takes it times its donor's share (FluxEff).
 RWTexture2D<float> gLim : register(u15);
+// STAGE 1c: THE CHAINS -- the column field, the bed and the read velocity bank, every mip of each, in one
+// root table (SweSolver: m_tableChain[fine parity][twin parity]); a mip's kernels read the mip above through
+// them (UpLiveAt, the magnify). The registers are the chains', indexed by the mip.
+RWTexture2D<float> gHChain[2] : register(u16);
+RWTexture2D<float> gBedChain[2] : register(u18);
+RWTexture2D<float2> gVelChain[2] : register(u20);
+RWTexture2D<float4> gWaveChain[2] : register(u22);   // the sea bank each mip's solve reads (the push, the sweeps' source)
 
 // The bed as the stack answers it at the cell (the instrument CsSweBedTrace reads this too).
 float BedAt(int2 t) {
@@ -168,9 +179,21 @@ bool LiveAt(int2 t) {
     return gLive[(uint(t.y) / gEtaTileH) * gEtaTilesX + uint(t.x) / gEtaTileW] != 0u;
 }
 
-float BedC(int2 t) { return gBedC[t]; }
-float HAt(int2 t) { return gH[t]; }        // NULL tiles read 0: no water
-float SurfaceAt(int2 t) { return gBedC[t] + gH[t]; }
+// STAGE 1c OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): THE MAGNIFY. A cell this mip holds no
+// tile for is held by the mip above where its tile there is resident (gLiveUp): its water, its bed and its
+// face velocities are the coarse cell's, magnified (nearest: the coarse cell's own value stands over its
+// 2 x 2 fine cells; HIERARCHY 4.20's magnify law). The fine set's edge thus borders the coarse water, not a
+// frontier; the frontier (the stateless sea) stands only where NO mip of the chain holds the cell.
+bool UpLiveAt(int2 t) {
+    if (gMip + 1.0f >= gMips || !InLattice(t)) return false;
+    const uint2 c = uint2(t) >> 1;
+    return gLiveUp[(c.y / gEtaTileH) * uint(gEtaTilesXUp) + c.x / gEtaTileW] != 0u;
+}
+bool HoldsAt(int2 t) { return LiveAt(t) || UpLiveAt(t); }   // some mip of the chain holds the cell
+float BedC(int2 t) { return LiveAt(t) ? gBedC[t] : UpLiveAt(t) ? gBedChain[uint(gMip) + 1u][t >> 1] : 0.0f; }
+float HAt(int2 t) { return LiveAt(t) ? gH[t] : UpLiveAt(t) ? gHChain[uint(gMip) + 1u][t >> 1] : 0.0f; }   // NULL: no water
+float SurfaceAt(int2 t) { return BedC(t) + HAt(t); }
+float2 VelPrevAt(int2 t) { return LiveAt(t) ? gVelPrev[t] : UpLiveAt(t) ? gVelChain[uint(gMip) + 1u][t >> 1] : 0.0f; }
 
 uint2 EtaTexel(uint3 id) {
     const uint t = gTileList[id.z];
@@ -246,8 +269,9 @@ bool ExteriorLevel(int2 e, out float etaX, out float uExt) {
     // megatexture's bed (FlatherFlux reads that bed for a cell no state tile holds). The lattice's edge
     // rows keep their law above (the side's cubic, the rivers' faces); this is the same Flather, standing
     // at residency's edge instead of the box's. A NULL tile whose bed stands over the tide takes nothing,
-    // as before; one under it is open sea.
-    if (!LiveAt(e)) {
+    // as before; one under it is open sea. STAGE 1c: a cell the mip above holds is not the frontier's --
+    // its coarse water is the neighbour (FaceUpdate reads it magnified).
+    if (!HoldsAt(e)) {
         etaX = gTideNavd;
         uExt = 0.0f;
         return true;
@@ -386,7 +410,7 @@ float FaceDepth(int2 a, int2 b, float u) {
 // The velocity a face held the substep before: axis `ax` (0: the east face, 1: the south face) of cell c.
 float PrevU(int2 c, int ax) {
     if (!InLattice(c)) return 0.0f;
-    const float2 v = gVelPrev[c];
+    const float2 v = VelPrevAt(c);   // stage 1c: the coarse cell's where this mip holds none
     return (ax == 0) ? v.x : v.y;
 }
 
@@ -394,7 +418,7 @@ float PrevU(int2 c, int ax) {
 // the velocity before times the face's upwind depth now; none where either side is not live.
 float FaceP(int2 c, int ax) {
     const int2 e = (ax == 0) ? int2(1, 0) : int2(0, 1);
-    if (!LiveAt(c) || !LiveAt(c + e)) return 0.0f;
+    if (!HoldsAt(c) || !HoldsAt(c + e)) return 0.0f;
     const float u = PrevU(c, ax);
     return u * FaceDepth(c, c + e, u);
 }
@@ -402,9 +426,12 @@ float FaceP(int2 c, int ax) {
 // The sea's radiation stress at cell c over the water's density, (S_xx, S_yy, S_xy) / rho in the texture
 // frame (m^3/s^2): S_xx = E (n (1 + cos^2) - 1/2), S_yy = E (n (1 + sin^2) - 1/2), S_xy = E n sin cos,
 // E = g Hs^2 / 16 per density (Longuet-Higgins and Stewart 1964). None outside the lattice.
+// stage 1c: the sea of a cell the mip above holds is its coarse cell's -- without it the radiation stress fell to
+// nothing across the fine set's edge, a push that rang the inlet a metre in the first gate run
+float4 WaveAt(int2 c) { return LiveAt(c) ? gWave[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][c >> 1] : 0.0f; }
 float3 WaveS(int2 c) {
     if (!InLattice(c)) return 0.0f;
-    const float4 w = gWave[c];
+    const float4 w = WaveAt(c);
     const float cx = cos(w.w), cy = sin(w.w);
     const float e = gGravity * w.x;
     return e * float3(w.y * (1.0f + cx * cx) - 0.5f, w.y * (1.0f + cy * cy) - 0.5f, w.y * cx * cy);
@@ -432,7 +459,9 @@ float3 WaveS(int2 c) {
 // is not, nothing where neither can stand over the sill (a lake at rest stays at rest).
 float2 FaceUpdate(float u, int2 t, int2 d, float faceLen, float span) {
     const int2 n = t + d;
-    if (!LiveAt(n)) return 0.0f;   // a NULL tile holds no water and takes none
+    // a NULL tile holds no water and takes none; a cell the mip above holds is read magnified (stage 1c), and
+    // a face neither of whose cells this mip holds is the mip above's, not this one's
+    if (!HoldsAt(t) || !HoldsAt(n) || !(LiveAt(t) || LiveAt(n))) return 0.0f;
     const float b = BedC(t), bn = BedC(n);
     const float h = HAt(t), hn = HAt(n);
     const float sill = max(b, bn);
@@ -513,7 +542,7 @@ float2 FlatherFlux(int f, float etaX, float uExt, int2 e, int2 i, float L) {
     const float hI = HAt(i);
     const float etaI = SurfaceAt(i);
     // the exterior's bed: the cached one where a state tile holds it, the megatexture's at the frontier
-    const float bedE = LiveAt(e) ? BedC(e) : BedAt(e);
+    const float bedE = HoldsAt(e) ? BedC(e) : BedAt(e);
     const float sill = max(bedE, BedC(i));
     const float hf = max(max(etaX, etaI) - sill, 0.0f);
     float q = 0.0f;
@@ -574,7 +603,8 @@ void CsSweFlux(uint3 id : SV_DispatchThreadID) {
 }
 
 // The share of a column's outgoing fluxes its water pays this substep (gLim); 1 off the lattice.
-float LimAt(int2 c) { return InLattice(c) ? gLim[c] : 1.0f; }
+// stage 1c: a cell this mip does not hold pays the whole share (the coarse donor's positivity is its own step's)
+float LimAt(int2 c) { return LiveAt(c) ? gLim[c] : 1.0f; }
 
 // A face's flux as the water moves it: the face's own times its donor's share. axis 0: the east face of
 // c (to c + (1, 0)); 1: the south face (to c + (0, 1)).
@@ -792,7 +822,9 @@ float4 WavePrevAt(float2 p) {   // bilinear over the sweep before, at a point in
     [unroll] for (int k = 0; k < 4; ++k) {
         const int2 c = t0 + int2(k & 1, k >> 1);
         const float w = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
-        if (InLattice(c) && LiveAt(c)) acc += w * gWavePrev[c];
+        // stage 1c: up-ray of the fine set's edge the coarse cell's sea is the source (the twin sweeps its own
+        // lattice from the open sides; the fine set has no side of its own)
+        if (InLattice(c)) acc += w * (LiveAt(c) ? gWavePrev[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][c >> 1] : 0.0f);
     }
     return acc;
 }

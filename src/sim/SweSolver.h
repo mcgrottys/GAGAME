@@ -473,7 +473,7 @@ private:
         // at the tide plane times the plane's rate) less the rivers' transport, over the sides' live
         // section (OceanBoundary). The prism arrives through the boundary; nothing books it as debt.
         float oceanU;
-        float padA, padB, padC;
+        float mip, mips, etaTilesXUp;   // stage 1c: the dispatch's mip, the chain's mips, the mip above's tiles across
         // PHASE C1: A CELL'S POINT in the domain's chart. cellX = the first cell's centre in the anchor's
         // tangent plane over R (east s0, north t0) and the steps (dx / R, -dy / R): cell (i, j) at
         // (s0 + i ds, t0 + j dt); anc = the anchor's up (planet frame) and R; east = its east and the
@@ -578,6 +578,7 @@ private:
     bool m_coarse = true;
     SweCbData m_cb1{};
     hal::Table m_table1, m_tableB1;
+    hal::Table m_waveTable1[2];   // stage 1c: the twin's sweeps' tables (the two sea banks in turn at mip 1)
     std::vector<uint32_t> m_list1, m_fluxList1, m_live1;
     bool m_coarseFresh = true;   // its tiles' first batch: cleared and reset to the stateless column
     uint32_t m_velNew1 = 0;
@@ -586,15 +587,31 @@ private:
     hal::Pso m_foldK;
     hal::Table m_tableFold[2][2];
     std::vector<uint32_t> m_foldList;
+    // STAGE 1c: THE CHAINS' TABLE (Swe.hlsl gHChain/gBedChain/gVelChain, root param 4): h and the bed at every
+    // mip, the velocity bank each mip reads, one table per parity pair [the fine's read][the twin's read].
+    hal::Table m_tableChain[2][2];
+    // STAGE 1d: THE EYE'S DEMAND -- mip 0 is wanted within reachM of the eye's ground point (0 = everywhere);
+    // the twin carries the rest as its own cells (UpdateResidency).
+    bool m_eyeOn = false;
+    double m_eyeLat = 0.0, m_eyeLon = 0.0, m_reachM = 0.0;
     std::vector<uint32_t> m_stepList1;   // the twin's tiles outside the fine set: the ones its height and limit step
     double m_probeAt = -1e18, m_probeLat = 0.0, m_probeLon = 0.0;
     bool m_probeOn = false;
     void CoarseCb(int n, int n1);
-    void RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool reset);
+    // STAGE 1c (2026-10-26): THE TWIN INTERLEAVED -- Berger and Oliger's order. Begin: the twin's constants, lists,
+    // clear, bed, reset and sea sweeps for the batch; Step: the fold of the fine's state, then ONE coarse step,
+    // after which the fine takes its two. Stepping the fine's whole batch against a coarse state frozen for
+    // sixteen steps, then the twin against a fold frozen for eight, grew a metre of ringing from the fine
+    // set's seaward edge (the gate runs cd..cd4): two Dirichlet couplings alternating a batch apart.
+    void RecordCoarseBegin(hal::CommandContext& cmd, Gpu& gpu, int n, int n1, bool reset);
+    void RecordCoarseStep(hal::CommandContext& cmd, Gpu& gpu);
+    D3D12_GPU_VIRTUAL_ADDRESS m_hl1Va = 0, m_fl1Va = 0, m_sl1Va = 0, m_live1Va = 0;
+    UINT m_hn1 = 0, m_fn1 = 0, m_sn1 = 0;
     void ProbeCoarse(Gpu& gpu);
 public:
     // The gate's probe: the level at this place, mip 0 against mip 1, said once a sim-minute (AfterBatch).
     void SetProbe(double latDeg, double lonDeg) { m_probeLat = latDeg; m_probeLon = lonDeg; m_probeOn = true; }
+    void SetEye(double latDeg, double lonDeg, double reachM);   // stage 1d: the eye's ground point and its reach for mip 0
 private:
     double m_simTime = 0;
     float m_faceDEta[kMaxRiverFaces] = {};   // the faces' target deviations (m)

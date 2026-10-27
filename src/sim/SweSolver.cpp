@@ -222,7 +222,7 @@ void SweSolver::LogCbFingerprint() {
 void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
                        const BedWindow& w) {
     (void)gpu;
-    for (hal::Table* t : {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1], &m_table1, &m_tableB1,
+    for (hal::Table* t : {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1], &m_table1, &m_tableB1, &m_waveTable1[0], &m_waveTable1[1],
                           &m_tableFold[0][0], &m_tableFold[0][1], &m_tableFold[1][0], &m_tableFold[1][1]}) {   // stage 1a/1b: every table reads the same page
         t->SrvArray(0, heightArr, heightArr ? heightArr->GetDesc().Format : DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
         t->SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
@@ -509,11 +509,11 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     };
     // Every other bank covers the state's tiles (their grids differ by format: a 4-byte texel tiles
     // 128 x 128, an 8-byte one 128 x 64).
-    auto mapCover = [&](auto& bank) {
+    auto mapCover = [&](auto& bank, uint32_t apron = 0) {
         for (uint32_t ty = 0; ty < bank.TilesY(); ++ty) {
             for (uint32_t tx = 0; tx < bank.TilesX(); ++tx) {
                 const uint32_t x0 = tx * bank.TileW(), y0 = ty * bank.TileH();
-                const uint32_t x1 = x0 + bank.TileW() - 1, y1 = y0 + bank.TileH() - 1;
+                const uint32_t x1 = x0 + bank.TileW() - 1 + apron, y1 = y0 + bank.TileH() - 1 + apron;
                 bool live = false;
                 for (uint32_t hy = y0 / m_h.TileH(); hy <= y1 / m_h.TileH() && hy < m_h.TilesY() && !live; ++hy) {
                     for (uint32_t hx = x0 / m_h.TileW(); hx <= x1 / m_h.TileW() && hx < m_h.TilesX(); ++hx) {
@@ -533,9 +533,9 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     mapCover(m_bed);
     mapCover(m_soil);
     mapCover(m_eta);
-    mapCover(m_flux);
-    mapCover(m_velA);
-    mapCover(m_velB);
+    mapCover(m_flux, 1);   // stage 1c: the apron (CoverState's note)
+    mapCover(m_velA, 1);
+    mapCover(m_velB, 1);
     mapCover(m_waveA);
     mapCover(m_waveB);
     mapCover(m_lim);
@@ -689,6 +689,8 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                .Srv(0)
                .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4), hal::UavRange(6, 10)})
                .Srv(3)
+               .Table({hal::UavRange(16, 8)})   // stage 1c: the chains (u16..u23: h, bed, the read velocities, the sea; two mips each)
+               .Srv(4)                          // stage 1c: the live words of the mip above
                .Build(gpu, "swe");
     m_rs->SetName(L"swe root signature");
 
@@ -755,6 +757,42 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
         t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+        t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+    }
+    // STAGE 1c: THE CHAINS' TABLE -- h and the bed at mips 0 and 1, and the velocity bank each mip reads (the
+    // fine's parity fp, the twin's cp), and the sea bank each mip's solve reads: u16 h[0], u17 h[1], u18 bed[0],
+    // u19 bed[1], u20 vel[0], u21 vel[1], u22 wave[0], u23 wave[1]
+    for (int fp = 0; fp < 2; ++fp) {
+        for (int cp = 0; cp < 2; ++cp) {
+            hal::Table& t = m_tableChain[fp][cp];
+            t = hal::Table::Alloc(gpu, 8, "swe.chain");
+            t.Uav2D(0, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 0);
+            t.Uav2D(1, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 1);
+            t.Uav2D(2, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 0);
+            t.Uav2D(3, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+            t.Uav2D(4, (fp ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 0);
+            t.Uav2D(5, (cp ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+            t.Uav2D(6, (fp ? m_waveB : m_waveA).Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);   // m_table / m_tableB's gWave
+            t.Uav2D(7, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);                     // m_table1's gWave
+        }
+    }
+    // STAGE 1c: the twin's sweeps' tables -- m_table1's views with the two sea banks in turn at mip 1
+    for (int k = 0; k < 2; ++k) {
+        hal::Table& t = m_waveTable1[k];
+        t = hal::Table::Alloc(gpu, 16, "swe.waves1");
+        t.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+        t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.Uav2D(6, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(7, m_velA.Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+        t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(9, m_soil.Res(), DXGI_FORMAT_R32_FLOAT, 1);
+        t.Uav2D(10, m_velB.Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
+        t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        t.Uav2D(13, (k ? m_waveB : m_waveA).Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+        t.Uav2D(14, (k ? m_waveA : m_waveB).Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT, 1);
     }
     // STAGE 1b: the fold's tables -- the fine banks at mip 0 in the read slots (gH, gBedC, gVelPrev = the
@@ -1145,6 +1183,54 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
             if ((v[0] & 16u) && tx + 1 < tX) want[size_t(ty) * tX + tx + 1] = 1;
         }
     }
+    // STAGE 1d OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): THE EYE'S DEMAND. Mip 0 is wanted
+    // where the water is AND within the eye's reach; beyond the reach the water is the twin's own (the fold
+    // carried it to mip 1 each batch, so a released tile's water is not lost: it stands there). The fine set
+    // is aligned to the coarse tiles (a 2 x 2 wanted whole), so every coarse tile over it is a fold and none
+    // is half its own. The boundary's tiles (m_keep) are kept only within the reach: beyond it the twin's
+    // edge rows are the box's boundary. A tile beyond the reach goes at once (demand, not dryness).
+    std::vector<uint8_t> keep(m_keep.begin(), m_keep.end());
+    std::vector<uint8_t> beyond(size_t(tX) * tY, 0);
+    if (m_coarse && m_eyeOn && m_reachM > 0.0) {
+        double ex = 0.0, ey = 0.0;
+        if (TexelOf(m_eyeLat, m_eyeLon, ex, ey)) {
+            for (uint32_t ty = 0; ty < tY; ++ty) {
+                for (uint32_t tx = 0; tx < tX; ++tx) {
+                    const double x0 = double(tx) * m_h.TileW(), x1 = x0 + m_h.TileW();
+                    const double y0 = double(ty) * m_h.TileH(), y1 = y0 + m_h.TileH();
+                    const double dxM = (std::max)({x0 - ex, 0.0, ex - x1}) * m_dom.dx;   // the tile's nearest cell to the eye's
+                    const double dyM = (std::max)({y0 - ey, 0.0, ey - y1}) * m_dom.dy;
+                    const size_t i = size_t(ty) * tX + tx;
+                    if (std::hypot(dxM, dyM) > m_reachM) {
+                        beyond[i] = 1;
+                        want[i] = 0;
+                        keep[i] = 0;
+                    }
+                }
+            }
+            for (uint32_t ty = 0; ty < tY; ty += 2) {   // the alignment: a coarse tile's four children together
+                for (uint32_t tx = 0; tx < tX; tx += 2) {
+                    uint8_t w = 0, k = 0;
+                    for (uint32_t j = 0; j < 2; ++j) {
+                        for (uint32_t i = 0; i < 2; ++i) {
+                            if (tx + i >= tX || ty + j >= tY) continue;
+                            w |= want[size_t(ty + j) * tX + tx + i];
+                            k |= keep[size_t(ty + j) * tX + tx + i];
+                        }
+                    }
+                    for (uint32_t j = 0; j < 2; ++j) {
+                        for (uint32_t i = 0; i < 2; ++i) {
+                            if (tx + i >= tX || ty + j >= tY) continue;
+                            const size_t c = size_t(ty + j) * tX + tx + i;
+                            want[c] = w;
+                            keep[c] = k;
+                            if (w || k) beyond[c] = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
     // THE STEP, from the live water: the fastest gravity wave plus the fastest current, at the Courant
     // number the solver has always run at (0.45).
     if (wet > 0) {
@@ -1157,7 +1243,7 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
     for (uint32_t ty = 0; ty < tY; ++ty) {
         for (uint32_t tx = 0; tx < tX; ++tx) {
             const size_t i = size_t(ty) * tX + tx;
-            if (want[i] || m_keep[i]) {
+            if (want[i] || keep[i]) {
                 m_dryFor[i] = 0.0;
                 if (!m_h.IsResident(tx, ty)) {
                     m_h.RequestMap(tx, ty);
@@ -1165,9 +1251,9 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
                 }
             } else if (m_h.IsResident(tx, ty)) {
                 m_dryFor[i] += dtS;
-                if (m_dryFor[i] >= m_releaseS) {
+                if (beyond[i] || m_dryFor[i] >= m_releaseS) {
                     m_h.RequestUnmap(tx, ty);
-                    releasedM3 += double(vol[i]) * m_dom.dx * m_dom.dy;
+                    if (!beyond[i]) releasedM3 += double(vol[i]) * m_dom.dx * m_dom.dy;   // beyond the reach: the twin holds it
                     m_dryFor[i] = 0.0;
                     ++released;
                 }
@@ -1184,17 +1270,31 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
         for (uint32_t tx = 0; tx < tX; ++tx) m_live[size_t(ty) * tX + tx] = m_h.IsResident(tx, ty) ? 1u : 0u;
     }
     DeriveGradResidency(gpu);
+    if (m_coarse && m_eyeOn && m_reachM > 0.0) {   // stage 1d: the fine set, a row a line (# resident, . not, E the eye's tile)
+        double ex = 0.0, ey = 0.0;
+        const bool eye = TexelOf(m_eyeLat, m_eyeLon, ex, ey);
+        for (uint32_t ty = 0; ty < tY; ++ty) {
+            std::string row;
+            for (uint32_t tx = 0; tx < tX; ++tx) {
+                const bool e = eye && uint32_t(ex) / m_h.TileW() == tx && uint32_t(ey) / m_h.TileH() == ty;
+                row += e ? 'E' : m_h.IsResident(tx, ty) ? '#' : '.';
+            }
+            Log("[swe]   mip 0 row %2u %s", ty, row.c_str());
+        }
+    }
     Log("[swe] the water's residency: +%u / -%u state tiles (%u hold water; %u resident), %.2f m^3 given up "
         "with the released; the step %.3f s (deepest %.1f m, fastest %.2f m/s)",
         mapped, released, wet, m_h.ResidentCount(), releasedM3, double(m_dt), double(hMax), double(uMax));
 }
 
 void SweSolver::CoverState(Gpu& gpu) {
-    const auto cover = [&](auto& bank, std::vector<uint32_t>* freshOut) {
+    // STAGE 1c: the flux and velocity banks cover one cell past each state tile too (apron 1): a face on the
+    // fine set's west or north edge is owned by the cell beyond it, whose tile must hold its flux.
+    const auto cover = [&](auto& bank, std::vector<uint32_t>* freshOut, uint32_t apron = 0) {
         for (uint32_t ty = 0; ty < bank.TilesY(); ++ty) {
             for (uint32_t tx = 0; tx < bank.TilesX(); ++tx) {
                 const uint32_t x0 = tx * bank.TileW(), y0 = ty * bank.TileH();
-                const uint32_t x1 = x0 + bank.TileW() - 1, y1 = y0 + bank.TileH() - 1;
+                const uint32_t x1 = x0 + bank.TileW() - 1 + apron, y1 = y0 + bank.TileH() - 1 + apron;
                 bool live = false;
                 for (uint32_t hy = y0 / m_h.TileH(); hy <= y1 / m_h.TileH() && hy < m_h.TilesY() && !live; ++hy) {
                     for (uint32_t hx = x0 / m_h.TileW(); hx <= x1 / m_h.TileW() && hx < m_h.TilesX(); ++hx) {
@@ -1215,9 +1315,9 @@ void SweSolver::CoverState(Gpu& gpu) {
     cover(m_bed, nullptr);
     cover(m_soil, nullptr);
     cover(m_eta, nullptr);
-    cover(m_flux, &m_freshF);
-    cover(m_velA, nullptr);
-    cover(m_velB, nullptr);
+    cover(m_flux, &m_freshF, 1);
+    cover(m_velA, nullptr, 1);
+    cover(m_velB, nullptr, 1);
     cover(m_waveA, nullptr);
     cover(m_waveB, nullptr);
     cover(m_lim, nullptr);
@@ -1353,50 +1453,51 @@ void SweSolver::CoarseCb(int n, int n1) {
     m_cb1.cellX[3] = 2.0f * m_cb.cellX[3];
     m_cb1.cellX[0] = static_cast<float>((0.5 - 0.5 * double(m_cb1.nx)) * double(m_cb1.cellX[1]));
     m_cb1.cellX[2] = static_cast<float>((0.5 * double(m_cb1.ny) - 0.5) * double(-m_cb1.cellX[3]));
-    m_cb1.sea[3] = 0.0f;
+    m_cb1.mip = 1.0f;   // (the sea stays on: stage 1c sweeps it at mip 1 too)   // stage 1c: the twin's dispatches run at mip 1 (nothing above it)
 }
 
-void SweSolver::RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool reset) {
-    PixScope scope(cmd.Native(), "swe.mip1 (the coarse twin)");
-    const int n1 = (std::max)(1, n / 2);
+void SweSolver::RecordCoarseBegin(hal::CommandContext& cmd, Gpu& gpu, int n, int n1, bool reset) {
+    PixScope scope(cmd.Native(), "swe.mip1 (the coarse twin: the batch's prelude)");
     CoarseCb(n, n1);
     if (m_coarseFresh) {
         Log("[swe] stage 1a: the twin's first batch -- %d fine steps of %.3f s, %d coarse of %.3f s; lattice %u x %u, tiles %u across, cell %.2f x %.2f m",
             n, m_dt, n1, m_cb1.dt, m_cb1.nx, m_cb1.ny, m_cb1.etaTilesX, m_cb1.dx, m_cb1.dy);
     }
+    m_live1Va = gpu.PushConstants(m_live1.data(), m_live1.size() * 4);
     cmd.ComputeConstants(0, m_cb1);
     cmd.ComputeTable(2, m_table1.Base());
-    cmd.ComputeSrvAt(3, gpu.PushConstants(m_live1.data(), m_live1.size() * 4));
-    const D3D12_GPU_VIRTUAL_ADDRESS hl = gpu.PushConstants(m_list1.data(), m_list1.size() * 4);
-    const D3D12_GPU_VIRTUAL_ADDRESS fl = gpu.PushConstants(m_fluxList1.data(), m_fluxList1.size() * 4);
-    const UINT hn = static_cast<UINT>(m_list1.size()), fn = static_cast<UINT>(m_fluxList1.size());
+    cmd.ComputeSrvAt(3, m_live1Va);
+    m_hl1Va = gpu.PushConstants(m_list1.data(), m_list1.size() * 4);
+    m_fl1Va = gpu.PushConstants(m_fluxList1.data(), m_fluxList1.size() * 4);
+    m_hn1 = static_cast<UINT>(m_list1.size());
+    m_fn1 = static_cast<UINT>(m_fluxList1.size());
     if (m_coarseFresh) {   // undefined memory under the new tiles: cleared, then the stateless column
-        cmd.ComputeSrvAt(1, hl);
+        cmd.ComputeSrvAt(1, m_hl1Va);
         cmd.Pipeline(m_clearTileK.Get());
-        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
-        cmd.ComputeSrvAt(1, fl);
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, m_hn1);
+        cmd.ComputeSrvAt(1, m_fl1Va);
         cmd.Pipeline(m_clearFlux.Get());
-        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fn);
+        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, m_fn1);
         cmd.UavBarriers({m_h.Atlas().Res(), m_soil.Res(), m_eta.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
         cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
     }
-    cmd.ComputeSrvAt(1, hl);
+    cmd.ComputeSrvAt(1, m_hl1Va);
     cmd.Pipeline(m_bedFillK.Get());
-    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
+    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, m_hn1);
     cmd.UavBarrier(m_bed.Res());
     if (reset || m_coarseFresh) {
-        cmd.ComputeSrvAt(1, hl);
+        cmd.ComputeSrvAt(1, m_hl1Va);
         cmd.Pipeline(m_resetK.Get());
-        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, hn);
-        cmd.ComputeSrvAt(1, fl);
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, m_hn1);
+        cmd.ComputeSrvAt(1, m_fl1Va);
         cmd.Pipeline(m_clearFlux.Get());
-        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fn);
+        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, m_fn1);
         cmd.UavBarriers({m_h.Atlas().Res(), m_soil.Res(), m_flux.Res(), m_velA.Res(), m_velB.Res()});
         cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
     }
     m_coarseFresh = false;
-    // STAGE 1b: THE FOLD -- the coarse tiles whose four fine children are resident take the fine's fold
-    // (the water, the bed, the twin's read velocity bank), after the twin's bed fill and reset, before its steps
+    // STAGE 1b: THE FOLD'S LIST -- the coarse tiles whose four fine children are resident take the fine's fold
+    // each coarse step (RecordCoarseStep); the twin's height kernel leaves them (their state is the fold's)
     {
         m_foldList.clear();
         const uint32_t tx1 = m_h.Atlas().TilesX(1), ty1 = m_h.Atlas().TilesY(1);
@@ -1412,45 +1513,60 @@ void SweSolver::RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool res
                 if (all) m_foldList.push_back(ty * tx1 + tx);
             }
         }
-        // the folded tiles are the fine's: readable by the twin's flux kernel (their faces to the outside
-        // are computed), not stepped by its height and limit kernels (their state stays the fold's between
-        // batches; stepped, the twin drifted 17 cm from the fine at the anchor over one batch of the spin-up's
-        // first transient)
         m_stepList1.clear();
         {
             std::vector<uint8_t> folded(m_list1.size(), 0);
             for (uint32_t t : m_foldList) if (t < folded.size()) folded[t] = 1;
             for (uint32_t t : m_list1) if (!folded[t]) m_stepList1.push_back(t);
         }
-        if (!m_foldList.empty()) {
-            const uint32_t fineNewest = m_velNew ? 1u : 0u;   // the bank the fine's last step wrote (velB when m_velNew)
-            const uint32_t twinRead = m_velNew1 ? 1u : 0u;    // the bank the twin's next step reads (velB when m_velNew1)
-            cmd.ComputeTable(2, m_tableFold[fineNewest][twinRead].Base());
-            cmd.ComputeSrvAt(1, gpu.PushConstants(m_foldList.data(), m_foldList.size() * 4));
-            cmd.Pipeline(m_foldK.Get());
-            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(m_foldList.size()));
-            cmd.UavBarriers({m_h.Atlas().Res(), m_bed.Res(), m_velA.Res(), m_velB.Res()});
+        m_sl1Va = m_stepList1.empty() ? m_hl1Va : gpu.PushConstants(m_stepList1.data(), m_stepList1.size() * 4);
+        m_sn1 = static_cast<UINT>(m_stepList1.size());
+    }
+    // STAGE 1c: THE SEA IN THE TWIN'S COLUMNS -- the same sweeps at mip 1, from the twin's own open sides; the
+    // fine set's edge reads the coarse sea through the chain (its push, and its sweeps' up-ray source)
+    if (m_cb1.sea[3] > 0.0f) {
+        cmd.ComputeSrvAt(1, m_hl1Va);
+        cmd.Pipeline(m_wavesK.Get());
+        for (int s = 0; s < kWaveSweeps; ++s) {
+            cmd.ComputeTable(2, m_waveTable1[s & 1].Base());
+            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, m_hn1);
+            cmd.UavBarriers({m_waveA.Res(), m_waveB.Res()});
         }
     }
-    const D3D12_GPU_VIRTUAL_ADDRESS sl = m_stepList1.empty() ? hl : gpu.PushConstants(m_stepList1.data(), m_stepList1.size() * 4);
-    const UINT sn = static_cast<UINT>(m_stepList1.size());
-    for (int i = 0; i < n1; ++i) {
-        cmd.ComputeTable(2, (m_velNew1 ? m_tableB1 : m_table1).Base());
-        cmd.ComputeSrvAt(1, fl);
-        cmd.Pipeline(m_fluxK.Get());
-        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, fn);
-        cmd.UavBarriers({m_flux.Res(), m_velA.Res(), m_velB.Res()});
-        m_velNew1 ^= 1;
-        if (!m_stepList1.empty()) {   // the twin's own cells, outside the fine set
-            cmd.ComputeSrvAt(1, sl);
-            cmd.Pipeline(m_limitK.Get());
-            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, sn);
-            cmd.UavBarrier(m_lim.Res());
-            cmd.ComputeSrvAt(1, sl);
-            cmd.Pipeline(m_heightK.Get());
-            cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, sn);
-            cmd.UavBarrier(m_h.Atlas().Res());
-        }
+}
+
+void SweSolver::RecordCoarseStep(hal::CommandContext& cmd, Gpu& gpu) {
+    PixScope scope(cmd.Native(), "swe.mip1 (the fold, one coarse step)");
+    cmd.ComputeConstants(0, m_cb1);
+    cmd.ComputeSrvAt(3, m_live1Va);
+    // THE FOLD (stage 1b): the fine's state now, at the parities now
+    if (!m_foldList.empty()) {
+        const uint32_t fineNewest = m_velNew ? 1u : 0u;   // the bank the fine's last step wrote (velB when m_velNew)
+        const uint32_t twinRead = m_velNew1 ? 1u : 0u;    // the bank the twin's next step reads (velB when m_velNew1)
+        cmd.ComputeTable(2, m_tableFold[fineNewest][twinRead].Base());
+        cmd.ComputeSrvAt(1, gpu.PushConstants(m_foldList.data(), m_foldList.size() * 4));
+        cmd.Pipeline(m_foldK.Get());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(m_foldList.size()));
+        cmd.UavBarriers({m_h.Atlas().Res(), m_bed.Res(), m_velA.Res(), m_velB.Res()});
+    }
+    // ONE COARSE STEP: the faces over the whole lattice, the share every column pays (the folded ones' faces are
+    // the twin's flux kernel's, so their share is the law's), the step over the twin's own cells
+    cmd.ComputeTable(2, (m_velNew1 ? m_tableB1 : m_table1).Base());
+    cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1].Base());   // stage 1c (nothing above mip 1: unread)
+    cmd.ComputeSrvAt(1, m_fl1Va);
+    cmd.Pipeline(m_fluxK.Get());
+    cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, m_fn1);
+    cmd.UavBarriers({m_flux.Res(), m_velA.Res(), m_velB.Res()});
+    m_velNew1 ^= 1;
+    cmd.ComputeSrvAt(1, m_hl1Va);
+    cmd.Pipeline(m_limitK.Get());
+    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, m_hn1);
+    cmd.UavBarrier(m_lim.Res());
+    if (!m_stepList1.empty()) {
+        cmd.ComputeSrvAt(1, m_sl1Va);
+        cmd.Pipeline(m_heightK.Get());
+        cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, m_sn1);
+        cmd.UavBarrier(m_h.Atlas().Res());
     }
 }
 
@@ -1458,35 +1574,59 @@ void SweSolver::RecordCoarse(hal::CommandContext& cmd, Gpu& gpu, int n, bool res
 // cell each holds the place in (a drain each, once a sim-minute: an instrument, loud by design).
 void SweSolver::ProbeCoarse(Gpu& gpu) {
     if (!m_probeOn || !m_coarse || !m_ready || m_coarseFresh) return;   // the twin has stepped
-    if (m_simTime - m_probeAt < 60.0) return;
+    if (m_simTime - m_probeAt < 30.0) return;
     m_probeAt = m_simTime;
-    double tx = 0.0, ty = 0.0;
-    if (!TexelOf(m_probeLat, m_probeLon, tx, ty)) return;
-    const auto readAt = [&](TileAtlas2D& bank, uint32_t mip, uint32_t cx, uint32_t cy, float& out) {
+    // the points: the anchor, then a line out to sea (inside the fine set, then the twin's own) and one up the
+    // river (the twin's own at a 1.5 km reach) -- where a disturbance stands first says where it is from
+    struct Pt { const char* name; double dLat, dLon; };
+    static const Pt kPts[] = {{"anchor", 0.0, 0.0}, {"sea+1km", 0.0, 0.013}, {"sea+3km", 0.0, 0.035}, {"river-3km", -0.0023, -0.035},
+                              {"n2.2", 0.020, 0.013}, {"n1.1", 0.010, 0.013}, {"s1.1", -0.010, 0.013}, {"s2.2", -0.020, 0.013},
+                              {"s3.3", -0.030, 0.013}, {"s4.4", -0.040, 0.013}, {"s6.7", -0.060, 0.013}};
+    struct Plane { std::vector<uint8_t> raw; uint32_t pitch = 0; };
+    const auto readAll = [&](TileAtlas2D& bank, uint32_t mip, Plane& out) {
         GpuTexture wrap;
         wrap.res = bank.Res();
         wrap.format = DXGI_FORMAT_R32_FLOAT;
         wrap.width = bank.TilesX(mip) * bank.TileW();
         wrap.height = bank.TilesY(mip) * bank.TileH();
         wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        uint32_t pitch = 0;
-        const std::vector<uint8_t> raw = gpu.ReadbackTexture(wrap, &pitch, mip);
-        const size_t at = size_t(cy) * pitch + size_t(cx) * 4;
-        if (at + 4 > raw.size()) return false;
-        memcpy(&out, &raw[at], 4);
+        out.raw = gpu.ReadbackTexture(wrap, &out.pitch, mip);
+    };
+    Plane h0, b0, h1, b1;
+    readAll(m_h.Atlas(), 0, h0);
+    readAll(m_bed, 0, b0);
+    readAll(m_h.Atlas(), 1, h1);
+    readAll(m_bed, 1, b1);
+    const auto at = [](const Plane& p, uint32_t cx, uint32_t cy, float& out) {
+        const size_t i = size_t(cy) * p.pitch + size_t(cx) * 4;
+        if (i + 4 > p.raw.size()) return false;
+        memcpy(&out, &p.raw[i], 4);
         return true;
     };
-    const uint32_t cx0 = uint32_t(std::clamp(tx, 0.0, double(m_cb.nx) - 1.0)), cy0 = uint32_t(std::clamp(ty, 0.0, double(m_cb.ny) - 1.0));
-    const uint32_t cx1 = cx0 / 2u, cy1 = cy0 / 2u;
-    float h0 = 0.0f, b0 = 0.0f, h1 = 0.0f, b1 = 0.0f;
-    if (!readAt(m_h.Atlas(), 0, cx0, cy0, h0) || !readAt(m_bed, 0, cx0, cy0, b0) ||
-        !readAt(m_h.Atlas(), 1, cx1, cy1, h1) || !readAt(m_bed, 1, cx1, cy1, b1)) {
-        return;
+    std::string line;
+    char buf[200];
+    for (const Pt& pt : kPts) {
+        double tx = 0.0, ty = 0.0;
+        if (!TexelOf(m_probeLat + pt.dLat, m_probeLon + pt.dLon, tx, ty)) continue;
+        const uint32_t cx0 = uint32_t(std::clamp(tx, 0.0, double(m_cb.nx) - 1.0)), cy0 = uint32_t(std::clamp(ty, 0.0, double(m_cb.ny) - 1.0));
+        float hh0 = 0.0f, bb0 = 0.0f, hh1 = 0.0f, bb1 = 0.0f;
+        const bool fine = m_h.IsResident(cx0 / m_h.TileW(), cy0 / m_h.TileH()) && at(h0, cx0, cy0, hh0) && at(b0, cx0, cy0, bb0);
+        if (!at(h1, cx0 / 2u, cy0 / 2u, hh1) || !at(b1, cx0 / 2u, cy0 / 2u, bb1)) continue;
+        if (fine) snprintf(buf, sizeof buf, "  %s: %+.3f|%+.3f", pt.name, bb0 + hh0, bb1 + hh1);   // mip 0 | mip 1
+        else snprintf(buf, sizeof buf, "  %s: --|%+.3f (bed %.1f)", pt.name, bb1 + hh1, bb1);
+        line += buf;
     }
-    const float e0 = b0 + h0, e1 = b1 + h1;
-    Log("[swe] stage 1a at %.4f N %.4f E, t=%.0f: mip 0 level %+.3f m (h %.2f over bed %.2f), mip 1 level %+.3f m (h %.2f over bed %.2f): "
-        "the twin differs by %+.3f m (the tide plane %+.3f)",
-        m_probeLat, m_probeLon, m_simTime, e0, h0, b0, e1, h1, b1, e1 - e0, m_cb.tideNavd);
+    Log("[swe] the probe t=%.0f (%u fine tiles, the tide plane %+.3f):%s", m_simTime, m_h.ResidentCount(), m_cb.tideNavd, line.c_str());
+}
+
+void SweSolver::SetEye(double latDeg, double lonDeg, double reachM) {
+    m_eyeOn = true;
+    m_eyeLat = latDeg;
+    m_eyeLon = lonDeg;
+    if (reachM != m_reachM) {
+        m_reachM = reachM;
+        Log("[swe] stage 1d: mip 0 by the eye's demand, within %.0f m of its ground point (0 = the whole window); the twin's own cells beyond", reachM);
+    }
 }
 
 void SweSolver::RecordReset(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS hList, UINT hCount,
@@ -1646,11 +1786,19 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     OceanBoundary(tideNavd, tideRate);   // C1: the open sea's Level and its transport
     SeaBoundary();                       // C4: the sea there, whose waves push
 
+    // STAGE 1c: this dispatch's mip, the chain's mips and the mip above's stride (Swe.hlsl UpLiveAt); the live
+    // words of the mip above on root SRV 4, the chains' table on root param 4 (rebound a step: the parities)
+    m_cb.mip = 0.0f;
+    m_cb.mips = (m_coarse && m_testH.empty()) ? 2.0f : 1.0f;
+    m_cb.etaTilesXUp = m_coarse ? static_cast<float>(m_h.Atlas().TilesX(1)) : 0.0f;
     cmd.ComputeRoot(m_rs.Get());
     LogCbFingerprint();
     cmd.ComputeConstants(0, m_cb);
     cmd.ComputeTable(2, m_table.Base());
-    cmd.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
+    const D3D12_GPU_VIRTUAL_ADDRESS liveVa = gpu.PushConstants(m_live.data(), m_live.size() * 4);
+    cmd.ComputeSrvAt(3, liveVa);
+    cmd.ComputeSrvAt(5, gpu.PushConstants(m_live1.empty() ? m_live.data() : m_live1.data(), (m_live1.empty() ? m_live.size() : m_live1.size()) * 4));
+    cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1].Base());
     const auto& hl = m_testH.empty() ? m_h.Atlas().ResidentList() : m_testH;
     const auto& fl = m_testF.empty() ? m_flux.ResidentList() : m_testF;
     const D3D12_GPU_VIRTUAL_ADDRESS hlVa = gpu.PushConstants(hl.data(), hl.size() * 4);
@@ -1695,9 +1843,24 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         cmd.ComputeTable(2, m_table.Base());
     }
 
-    for (int i = 0; i < n; ++i) {
+    // STAGE 1c: THE TWIN INTERLEAVED (Berger and Oliger): each coarse step is the fold of the fine's state, one
+    // step of the twin, then the fine's steps up to the same time (two, the ratio of the scales), reading the
+    // coarse neighbour the twin just advanced. Coupled every two fine steps, not every batch.
+    const bool twin = m_coarse && m_testH.empty() && n > 0;
+    const int n1 = twin ? (std::max)(1, n / 2) : 0;
+    if (twin) RecordCoarseBegin(cmd, gpu, n, n1, reset);
+    int i = 0;
+    for (int k = 0; k < (twin ? n1 : 1); ++k) {
+    if (twin) {
+        RecordCoarseStep(cmd, gpu);
+        cmd.ComputeConstants(0, m_cb);   // the fine's constants and live words return
+        cmd.ComputeSrvAt(3, liveVa);
+    }
+    const int fineTo = twin ? ((k + 1) * n) / n1 : n;
+    for (; i < fineTo; ++i) {
         // The substeps take turns: read the newest velocities (u7), write the other bank (u10).
         cmd.ComputeTable(2, (m_velNew ? m_tableB : m_table).Base());
+        cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1].Base());   // stage 1c: the chains at this parity
         cmd.ComputeSrvAt(1, flVa);
         cmd.Pipeline(m_fluxK.Get());
         cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
@@ -1719,14 +1882,8 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
         cmd.UavBarrier(m_h.Atlas().Res());
     }
-    m_simTime += n * m_dt;
-
-    // STAGE 1a: the coarse twin steps the same interval at mip 1, then mip 0's constants and lists return
-    if (m_coarse && m_testH.empty() && n > 0) {
-        RecordCoarse(cmd, gpu, n, reset);
-        cmd.ComputeConstants(0, m_cb);
-        cmd.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
     }
+    m_simTime += n * m_dt;
 
     cmd.ComputeTable(2, m_table.Base());
     cmd.ComputeSrvAt(1, hlVa);
@@ -1803,6 +1960,8 @@ bool SweSolver::TraceFace(Gpu& gpu, std::vector<FaceRow>& rows) {
                        .Srv(0)
                        .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4), hal::UavRange(5, 11)})
                        .Srv(3)
+                       .Table({hal::UavRange(16, 8)})   // stage 1c: the chains
+                       .Srv(4)
                        .Build(gpu, "swe.facetrace");
         m_faceRs->SetName(L"swe face trace root signature");
         m_faceK = hal::BuildCompute(gpu, m_faceRs.Get(),
@@ -1852,6 +2011,8 @@ bool SweSolver::TraceFace(Gpu& gpu, std::vector<FaceRow>& rows) {
         up.ComputeSrvAt(1, gpu.PushConstants(fl.data(), fl.size() * 4));
         up.ComputeTable(2, m_faceTable.Base());
         up.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
+        up.ComputeTable(4, m_tableChain[m_velNew][m_velNew1].Base());   // stage 1c
+        up.ComputeSrvAt(5, gpu.PushConstants(m_live1.empty() ? m_live.data() : m_live1.data(), (m_live1.empty() ? m_live.size() : m_live1.size()) * 4));
         up.Pipeline(m_faceK.Get());
         up.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
         gpu.EndUpload();

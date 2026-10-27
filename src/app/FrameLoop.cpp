@@ -1759,6 +1759,9 @@ std::optional<int> FrameLoop::Session() {
                                           simUnix, oceanAt, faceAt, faceQAt, describeWest,
                                           &focusProbe, &levelJudges);
         }
+        // STAGE 1d (2026-10-26): the eye's demand for mip 0 -- the spin-up's eye stands at the place's anchor (the
+        // camera is not placed yet); each frame's is the camera's ground point (with weather.Update)
+        if (swe.Ready()) swe.SetEye(S.place.anchor[1], S.place.anchor[0], S.water.swe.fineReachM);
         if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();
             swe.Spinup(gpu, simUnix, S.water.swe.spinupH, oceanAt, faceAt, faceQAt);
@@ -3613,6 +3616,7 @@ bool FrameLoop::Frame() {
             resMgr.Mark("read: weather.Update -- the solver steps on its bed");
             double cla = 0.0, clo = 0.0;   // PHASE C5: the camera's place by the exact chart
             m_A.surface.flat.LatLonOf(cam.px, cam.pz, cla, clo);
+            if (m_A.swe.Ready()) m_A.swe.SetEye(cla, clo, S.water.swe.fineReachM);   // stage 1d: the eye's demand
             weather.Update(gpu, renderer.Shaders(), S.shadersW, simUnix, cla, clo, altV);
             // M9ay: every ACTIVE window's lattice at mip 0, from the manager that owns them.
             weather.PinDomains(resMgr, hgtTenant);

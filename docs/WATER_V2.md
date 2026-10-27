@@ -1515,6 +1515,64 @@ the twin drifted 17 cm from the fine at the anchor over one batch of the spin-up
 has no cells of its own yet; 1c gives the fine set's edge the coarse neighbour (the magnify) and 1d lets
 mip 0 be demand's, which is where the centimetre gate means something.
 
+**Stage 1c, built (2026-10-26): the magnify, through the chains.** A cell a mip holds no tile for is HELD
+by the mip above where its tile there is resident (`Swe.hlsl` UpLiveAt, from the mip above's live words
+on a root SRV), and its water, bed, face velocities and sea are the coarse cell's, magnified (nearest:
+the coarse value stands over its 2 x 2; HIERARCHY 4.20's magnify law). The kernels read the mip above
+through ONE ROOT TABLE OF THE CHAINS (`gHChain`, `gBedChain`, `gVelChain`, `gWaveChain`: every mip of
+each, indexed by the mip; `SweSolver::m_tableChain`, one per parity pair), since the kernel's 16-slot
+table is a mip's own views. So the fine set's edge borders the coarse water, not a frontier: the frontier
+(the stateless sea) stands only where NO mip holds the cell. The flux and velocity banks cover one cell
+past each state tile (the apron), because a face on the fine set's west or north edge is owned by the
+cell beyond it. The twin sweeps the sea at mip 1 from its own open sides; the fine set's sweeps take
+the coarse sea as their up-ray source (the fine set has no open side of its own) and its push continues
+across the edge. THE ORDER IS BERGER AND OLIGER'S: each coarse step is the fold of the fine's state,
+one step of the twin, then the fine's two steps reading the coarse neighbour the twin just advanced
+(`RecordCoarseBegin` / `RecordCoarseStep`, interleaved in `Record`'s loop). The first build stepped the
+fine's whole batch against a coarse state frozen for sixteen steps and then the twin against a fold
+frozen for eight; the probe line (the anchor, a line out to sea and across the fine set's seaward edge,
+every 30 s) showed a metre of ringing born at the last fine cells before the edge and growing to eight
+metres in the open sea before friction took it: two Dirichlet couplings alternating a batch apart. With
+the whole window fine under the same kernels the anchor matched stage 1b to the millimetre, so the
+kernel changes were sound and the interface was the fault. Interleaved, the line is quiet.
+
+**Stage 1d, built (2026-10-26): mip 0 by the eye's demand.** `water.swe.fineReachM` (0 = the whole
+window, today's): mip 0 is wanted where the water is AND within the reach of the eye's ground point
+(the spin-up's eye stands at the place's anchor; each frame's is the camera's, with `weather.Update`);
+beyond it the water is the twin's own, its fold having carried it there each coarse step, so a released
+tile's water stands at mip 1. The fine set is aligned to the coarse tiles (a 2 x 2 wanted whole, so
+every coarse tile over it is a fold and none is half its own); the boundary's tiles are kept only within
+the reach, beyond it the twin's edge rows are the box's boundary; a tile beyond the reach goes at once
+(demand, not dryness). The residency log draws the fine set a row a line. GATE (`merrimack_bar --storm
+3,10,95 --headless --frames 60 --dump-water-state --set water.swe.fineReachM=1500`, against stage 1b's
+run): 55 fine tiles of 120 (a 4 x 4 of 128-cell tiles about the inlet, the outer sea, the Sound and the
+river above Newburyport at mip 1); the anchor's level through the hour's spin-up within a millimetre of
+stage 1b's at every probe; the dump at the frames' end identical at the anchor, within 2.3 cm over the
+kilometre about it, 5.4 cm at most anywhere (beyond the reach, where the bank's readers still take the
+tide plane: they do not read mip 1 yet, stage 2's). The twin's limit kernel now runs over its whole
+lattice, the folded tiles included (measured a no-op: the dump byte-identical; the law is the honest
+one).
+
+Residuals, stated: the magnify is nearest (bilinear is a line); the fine's two steps read the coarse
+state at the end of the coarse step, not interpolated in time (first order; Berger and Oliger
+interpolate); the exchange across the edge is computed by both sides (the fine face against the
+magnified cell, the coarse face against the fold) and not refluxed, so mass across the edge is
+consistent to first order, not conserved to the bit (the fold of fluxes, 4.20's first law, is the
+next piece); the bank, the globe and the hull read mip 0 or the tide plane, never mip 1.
+
+**The sphere (Mark, 2026-10-26: "are you taking into account the spherical nature of things?").** Not
+inside the kernel. The solver's lattice is the window's equiangular lat/lon chart with ONE metre pair
+(dx, dy) for the whole box; the sphere enters at the bed (each cell's place is a direction from the
+anchor through the window's chart) and at the readers (the bank and the hull read the solver in that
+chart). Fine at 18 km; over the Gulf the east-west cell length drifts a few percent with latitude and
+the law does not know it. What maps well: the tree's laws are tile-local (fold, magnify, the frontier,
+demand) and only the kernel's metric is not; the cubed sphere (Ronchi, Iacono and Paolucci 1996; the
+lattice of MITgcm and FV3) is six quadtrees of tiles with per-cell metric terms, which is the origin
+lattice's and the cube-lattice blocks' shape already. The kernel stays one text: the metric becomes a
+per-cell face length and span the tree supplies as it supplies the bed, and Coriolis a bivector
+rotation of the face velocity. The first honest step is a per-row metric in the window; the tail of
+stage 2 (the planet's water at the coarse mips) is where the chart has to become the cube-sphere tree.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

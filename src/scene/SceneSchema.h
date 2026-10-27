@@ -198,6 +198,10 @@ struct SweProps {
     // THE SOLVER'S SUBSTEPS A FRAME (SweSolver::SetStepBudget; 16 since M5): past it the solver starves and
     // runs time-dilated. A record at 30x with a surge's 0.012 s step needs ~90; the descent at 130x ~360.
     double stepsPerFrame = 16.0;
+    // STAGE 1d OF ONE WATER ON THE TREE (2026-10-26, WATER_V2.md 14): the reach of the eye's demand for the
+    // solver's finest mip, m about its ground point; 0 = the whole window at mip 0. Beyond it the coarse twin
+    // carries the water (SweSolver::SetEye).
+    double fineReachM = 0.0;
     // m^3/s at the first river face; < 0 = its gauge's, from data.river (sim/RiverModel.h DischargeAt)
     double riverQ = -1.0;
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
