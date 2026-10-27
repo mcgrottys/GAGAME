@@ -1457,8 +1457,8 @@ exterior (it becomes the frontier's), the impact's readers in the bank kernel an
 (`ImpactRead.hlsli`, `ImpactAt`), Green's law, the shoaling bound, `stepsPerFrame` (a mip's step is
 its CFL; the frame carries the mips it can and the rest starve honestly at the coarsest, never the
 finest), the shelf scene key. (Stage 2 took the box, `solvers`, `AddDormantWindow`, the activation
-altitude and the shelf rung's three verbs; the sponge stays as the holds-water instrument's seed only, the
-kernel has none; `SetLevelSource` is the window's exterior still, the frontier's when the tail is the planet's.)
+altitude and the shelf rung's three verbs; the sponge went with the one edge law on 2026-10-27, below;
+`SetLevelSource` is the window's exterior still, the frontier's when the tail is the planet's.)
 Stays: `Swe.hlsl`'s flux and update laws, wetting and drying, the soil, the rivers' faces (as sources),
 the waves' push, the churn, the bank and its column plane, the crest law and the bore's face (13.5),
 `ImpactWave` as the source's cavity and the far field's check, the events' record, `laws/`.
@@ -1656,8 +1656,34 @@ none" of water the kernel had joined. Its seeds are now where the sea continues 
 columns of a whole-open side, the Flather face cells elsewhere (`SweDomain::Bound`). Still open, not the
 water's: the colour's and the survey mask's face-2 root paints never return under `streaming.offline` (two Io
 threads of twelve for the run); a side open on most but not all of its cells gets faces and no sponge (the
-open-side law is whole-side). Stage 2's gate is met: the solver by demand with no key, the cold place flooding
-on what the tree holds, the Merrimack unchanged.
+open-side law is whole-side -- made one law the same day, below). Stage 2's gate is met: the solver by demand
+with no key, the cold place flooding on what the tree holds, the Merrimack unchanged.
+
+**The edge is one law (2026-10-27, Mark: "make the open-side law one law for a side open on part of its
+cells").** Until this date the window's boundary had three laws: a side was *open* when every cell of it lay
+under +1.2 m NAVD88 and no river entered there (its every cell a Flather face on the Level, and an offshore
+sponge standing on it); on any other side only a cell whose bed lay below mean sea was the sea's; the rest were
+walls. Boston's harbour mouth, open on 1525 of 2048 cells of the east edge, had no open side. Now every edge
+cell with a bed that no river face holds is the stateless sea's exterior, pinned to the Level along its side
+(`Swe.hlsl OceanSideOf`, `SweDomain::SeaEdgeCell`): it holds the water that Level stands over its bed and none
+where the Level is under it (`CsSweHeight`), and its faces to the interior are Flather. That is the law
+residency's frontier already had (stage 0b: the tide plane over the megatexture's bed), standing at the
+lattice's edge too: a channel the edge cuts fills and drains with the sea and a dune at the edge stands over
+it, each instant, with no side open and none a wall. Gone with it: `openSides`, the sponge and
+`water.swe.sponge`, the whole-side test, the kernel's bitmask (its cbuffer slot kept as `gUnused0` so `gFaceA`
+stays on its register), the boundary's keep-forever tiles (`m_keep`; the tiles the boundary's water stands on
+are now computed each residency turn from the Level, `SweSolver::BoundaryTiles`, the same rule as any water),
+and the flood instrument's "crossings" (a wet edge cell is a seed, so there can be none). The spill flood seeds
+from every sea edge cell at its own bed; the sea source's point is the edge water's depth-weighted centroid;
+`OpenSeaLevel` is the mean Level over the edge cells it stands over; the cycle tool's ocean probe stands by the
+deepest edge cell. Gate (stage 2's two runs, before and after): Boston unchanged to 1 mm (its three land sides
+are dry exterior now as they were walls before); the Merrimack within 2 mm of level and 14 cm/s of current over
+the dump's area (mean 0.06 mm, 0.6 mm/s), the north and south edges' cells under the Level now the sea's (892
+and 568 of them under mean sea); the flood instrument joins the same 120.87 and 303.28 km^2 with nothing
+unjoined at the edge; its self-test rewritten to the law (the sea joins a cut channel from both ends, a pool
+the edge does not touch is reported, a reach a river face alone holds is said so, the crest a raised bed parts
+a reach at is found). Stated: where ground at +1 m lies at a land edge and the atlas's Level tops it, the sea
+enters there, as it does at residency's frontier; a dike is the bed's to say, not a side's.
 
 ## Sources
 

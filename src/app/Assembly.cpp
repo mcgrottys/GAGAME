@@ -659,7 +659,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     if (sea && S.water.swe.enabled && sweDomain.Ready()) {
         SweConfig sweCfg;
         sweCfg.name = S.scene.name.c_str();
-        sweCfg.spongeM = S.water.swe.sponge;
         // THE RIVERS THAT ENTER IT (sim/RiverModel.h): every reach of data.river whose mouth the box
         // holds, a Flather face where its line leaves the box. Their clocks are the frame loop's.
         for (const RiverModel::Crossing& c : rivers.EntersBox(sweDomain.lat0, sweDomain.lon0, sweDomain.lat1, sweDomain.lon1)) {

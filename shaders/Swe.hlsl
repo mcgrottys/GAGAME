@@ -36,7 +36,7 @@ cbuffer SweCb : register(b0) {
     uint  gEtaTilesX, gFluxTilesX;
     uint  gEtaTileW, gEtaTileH, gFluxTileW, gFluxTileH;
     uint  gListCount;
-    float gOpenSides;            // the open ocean sides, a bitmask: 1 N, 2 S, 4 W, 8 E (SweDomain::Bound)
+    float gUnused0;              // the slot the open-side bitmask held (the edge is one law since 2026-10-27); keeps gFaceA on its register
     float gDy;                   // M6r: north-south texel metres (equiangular CUDEM grid:
                                  // dy = 13.65 != dx = 10.08 -- the per-axis metric)
     float gFaceCount;            // the river faces (gFaceA, gFaceB; SweSolver.h SweConfig::faces)
@@ -207,18 +207,20 @@ uint2 FluxTexel(uint3 id) {
 
 // ---- the boundary: the open sea's sides and the river faces ---------------------------------------
 
-// The side whose EXTERIOR cell `e` is, where the sea continues past the edge (-1: none). The exterior
-// cells are the sea's own water, pinned to its Level; the faces between them and the interior are
-// Flather. THE SEA CONTINUES where the domain cuts water that is always there: every cell of an open
-// side (SweDomain::Bound: all of it can be wet), and on any other side a cell whose bed lies below mean
-// sea (0 m NAVD88) -- a channel the edge cuts, Plum Island Sound's at the Merrimack window's south edge
-// -- never a marsh or a field. (The river faces are tested before this: ExteriorLevel.) A corner cell
-// answers its first side; SweSolver::SeaFaceCell is the twin.
+// The side whose EXTERIOR cell `e` is (-1: an interior cell). THE EDGE IS THE FRONTIER'S LAW (2026-10-27,
+// one water on the tree): every edge cell with a bed is the stateless sea's, pinned to the Level along
+// its side (OceanEtaAt). It holds the water that Level stands over its bed and none where the Level is
+// under it (CsSweHeight), and the faces between it and the interior are Flather -- so a channel the edge
+// cuts fills and drains with the sea and a dune at the edge stands over it, each instant, with no side
+// "open" and none a wall: the law residency's frontier already had (ExteriorLevel: the tide plane over
+// the megatexture's bed), standing at the lattice's edge too. (The river faces are tested before this:
+// ExteriorLevel.) A corner cell answers its first side; SweDomain::SeaEdgeCell is the twin. Until this
+// date a side was open when every cell of it lay under +1.2 m, else only its cells below mean sea were
+// the sea's: a harbour mouth across 1525 of 2048 cells had no open side.
 int OceanSideOf(int2 e) {
     const int s = (e.y == 0) ? 0 : (e.y == (int)gNy - 1) ? 1 : (e.x == 0) ? 2 : (e.x == (int)gNx - 1) ? 3 : -1;
     if (s < 0) return -1;
-    if ((((uint)gOpenSides) >> s) & 1u) return s;
-    return (BedC(e) < 0.0f) ? s : -1;
+    return (BedC(e) > -9000.0f) ? s : -1;
 }
 
 // The Level along open side `s` at its exterior cell `e`, NAVD: the four samples' cubic through the

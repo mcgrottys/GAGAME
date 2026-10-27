@@ -44,11 +44,13 @@ namespace ga {
 // validated estuary behavior.
 struct SweConfig {
     const char* name = "swe";   // PHASE C3: the scene names it (Assembly: scene.name)
-    // PHASE C1: THE SPONGE STANDS ON THE OPEN SIDES. A side of the domain is open sea when every cell
-    // along it can be wet (bed under +1.2 m NAVD, the residency law's own bound) and no river enters
-    // there; the sponge's ramp begins spongeM metres in from an open side and is whole 700 m nearer it
-    // (water.swe.sponge; 1866 m = where today's world-x ramp began, 1400 m east of the old origin).
-    float spongeM = 1866.0f;
+    // THE EDGE IS THE FRONTIER'S LAW (2026-10-27, one water on the tree): every edge cell of the window
+    // that no river face holds is the stateless sea's, pinned to the tide atlas's Level along its side
+    // (Swe.hlsl OceanSideOf); wet or dry is that Level over the cell's bed, each instant. No side is
+    // "open" and none is a wall: a channel the edge cuts fills and drains with the sea, a dune at the
+    // edge stands over it. (Until this date a side was open when EVERY cell of it lay under +1.2 m,
+    // else only its cells below mean sea were the sea's, and an offshore sponge stood on the open
+    // sides: three laws, and a harbour mouth open on 1525 of 2048 cells had no open side.)
     // THE RIVER FACES (2026-10-21): where a river enters the domain -- the crossing of its reach's line
     // with the box's edge (sim/RiverModel.h EntersBox) -- a Flather open boundary on that side, over the
     // run of wet-capable edge cells about the crossing (SweDomain::Bound). Until this date one face
@@ -84,9 +86,6 @@ struct SweDomain {
     uint32_t nx = 0, ny = 0;
     double dx = 0.0, dy = 0.0;                               // a cell, metres (true, at the anchor)
     std::vector<float> elev;      // the bed at the cell centres, m NAVD88, row 0 north (the stack's)
-    uint32_t openSides = 0;       // bit 0 N, 1 S, 2 W, 3 E: the sides that are open sea (Bound)
-    std::vector<uint8_t> sponge;  // per cell: 1 where the sea continues past the edge: the sponge's columns of a
-                                  // side open whole, the Flather face cells elsewhere (the flood's seeds; Bound)
     // THE RIVER FACES' CELLS (Bound): a side and the run [c0, c1] along it (columns for N and S,
     // rows for W and E) of wet-capable edge cells (bed under +2 m) about the river's crossing.
     struct FaceCells {
@@ -99,9 +98,10 @@ struct SweDomain {
                                                                                       : size_t(a) * nx + (nx - 1);
     }
     std::vector<uint8_t> FaceMask() const;   // 1 at every face cell whose bed is under +2 m
-    // THE SEA CONTINUES PAST THE EDGE at edge cell `a` of `side` (Swe.hlsl OceanSideOf, on this bed): the
-    // side is open, or the cell's bed lies below mean sea (0 m NAVD88) -- and no river face holds it.
-    bool SeaFaceCell(int side, int a) const;
+    // THE SEA'S EDGE CELL: edge cell `a` of `side` is the stateless sea's exterior (Swe.hlsl OceanSideOf)
+    // when it has a bed and no river face holds it; the Level over that bed, each instant, says whether
+    // it holds water. One law for every edge cell: no open side, no wall.
+    bool SeaEdgeCell(int side, int a) const;
     bool Ready() const { return nx > 0 && ny > 0; }
     void Place(double boxLat0, double boxLon0, double boxLat1, double boxLon1, uint32_t cellsX,
                uint32_t cellsY, double planetR);
@@ -112,10 +112,8 @@ struct SweDomain {
     bool Holds(double latDeg, double lonDeg) const;   // the lattice holds the place
     // The bed at every cell's centre, from the one stack (bedAt(lat, lon, the cell's grain), degrees).
     void FillBed(const std::function<float(double, double, double)>& bedAt);
-    // The open sides and the sponge's cells, from the bed (elev filled first).
+    // The river faces' cells, from the bed (elev filled first).
     void Bound(const SweConfig& cfg);
-    // A cell's sponge weight (the kernel's SpongeAt, in doubles).
-    double SpongeAt(int i, int j, double spongeM) const;
     // THE ROWS A READER CARRIES (WindowRows.hlsli HP_SOLVER_ROWS_DECL): the planes U, V, W about a
     // frame whose origin is `origin` and whose axes are east / up / north (planet frame), over R so
     // their w is the cell at the origin; then (nx, ny, 1 = a solver stands, 0). Zeros: none.
@@ -124,11 +122,10 @@ struct SweDomain {
 };
 
 // A SOLVER'S WINDOW HOLDS ITS WATER (an instrument, said once where a window is made): the grid
-// flooded 4-connected (the kernel's faces) through cells whose bed is under `level`, from its open
-// boundaries -- the sponge's cells (SweDomain::sponge) and the river faces' cells (`face`, a mask a
-// cell; SweDomain::FaceMask). Water the sponge's flood does not
-// reach is listed, largest first, with where it meets the window's edge. `plantCrossEdge` lets the
-// flood run along the outside of an edge it reaches: the selftest's plant, a cut channel made whole.
+// flooded 4-connected (the kernel's faces) through cells whose bed is under `level`, from its
+// boundary -- every edge cell under the level (the sea's: the kernel's one edge law) and the river
+// faces' cells (`face`, a mask a cell; SweDomain::FaceMask). Water the sea's flood does not reach is
+// listed, largest first: a pool the edge does not touch, or water a river face alone holds.
 struct WaterPiece {
     struct EdgeRun {
         char edge;      // 'N', 'S', 'W', 'E'
@@ -139,30 +136,29 @@ struct WaterPiece {
     int cells = 0;
     int c0 = 0, r0 = 0, c1 = 0, r1 = 0;   // its box, cells
     bool face = false;                    // a river face reaches it (so it is held by the face alone)
-    std::vector<EdgeRun> runs;            // where it meets the window's edge
+    std::vector<EdgeRun> runs;            // where it meets the window's edge (a river face's cells only)
 };
 struct WaterHold {
-    int joined = 0;      // cells the sponge's flood reaches
+    int joined = 0;      // cells the sea's flood reaches
     int faceCells = 0;   // the river faces' seeds
     std::vector<WaterPiece> pieces;
-    std::vector<WaterPiece::EdgeRun> crossings;   // the sponge's water at the edge, not a boundary
-    std::vector<uint8_t> sea;                     // by label: 1 = the sponge's flood reaches it
+    std::vector<uint8_t> sea;   // by label: 1 = the sea's flood reaches it
 };
-WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, const uint8_t* face,
-                      bool plantCrossEdge = false, std::vector<int>* labels = nullptr);
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* face,
+                      std::vector<int>* labels = nullptr);
 // The two beds' floods side by side: the cells the grid's joins that the kernel's does not (and
 // back), the largest piece of the kernel's water the grid's joins, and where it parts from the
 // sea -- the cell of the lowest crest on its way there over the kernel's bed, and that cell's bed
 // in each.
 struct FloodParting {
-    int gridJoined = 0, kernelJoined = 0;   // the cells each bed's flood joins to the sponge
+    int gridJoined = 0, kernelJoined = 0;   // the cells each bed's flood joins to the sea
     int gridOnly = 0, kernelOnly = 0;
     WaterPiece piece;       // the kernel's piece (cells = those of it the grid joins); id -1 = none
     int crestCell = -1;
     float crestKernel = 0.0f, crestGrid = 0.0f;
 };
 FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
-                           const uint8_t* sponge, const uint8_t* face);
+                           const uint8_t* face);
 void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char* when,
                          const std::vector<float>* kernelBed = nullptr);
 bool RunWaterHoldSelfTest();
@@ -227,18 +223,10 @@ public:
     double LedgerReleased() const { return m_released; }
     void Volumes(Gpu& gpu, double& columns, double& soil, std::vector<float>* hOut = nullptr);
     uint32_t StateTiles() const { return m_h.ResidentCount(); }
-    // The open sea's Level the last batch was given (m NAVD88): the tide plane plus the open sides'
-    // mean departure, the surge included.
-    double OpenSeaLevel() const {
-        double s = 0.0;
-        int k = 0;
-        for (int side = 0; side < 4; ++side) {
-            if (!(m_dom.openSides & (1u << side))) continue;   // the open sides' (the whole-sea sides)
-            for (int j = 0; j < 4; ++j) s += m_cb.oceanEta[4 * side + j];
-            k += 4;
-        }
-        return double(m_cb.tideNavd) + (k ? s / k : 0.0);
-    }
+    // The sea's Level at the window's edge the last batch was given (m NAVD88): the mean, over the edge
+    // cells that Level stands over, of the Level there (the surge included); the tide plane where it
+    // stands over none (OceanBoundary).
+    double OpenSeaLevel() const { return m_openSea; }
     uint32_t DryWaiting() const;   // resident state tiles holding no water, inside their hysteresis
     float WetDepth() const { return m_cb.wetEps; }   // wet is h > this (m): the readers' scale for a column's water
 
@@ -315,6 +303,12 @@ public:
     // The domain's wet area (m^2) at a level L: the cells whose spill level is under it (Init's priority
     // flood from the open sides and the river faces) -- the hypsometry the open sea's prism comes from.
     double WetAreaAt(double levelNavd) const;
+    // THE LEVEL AT AN EDGE CELL (m NAVD88), as the kernel reads it: a river face's exterior level over its
+    // run, else the side's cubic through the Level's four samples (Swe.hlsl OceanEtaAt), from the last
+    // OceanBoundary. And the state tiles the boundary's water stands on now: a tile holding an edge cell
+    // that Level stands over -- wanted by the same rule as any water (UpdateResidency).
+    double EdgeLevel(int side, int a) const;
+    std::vector<uint8_t> BoundaryTiles() const;
     float PadW() const { return static_cast<float>(m_eta.TilesX() * m_eta.TileW()); }
     float PadH() const { return static_cast<float>(m_eta.TilesY() * m_eta.TileH()); }
 
@@ -464,7 +458,7 @@ private:
         uint32_t nx, ny, etaTilesX, fluxTilesX;
         uint32_t etaTileW, etaTileH, fluxTileW, fluxTileH;
         uint32_t listCount;
-        float openSides;   // the open ocean sides, a bitmask (SweDomain::openSides)
+        float unused0;     // the slot the open-side bitmask held (the edge is one law since 2026-10-27); keeps faceA on its register
         float dy;   // M6r: north-south texel size -- the CUDEM grid is EQUIANGULAR, so
                     // dy = dlat*mPerLat (13.65 m) != dx = dlon*mPerLon (10.08 m)
         float faceCount;  // the river faces (gFaceA, gFaceB)
@@ -543,7 +537,7 @@ private:
     double m_ledgerBase = 0.0, m_released = 0.0;
     std::vector<uint32_t> m_freshH, m_freshF;
     std::vector<double> m_dryFor;
-    std::vector<uint8_t> m_keep;           // state tiles never released (the boundary's exterior cells)
+    double m_openSea = 0.0;                // OpenSeaLevel (OceanBoundary)
     double m_releaseS = 1800.0;            // the hysteresis: dry this long, released
     double m_surgeA = 0.0, m_surgePeak = 0.0, m_surgeTau = 3600.0;
     double m_openSaidT[4] = {-1e18, -1e18, -1e18, -1e18};   // each side's level last said (sim s)

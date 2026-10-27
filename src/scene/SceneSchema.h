@@ -214,7 +214,6 @@ struct SweProps {
     // enter the window is data (data.river's reaches, sim/RiverModel.h).
     uint32_t windowTiles = 16;
     float cellM = 13.728f;
-    float sponge = 1866.0f;
 };
 struct BankProps {
     bool flatBed = false;

@@ -57,8 +57,6 @@ void SweDomain::Place(double boxLat0, double boxLon0, double boxLat1, double box
         V[i] = 0.5 * double(ny) * A[i] - R / dy * N[i];
     }
     elev.clear();
-    sponge.clear();
-    openSides = 0;
 }
 
 bool SweDomain::CellOfDir(const double P[3], double& tx, double& ty) const {
@@ -102,23 +100,13 @@ void SweDomain::FillBed(const std::function<float(double, double, double)>& bedA
     }
 }
 
-double SweDomain::SpongeAt(int i, int j, double spongeM) const {
-    double d = 1.0e300;
-    if (openSides & 1u) d = (std::min)(d, (j + 0.5) * dy);
-    if (openSides & 2u) d = (std::min)(d, (double(ny) - j - 0.5) * dy);
-    if (openSides & 4u) d = (std::min)(d, (i + 0.5) * dx);
-    if (openSides & 8u) d = (std::min)(d, (double(nx) - i - 0.5) * dx);
-    const double t = std::clamp((d - (spongeM - 700.0)) / 700.0, 0.0, 1.0);
-    return 1.0 - t * t * (3.0 - 2.0 * t);   // the kernel's 1 - smoothstep(d0 - 700, d0, d)
-}
-
-bool SweDomain::SeaFaceCell(int side, int a) const {
+bool SweDomain::SeaEdgeCell(int side, int a) const {
     const float e = elev[EdgeCell(side, a)];
     if (e < -9000.0f) return false;
     for (const FaceCells& f : faces) {
         if (f.side == side && a >= f.c0 && a <= f.c1 && e < 2.0f) return false;   // the river's
     }
-    return ((openSides >> side) & 1u) != 0u || e < 0.0f;
+    return true;
 }
 
 std::vector<uint8_t> SweDomain::FaceMask() const {
@@ -133,7 +121,6 @@ std::vector<uint8_t> SweDomain::FaceMask() const {
 }
 
 void SweDomain::Bound(const SweConfig& cfg) {
-    openSides = 0;
     faces.clear();
     if (!Ready() || elev.size() != size_t(nx) * ny) return;
     // THE RIVER FACES' CELLS: the edge cell nearest the river's crossing that can be wet (bed under
@@ -165,40 +152,6 @@ void SweDomain::Bound(const SweConfig& cfg) {
         faces.push_back(f);
         Log("[swe] %s: %s's face on the %c side, cells %d..%d along it (the crossing at %d)", cfg.name,
             rf.name.c_str(), "NSWE"[rf.side], f.c0, f.c1, a0);
-    }
-    const auto wet = [&](size_t i) { return elev[i] > -9000.0f && elev[i] < 1.2f; };
-    for (int side = 0; side < 4; ++side) {
-        bool faced = false;   // a river's side is its Flather face's, not the sponge's
-        for (const FaceCells& f : faces) faced = faced || f.side == side;
-        if (faced) continue;
-        const int len = side < 2 ? int(nx) : int(ny);
-        bool open = true;
-        for (int k = 0; k < len && open; ++k) {
-            const size_t i = side == 0   ? size_t(k)
-                             : side == 1 ? size_t(ny - 1) * nx + k
-                             : side == 2 ? size_t(k) * nx
-                                         : size_t(k) * nx + (nx - 1);
-            open = wet(i);
-        }
-        if (open) openSides |= 1u << side;
-    }
-    sponge.assign(size_t(nx) * ny, 0);
-    for (uint32_t j = 0; j < ny; ++j) {
-        for (uint32_t i = 0; i < nx; ++i) {
-            sponge[size_t(j) * nx + i] = SpongeAt(int(i), int(j), cfg.spongeM) > 0.0 ? 1 : 0;
-        }
-    }
-    // THE FLOOD'S SEEDS ARE WHERE THE SEA CONTINUES PAST THE EDGE (stage 2 of one water on the tree):
-    // the sponge's columns along a side open whole, and the Flather face cells of every other side --
-    // the kernel's own boundary (SeaFaceCell). A window whose open sea meets one side over most of it
-    // but not all (a harbour's mouth across the east edge, say) has faces there and no open side, and
-    // its water joined the sea in the kernel while the instrument, seeded by the sponge alone, found
-    // it joined to nothing.
-    for (int side = 0; side < 4; ++side) {
-        const int len = side < 2 ? int(nx) : int(ny);
-        for (int a = 0; a < len; ++a) {
-            if (SeaFaceCell(side, a)) sponge[EdgeCell(side, a)] = 1;
-        }
     }
 }
 
@@ -333,12 +286,10 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     const uint32_t nx = m_dom.nx, ny = m_dom.ny;
     const float dx = static_cast<float>(m_dom.dx);
     Log("[swe] %s domain: box %.5f..%.5f N x %.5f..%.5f E about its anchor %.6f N %.6f E, %ux%u "
-        "cells of %.3f x %.3f m (true, at the anchor) -- open sides%s%s%s%s%s, the sponge %.0f m in "
-        "from them; river faces: %s",
+        "cells of %.3f x %.3f m (true, at the anchor) -- every edge cell the sea's, the Level over its bed; "
+        "river faces: %s",
         cfg.name, m_dom.lat0, m_dom.lat1, m_dom.lon0, m_dom.lon1, m_dom.latC, m_dom.lonC, nx, ny,
-        m_dom.dx, m_dom.dy, m_dom.openSides ? "" : " none", (m_dom.openSides & 1u) ? " N" : "",
-        (m_dom.openSides & 2u) ? " S" : "", (m_dom.openSides & 4u) ? " W" : "",
-        (m_dom.openSides & 8u) ? " E" : "", double(cfg.spongeM), [&] {
+        m_dom.dx, m_dom.dy, [&] {
             std::string t;
             for (const SweDomain::FaceCells& f : m_dom.faces) t += (t.empty() ? "" : ", ") + f.name + " " + "NSWE"[f.side];
             return t.empty() ? std::string("none") : t;
@@ -457,18 +408,20 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                 open.push({elev[i], uint32_t(i)});
             }
         };
-        int seaFaces[4] = {0, 0, 0, 0};
+        int seaCells[4] = {0, 0, 0, 0}, underMsl[4] = {0, 0, 0, 0};   // a census at mean sea (0 m NAVD88): an instrument
         for (int side = 0; side < 4; ++side) {
             const int len = side < 2 ? int(nx) : int(ny);
             for (int a = 0; a < len; ++a) {
-                if (!m_dom.SeaFaceCell(side, a)) continue;
-                seed(m_dom.EdgeCell(side, a));
-                ++seaFaces[side];
+                if (!m_dom.SeaEdgeCell(side, a)) continue;
+                seed(m_dom.EdgeCell(side, a));   // at its own bed: the sea reaches it once the Level tops it
+                ++seaCells[side];
+                if (elev[m_dom.EdgeCell(side, a)] < 0.0f) ++underMsl[side];
             }
         }
-        Log("[swe] %s the sea continues past the edge at %d N, %d S, %d W, %d E cells (the open sides whole; "
-            "elsewhere the cells whose bed lies below mean sea): Flather faces on the Level there",
-            cfg.name, seaFaces[0], seaFaces[1], seaFaces[2], seaFaces[3]);
+        Log("[swe] %s the edge is the sea's: N %d, S %d, W %d, E %d cells (%d, %d, %d, %d of them under mean sea), "
+            "each a Flather face on the Level over its bed",
+            cfg.name, seaCells[0], seaCells[1], seaCells[2], seaCells[3], underMsl[0], underMsl[1], underMsl[2],
+            underMsl[3]);
         for (const SweDomain::FaceCells& F : m_dom.faces) {
             for (int a = F.c0; a <= F.c1; ++a) seed(m_dom.EdgeCell(F.side, a));
         }
@@ -629,7 +582,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.etaTileH = m_eta.TileH();
     m_cb.fluxTileW = m_flux.TileW();
     m_cb.fluxTileH = m_flux.TileH();
-    m_cb.openSides = static_cast<float>(m_dom.openSides);
+    m_cb.unused0 = 0.0f;
     m_cb.dx = dx;
     m_cb.dy = dyM;
     m_cb.dt = m_dt;
@@ -647,7 +600,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     // between each and its interior neighbour radiating at the gravity-wave speed (Swe.hlsl). The
     // 24-texel Dirichlet strip it replaced was a soft wall (transients reflected off the pinned eta),
     // and its relax rate was a tuning knob the radiation condition does not need. A domain no river
-    // enters has no face: its edges are walls or the sponge. (The south strip that held Plum Island
+    // enters has no face: its edges are the sea's, each cell on the Level over its bed. (The south strip that held Plum Island
     // Sound's tide, retired in M6d -- it filled the basin through the back door -- is gone.)
     static_assert(kMaxRiverFaces == 4, "SweCbData's faceA / faceB and Swe.hlsl's gFaceA / gFaceB hold four");
     m_cb.faceCount = static_cast<float>(m_dom.faces.size());
@@ -857,9 +810,8 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT);
     }
     m_dryFor.assign(size_t(m_h.TilesX()) * m_h.TilesY(), 0.0);
-    // The boundary's faces (the ledger's) and the tiles that hold the boundary's exterior cells (never
-    // released: the boundary's water is pinned there).
-    m_keep.assign(size_t(m_h.TilesX()) * m_h.TilesY(), 0);
+    // The boundary's faces (the ledger's): every edge cell once. (The tiles the boundary's water stands
+    // on are the Level's, each residency turn: BoundaryTiles.)
     m_ledgerFaces.assign(1, 0u);
     for (int side = 0; side < 4; ++side) {
         const int len = side < 2 ? int(nx) : int(ny);
@@ -868,11 +820,6 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
             const int y = side == 0 ? 0 : side == 1 ? int(ny) - 1 : a;
             // each edge cell once (a corner belongs to its row, N or S)
             if (side < 2 || (y > 0 && y < int(ny) - 1)) m_ledgerFaces.push_back(uint32_t(x) | (uint32_t(y) << 12));
-            bool river = false;
-            for (const SweDomain::FaceCells& F : m_dom.faces) river = river || (F.side == side && a >= F.c0 && a <= F.c1);
-            if (river || m_dom.SeaFaceCell(side, a)) {
-                m_keep[size_t(y / int(m_h.TileH())) * m_h.TilesX() + size_t(x / int(m_h.TileW()))] = 1;
-            }
         }
     }
     m_ledgerFaces[0] = uint32_t(m_ledgerFaces.size() - 1);
@@ -913,6 +860,37 @@ double SweSolver::DomainWeight(double latDeg, double lonDeg) const {
 double SweSolver::WetAreaAt(double levelNavd) const {
     const size_t k = size_t(std::lower_bound(m_spill.begin(), m_spill.end(), float(levelNavd)) - m_spill.begin());
     return double(k) * m_dom.dx * m_dom.dy;
+}
+
+double SweSolver::EdgeLevel(int side, int a) const {
+    for (int f = 0; f < FaceCount(); ++f) {
+        const SweDomain::FaceCells& F = m_dom.faces[f];
+        if (F.side == side && a >= F.c0 && a <= F.c1 && m_dom.elev[m_dom.EdgeCell(side, a)] < 2.0f) {
+            return double(m_cb.tideNavd) + double(m_cb.faceB[4 * f + 1]);
+        }
+    }
+    const double len = side < 2 ? double(m_cb.nx) : double(m_cb.ny);
+    const double t = std::clamp((a + 0.5) / len, 0.0, 1.0) * 3.0;   // 0..3 (Swe.hlsl OceanEtaAt)
+    const double l0 = -(t - 1.0) * (t - 2.0) * (t - 3.0) / 6.0, l1 = t * (t - 2.0) * (t - 3.0) / 2.0;
+    const double l2 = -t * (t - 1.0) * (t - 3.0) / 2.0, l3 = t * (t - 1.0) * (t - 2.0) / 6.0;
+    const float* y = &m_cb.oceanEta[4 * side];
+    return double(m_cb.tideNavd) + l0 * y[0] + l1 * y[1] + l2 * y[2] + l3 * y[3];
+}
+
+std::vector<uint8_t> SweSolver::BoundaryTiles() const {
+    const uint32_t tX = m_h.TilesX(), tY = m_h.TilesY();
+    std::vector<uint8_t> keep(size_t(tX) * tY, 0);
+    for (int side = 0; side < 4; ++side) {
+        const int len = side < 2 ? int(m_cb.nx) : int(m_cb.ny);
+        for (int a = 0; a < len; ++a) {
+            const size_t i = m_dom.EdgeCell(side, a);
+            const float e = m_dom.elev[i];
+            if (e < -9000.0f || !(EdgeLevel(side, a) > double(e))) continue;   // the Level under the bed: no water stands here
+            const uint32_t x = uint32_t(i % m_cb.nx), y = uint32_t(i / m_cb.nx);
+            keep[size_t(y / m_h.TileH()) * tX + x / m_h.TileW()] = 1;
+        }
+    }
+    return keep;
 }
 
 void SweSolver::RequestRegion(double latDeg, double lonDeg, double radiusM) {
@@ -1129,12 +1107,29 @@ void SweSolver::SeaBoundary() {
     // GAGAME_SWE_NOSEA (an instrument: the A/B of the waves' push, and the calm day's gate)
     static const bool noSea = std::getenv("GAGAME_SWE_NOSEA") != nullptr;
     if (!m_seaAt || noSea) return;
-    // the open water: the open sides' middle, else the domain's centre
+    // the open water: the edge's water, its cells' centroid weighted by their depth under the Level (the
+    // deep sea pulls it; the global wave grid is far coarser than the window); the domain's centre where
+    // the Level stands over no edge cell
     double tx = 0.5 * double(m_cb.nx), ty = 0.5 * double(m_cb.ny);
-    if (m_dom.openSides & 8u) tx = double(m_cb.nx) - 0.5;
-    else if (m_dom.openSides & 4u) tx = 0.5;
-    else if (m_dom.openSides & 1u) ty = 0.5;
-    else if (m_dom.openSides & 2u) ty = double(m_cb.ny) - 0.5;
+    {
+        double sx = 0.0, sy = 0.0, sw = 0.0;
+        for (int side = 0; side < 4; ++side) {
+            const int len = side < 2 ? int(m_cb.nx) : int(m_cb.ny);
+            for (int a = 0; a < len; ++a) {
+                if (!m_dom.SeaEdgeCell(side, a)) continue;
+                const size_t i = m_dom.EdgeCell(side, a);
+                const double d = EdgeLevel(side, a) - double(m_dom.elev[i]);
+                if (!(d > 0.0)) continue;
+                sx += d * (double(i % m_cb.nx) + 0.5);
+                sy += d * (double(i / m_cb.nx) + 0.5);
+                sw += d;
+            }
+        }
+        if (sw > 0.0) {
+            tx = sx / sw;
+            ty = sy / sw;
+        }
+    }
     double la = 0.0, lo = 0.0;
     m_dom.LatLonOf(tx, ty, la, lo);
     double hs = 0.0, tp = 0.0, fromDeg = 0.0;
@@ -1199,9 +1194,10 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
     // where the water is AND within the eye's reach; beyond the reach the water is the twin's own (the fold
     // carried it to mip 1 each batch, so a released tile's water is not lost: it stands there). The fine set
     // is aligned to the coarse tiles (a 2 x 2 wanted whole), so every coarse tile over it is a fold and none
-    // is half its own. The boundary's tiles (m_keep) are kept only within the reach: beyond it the twin's
-    // edge rows are the box's boundary. A tile beyond the reach goes at once (demand, not dryness).
-    std::vector<uint8_t> keep(m_keep.begin(), m_keep.end());
+    // is half its own. The boundary's tiles (BoundaryTiles: where the Level stands over an edge cell now)
+    // are kept only within the reach: beyond it the twin's edge rows are the box's boundary. A tile
+    // beyond the reach goes at once (demand, not dryness).
+    std::vector<uint8_t> keep = BoundaryTiles();
     std::vector<uint8_t> beyond(size_t(tX) * tY, 0);
     if (m_coarse && m_eyeOn && m_reachM > 0.0) {
         double ex = 0.0, ey = 0.0;
@@ -1423,11 +1419,7 @@ void SweSolver::Volumes(Gpu& gpu, double& columns, double& soil, std::vector<flo
             for (const SweDomain::FaceCells& F : m_dom.faces) {
                 river = river || (F.side == side && a >= F.c0 && a <= F.c1 && bed[i] < 2.0f);
             }
-            // a corner answers its first side (N, S, W, E), as the kernel's
-            const int x = int(i % m_cb.nx), y = int(i / m_cb.nx);
-            const int first = (y == 0) ? 0 : (y == int(m_cb.ny) - 1) ? 1 : (x == 0) ? 2 : 3;
-            const bool sea = first == side && ((((m_dom.openSides >> side) & 1u) != 0u) || bed[i] < 0.0f);
-            if (river || sea) ext[i] = 1;
+            if (river || bed[i] > -9000.0f) ext[i] = 1;   // every edge cell with a bed is the boundary's
         }
     }
     for (size_t i = 0; i < h.size(); ++i) {
@@ -1669,12 +1661,10 @@ void SweSolver::OceanBoundary(float tideNavd, float tideRate) {
     const double ts = (m_simTime - m_surgePeak) / m_surgeTau;
     const double surge = m_surgeA * std::exp(-ts * ts);
     const double surgeRate = -2.0 * ts / m_surgeTau * surge;
-    double section = 0.0;
+    double section = 0.0, levelSum = 0.0;
+    int levelN = 0;
     for (int s = 0; s < 4; ++s) {
         const double len = s < 2 ? nx : ny;
-        bool any = false;
-        for (int i = 0; i < int(len) && !any; ++i) any = m_dom.SeaFaceCell(s, i);
-        if (!any) continue;
         // The manager's Level at four points along the side, on its exterior cells' line.
         double y[4];
         for (int k = 0; k < 4; ++k) {
@@ -1692,7 +1682,7 @@ void SweSolver::OceanBoundary(float tideNavd, float tideRate) {
         // four departures, the surge, and the instant it was asked at.
         if (m_simTime - m_openSaidT[s] >= 60.0 && (std::fabs(y[0]) > 0.5 || std::fabs(y[3]) > 0.5)) {
             m_openSaidT[s] = m_simTime;   // per side: one side's line must not silence another's (2026-10-26)
-            Log("[swe] open side %d at t=%.0f: the level's departure from the tide plane %+.2f %+.2f %+.2f %+.2f m (surge %+.2f; source %s)",
+            Log("[swe] side %d at t=%.0f: the level's departure from the tide plane %+.2f %+.2f %+.2f %+.2f m (surge %+.2f; source %s)",
                 s, m_simTime, y[0], y[1], y[2], y[3], surge, m_levelAt ? "the manager's Level" : "the tide plane");
         }
         // The side's live section under that Level (the kernel's cubic, Swe.hlsl OceanEtaAt).
@@ -1703,9 +1693,14 @@ void SweSolver::OceanBoundary(float tideNavd, float tideRate) {
             const double l2 = -a * (a - 1.0) * (a - 3.0) / 2.0, l3 = a * (a - 1.0) * (a - 2.0) / 6.0;
             const double lvl = double(tideNavd) + l0 * y[0] + l1 * y[1] + l2 * y[2] + l3 * y[3];
             const float e = m_dom.elev[m_dom.EdgeCell(s, i)];
-            if (m_dom.SeaFaceCell(s, i)) section += (std::max)(lvl - double(e), 0.0) * cellL;
+            if (m_dom.SeaEdgeCell(s, i) && lvl > double(e)) {   // the sea's cell, and the Level stands over it
+                section += (lvl - double(e)) * cellL;
+                levelSum += lvl;
+                ++levelN;
+            }
         }
     }
+    m_openSea = levelN ? levelSum / levelN : double(tideNavd) + surge;
     // THE PRISM BY CONTINUITY: the open sea brings what the stateless tide says the domain must hold
     // -- its wet area at the plane times the plane's rate -- less what the rivers bring; Flather's
     // radiation carries every departure from it. (The river faces' law: radiation alone cannot carry
@@ -2351,7 +2346,6 @@ bool SweSolver::RunSchemeTests(Gpu& gpu) {
     float seaHs = 0.0f;
     const auto run = [&](int kind, float hL, float hR, float level, float cd, float damp, double seconds) {
         m_cb = saved;
-        m_cb.openSides = 0.0f;
         m_cb.faceCount = 0.0f;
         m_cb.cd = cd;
         m_cb.damp = damp;
@@ -2621,18 +2615,25 @@ bool SweSolver::RunSchemeTests(Gpu& gpu) {
     return pass;
 }
 
-WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, const uint8_t* faceMask,
-                      bool plantCrossEdge, std::vector<int>* labels) {
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* faceMask,
+                      std::vector<int>* labels) {
     WaterHold h;
     const size_t n = size_t(nx) * size_t(ny);
     const auto face = [&](size_t i) { return faceMask && faceMask[i] && bed[i] > -9000.0f && bed[i] < 2.0f; };
     const auto wet = [&](size_t i) { return (bed[i] > -9000.0f && bed[i] < level) || face(i); };
+    const auto edgeOf = [&](size_t i) {   // the side an edge cell answers (0 N, 1 S, 2 W, 3 E; -1 inside)
+        const int c = int(i % size_t(nx)), r = int(i / size_t(nx));
+        return (r == 0) ? 0 : (r == ny - 1) ? 1 : (c == 0) ? 2 : (c == nx - 1) ? 3 : -1;
+    };
     const auto edgeCell = [&](int e, int t) {   // e: 0 N, 1 S, 2 W, 3 E; t along that edge
         return (e == 0)   ? size_t(t)
                : (e == 1) ? size_t(ny - 1) * nx + t
                : (e == 2) ? size_t(t) * nx
                           : size_t(t) * nx + size_t(nx - 1);
     };
+    // THE SEA'S SEEDS: every edge cell under the level that no river face holds -- the kernel's one edge
+    // law (Swe.hlsl OceanSideOf: the Level over the cell's bed).
+    const auto seaSeed = [&](size_t i) { return edgeOf(i) >= 0 && !face(i) && bed[i] > -9000.0f && bed[i] < level; };
     for (size_t i = 0; i < n; ++i) h.faceCells += face(i) ? 1 : 0;
     std::vector<int> label(n, -1);
     std::vector<size_t> q;
@@ -2644,7 +2645,7 @@ WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8
         p.c0 = nx;
         p.r0 = ny;
         p.c1 = p.r1 = -1;
-        bool sea = false, edge = false, crossed[4] = {false, false, false, false};
+        bool sea = false, edge = false;
         q.assign(1, s);
         label[s] = id;
         for (size_t k = 0; k < q.size(); ++k) {
@@ -2655,7 +2656,7 @@ WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8
             p.c1 = (std::max)(p.c1, c);
             p.r0 = (std::min)(p.r0, r);
             p.r1 = (std::max)(p.r1, r);
-            sea = sea || sponge[i] != 0;
+            sea = sea || seaSeed(i);
             p.face = p.face || face(i);
             const auto visit = [&](size_t j) {
                 if (label[j] < 0 && wet(j)) {
@@ -2667,28 +2668,21 @@ WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8
             if (c + 1 < nx) visit(i + 1);
             if (r > 0) visit(i - size_t(nx));
             if (r + 1 < ny) visit(i + size_t(nx));
-            const int e = (r == 0) ? 0 : (r == ny - 1) ? 1 : (c == 0) ? 2 : (c == nx - 1) ? 3 : -1;
-            edge = edge || e >= 0;
-            if (plantCrossEdge && e >= 0 && !crossed[e]) {   // THE PLANT: the flood runs along the
-                crossed[e] = true;                            // outside of an edge it reaches
-                for (int t = 0; t < ((e < 2) ? nx : ny); ++t) visit(edgeCell(e, t));
-            }
+            edge = edge || edgeOf(i) >= 0;
         }
-        // Where the piece meets the window's edge; for the sponge's water only where the edge is
-        // no boundary (not the sponge's columns, not a river face): the crossings a law must open.
-        std::vector<WaterPiece::EdgeRun>& runs = sea ? h.crossings : p.runs;
-        for (int e = 0; edge && e < 4; ++e) {
+        // Where a piece the sea does not reach meets the window's edge: a river face's cells (every
+        // other wet edge cell is the sea's seed, so such a piece is joined).
+        for (int e = 0; edge && !sea && e < 4; ++e) {
             const int len = (e < 2) ? nx : ny;
             WaterPiece::EdgeRun run{"NSWE"[e], -1, -1, 1.0e9f};
             for (int t = 0; t <= len; ++t) {
                 const size_t j = (t < len) ? edgeCell(e, t) : 0;
-                const bool open = sea && (sponge[j] != 0 || face(j));
-                if (t < len && label[j] == id && !open) {
+                if (t < len && label[j] == id) {
                     if (run.from < 0) run.from = t;
                     run.to = t;
                     run.deepest = (std::min)(run.deepest, bed[j]);
                 } else if (run.from >= 0) {
-                    runs.push_back(run);
+                    p.runs.push_back(run);
                     run = WaterPiece::EdgeRun{"NSWE"[e], -1, -1, 1.0e9f};
                 }
             }
@@ -2708,11 +2702,11 @@ WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8
 }
 
 FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
-                           const uint8_t* sponge, const uint8_t* face) {
+                           const uint8_t* face) {
     FloodParting f;
     std::vector<int> gl, kl;
-    const WaterHold g = FloodWindow(grid, nx, ny, level, sponge, face, false, &gl);
-    const WaterHold k = FloodWindow(kernel, nx, ny, level, sponge, face, false, &kl);
+    const WaterHold g = FloodWindow(grid, nx, ny, level, face, &gl);
+    const WaterHold k = FloodWindow(kernel, nx, ny, level, face, &kl);
     f.gridJoined = g.joined;
     f.kernelJoined = k.joined;
     const size_t n = size_t(nx) * size_t(ny);
@@ -2799,15 +2793,14 @@ void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char*
                          const std::vector<float>* kernelBed) {
     constexpr float kLevel = 1.0f;   // m NAVD88: the level the flood stands at
     const int nx = int(dom.nx), ny = int(dom.ny);
-    if (nx < 2 || ny < 2 || dom.elev.size() != size_t(nx) * ny || dom.sponge.size() != dom.elev.size()) return;
+    if (nx < 2 || ny < 2 || dom.elev.size() != size_t(nx) * ny) return;
     const float dx = float(dom.dx), dz = float(dom.dy);
     const double km2 = double(dx) * dz / 1.0e6;
-    const uint8_t* spongeCells = dom.sponge.data();
     const float* grid = dom.elev.data();
     const bool kernel = kernelBed && kernelBed->size() == size_t(nx) * size_t(ny);
     const float* bed = kernel ? kernelBed->data() : grid;
     const std::vector<uint8_t> faceMask = dom.FaceMask();
-    const WaterHold h = FloodWindow(bed, nx, ny, kLevel, spongeCells, faceMask.data());
+    const WaterHold h = FloodWindow(bed, nx, ny, kLevel, faceMask.data());
     // Places in the domain's chart: metres east of its west side, north of its south side.
     const auto X = [&](int c) { return (c + 0.5f) * dx; };
     const auto Z = [&](int r) { return (ny - r - 0.5f) * dz; };
@@ -2829,10 +2822,10 @@ void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char*
     };
     snprintf(b, sizeof(b),
              "[swe] %s window (%s): does it hold its water? flooded at %+.2f m NAVD, 4-connected, "
-             "from the sea (the sponge %.0f m in from an open side, the Flather faces elsewhere) and the river faces "
+             "from the sea (every edge cell under it, the kernel's one edge law) and the river faces "
              "(%d wet-capable cells): %.2f km^2 joined to the sea; not joined to it: %zu pieces, %.2f km^2, %d at the window's "
              "edge (%.2f km^2)",
-             cfg.name ? cfg.name : "?", when, kLevel, double(cfg.spongeM), h.faceCells, h.joined * km2,
+             cfg.name ? cfg.name : "?", when, kLevel, h.faceCells, h.joined * km2,
              h.pieces.size(), all * km2, atEdge, edgeCells * km2);
     std::string s = b;
     int shown = 0;
@@ -2849,14 +2842,6 @@ void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char*
         for (size_t k = 0; k < p.runs.size() && k < 4; ++k) s += (k ? "," : "") + runText(p.runs[k]);
         if (p.runs.size() > 4) s += " +" + std::to_string(p.runs.size() - 4) + " more";
     }
-    std::vector<WaterPiece::EdgeRun> cross = h.crossings;   // the deepest first
-    std::stable_sort(cross.begin(), cross.end(),
-                     [](const WaterPiece::EdgeRun& u, const WaterPiece::EdgeRun& w) { return u.deepest < w.deepest; });
-    if (!cross.empty()) {
-        s += " | the sponge's water meets the edge where it is no boundary: " + std::to_string(cross.size()) +
-             " runs, the deepest";
-        for (size_t k = 0; k < cross.size() && k < 4; ++k) s += (k ? "," : "") + runText(cross[k]);
-    }
     for (const WaterPiece& p : h.pieces) {
         if (!p.runs.empty()) continue;
         snprintf(b, sizeof(b), " | the largest away from the edge: %.3f km^2 %s, x %.0f..%.0f z %.0f..%.0f m",
@@ -2868,17 +2853,17 @@ void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char*
     Log("%s", s.c_str());
     if (!kernel) return;
     // Beside it, the survey's grid flooded by the same law: where the two beds' water parts.
-    const FloodParting f = CompareFloods(grid, bed, nx, ny, kLevel, spongeCells, faceMask.data());
+    const FloodParting f = CompareFloods(grid, bed, nx, ny, kLevel, faceMask.data());
     const char* name = cfg.name ? cfg.name : "?";
     if (f.gridOnly == 0 && f.kernelOnly == 0) {
         Log("[swe] %s window: the survey's grid, flooded by the same law, joins the same water to "
-            "the sponge as the kernel's bed (%.2f km^2)",
+            "the sea as the kernel's bed (%.2f km^2)",
             name, f.gridJoined * km2);
         return;
     }
     snprintf(b, sizeof(b),
              "[swe] %s window: the survey's grid joins %.2f km^2 that the kernel's bed does not (its "
-             "flood joins %.2f km^2 to the sponge, the kernel's %.2f), and the kernel's bed joins "
+             "flood joins %.2f km^2 to the sea, the kernel's %.2f), and the kernel's bed joins "
              "%.2f km^2 that the grid does not",
              name, f.gridOnly * km2, f.gridJoined * km2, f.kernelJoined * km2, f.kernelOnly * km2);
     std::string t = b;
@@ -2902,32 +2887,26 @@ void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char*
 }
 
 // The instrument's gate, on a made-up window 64 x 40: land at +5 m, the open sea in the last 8
-// columns (the sponge from column 56), and a channel at -3 m from the west edge (row 20) that runs
-// east to column 20, turns north out through the north edge, comes back in at column 30 and runs on
-// to the sea -- the Merrimack's bend in miniature. WHOLE closes the bend inside the grid (row 2).
+// columns at -10 m, a channel at -3 m along row 20 from the west edge to the sea (the sea reaches it
+// from both ends: a wet edge cell is the sea's), a reach at -3 m along row 10 from the west edge to
+// column 10 (the sea reaches it through the west edge alone), and a pool at -1 m, rows 30..32 x
+// columns 10..14, that touches no edge. A second bed lifts the reach's column 5 to +2 m.
 bool RunWaterHoldSelfTest() {
-    constexpr int nx = 64, ny = 40, kSponge = 56;
-    const auto make = [&](bool whole) {
-        std::vector<float> b(size_t(nx) * ny, 5.0f);
-        for (int r = 0; r < ny; ++r) {
-            for (int c = kSponge; c < nx; ++c) b[size_t(r) * nx + c] = -10.0f;
-        }
-        for (int t = 0; t <= 20; ++t) {
-            b[size_t(20) * nx + t] = -3.0f;   // the channel from the west edge
-            b[size_t(t) * nx + 20] = -3.0f;   // north to the edge
-            b[size_t(t) * nx + 30] = -3.0f;   // and back from it
-        }
-        for (int c = 30; c < kSponge; ++c) b[size_t(20) * nx + c] = -3.0f;
-        for (int c = 20; whole && c <= 30; ++c) b[size_t(2) * nx + c] = -3.0f;
-        return b;
-    };
-    std::vector<uint8_t> spongeMask(size_t(nx) * ny, 0);   // the sponge's columns
+    constexpr int nx = 64, ny = 40, kSea = 56;
+    const auto at = [&](int r, int c) { return size_t(r) * nx + c; };
+    std::vector<float> b(size_t(nx) * ny, 5.0f);
     for (int r = 0; r < ny; ++r) {
-        for (int c = kSponge; c < nx; ++c) spongeMask[size_t(r) * nx + c] = 1;
+        for (int c = kSea; c < nx; ++c) b[at(r, c)] = -10.0f;
     }
-    const uint8_t* sp = spongeMask.data();
+    for (int c = 0; c < kSea; ++c) b[at(20, c)] = -3.0f;
+    for (int c = 0; c <= 10; ++c) b[at(10, c)] = -3.0f;
+    for (int r = 30; r <= 32; ++r) {
+        for (int c = 10; c <= 14; ++c) b[at(r, c)] = -1.0f;
+    }
+    std::vector<float> raised = b;
+    raised[at(10, 5)] = 2.0f;
     std::vector<uint8_t> westMask(size_t(nx) * ny, 0);   // a river face along the west column
-    for (int r = 0; r < ny; ++r) westMask[size_t(r) * nx] = 1;
+    for (int r = 0; r < ny; ++r) westMask[at(r, 0)] = 1;
     int checks = 0;
     bool ok = true;
     const auto expect = [&](bool cond, const char* what) {
@@ -2937,49 +2916,35 @@ bool RunWaterHoldSelfTest() {
             Log("[waterhold]   FAIL %s", what);
         }
     };
-    const std::vector<float> cut = make(false), whole = make(true);
-    const WaterHold a = FloodWindow(cut.data(), nx, ny, 1.0f, sp, nullptr);
-    expect(a.pieces.size() == 1 && a.pieces[0].cells == 41 && !a.pieces[0].face,
-           "a channel cut by the north edge is reported: one piece of 41 cells, joined to none");
-    bool north = false, west = false;
-    for (size_t k = 0; !a.pieces.empty() && k < a.pieces[0].runs.size(); ++k) {
-        const WaterPiece::EdgeRun& r = a.pieces[0].runs[k];
-        north = north || (r.edge == 'N' && r.from == 20 && r.to == 20 && r.deepest == -3.0f);
-        west = west || (r.edge == 'W' && r.from == 20 && r.to == 20);
+    const WaterHold a = FloodWindow(b.data(), nx, ny, 1.0f, nullptr);
+    expect(a.joined == 8 * ny + kSea + 11 && a.pieces.size() == 1 && a.pieces[0].cells == 15 && !a.pieces[0].face &&
+               a.pieces[0].runs.empty(),
+           "the sea joins its columns, the channel and the reach (a wet edge cell is the sea's); the pool "
+           "alone is not joined: one piece of 15 cells, meeting no edge");
+    const WaterHold f = FloodWindow(b.data(), nx, ny, 1.0f, westMask.data());
+    expect(f.faceCells == 2 && f.joined == 8 * ny + kSea && f.pieces.size() == 2,
+           "with a river face on the west: two face cells (rows 10 and 20), the channel still the sea's, the "
+           "reach held by the face alone, the pool by none");
+    bool reach = false, pool = false;
+    for (const WaterPiece& p : f.pieces) {
+        reach = reach || (p.cells == 11 && p.face && p.runs.size() == 1 && p.runs[0].edge == 'W' &&
+                          p.runs[0].from == 10 && p.runs[0].to == 10 && p.runs[0].deepest == -3.0f);
+        pool = pool || (p.cells == 15 && !p.face && p.runs.empty());
     }
-    expect(north && west, "it meets the north edge at column 20 (deepest -3) and the west edge at row 20");
-    expect(a.crossings.size() == 1 && a.crossings[0].edge == 'N' && a.crossings[0].from == 30 &&
-               a.crossings[0].to == 30,
-           "the sea's water meets the edge where it is no boundary once: the north edge at column 30");
-    const WaterHold f = FloodWindow(cut.data(), nx, ny, 1.0f, sp, westMask.data());
-    expect(f.faceCells == 1 && f.pieces.size() == 1 && f.pieces[0].face,
-           "with a river face on the west, the cut channel is held by the face alone");
-    const WaterHold w = FloodWindow(whole.data(), nx, ny, 1.0f, sp, nullptr);
-    expect(w.pieces.empty() && w.joined > 0, "a whole channel is not reported");
-    const WaterHold p = FloodWindow(cut.data(), nx, ny, 1.0f, sp, nullptr, true);
-    expect(p.pieces.empty(),
-           "PLANT (the flood crosses the edge): the cut channel joins the sea, so the first check "
-           "would fail on it -- caught");
-    // THE TWO BEDS: the grid (the bend whole) against a kernel's bed with a band raised to +2 m
-    // along the north edge, as the fade into the 15-arcsecond relief raises one (finding 68).
-    std::vector<float> raised = whole;
-    for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < kSponge; ++c) {
-            raised[size_t(r) * nx + c] = (std::max)(raised[size_t(r) * nx + c], 2.0f);
-        }
-    }
-    const WaterHold rk = FloodWindow(raised.data(), nx, ny, 1.0f, sp, nullptr);
-    expect(w.pieces.empty() && rk.pieces.size() == 1 && rk.pieces[0].cells == 37,
-           "two beds: the reach is joined on the grid and cut on the raised bed (one piece, 37 cells)");
-    const FloodParting fp = CompareFloods(whole.data(), raised.data(), nx, ny, 1.0f, sp, nullptr);
-    expect(fp.gridOnly == 54 && fp.kernelOnly == 0 && fp.piece.cells == 37 && fp.crestCell >= 0 &&
-               fp.crestCell / nx < 4 && fp.crestKernel == 2.0f && fp.crestGrid == -3.0f,
-           "the grid joins 54 cells the raised bed does not, and the reach parts from the sea at a "
-           "band cell: +2 on the kernel's bed, -3 on the grid's");
+    expect(reach && pool, "the reach meets the west edge at row 10 (deepest -3), at the face; the pool meets no edge");
+    const WaterHold rk = FloodWindow(raised.data(), nx, ny, 1.0f, nullptr);
+    expect(rk.pieces.size() == 2 && rk.joined == 8 * ny + kSea + 5,
+           "on the raised bed the reach parts from the sea at column 5: the sea keeps 5 of it, two pieces (the "
+           "5 behind the crest, the pool)");
+    const FloodParting fp = CompareFloods(b.data(), raised.data(), nx, ny, 1.0f, nullptr);
+    expect(fp.gridOnly == 6 && fp.kernelOnly == 0 && fp.piece.cells == 5 && fp.crestCell == int(at(10, 5)) &&
+               fp.crestKernel == 2.0f && fp.crestGrid == -3.0f,
+           "the grid joins 6 cells the raised bed does not (the crest and the 5 behind it); the kernel's piece "
+           "of 5 parts from the sea at the crest: +2 on the kernel's bed, -3 on the grid's");
     if (ok) {
-        Log("[waterhold] ---- PASS (%d checks): a channel the window's edge cuts is reported with "
-            "where it meets the edge, held by the west face alone when it has one, a whole one is "
-            "not, and the plant (the flood across the edge) is caught",
+        Log("[waterhold] ---- PASS (%d checks): a wet edge cell is the sea's, a pool the edge does not touch is "
+            "reported, a reach a river face alone holds is said so, and the crest where a raised bed parts a "
+            "reach from the sea is found",
             checks);
     } else {
         Log("[waterhold] ---- FAIL");

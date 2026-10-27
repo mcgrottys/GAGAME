@@ -335,7 +335,7 @@ inline void LogWestBoundary(Gpu& gpu, SweSolver& swe, double hours, double tide,
 
 // M5c validation harness: integrate a full tidal cycle headless and log probes to CSV. EVERY PROBE IS
 // THE DATA'S (2026-10-21, Mark: "make sure you wrap up making everything part of a global model"; until
-// this date they were the Merrimack's metres about its anchor): the ocean in an open side's sponge (must
+// this date they were the Merrimack's metres about its anchor): the ocean by the window's deepest edge cell (must
 // track the analytic tide); the throat at the tidal current station the domain holds (the solved current
 // against its prediction, the real gate) and a section across it, square to the station's flood; the
 // place's anchor; the river where it enters (the first face) and a third of the way from it to the throat.
@@ -392,14 +392,32 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G faceAt, Q faceQAt,
             gap[2 * k + 1] = float(throatZ + az * o);
         }
     }
-    // Ocean probe: the middle of an open side, inside its sponge.
+    // Ocean probe: 2.5 cells in from the window's deepest edge cell (every edge cell is the sea's; the
+    // deepest is the open water's).
     float oceanX = 0.0f, oceanZ = 0.0f;
     {
-        const uint32_t o = dom.openSides;
-        const double tx = (o & 4u) ? 2.5 : (o & 8u) ? nx - 2.5 : nx * 0.5;
-        const double ty = (o & 1u) ? 2.5 : (o & 2u) ? ny - 2.5 : ny * 0.5;
+        int bs = -1, ba = 0;
+        float be = 1.0e9f;
+        for (int side = 0; side < 4; ++side) {
+            const int len = side < 2 ? int(nx) : int(ny);
+            for (int a = 0; a < len; ++a) {
+                if (!dom.SeaEdgeCell(side, a)) continue;
+                const float e = dom.elev[dom.EdgeCell(side, a)];
+                if (e < be) {
+                    be = e;
+                    bs = side;
+                    ba = a;
+                }
+            }
+        }
+        double tx = nx * 0.5, ty = ny * 0.5;
+        if (bs >= 0) {
+            tx = bs == 2 ? 2.5 : bs == 3 ? nx - 2.5 : ba + 0.5;
+            ty = bs == 0 ? 2.5 : bs == 1 ? ny - 2.5 : ba + 0.5;
+        }
         flatOf(tx, ty, oceanX, oceanZ);
-        Log("[swe-cycle] ocean probe (%.0f, %.0f) %s", oceanX, oceanZ, o ? "in an open side's sponge" : "-- no open side: the middle");
+        Log("[swe-cycle] ocean probe (%.0f, %.0f) %s", oceanX, oceanZ,
+            bs >= 0 ? "2.5 cells in from the deepest edge cell" : "-- no edge cell with a bed: the middle");
     }
     // The river where it enters (the first face): the deepest cell of the line kIn cells in from its
     // side, and of the line a third of the way from the face to the throat.
@@ -708,7 +726,7 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G faceAt, Q faceQAt,
                 const float level = float(swe.OpenSeaLevel());
                 const std::vector<uint8_t> fm = dom.FaceMask();
                 std::vector<int> labels;
-                const WaterHold hold = FloodWindow(bt.bed.data(), nx, ny, level, dom.sponge.data(), fm.data(), false, &labels);
+                const WaterHold hold = FloodWindow(bt.bed.data(), nx, ny, level, fm.data(), &labels);
                 const size_t n = hh.size();
                 std::vector<uint8_t> a(n, 0), b(n, 0);
                 size_t na = 0, nb = 0, both = 0, onlyA = 0, onlyB = 0, ringA = 0, ringB = 0, above12 = 0;
