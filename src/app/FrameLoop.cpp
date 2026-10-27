@@ -1597,13 +1597,12 @@ std::optional<int> FrameLoop::Session() {
             const WaterManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
             bedWhole = bw.done;
             Log("[swe] bed wait: %u window(s), %u tiles mapped in %u residency turns, %.2f s -- %s "
-                "(%llu of %llu cells read the page at mip 0)",
+                "(%u of the solver's wants unanswered; the kernel reads, of %llu cells:%s)",
                 bw.windows, bw.tiles, bw.turns, bw.seconds,
-                bw.done ? "the bed is whole"
+                bw.done ? "the bed is whole: the tree's own level everywhere"
                         : bw.windows ? "NOT whole at the bound; the hour spins up on what there is"
                                      : "no domain inside the page to wait for",
-                static_cast<unsigned long long>(bw.whole),
-                static_cast<unsigned long long>(bw.cells));
+                bw.pending, static_cast<unsigned long long>(bw.cells), bw.read.c_str());
             if (bedTrace) m_bedTracer.Read(gpu, swe, "before-spinup", oceanAt(spinT0));
         } else if (S.water.swe.bedWait == 1 && S.water.swe.spinupH > 0) {
             gpu.WaitIdle();

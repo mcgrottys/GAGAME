@@ -66,6 +66,7 @@ struct WeatherSample {
 
 class WaterManager {
 public:
+    struct Window;   // a solver's window (below); WantDomain names it before it is defined
     WaterManager() = default;
     WaterManager(const WaterManager&) = delete;   // the registry's producers hold `this`
     WaterManager& operator=(const WaterManager&) = delete;
@@ -118,27 +119,43 @@ public:
     // is stage 2b's, with the chain's coarse mips; this is where it goes. Nothing here reads the GPU
     // back: the CPU mirrors refresh on demand (RefreshMirrorsTo).
     void Update(double simUnix, double camLatDeg, double camLonDeg, double camAltM);
-    // M9ay: THE SOLVER DOMAINS STAY RESIDENT AT MIP 0 -- every ACTIVE window's lattice, on
-    // the page it reads, every frame. The pin used to live in main for the Merrimack alone
-    // (AUDIT_WATER item 6): an active Boston solver read slice 6 at whatever mip the camera
+    // M9ay: THE SOLVER DOMAINS STAY RESIDENT -- every ACTIVE window's lattice, every frame, on what
+    // its kernel reads (WantDomain). The pin used to live in main for the Merrimack alone
+    // (AUDIT_WATER item 6): an active solver elsewhere read its slice at whatever mip the camera
     // had left there, and with no globe layer nothing warmed the page for anyone.
     void PinDomains(ResidencyManager& res, int hgtTenant);
+    // THE SOLVER'S WANT IS WHAT ITS KERNEL READS (stage 2 of one water on the tree, WATER_V2 14.4).
+    // The bed's read rule (shaders/HeightPages.hlsli HpChainRead) takes the standing window where it
+    // holds the cell's ground and the cube face by direction where it does not, so a domain is asked
+    // for on BOTH, at mip 0, the finest. The tree's magnified law (F14) closes every tile below its
+    // own level without a load, so the ask lands at the own level wherever that is: the window's
+    // pages at a surveyed place, the cube's own mips where the stack holds only its global tiers (a
+    // window's pages hold mips 0..3, 10 m to 76 m of a rank-2 window; a 15" tier is coarser than
+    // all of them, and the window answers nothing there). Nothing here names a place. Returns the
+    // window's rectangles (DomainRects); `faces` gets the cube's (SurfaceFrame::CubeRectsLL).
+    int WantDomain(ResidencyManager& res, int sampler, int hgtTenant, const Window& w, float win[4][4],
+                   float cube[6][4], uint32_t& faces) const;
     // THE BED BEFORE THE HOUR (review finding 48). A spin-up integrates on the bed its kernel
     // reads, and the kernel reads the height tenant through the residency map; before the first
     // frame nothing of any domain has been asked for. This asks for the active windows' lattices
-    // at mip 0 -- the pin's own rectangles, or the one window named -- and runs residency turns
-    // on upload lists until the bed the kernel reads IS that bed. "Landed" is what the solver's
-    // own bed trace reads (SweSolver::TraceBed), never the manager's claim alone: a
-    // DirectStorage tile is Mapped before its bytes land (review finding 24), and the kernel
-    // reads the residency map a turn uploads, not the one the manager holds. Bounded: a bed that
-    // is not whole after kBedWaitMaxS is reported and the spin-up goes on over what there is.
+    // (WantDomain: the pin's own rectangles, or the one window named) and runs residency turns on
+    // upload lists until the order has answered every tile the ask implies: held, or closed by the
+    // tree's own law as magnified or refused (ResidencyManager::PendingOf). That is "the finest the
+    // tree holds", at a surveyed place the window's mip 0 and at a cold one the cube's own level --
+    // never a claim that the window's mip 0 is mapped, which a place with no survey can never make.
+    // The solver's own bed trace (SweSolver::TraceBed) then says what the kernel read (`read`): a
+    // DirectStorage tile is Mapped before its bytes land (review finding 24), and the kernel reads
+    // the residency map a turn uploads, not the one the manager holds. Bounded: a bed that is not
+    // whole after kBedWaitMaxS is reported and the spin-up goes on over what there is.
     struct BedWait {
         uint32_t windows = 0;          // windows waited for (inside the page)
         uint32_t turns = 0;            // residency turns taken
         uint32_t tiles = 0;            // tiles mapped over the wait, every tenant
         uint64_t cells = 0, whole = 0; // lattice cells traced, and those reading the page at mip 0
+        uint32_t pending = 0;          // the solver's wants the order had not answered at the end
+        std::string read;              // what the kernel read, by slice kind and mip (the trace)
         double seconds = 0.0;
-        bool done = false;             // every window's bed read whole
+        bool done = false;             // the order answered every want: the bed is the tree's own
     };
     BedWait WaitForBeds(Gpu& gpu, ResidencyManager& res, int hgtTenant,
                         const char* only = nullptr);

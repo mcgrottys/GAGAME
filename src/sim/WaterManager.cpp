@@ -164,20 +164,34 @@ int WaterManager::DomainRects(const Window& w, float out[4][4]) const {
     return SurfaceFrame::SliceRectsLL(m_stand, w.box[0], w.box[1], w.box[2], w.box[3], out);
 }
 
+int WaterManager::WantDomain(ResidencyManager& res, int sampler, int hgtTenant, const Window& w,
+                             float win[4][4], float cube[6][4], uint32_t& faces) const {
+    // PHASE B2: the standing window, in its own uv (modulo the page: one, two or four rectangles)...
+    const int n = DomainRects(w, win);
+    for (int k = 0; k < n; ++k) {
+        res.Want(sampler, hgtTenant, m_hgtSlice, 0u, win[k][0], win[k][1], win[k][2], win[k][3]);
+    }
+    // ...and the cube's faces under the domain, where the rule reads when the window holds nothing:
+    // the height tenant's slices 0..5 are the cube's faces (Assembly: "paint cube faces").
+    faces = SurfaceFrame::CubeRectsLL(w.box[0], w.box[1], w.box[2], w.box[3], cube);
+    for (uint32_t f = 0; f < 6u; ++f) {
+        if (!((faces >> f) & 1u)) continue;
+        res.Want(sampler, hgtTenant, f, 0u, cube[f][0], cube[f][1], cube[f][2], cube[f][3]);
+    }
+    return n;
+}
+
 void WaterManager::PinDomains(ResidencyManager& res, int hgtTenant) {
     if (hgtTenant < 0 || !m_hgtArr) return;
     std::string pinned;
     for (const Window& w : m_windows) {
         if (!w.active || !(w.box[2] > w.box[0])) continue;
-        float r[4][4];
-        const int n = DomainRects(w, r);
+        float r[4][4], c[6][4];
+        uint32_t faces = 0;
         // M13: the solver's domain is its own reader of the shared cache -- it pins the bed
         // under its lattice whether or not any view is looking there.
-        // Step 5: a standing reader, the order's first class (HIERARCHY 4.19). PHASE B2: in the
-        // standing window's uv.
-        for (int k = 0; k < n; ++k) {
-            res.Want(res.Sampler("solver", true), hgtTenant, m_hgtSlice, 0u, r[k][0], r[k][1], r[k][2], r[k][3]);
-        }
+        // Step 5: a standing reader, the order's first class (HIERARCHY 4.19).
+        const int n = WantDomain(res, res.Sampler("solver", true), hgtTenant, w, r, c, faces);
         if (!m_pinLogged) {
             char line[200];
             snprintf(line, sizeof(line), " %s in %d rectangle(s)%s", w.name.c_str(), n,
@@ -187,12 +201,18 @@ void WaterManager::PinDomains(ResidencyManager& res, int hgtTenant) {
                 snprintf(line, sizeof(line), " uv %.4f..%.4f x %.4f..%.4f", r[k][0], r[k][2], r[k][1], r[k][3]);
                 pinned += line;
             }
+            for (uint32_t f = 0; f < 6u; ++f) {
+                if (!((faces >> f) & 1u)) continue;
+                snprintf(line, sizeof(line), "; the cube's face %u uv %.4f..%.4f x %.4f..%.4f", f, c[f][0], c[f][2],
+                         c[f][1], c[f][3]);
+                pinned += line;
+            }
         }
     }
     if (!m_pinLogged && !pinned.empty()) {
         m_pinLogged = true;
-        Log("[weather] solver domains pinned on the standing window, slice %u mip 0:%s", m_hgtSlice,
-            pinned.c_str());
+        Log("[weather] solver domains pinned on the standing window, slice %u mip 0, and on the cube under them:%s",
+            m_hgtSlice, pinned.c_str());
     }
 }
 
@@ -236,18 +256,12 @@ WaterManager::BedWait WaterManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
                                                   int hgtTenant, const char* only) {
     BedWait bw;
     if (hgtTenant < 0 || !m_hgtArr) return bw;
-    struct Domain {
-        SweSolver* solver;
-        float r[4][4];   // PHASE B2: its rectangles in the standing window's uv
-        int n;
-    };
-    std::vector<Domain> domains;
-    for (Window& w : m_windows) {
+    std::vector<const Window*> domains;
+    for (const Window& w : m_windows) {
         if (!w.active || !w.solver || !w.solver->Ready()) continue;
         if (only && w.name != only) continue;
-        Domain d{w.solver, {}, 0};
-        d.n = DomainRects(w, d.r);
-        if (d.n) domains.push_back(d);
+        float r[4][4];
+        if (DomainRects(w, r)) domains.push_back(&w);
     }
     bw.windows = static_cast<uint32_t>(domains.size());
     if (domains.empty()) return bw;
@@ -257,20 +271,13 @@ WaterManager::BedWait WaterManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
     // The turn fills the frame's upload-ring slot, which a frame still in flight may be copying
     // from (an activation inside the loop); boot has nothing in flight and this costs nothing.
     gpu.WaitIdle();
-    // The manager's claim is read before the kernel's (it is cheap); the trace is the answer.
-    auto claimed = [&] {
-        uint64_t hist[16];
-        const uint64_t n = ClaimedMips(res, hgtTenant, hist, only);
-        return n > 0 && hist[0] == n;
-    };
-    SweSolver::BedTrace trace;
     for (;;) {
         // Asked again every turn, as the pin asks every frame: the ring gate admits a level only
         // under a mapped parent, so one ask brings one ring.
-        for (const Domain& d : domains) {
-            for (int k = 0; k < d.n; ++k) {
-                res.Want(sampler, hgtTenant, m_hgtSlice, 0u, d.r[k][0], d.r[k][1], d.r[k][2], d.r[k][3]);
-            }
+        for (const Window* w : domains) {
+            float r[4][4], c[6][4];
+            uint32_t faces = 0;
+            WantDomain(res, sampler, hgtTenant, *w, r, c, faces);
         }
         {
             hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
@@ -279,26 +286,49 @@ WaterManager::BedWait WaterManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
         }
         ++bw.turns;
         bw.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (claimed()) {
-            bw.cells = bw.whole = 0;
-            for (const Domain& d : domains) {
-                if (!d.solver->TraceBed(gpu, trace)) continue;
-                const uint32_t page = d.solver->PageSlice();
-                for (size_t i = 0; i < trace.bed.size(); ++i) {
-                    ++bw.cells;
-                    if (trace.mip[i] == 0 && trace.slice[i] == page) ++bw.whole;
-                }
-            }
-            if (bw.cells > 0 && bw.whole == bw.cells) {
-                bw.done = true;
-                break;
-            }
+        // THE END: the order has answered every tile the ask implies (the first turn states the ask;
+        // the pass that orders it runs in that turn, so from the second the count is the order's).
+        bw.pending = res.PendingOf(sampler, hgtTenant);
+        if (bw.turns >= 2 && bw.pending == 0) {
+            bw.done = true;
+            break;
         }
         if (bw.seconds > kBedWaitMaxS) break;
         // The loads run on the Io lane; a turn that finds nothing landed has nothing to map.
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     bw.tiles = res.MappedCount() - mapped0;
+    {   // What the kernel read, by slice kind and mip: the page (the standing window) or the cube.
+        SweSolver::BedTrace trace;
+        uint64_t page[16] = {}, cube[16] = {};
+        bw.cells = bw.whole = 0;
+        for (const Window* w : domains) {
+            if (!w->solver->TraceBed(gpu, trace)) continue;
+            const uint32_t slice = w->solver->PageSlice();
+            for (size_t i = 0; i < trace.bed.size(); ++i) {
+                ++bw.cells;
+                const uint32_t m = (std::min)(static_cast<uint32_t>(trace.mip[i]), 15u);
+                if (trace.slice[i] == slice) {
+                    ++page[m];
+                    if (m == 0u) ++bw.whole;
+                } else {
+                    ++cube[m];
+                }
+            }
+        }
+        char line[64];
+        for (int m = 0; m < 16; ++m) {
+            if (!page[m]) continue;
+            snprintf(line, sizeof(line), " page m%d:%llu", m, static_cast<unsigned long long>(page[m]));
+            bw.read += line;
+        }
+        for (int m = 0; m < 16; ++m) {
+            if (!cube[m]) continue;
+            snprintf(line, sizeof(line), " cube m%d:%llu", m, static_cast<unsigned long long>(cube[m]));
+            bw.read += line;
+        }
+        if (bw.read.empty()) bw.read = " nothing traced";
+    }
     {   // what the manager's map claims over the domain at the wait's end, by mip (15 = outside the page)
         uint64_t hist[16];
         const uint64_t n = ClaimedMips(res, hgtTenant, hist, only);

@@ -85,7 +85,8 @@ struct SweDomain {
     double dx = 0.0, dy = 0.0;                               // a cell, metres (true, at the anchor)
     std::vector<float> elev;      // the bed at the cell centres, m NAVD88, row 0 north (the stack's)
     uint32_t openSides = 0;       // bit 0 N, 1 S, 2 W, 3 E: the sides that are open sea (Bound)
-    std::vector<uint8_t> sponge;  // per cell: 1 where the sponge acts (the flood's seeds)
+    std::vector<uint8_t> sponge;  // per cell: 1 where the sea continues past the edge: the sponge's columns of a
+                                  // side open whole, the Flather face cells elsewhere (the flood's seeds; Bound)
     // THE RIVER FACES' CELLS (Bound): a side and the run [c0, c1] along it (columns for N and S,
     // rows for W and E) of wet-capable edge cells (bed under +2 m) about the river's crossing.
     struct FaceCells {

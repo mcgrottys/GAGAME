@@ -188,6 +188,18 @@ void SweDomain::Bound(const SweConfig& cfg) {
             sponge[size_t(j) * nx + i] = SpongeAt(int(i), int(j), cfg.spongeM) > 0.0 ? 1 : 0;
         }
     }
+    // THE FLOOD'S SEEDS ARE WHERE THE SEA CONTINUES PAST THE EDGE (stage 2 of one water on the tree):
+    // the sponge's columns along a side open whole, and the Flather face cells of every other side --
+    // the kernel's own boundary (SeaFaceCell). A window whose open sea meets one side over most of it
+    // but not all (a harbour's mouth across the east edge, say) has faces there and no open side, and
+    // its water joined the sea in the kernel while the instrument, seeded by the sponge alone, found
+    // it joined to nothing.
+    for (int side = 0; side < 4; ++side) {
+        const int len = side < 2 ? int(nx) : int(ny);
+        for (int a = 0; a < len; ++a) {
+            if (SeaFaceCell(side, a)) sponge[EdgeCell(side, a)] = 1;
+        }
+    }
 }
 
 void SweDomain::KernelRows(const double east[3], const double up[3], const double north[3],
@@ -2817,8 +2829,8 @@ void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char*
     };
     snprintf(b, sizeof(b),
              "[swe] %s window (%s): does it hold its water? flooded at %+.2f m NAVD, 4-connected, "
-             "from the sponge (%.0f m in from an open side) and the river faces (%d wet-capable cells): %.2f km^2 "
-             "joined to the sponge; not joined to it: %zu pieces, %.2f km^2, %d at the window's "
+             "from the sea (the sponge %.0f m in from an open side, the Flather faces elsewhere) and the river faces "
+             "(%d wet-capable cells): %.2f km^2 joined to the sea; not joined to it: %zu pieces, %.2f km^2, %d at the window's "
              "edge (%.2f km^2)",
              cfg.name ? cfg.name : "?", when, kLevel, double(cfg.spongeM), h.faceCells, h.joined * km2,
              h.pieces.size(), all * km2, atEdge, edgeCells * km2);

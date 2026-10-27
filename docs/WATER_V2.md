@@ -1619,11 +1619,45 @@ stack's +0.5), nothing was wet, and the harbour did not flood. Moving the anchor
 (scenes/debug/boston_seam*.json) changed the seam's cut (four rectangles) and the claim's progress (mip 0
 at 89 of 66049 samples, mip 3 at 5506) but not the outcome: the block is the order's at a cold place
 offline, not the seam's alone and not a water law's. The height tree's identity is the place's by design
-(the datum's offset is in it: `|norm x... -0.092`), so every new place paints cold. Stage 2's gate stands
-half met: the solver by demand with no key, yes; Boston flooding, not until the residency delivers a cold
-place's bed (next: read `ResidencyOrder`'s need and parent law for a want across the page seam under two
-loads that never return; or one run online, Mark's call, since the colour's root is a Google fetch).
-The bed wait now says the manager's claim by mip at its end.
+(the datum's offset is in it: `|norm x... -0.092`), so every new place paints cold. Stage 2's gate stood half met
+there for a night.
+
+**Stage 2, closed (2026-10-27): a cold place's bed is the cube's own level, and the solver wants what its
+kernel reads.** The block was not the seam, not the two root loads, not the order's need law, and not Google:
+it was the solver's want. A rank-2 standing window's pages hold mips 0..3 (10 m to 76 m of ground), and the
+height stack holds Boston only at its global tiers (ETOPO's 15", the 463 m tier: nothing finer is harvested
+there), so by the tree's own law (F14, `TileTree::Magnified`) EVERY page of the window is its parent magnified
+-- "known without a load", never mapped, and 1835 of them were. The kernel's read rule
+(`shaders/HeightPages.hlsli` `HpChainRead`) was already right: the standing window where it holds the cell's
+ground, the cube face by direction where it does not. But the solver's pin and its whole-bed wait asked for the
+window's slice alone, never the cube, and the wait ended only when the window's mip 0 was claimed over the
+domain -- which a place with no survey can never do; it ran to its 60 s bound while the kernel read the cube's
+root (m7, 78 km texels: +33 m at Long Wharf). Now `WaterManager::WantDomain` states the solver's want as the
+rule reads: the domain's rectangles on the standing window at mip 0 AND on the cube's faces under it at mip 0
+(`SurfaceFrame::CubeRectsLL`), the magnified law closing every tile below the own level without a load, so the
+ask lands at the own level wherever that is -- the window's pages at the Merrimack, the cube's m0 at Boston --
+and the wait ends when the order has answered every tile this reader's wants imply
+(`ResidencyManager::PendingOf(sampler, tenant)`: not held and not closed as magnified or refused; the colour's
+cold root, another reader's, no longer holds it). The bed wait's line now says what the kernel read, by slice
+kind and mip. BOSTON: the bed whole in 0.11 s (10 tiles, 16 turns; the cube's m0 over all 4194304 cells),
+17.5 % of the window below the tide, 120.87 km^2 of water joined to the sea through 1525 Flather face cells on
+the east edge, 0 km^2 unjoined at the edge, the harbour's level following the falling plane to within 5 to 9 cm
+through the hour (sea+1km -1.264 against the plane -1.320 at its end; the lag the Merrimack's sea shows too).
+The anchor's own texel, Long Wharf, is LAND at 611 m: the inner harbour does not exist at that grain, and that
+is what the tree holds, not a law -- a 1/9" tile harvested there would paint the window's pages and the same
+want would land them. THE MERRIMACK is byte-identical before and after (the window's pages win over the cube
+wherever they are resident; its bed whole in 0.48 s, 1229 tiles: the window's and the cube's column). The
+scene (`scenes/demos/boston_harbor.json`) holds the eye's start, its clocks and two views and names nothing
+(no `scene.name` either, Mark: "the only thing the scene should have about Boston is the camera's projection
+and coordinate location"). One instrument mended on the way: the flood test (`SweSolver::LogHoldsWater`)
+seeded only from the sponge of a side open along its WHOLE length and from river faces; Boston's east side is
+open on 1525 of 2048 cells, so it has Flather faces and no open side, and the instrument said "joined to
+none" of water the kernel had joined. Its seeds are now where the sea continues past the edge: the sponge's
+columns of a whole-open side, the Flather face cells elsewhere (`SweDomain::Bound`). Still open, not the
+water's: the colour's and the survey mask's face-2 root paints never return under `streaming.offline` (two Io
+threads of twelve for the run); a side open on most but not all of its cells gets faces and no sponge (the
+open-side law is whole-side). Stage 2's gate is met: the solver by demand with no key, the cold place flooding
+on what the tree holds, the Merrimack unchanged.
 
 ## Sources
 
