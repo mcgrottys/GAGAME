@@ -1685,6 +1685,52 @@ the edge does not touch is reported, a reach a river face alone holds is said so
 a reach at is found). Stated: where ground at +1 m lies at a land edge and the atlas's Level tops it, the sea
 enters there, as it does at residency's frontier; a dike is the bed's to say, not a side's.
 
+**Stage 3, built where the field stands (2026-10-27): the impact imposed on the columns.** An event of the
+record (`sim/ImpactField.h`) is IMPOSED on the column field at the first batch the field stands past its zero,
+at every mip the field holds -- mip 0's fine set and the twin, each on its own list and constants
+(`Swe.hlsl CsSweImpose`; `SweSolver::BeginImpose`, `RecordImpose`; the record reaches the solver through
+`SetImpacts`). What is imposed is the law's state at that instant: the level, the sum over the event's table at
+the cell's distance (`laws/Impact.hlsli ImpactTerm`: at T = 0 the cavity itself, the lipped parabola of net
+volume nought; later the train linear theory has carried), and its radial velocity from the same sum by
+continuity, u_r = sum A_n omega_n / (h0 k_n) J1(k_n r) sin(omega_n T), nought at T = 0 (the cavity is at rest) --
+each shoaled from the basin depth to the column's own water by Green's law (eta by (h0/h)^(1/4), u by (h0/h)^(3/4),
+the WKB limit of the same theory, unbounded: the columns are the nonlinear reader). The level goes into the column
+(h >= 0: a cavity deeper than the water stands on the bed), the velocity onto the cell's east and south faces
+radial from the impact, and the law carries it from there: the ring, the shoaling, the steepening, the run-up,
+with no analytic reader inside the window. The distance is in the anchor's chart with the impact placed its
+great-circle distance along its bearing (the chart's error against the sphere is second order in the window's
+size over that distance: 2 m at 2600 km). The table rides a root SRV (t5); the event's place, instant and term
+count are two float4 appended to the constants on both sides. One event a batch. The gate's probe
+(`ProbeCoarse`) says the law's own level beside the solver's every batch for the hour after an imposition.
+
+*The gate* (`scenes/demos/impact_bar.json`, out/review/stage3/impact_bar1): a 30 m stone at 20 km/s into the
+sea 7.2 km east of the Merrimack's mouth, ten minutes into the spin-up hour on the bar scene's pinned clocks;
+its cavity 1.3 km across and 25 m deep (the scene's basin depth; the bed under it is 41 m), 244 terms, imposed at
+T = 13 s. At the 3 km sea point (4.2 km from the impact, the twin's own cells, 26 m of water) the solver's first
+crest arrives at 168 s (+2.04 m) against the law's 197 s (+2.83 m) and the troughs coincide at 225 s (-1.86
+against -2.86); at the 1 km point (6.0 km, the fine set) the first motion is 284 s against 313 s and the crest
+299 s (+1.61) against 313 s (+3.22); between the two sea points the solver's crest travels 1.8 km in 131 s, 13.7
+m/s = sqrt(g h) for the 19 m of water between them, while the law's travels it in 116 s, 15.5 m/s = sqrt(g h) of
+its one depth. So the solver rides sqrt(g h) of the bed it has, and the 15 % by which it leads the law at the
+first point is the 41 m under the impact against the law's 25: the law has one depth, the solver the bed. The
+gate's first clause is met on sqrt(g h); against the law it is met at the 1 km point (9 %) and not at the 3 km
+point (15 %) for the reason stated. At the anchor, in the inlet between the jetties, the solver shows +0.90 m at
+419 s where the law says +2.6 to +2.8 (Green's law 1-D and unbounded into 5 m of water, which the jetties and
+the bar make false): no gate there. The law's second crest at the 1 km point (410 s) the solver does not carry:
+shallow water does not disperse a 1.3 km cavity's train, as 14.2 said. Amplitude: the solver's 0.65-0.72 of the
+law's at 4 km, 0.42-0.51 at 6 km -- measured, not settled: the imposition is 0.88 of the law's cavity to begin
+with (Green's law from 25 to 41 m), the twin's 27 m cells diffuse, and the linear law keeps what dispersion
+spreads. The Merrimack without an event is byte-identical through the change (merrimack7 = merrimack8).
+The exterior still reads the Bessel law at every edge cell (the one edge law), so the solver's own train
+meets the law's at the edge: the east edge's Level stood +2.16 m at T = 256 s.
+
+*Not built, stated:* the tail. The gate's second clause -- the train crossing 2600 km in the tail's own solve,
+its amplitude against the law within its dispersion -- needs the planet's coarse mips always resident and
+stepping (14.2), which stage 2 left as the window's twin at mip 1 (28 km): a far event still enters through the
+edge's analytic Level as before, and its state is imposed on the window only where its train already stands
+when the field first stands (the linear theory's level and velocity then, exact for linear). That is stage 2b,
+the N-mip tail on the tree, and it is the next piece of this section.
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

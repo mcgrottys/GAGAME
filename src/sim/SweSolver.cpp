@@ -656,6 +656,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                .Srv(3)
                .Table({hal::UavRange(16, 8)})   // stage 1c: the chains (u16..u23: h, bed, the read velocities, the sea; two mips each)
                .Srv(4)                          // stage 1c: the live words of the mip above
+               .Srv(5)                          // stage 3: an impact's table (CsSweImpose)
                .Build(gpu, "swe");
     m_rs->SetName(L"swe root signature");
 
@@ -680,6 +681,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     makePso(L"CsSweDerive", m_deriveK);
     makePso(L"CsSweVelGrad", m_velGradK);
     makePso(L"CsSweFold", m_foldK);   // stage 1b
+    makePso(L"CsSweImpose", m_imposeK);   // stage 3
 
     // t1, t2 filled by SetBed; the UAVs here. m_table reads m_velA (u7) and writes m_velB (u10);
     // m_tableB the other way (the substeps take turns: Record).
@@ -1463,6 +1465,8 @@ void SweSolver::CoarseCb(int n, int n1) {
 void SweSolver::RecordCoarseBegin(hal::CommandContext& cmd, Gpu& gpu, int n, int n1, bool reset) {
     PixScope scope(cmd.Native(), "swe.mip1 (the coarse twin: the batch's prelude)");
     CoarseCb(n, n1);
+    memcpy(m_cb1.impactA, m_cb.impactA, sizeof(m_cb.impactA));   // stage 3: the same event, the twin's own chart
+    memcpy(m_cb1.impactB, m_cb.impactB, sizeof(m_cb.impactB));
     if (m_coarseFresh) {
         Log("[swe] stage 1a: the twin's first batch -- %d fine steps of %.3f s, %d coarse of %.3f s; lattice %u x %u, tiles %u across, cell %.2f x %.2f m",
             n, m_dt, n1, m_cb1.dt, m_cb1.nx, m_cb1.ny, m_cb1.etaTilesX, m_cb1.dx, m_cb1.dy);
@@ -1500,6 +1504,7 @@ void SweSolver::RecordCoarseBegin(hal::CommandContext& cmd, Gpu& gpu, int n, int
         cmd.UavBarriers({m_waveA.Res(), m_waveB.Res(), m_lim.Res()});
     }
     m_coarseFresh = false;
+    RecordImpose(cmd, m_hl1Va, m_hn1, m_velNew1 ? m_tableB1 : m_table1);   // stage 3: the twin's cells
     // STAGE 1b: THE FOLD'S LIST -- the coarse tiles whose four fine children are resident take the fine's fold
     // each coarse step (RecordCoarseStep); the twin's height kernel leaves them (their state is the fold's)
     {
@@ -1574,11 +1579,67 @@ void SweSolver::RecordCoarseStep(hal::CommandContext& cmd, Gpu& gpu) {
     }
 }
 
+// STAGE 3: AN IMPACT DUE THIS BATCH. The first event of the record not yet imposed whose zero the batch's start
+// has passed: its place in the anchor's chart (its great-circle distance along its bearing from the anchor), the
+// seconds since its zero, its basin depth and its table go to the constants (CsSweImpose reads them); the
+// instrument says where it fell and what lies under it.
+bool SweSolver::BeginImpose(Gpu& gpu) {
+    m_cb.impactB[0] = m_cb.impactB[1] = m_cb.impactB[2] = m_cb.impactB[3] = 0.0f;
+    m_imposeEvent = -1;
+    if (!m_impacts || !m_testH.empty() || !m_ready) return false;
+    const std::vector<ImpactField::Event>& ev = m_impacts->Events();
+    if (m_imposed.size() < ev.size()) m_imposed.resize(ev.size(), 0);
+    for (size_t i = 0; i < ev.size(); ++i) {
+        if (m_imposed[i] || ev[i].zeroUnix < 0.0 || ev[i].zeroUnix > m_simTime || !ev[i].wave.On()) continue;
+        const ImpactWave& w = ev[i].wave;
+        const double D = w.DistanceM(m_dom.latC, m_dom.lonC);
+        const double la0 = m_dom.latC * kSweD2R, lo0 = m_dom.lonC * kSweD2R;
+        const double la1 = w.P().lat * kSweD2R, lo1 = w.P().lon * kSweD2R;
+        const double be = std::sin(lo1 - lo0) * std::cos(la1);   // the bearing from the anchor: east, north
+        const double bn = std::cos(la0) * std::sin(la1) - std::sin(la0) * std::cos(la1) * std::cos(lo1 - lo0);
+        const double bl = std::hypot(be, bn);
+        m_cb.impactA[0] = static_cast<float>(bl > 0.0 ? D * be / bl : 0.0);
+        m_cb.impactA[1] = static_cast<float>(bl > 0.0 ? D * bn / bl : 0.0);
+        m_cb.impactA[2] = static_cast<float>(m_simTime - ev[i].zeroUnix);
+        m_cb.impactA[3] = static_cast<float>(w.P().basinDepthM);
+        m_cb.impactB[0] = static_cast<float>(w.Terms());
+        m_imposeVa = gpu.PushConstants(w.Table().data(), size_t(w.Terms()) * 16);
+        m_imposeEvent = static_cast<int>(i);
+        m_imposed[i] = 1;
+        m_imposedAt = m_simTime;
+        double tx = 0.0, ty = 0.0;
+        const bool in = m_dom.CellOf(w.P().lat, w.P().lon, tx, ty) && tx >= 0.0 && ty >= 0.0 && tx < double(m_cb.nx) && ty < double(m_cb.ny);
+        const float bedAt = in ? m_dom.elev[size_t(ty) * m_cb.nx + size_t(tx)] : 0.0f;
+        Log("[impact] stage 3: event %zu imposed on the solver's columns at T=%.0f s after its zero (%s the window: %.1f km "
+            "from the anchor, bearing %.0f deg%s%.1f m): cavity %.1f km across, %.0f m deep over a basin of %.0f m, %d terms; "
+            "the law carries it from here, the twin's cells and the fine set's alike",
+            i, m_simTime - ev[i].zeroUnix, in ? "inside" : "outside", D / 1000.0, std::atan2(be, bn) / kSweD2R,
+            in ? "; the bed under it " : "; ", in ? bedAt : 0.0f, w.C().diameterM / 1000.0, w.C().depthM,
+            w.P().basinDepthM, w.Terms());
+        return true;
+    }
+    return false;
+}
+
+void SweSolver::RecordImpose(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS listVa, UINT count, const hal::Table& table) {
+    if (m_imposeEvent < 0 || count == 0) return;
+    PixScope scope(cmd.Native(), "swe.impose (an impact's state onto the columns)");
+    cmd.ComputeTable(2, table.Base());   // u7 = the velocities the next step reads
+    cmd.ComputeSrvAt(6, m_imposeVa);
+    cmd.ComputeSrvAt(1, listVa);
+    cmd.Pipeline(m_imposeK.Get());
+    cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, count);
+    cmd.UavBarriers({m_h.Atlas().Res(), m_velA.Res(), m_velB.Res()});
+}
+
 // THE GATE'S PROBE: the level at the place, mip 0 against mip 1 -- the water and the bed read back at the
-// cell each holds the place in (a drain each, once a sim-minute: an instrument, loud by design).
+// cell each holds the place in (a drain each, once a sim-minute: an instrument, loud by design). Stage 3: for
+// the hour after an impact is imposed, every batch, with the law's own level (the Bessel sum shoaled to the
+// water there, unbounded) beside the solver's at the anchor and the two sea points.
 void SweSolver::ProbeCoarse(Gpu& gpu) {
     if (!m_probeOn || !m_coarse || !m_ready || m_coarseFresh) return;   // the twin has stepped
-    if (m_simTime - m_probeAt < 30.0) return;
+    const bool live = m_impacts && m_imposedAt > -1.0e17 && m_simTime - m_imposedAt < 3600.0;
+    if (m_simTime - m_probeAt < (live ? 0.0 : 30.0)) return;
     m_probeAt = m_simTime;
     // the points: the anchor, then a line out to sea (inside the fine set, then the twin's own) and one up the
     // river (the twin's own at a 1.5 km reach) -- where a disturbance stands first says where it is from
@@ -1619,6 +1680,11 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
         if (fine) snprintf(buf, sizeof buf, "  %s: %+.3f|%+.3f", pt.name, bb0 + hh0, bb1 + hh1);   // mip 0 | mip 1
         else snprintf(buf, sizeof buf, "  %s: --|%+.3f (bed %.1f)", pt.name, bb1 + hh1, bb1);
         line += buf;
+        if (live && (&pt - kPts) < 3) {   // the law beside it: the tide plane plus the sum, shoaled to the water there
+            const double law = double(m_cb.tideNavd) + m_impacts->EtaAt(m_probeLat + pt.dLat, m_probeLon + pt.dLon, m_simTime, double(hh1), false);
+            snprintf(buf, sizeof buf, " (law %+.3f)", law);
+            line += buf;
+        }
     }
     Log("[swe] the probe t=%.0f (%u fine tiles, the tide plane %+.3f):%s", m_simTime, m_h.ResidentCount(), m_cb.tideNavd, line.c_str());
 }
@@ -1792,6 +1858,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     }
     OceanBoundary(tideNavd, tideRate);   // C1: the open sea's Level and its transport
     SeaBoundary();                       // C4: the sea there, whose waves push
+    BeginImpose(gpu);                    // stage 3: an impact due this batch, its state onto the columns below
 
     // STAGE 1c: this dispatch's mip, the chain's mips and the mip above's stride (Swe.hlsl UpLiveAt); the live
     // words of the mip above on root SRV 4, the chains' table on root param 4 (rebound a step: the parities)
@@ -1838,6 +1905,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     cmd.Dispatch(m_h.TileW() / 16, m_h.TileH() / 16, static_cast<UINT>(hl.size()));
     cmd.UavBarrier(m_bed.Res());
     if (reset) RecordReset(cmd, hlVa, static_cast<UINT>(hl.size()), flVa, static_cast<UINT>(fl.size()));
+    RecordImpose(cmd, hlVa, static_cast<UINT>(hl.size()), m_velNew ? m_tableB : m_table);   // stage 3: the fine set
     // C4: THE SEA IN THE COLUMNS, a few sweeps a batch (an even number: the solve reads the bank they end on).
     if (m_cb.sea[3] > 0.0f) {
         cmd.ComputeSrvAt(1, hlVa);

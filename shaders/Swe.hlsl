@@ -74,6 +74,12 @@ cbuffer SweCb : register(b0) {
     // gSea2: the direction it travels (a unit vector, texture frame: x east, y south), 0, 0.
     float4 gSea;
     float4 gSea2;
+    // STAGE 3 OF ONE WATER ON THE TREE (2026-10-27, docs/WATER_V2.md 14): AN IMPACT IMPOSED ON THE COLUMNS
+    // (CsSweImpose). gImpactA: the impact's place in the anchor's chart (east, north; metres), the seconds since
+    // its zero at this batch's start, the basin depth h0 its table was built over; gImpactB: the table's term
+    // count (gImpactTerms: k, omega, A, 0 a term; 0 = nothing to impose), 0, 0, 0. APPENDED AT THE END on both sides.
+    float4 gImpactA;
+    float4 gImpactB;
 };
 
 #define HP_WINDOW_ROWS 1
@@ -84,6 +90,7 @@ typedef float real;
 #define GA_PLANET_G (gGravity)
 #include "laws/Dispersion.hlsli"
 #include "laws/Breaking.hlsli"
+#include "laws/Impact.hlsli"
 
 // THE CELL'S POINT about the domain's anchor C (the standing window's centre), in C's east / up /
 // north: the cell's place (s, t) in the anchor's tangent plane (over R) carried onto the sphere along
@@ -102,6 +109,7 @@ StructuredBuffer<uint> gTileList : register(t0);
 StructuredBuffer<uint> gLive : register(t3);
 // STAGE 1c: the live words of the mip above this dispatch's (SweSolver: m_live1 under mip 0; none above mip 1)
 StructuredBuffer<uint> gLiveUp : register(t4);
+StructuredBuffer<uint> gImpactTerms : register(t5);   // stage 3: an impact's table (k, omega, A, 0 a term), as floats
 // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. M9ax: the tenant's WHOLE array (cube faces 0..5 and
 // the eye's windows and the standing window: PHASE B2/B3) with its residency-map array, resolved by HeightPages.hlsli
 // exactly as the pixel stage resolves it. There is no solver-private copy of the bed, and no
@@ -363,6 +371,49 @@ void CsSweReset(uint3 id : SV_DispatchThreadID) {
     // the soil under standing water is full; under none, empty -- across the wet tolerance
     gSoilW[t] = gSoil.x * saturate(gH[t] / gWetEps);
     gLim[t] = 1.0f;
+}
+
+// STAGE 3 OF ONE WATER ON THE TREE (2026-10-27): AN IMPACT IMPOSED ON THE COLUMN FIELD, at the first batch the
+// field stands past the event's zero, at every mip the field holds (the twin's own constants on its own list).
+// The law's state then: its level, the sum over the table at the cell's distance (laws/Impact.hlsli ImpactTerm;
+// at T = 0 the cavity itself, the lipped parabola of net volume nought; later the train linear theory has
+// carried), and its radial velocity from the same sum by continuity, u_r = sum A omega / (h0 k) J1(k r)
+// sin(omega T) -- nought at T = 0, the cavity at rest -- each shoaled from the basin depth to the column's own
+// water by Green's law, eta by (h0 / h)^(1/4) and u by (h0 / h)^(3/4), the WKB limit of the same theory,
+// unbounded (the columns are the nonlinear reader). The level goes into the column, h >= 0 (a cavity deeper
+// than the water stands on the bed); the velocity onto the cell's east and south faces, radial from the impact.
+// From here the law carries it: the solver's own ring, shoaling, steepening, run-up and bore, with no analytic
+// reader inside the window. The distance is in the anchor's chart with the impact placed its great-circle
+// distance along its bearing (SweSolver::BeginImpose): the chart's error against the sphere is second order in
+// the window's size over that distance, 2 m at 2600 km for this window.
+[numthreads(16, 16, 1)]
+void CsSweImpose(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
+    const int2 t = int2(EtaTexel(id));
+    if (t.x >= (int)gNx || t.y >= (int)gNy) return;
+    const uint n = (uint)gImpactB.x;
+    if (n == 0u) return;
+    const float R = gAnc.w;
+    const float s = (gCellX.x + float(t.x) * gCellX.y) * R, tn = (gCellX.z + float(t.y) * gCellX.w) * R;   // east, north
+    const float2 d = float2(s - gImpactA.x, tn - gImpactA.y);
+    const float r = max(length(d), 1.0f);
+    const float T = max(gImpactA.z, 0.0f);
+    const float h0 = gImpactA.w;
+    float eta = 0.0f, ur = 0.0f;
+    [loop] for (uint i = 0u; i < n; ++i) {
+        const float k = asfloat(gImpactTerms[4u * i]);
+        const float om = asfloat(gImpactTerms[4u * i + 1u]);
+        const float A = asfloat(gImpactTerms[4u * i + 2u]);
+        eta += ImpactTerm(A, k, om, r, T);
+        ur += A * om / (h0 * k) * BesselJ1(k * r) * sin(om * T);
+    }
+    const float h = max(gH[t], kDepthFloorM);
+    const float G = pow(h0 / h, 0.25f);
+    gH[t] = max(gH[t] + eta * G, 0.0f);
+    // the faces: radial from the impact at each face's centre (the east face + east, the south face + south)
+    const float2 dE = float2(d.x + 0.5f * gDx, d.y), dS = float2(d.x, d.y - 0.5f * gDy);
+    const float u = ur * G * G * G;
+    gVelPrev[t] = float2(u * dE.x / max(length(dE), 1.0f), -u * dS.y / max(length(dS), 1.0f));
 }
 
 [numthreads(16, 16, 1)]

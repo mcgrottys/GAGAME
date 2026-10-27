@@ -1281,6 +1281,7 @@ std::optional<int> FrameLoop::Session() {
         // ...and the impact's wave (2026-10-25), shoaled to the depth at the face: the solver carries
         // it inland from here (the bank and the hull read the same law where the solver is silent).
         std::shared_ptr<ImpactField> imp = m_impacts;
+        swe.SetImpacts(imp);   // stage 3 (2026-10-27): an event the field holds is imposed on its columns at its zero
         Compositor* compP = &compositor;
         const int hgtChP = hgtCh;
         swe.SetLevelSource([atlas, imp, compP, hgtChP](double la, double lo, double t) -> double {

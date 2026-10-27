@@ -23,6 +23,7 @@
 #pragma once
 
 #include "core/GradeField.h"
+#include "sim/ImpactField.h"
 #include "core/Lattice.h"
 #include "hal/Context.h"
 #include "hal/Gpu.h"
@@ -241,6 +242,11 @@ public:
     // the tide atlas (EOT20 and the stations). The open sides' exterior cells ride it; unset, they ride
     // the tide plane Record is given.
     void SetLevelSource(std::function<double(double, double, double)> levelAt) { m_levelAt = std::move(levelAt); }
+    // STAGE 3 OF ONE WATER ON THE TREE (2026-10-27): the impacts' record. Each event, at the first batch the field
+    // stands past its zero, is IMPOSED on the columns at every mip the field holds -- the law's level and radial
+    // velocity then (its cavity at T = 0), shoaled to the column's water -- and the law carries it from there
+    // (Swe.hlsl CsSweImpose; BeginImpose, RecordImpose). One event a batch; the next batch takes the next.
+    void SetImpacts(std::shared_ptr<const ImpactField> impacts) { m_impacts = std::move(impacts); }
 
     // Advance toward simUnix (records compute through cmd) and leave eta + uv sampleable.
     // tideNavd = the analytic water level, NAVD88 m. Returns substeps executed this frame.
@@ -494,6 +500,11 @@ private:
         float testB[4];   // hL, hR, the lake's level, 0
         float sea[4];     // C4: Hs, the peak's angular frequency, Hs^2 / 16, 1 = waves push
         float sea2[4];    // the direction the sea travels (texture frame: x east, y south), 0, 0
+        // STAGE 3 (2026-10-27): an impact imposed on the columns (Swe.hlsl CsSweImpose, BeginImpose): its place in
+        // the anchor's chart (east, north; m), the seconds since its zero, the basin depth; then its table's term
+        // count (0 = nothing this batch), 0, 0, 0.
+        float impactA[4];
+        float impactB[4];
     };
 
     bool m_ready = false;
@@ -595,6 +606,16 @@ private:
     std::vector<uint32_t> m_stepList1;   // the twin's tiles outside the fine set: the ones its height and limit step
     double m_probeAt = -1e18, m_probeLat = 0.0, m_probeLon = 0.0;
     bool m_probeOn = false;
+    // stage 3: the impacts' record, which events are imposed, the instant of the last imposition (the probe says
+    // the law beside the solver for the hour after), this batch's event and its table on the GPU
+    std::shared_ptr<const ImpactField> m_impacts;
+    std::vector<uint8_t> m_imposed;
+    double m_imposedAt = -1e18;
+    int m_imposeEvent = -1;
+    D3D12_GPU_VIRTUAL_ADDRESS m_imposeVa = 0;
+    hal::Pso m_imposeK;
+    bool BeginImpose(Gpu& gpu);
+    void RecordImpose(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS listVa, UINT count, const hal::Table& table);
     void CoarseCb(int n, int n1);
     // STAGE 1c (2026-10-26): THE TWIN INTERLEAVED -- Berger and Oliger's order. Begin: the twin's constants, lists,
     // clear, bed, reset and sea sweeps for the batch; Step: the fold of the fine's state, then ONE coarse step,
