@@ -2070,6 +2070,28 @@ void SweSolver::ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
     const std::vector<uint8_t> uvData = gpu.ReadbackTexture(uvWrap, &uvPitch);
     m_uvState = uvWrap.state;
     UnpackFields(m_cb.nx, m_cb.ny, etaData, etaPitch, uvData, uvPitch, etaOut, etaW, etaH, uv4Out, uvW, uvH);
+    // THE MIRROR'S CENSUS (stage 2 of one water on the tree, 2026-10-26): what the mirror holds, said with
+    // every read -- the cells whose surface or water is not zero, their bounding box in the lattice, and the
+    // tiles the eta and uv banks hold. A reader that finds the dry floor where it expected water reads this
+    // line first: the mirror is mip 0's, the fine set about the eye, and beyond its reach the twin holds the
+    // water at mip 1, which no reader reads yet.
+    {
+        uint32_t nz = 0, x0 = UINT32_MAX, y0 = UINT32_MAX, x1 = 0, y1 = 0, nzUv = 0;
+        for (uint32_t y = 0; y < etaH; ++y) {
+            for (uint32_t x = 0; x < etaW; ++x) {
+                const bool e = etaOut[size_t(y) * etaW + x] != 0.0f;
+                const bool h = uv4Out[(size_t(y) * uvW + x) * 4 + 2] > 0.0f;
+                nzUv += h ? 1u : 0u;
+                if (!e && !h) continue;
+                ++nz;
+                x0 = (std::min)(x0, x); y0 = (std::min)(y0, y); x1 = (std::max)(x1, x); y1 = (std::max)(y1, y);
+            }
+        }
+        Log("[swe] the mirror: %u of %u cells carry a surface or water (%u hold water), x %u..%u y %u..%u of the "
+            "lattice; eta tiles resident %u, uv tiles %u, h tiles %u",
+            nz, etaW * etaH, nzUv, nz ? x0 : 0u, nz ? x1 : 0u, nz ? y0 : 0u, nz ? y1 : 0u, m_eta.ResidentCount(),
+            m_uvBank.ResidentCount(), m_h.ResidentCount());
+    }
 }
 
 SweSolver::FieldsRead SweSolver::ReadFieldsDetach() {

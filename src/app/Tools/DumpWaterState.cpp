@@ -52,6 +52,29 @@ void RunDumpWaterState(const Options&, Gpu& gpu, SeaLayer* sea, double simUnix,
     wr("ws_u.f32", uW);
     wr("ws_v.f32", vW);
     wr("ws_shadow.f32", shW);
+    {   // the mirror itself and each dump cell's lattice cell (stage 2's instrument; the solver's chart in doubles)
+        uint32_t mw = 0, mh = 0;
+        const std::vector<float>* uv4 = nullptr;
+        const SweSolver* solver = nullptr;
+        if (const std::vector<float>* eta = weather.MirrorEta(mw, mh, &uv4, &solver); eta && solver && uv4) {
+            std::vector<float> e(*eta), hcol(size_t(mw) * mh);
+            for (size_t i = 0; i < hcol.size(); ++i) hcol[i] = (*uv4)[i * 4 + 2];
+            wr("ws_mirror_eta.f32", e);
+            wr("ws_mirror_h.f32", hcol);
+            std::vector<float> txy(size_t(nxW) * nyW * 2);
+            for (int j = 0; j < nyW; ++j) {
+                for (int i2 = 0; i2 < nxW; ++i2) {
+                    double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
+                    chart.LatLonOf(bx0 + (i2 + 0.5) * cellW, bz0 + (j + 0.5) * cellW, la, lo);
+                    solver->Domain().CellOf(la, lo, tx, ty);
+                    txy[(size_t(j) * nxW + i2) * 2] = float(tx);
+                    txy[(size_t(j) * nxW + i2) * 2 + 1] = float(ty);
+                }
+            }
+            wr("ws_cells.f32", txy);
+            Log("[waterstate] the mirror exported: %u x %u eta and h, and each dump cell's lattice cell", mw, mh);
+        }
+    }
     double qcLat = 0.0, qcLon = 0.0;   // the box's centre
     chart.LatLonOf(bx0 + 0.5 * nxW * cellW, bz0 + 0.5 * nyW * cellW, qcLat, qcLon);
     const WeatherSample qc = weather.Query(qcLat, qcLon, simUnix, 500.0);

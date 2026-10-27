@@ -21,8 +21,7 @@
     { "key": "nodes", "kind": "list", "node": "component", "doc": "typed nodes (scene/Component.h), by name, typed by ComponentSchemas" },
     { "key": "prune", "kind": "object", "node": "tool", "doc": "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm" },
     { "key": "tools", "kind": "list", "node": "tool", "doc": "the one-shot modes this scene runs (--tool)" },
-    { "key": "stations", "kind": "list", "node": "station", "doc": "where a station of the data stands when its file does not say (PHASE C3)" },
-    { "key": "solvers", "kind": "list", "node": "solver", "doc": "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide" }
+    { "key": "stations", "kind": "list", "node": "station", "doc": "where a station of the data stands when its file does not say (PHASE C3)" }
   ],
   "placement": [
     { "spelling": "compass", "keys": ["x", "alt", "z", "az", "pitch"], "doc": "the flat world frame in metres and compass degrees: Camera::SetFromCompass, then FromCamera" },
@@ -47,7 +46,6 @@
       { "key": "debug", "type": "object", "field": "none", "schema": "debug", "reload": "hot", "doc": "the debug views of the globe's surface" },
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": true, "reload": "hot", "doc": "the scene's sources by name: a derived scene ADDS to its base's (merged in place by name, `remove: true` drops one), as every named list; their order is StackOrder's (`over`, then the coarser under the finer), not the list's" },
       { "key": "stations", "type": "list", "field": "none", "element": "station", "named": true, "reload": "hot", "doc": "where a station of the data stands when its file does not say; by name, merged as every named list" },
-      { "key": "solvers", "type": "list", "field": "none", "element": "solver", "named": true, "reload": "hot", "doc": "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide; by name, merged as every named list" },
       { "key": "impacts", "type": "list", "field": "none", "element": "sea.impactor", "named": false, "reload": "hot", "doc": "the asteroids into the sea, each an event with its own instant (sim/ImpactField.h: the record the I key appends to)" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
       { "key": "hud", "type": "object", "field": "none", "schema": "hud", "reload": "hot", "doc": "the windshield: readouts and the minimap on the glass" },
@@ -182,7 +180,7 @@
       { "key": "currentRefreshS", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 90, "reload": "restart", "doc": "how often (sim s) the wave solve reads the solver's current and re-keys (a solve each); past the run's length = the first current throughout" },
       { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)" },
       { "key": "bedWait", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "whole", "names": ["none", "map", "whole"], "reload": "restart", "doc": "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)" },
-      { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells `cellM` over it in true metres at that latitude, its bed the one height stack's; zeros = no solver" },
+      { "key": "windowTiles", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 16, "reload": "restart", "doc": "the solver's window: this many tiles of 128 cells a side about the eye's start (the place's anchor), its corner on the global lattice of the cell's angle, its bed the one height stack's, its open sea the tide atlas's; 0 = no solver (stage 2 of one water on the tree)" },
       { "key": "cellM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 13.728, "reload": "restart", "doc": "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)" },
       { "key": "sponge", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 1866, "reload": "restart", "doc": "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it" }
     ] },
@@ -303,13 +301,6 @@
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the station's id in its file" },
       { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its latitude" },
       { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its longitude" }
-    ] },
-    { "type": "solver", "keys": [
-      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the window's name (the logs, the title)" },
-      { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "its domain, [lon0, lat0, lon1, lat1] degrees" },
-      { "key": "nx", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "cells east to west" },
-      { "key": "ny", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "cells south to north" },
-      { "key": "station", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the tide station (its id in data.tides) its open sea is held to" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },

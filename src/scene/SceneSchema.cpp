@@ -27,7 +27,6 @@ BuildingsLayerProps kBuildings;
 NodeProps kNode;
 ToolProps kTool;
 StationProps kStation;
-SolverProps kSolver;
 SourceProps kSource;
 
 using Q = Quantity;
@@ -252,7 +251,8 @@ const Schema& SweSchema() {
             .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)", R)
             .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
-            .BindBox("box", p.box, "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells `cellM` over it in true metres at that latitude, its bed the one height stack's; zeros = no solver", R)
+            .Bind("windowTiles", p.windowTiles, Q::Dimensionless, "1",
+                  "the solver's window: this many tiles of 128 cells a side about the eye's start (the place's anchor), its corner on the global lattice of the cell's angle, its bed the one height stack's, its open sea the tide atlas's; 0 = no solver (stage 2 of one water on the tree)", R)
             .Bind("cellM", p.cellM, Q::Length, "m", "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)", R)
             .Bind("sponge", p.sponge, Q::Length, "m", "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it", R);
         return sc;
@@ -852,19 +852,6 @@ const Schema& StationSchema() {
     return *s;
 }
 
-const Schema& SolverSchema() {
-    static const Schema* s = [] {
-        Schema* sc = new Schema("solver", &kSolver);
-        sc->Bind("name", kSolver.name, "the window's name (the logs, the title)", R)
-            .BindBox("box", kSolver.box, "its domain, [lon0, lat0, lon1, lat1] degrees", R)
-            .Bind("nx", kSolver.nx, Q::Dimensionless, "1", "cells east to west", R)
-            .Bind("ny", kSolver.ny, Q::Dimensionless, "1", "cells south to north", R)
-            .Bind("station", kSolver.station, "the tide station (its id in data.tides) its open sea is held to", R);
-        return sc;
-    }();
-    return *s;
-}
-
 const Schema& PruneSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.prune;
@@ -915,7 +902,6 @@ const Schema& SceneFileSchema() {
             .Nest("debug", DebugSchema(), &kDoc.debug, "the debug views of the globe's surface")
             .List("sources", &SourceSchema(), "the scene's sources by name: a derived scene ADDS to its base's (merged in place by name, `remove: true` drops one), as every named list; their order is StackOrder's (`over`, then the coarser under the finer), not the list's")
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say; by name, merged as every named list")
-            .List("solvers", &SolverSchema(), "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide; by name, merged as every named list")
             .List("impacts", &ImpactSchema(), "the asteroids into the sea, each an event with its own instant (sim/ImpactField.h: the record the I key appends to)", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .Nest("hud", HudSchema(), &kDoc.hud, "the windshield: readouts and the minimap on the glass")

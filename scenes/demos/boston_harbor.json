@@ -1,0 +1,25 @@
+{
+  "_readme": [
+    "BOSTON HARBOR WITH NO SCENE KEY (stage 2 of one water on the tree, 2026-10-26, WATER_V2.md 14.4). The eye starts at",
+    "Boston's tide station (8443970, Long Wharf) and the solver stands about it: water.swe.windowTiles tiles of 128 cells on",
+    "the global lattice of the cell's angle, the one height stack its bed (ETOPO's 15\" here -- no CUDEM tile is harvested for",
+    "Boston, so the inner harbour is two texels wide), the tide atlas its open sea. Nothing here names a box, a station or a",
+    "solver: the place's anchor, the clocks and a view. The clocks are the bar scene's (scene/SceneClocks.h), so every run is",
+    "the same water.",
+    "",
+    "Gate:  build\\bin\\gagame.exe scenes\\demos\\boston_harbor.json --headless --frames 60 --dump-water-state --set streaming.offline=true --set water.swe.fineReachM=1500"
+  ],
+  "base": "scenes/world.json",
+  "scene": {"name": "boston-harbor", "mode": "world", "planet": "earth", "view": "harbor"},
+  "place": {"anchor": [-71.05028, 42.35389]},
+  "time": {"start": "2026-10-23T18:59:47Z"},
+  "water": {"clock": {"bind": "time"}},
+  "sun": {
+    "clock": {"start": "2026-10-23T16:00:00Z", "rate": 0},
+    "earth": {"clock": {"start": "2026-10-23T16:00:00Z", "rate": 0}}
+  },
+  "views": [
+    {"name": "harbor", "at": {"lat": 42.3539, "lon": -71.0503, "alt": 0, "heading": 90, "tilt": 70, "range": 800}, "fovY": 55, "gauge": "root"},
+    {"name": "harbor_above", "at": {"lat": 42.3539, "lon": -71.0403, "alt": 0, "heading": 0, "tilt": 0, "range": 6000}, "fovY": 55, "gauge": "root"}
+  ]
+}

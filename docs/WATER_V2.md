@@ -1456,7 +1456,9 @@ altitude, `SetLevelDeparture`, `OwnedLevelAt`, `RequestRegionOwned`, `SetLevelSo
 exterior (it becomes the frontier's), the impact's readers in the bank kernel and the globe
 (`ImpactRead.hlsli`, `ImpactAt`), Green's law, the shoaling bound, `stepsPerFrame` (a mip's step is
 its CFL; the frame carries the mips it can and the rest starve honestly at the coarsest, never the
-finest), the shelf scene key.
+finest), the shelf scene key. (Stage 2 took the box, `solvers`, `AddDormantWindow`, the activation
+altitude and the shelf rung's three verbs; the sponge stays as the holds-water instrument's seed only, the
+kernel has none; `SetLevelSource` is the window's exterior still, the frontier's when the tail is the planet's.)
 Stays: `Swe.hlsl`'s flux and update laws, wetting and drying, the soil, the rivers' faces (as sources),
 the waves' push, the churn, the bank and its column plane, the crest law and the bore's face (13.5),
 `ImpactWave` as the source's cavity and the far field's check, the events' record, `laws/`.
@@ -1572,6 +1574,56 @@ lattice's and the cube-lattice blocks' shape already. The kernel stays one text:
 per-cell face length and span the tree supplies as it supplies the bed, and Coriolis a bivector
 rotation of the face velocity. The first honest step is a per-row metric in the window; the tail of
 stage 2 (the planet's water at the coarse mips) is where the chart has to become the cube-sphere tree.
+
+**Stage 2, built (2026-10-26): the solver stands where the eye is.** No scene names a box or a solver now:
+`water.swe.box`, the `solvers` list, `AddDormantWindow`, the activation altitude, the shelf rung's one-way
+nesting (`SetLevelDeparture`, `OwnedLevelAt`, `RequestRegionOwned`) and the manager's owned windows are gone
+(`SweSolver`'s domain, `WaterManager`, `FrameLoop`, the schema; 376 lines out, 110 in). The window is
+`water.swe.windowTiles` tiles of 128 cells a side (16: 2048 cells, 28 km at the cell's 13.7 m) about the
+eye's start -- the place's anchor, where every view stands -- with its south-west corner on the GLOBAL
+LATTICE of the cell's angle, a tile's angle apart, so a place falls in the same cells whichever eye came to
+it (`Assembly.cpp`). Its bed is the one height stack at every cell, its tide focus the nearest station in
+it, its datum that station's link, its rivers whatever reaches of the world's river data cross its edge,
+its open sea the tide atlas along every edge cell whose bed lies below mean sea, the twin at mip 1 the
+whole window (the tail, pinned and stepping), mip 0 by the eye's demand within `fineReachM` (1d). The
+window's size is a budget, the tail's extent at two mips; the chain's coarse mips carrying the planet is
+what retires it, and the window following the eye in flight (re-stood about it: its bed, rivers, tide
+focus, standing window and the bank's ladder anew) is stage 2b's, with those mips -- today an eye that
+leaves the window finds the tide plane, as it did beyond the box, said once (`WaterManager::Update`).
+THE MERRIMACK (`merrimack_bar --storm 3,10,95 --headless --frames 60 --dump-water-state --set
+water.swe.fineReachM=1500`, against stage 1d's run): the window 42.683..42.936 N x -70.938..-70.686 E,
+2048 x 2048 cells, the bed whole in 0.5 s (1221 tiles), 81 fine tiles; the anchor's level through the
+hour's spin-up 10 to 14 cm UNDER stage 1d's at every probe (-1.108 against -1.0 at the hour's end, the
+plane -1.007), and the dump, where both runs' grids lie inside the fine set, 10.4 cm lower (median; 11.2 cm
+at most) -- not the kernels (1c/1d matched to the millimetre under the same kernels) but the boundary: the
+window's edges 10 km further out, the Merrimack's face 4.6 km further up the river (km 13.3, its prism
+5.36 km^2 against 3.40), the Ipswich entering on the south, the tide focus Plum Island instead of
+Newburyport (2 cm of datum). Run to run the dump is identical to the bit. Two readings of the dump that
+cost the evening: (1) 85 % of its grid read the DRY FLOOR (-0.65 under the plane) while the kernel held
+water there, because the dump's grid stands about the origin lattice's node, 2 km east and 3 km north of the
+eye, and the fine set is now the eye's 4 x 4 tiles -- beyond its reach the twin holds the water at mip 1 and
+no reader reads mip 1 (the residual stated under 1d, now visible; `SweSolver::ReadFields` says what the
+mirror holds with every read, and the dump exports the mirror and each cell's lattice cell); (2) the
+world's river composite carries a reach with no name (nhdplus 5860733) that the window's west edge now
+cuts, a nameless face with no discharge. BOSTON HARBOR (`scenes/demos/boston_harbor.json`: the anchor at
+the station, the clocks pinned, a view; no box, no station, no solver): the solver stands with no key --
+the window 42.225..42.478 N x -71.191..-70.938 E, Boston's station the focus and the datum (-1.678 m), no
+river, Flather on the atlas's level at 1525 edge cells, the twin's 64 tiles, the pin's rectangles across
+the page's seam (two, the harbour straddling u = 1 of the standing window's modulo-16384 addressing) --
+BUT THE KERNEL'S BED DID NOT LAND: the whole-bed wait maps 3 to 42 of its 1221 tiles in 60 s over 6000
+residency turns (the manager's claim m15 over the domain: nothing of slice 46 resident), while the same
+boot at the Merrimack, whose height tree is warm on disk, maps 1221 in half a second; two root loads (the
+colour's and the survey mask's, face 2) sit "in flight, never returned" from frame 1 under
+`streaming.offline`. The kernel read the cube's coarse heights instead (+33 m at Long Wharf against the
+stack's +0.5), nothing was wet, and the harbour did not flood. Moving the anchor 10 km east or north
+(scenes/debug/boston_seam*.json) changed the seam's cut (four rectangles) and the claim's progress (mip 0
+at 89 of 66049 samples, mip 3 at 5506) but not the outcome: the block is the order's at a cold place
+offline, not the seam's alone and not a water law's. The height tree's identity is the place's by design
+(the datum's offset is in it: `|norm x... -0.092`), so every new place paints cold. Stage 2's gate stands
+half met: the solver by demand with no key, yes; Boston flooding, not until the residency delivers a cold
+place's bed (next: read `ResidencyOrder`'s need and parent law for a want across the page seam under two
+loads that never return; or one run online, Mark's call, since the colour's root is a Google fetch).
+The bed wait now says the manager's claim by mip at its end.
 
 ## Sources
 

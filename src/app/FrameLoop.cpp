@@ -1283,14 +1283,12 @@ std::optional<int> FrameLoop::Session() {
         std::shared_ptr<ImpactField> imp = m_impacts;
         Compositor* compP = &compositor;
         const int hgtChP = hgtCh;
-        WaterManager* wm = &weather;
-        swe.SetLevelSource([atlas, imp, compP, hgtChP, wm](double la, double lo, double t) -> double {
+        swe.SetLevelSource([atlas, imp, compP, hgtChP](double la, double lo, double t) -> double {
             constexpr double kDeg = 3.141592653589793 / 180.0;
             if (!atlas->Ready()) return std::nan("");
-            // THE SHELF RUNG (2026-10-26): a window about this one (the Gulf of Maine) that has carried the
-            // train across the shelf answers the level at the face; the analytic wave only where none does.
-            double shelfL = 0.0;
-            if (wm->OwnedLevelAt(la, lo, t, shelfL) && std::isfinite(shelfL)) return shelfL;
+            // (The shelf rung -- a Gulf of Maine window about this one, answering the faces with the train it
+            // had carried across the shelf -- went with stage 2 of one water on the tree, 2026-10-26: the
+            // analytic wave stands at the faces until stage 3 imposes the cavity in the tail's own solve.)
             const double tide = atlas->MslNavd(la, lo) + atlas->Level(la, lo, t);
             if (!imp || !imp->Begun(t)) return tide;
             const double bed = compP->SampleHeightResident(hgtChP, la * kDeg, lo * kDeg, 10.0);
@@ -1308,54 +1306,6 @@ std::optional<int> FrameLoop::Session() {
             }
             return tide + e;
         });
-    }
-    // THE SHELF RUNG'S FORCING (2026-10-26): a dormant window's open sea rides the atlas plus the asteroid's
-    // wave by Green's law to the depth there (unbounded: the solver is the nonlinear reader), and its
-    // solver takes the scene's step budget.
-    {
-        std::shared_ptr<ImpactField> imp = m_impacts;
-        Compositor* compP = &compositor;
-        const int hgtChP = hgtCh;
-        weather.SetLevelDeparture([imp, compP, hgtChP](double la, double lo, double t) -> double {
-            constexpr double kDeg = 3.141592653589793 / 180.0;
-            if (!imp || !imp->Begun(t)) return 0.0;
-            const double bed = compP->SampleHeightResident(hgtChP, la * kDeg, lo * kDeg, 100.0);
-            const double h0 = imp->Events().front().props.basinDepthM;
-            const double depth = (std::isfinite(bed) && -bed > 0.0) ? -bed : h0;   // the water over the bed at the datum
-            // BOUNDED here (the shore's saturation): a shelf window's box cuts coastal water on its landward
-            // sides, and Green's law unbounded into a few metres of depth forced those faces by ten times the
-            // deep wave and blew the solver up (820 m/s on 250 m cells, 2026-10-26). At the Gulf's mouth, 200 m
-            // deep, the bound is far above the wave; the window inside it reads the shelf, not this law.
-            return imp->EtaAt(la, lo, t, depth, true);
-        });
-        weather.SetStepBudget(static_cast<uint32_t>(S.water.swe.stepsPerFrame));
-    }
-    // The scene's dormant solvers (`solvers`): each asleep until the eye comes, its domain a box of
-    // cells on the stack's bed, its open sea held to its own station's tide on NAVD88.
-    for (const scene::SolverProps& v : S.solvers) {
-        int st = -1;
-        for (size_t i = 0; i < model.Count(); ++i) {
-            if (model.S(i).id == v.station) st = static_cast<int>(i);
-        }
-        if (st < 0 || model.S(st).mllwMinusNavdM <= -900.0 || !v.nx || !v.ny) {
-            Log("[solver] %s: its station '%s' is not in data.tides with a NAVD88 link, or it names no cells; it stays off",
-                v.name.c_str(), v.station.c_str());
-            continue;
-        }
-        const double off = model.S(st).mllwMinusNavdM;
-        auto oceanAt = [&model, st, off](double t) { return model.Height(static_cast<size_t>(st), t) + off; };
-        SweConfig cfg;
-        const double box[4] = {v.box[1], v.box[0], v.box[3], v.box[2]};   // the window's lat0, lon0, lat1, lon1
-        // its rivers, as the scene's solver's: the reaches whose mouths its box holds
-        const std::vector<RiverModel::Crossing> at = m_A.rivers.EntersBox(box[0], box[1], box[2], box[3]);
-        for (const RiverModel::Crossing& c : at) cfg.faces.push_back({c.side, c.lat, c.lon, m_A.rivers.R(c.reach).name});
-        SweDomain shape;   // the faces' order as the window's domain will make them (by name and side)
-        for (const SweConfig::RiverFace& rf : cfg.faces) shape.faces.push_back({rf.side, 0, -1, rf.name});
-        auto clock = std::make_shared<RiverFaceClock>(riverClock(shape, at, -1.0));
-        const TideModel* tm = &model;
-        weather.AddDormantWindow(v.name.c_str(), box, v.nx, v.ny, cfg, oceanAt, (std::max)(S.water.swe.spinupH, 0.5),
-                                 [clock, tm](int f, double t) { return clock->DEta(*tm, f, t); },
-                                 [clock, tm](int f, double t) { return clock->Q(*tm, f, t); });
     }
     // WATER V2 (sim/WaterProducer.h): the producers the manager does not evaluate, declared with their
     // readers, so the manifest (LogProducers, below) is every input the water reads.
@@ -1440,9 +1390,8 @@ std::optional<int> FrameLoop::Session() {
 
     if (S.Tool("ocean-probe")) {
         // nullopt = "lat,lon" did not parse: the block never returned, so the run goes on.
-        if (const auto rc = tools::RunOceanProbe(opt, model, gpu, renderer, swe, resMgr,
-                                                 simUnix, oceanAt, faceAt, faceQAt,
-                                                 weather)) {
+        if (const auto rc = tools::RunOceanProbe(opt, model, gpu, swe, resMgr, simUnix, oceanAt, faceAt,
+                                                 faceQAt, weather)) {
             return *rc;
         }
     }
@@ -1513,13 +1462,6 @@ std::optional<int> FrameLoop::Session() {
             waveField->SetSweCurrent(&swe, sea->sweCurrentGain, sea->sweCurrentRefreshS);
             swe.SetStepBudget(static_cast<uint32_t>(S.water.swe.stepsPerFrame));
             swe.SetProbe(S.place.anchor[1], S.place.anchor[0]);   // stage 1a's gate: mip 0 against mip 1 at the anchor
-        }
-        // The owned windows (Boston) step on the frame's list too, when a hull asks them
-        // (WaterManager::Simulate), in the sea layer's simulate pass beside the external one.
-        if (sea) {
-            sea->onSimulate = [this](const FrameContext& ctx) {
-                if (ctx.cmd && ctx.gpu) m_weather.Simulate(*ctx.cmd, *ctx.gpu, m_simUnix);
-            };
         }
         // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
@@ -2734,9 +2676,7 @@ bool FrameLoop::Frame() {
         };
         Log("[residency] the turn stands first in each frame's command list (law 8): after every "
             "want of the frame, which the loop says before RenderFrame, and before every read the "
-            "list records, so every layer of a frame reads one map, with no frame of latency. The "
-            "solver's owned-window batches (weather.Update, on their own upload list ahead of the "
-            "frame's) read the map the turn before made, as the frame before's layers did.");
+            "list records, so every layer of a frame reads one map, with no frame of latency.");
     }
     auto& gisLayer = m_A.gisLayer;
     // M12 step 4a: the z14 page origin, read off the surface's height window -- the doubles
@@ -3607,17 +3547,16 @@ bool FrameLoop::Frame() {
                                  : static_cast<float>(std::max(1u, window.Height()));
             gisLayer->tolMeters = static_cast<float>(altV * cam.fovY / vh);
         }
-        // M6x: the weather manager's residency clock -- the camera's ground position
-        // is the demand signal; dormant windows spin up as it arrives, owned solvers
-        // advance. All in the flat one-world frame. (The CPU mirrors no longer
-        // refresh here: nothing in the loop reads them -- step 2 of PERF_EXPERIMENT.)
+        // The eye's ground point is the demand signal: mip 0 within its reach (stage 1d), the one window
+        // about its start (stage 2; the window following it in flight is 2b's, WaterManager::Update).
+        // (The CPU mirrors no longer refresh here: nothing in the loop reads them -- step 2 of PERF_EXPERIMENT.)
         if (!marsMode) {
             PROF_BEGIN();
             resMgr.Mark("read: weather.Update -- the solver steps on its bed");
             double cla = 0.0, clo = 0.0;   // PHASE C5: the camera's place by the exact chart
             m_A.surface.flat.LatLonOf(cam.px, cam.pz, cla, clo);
             if (m_A.swe.Ready()) m_A.swe.SetEye(cla, clo, S.water.swe.fineReachM);   // stage 1d: the eye's demand
-            weather.Update(gpu, renderer.Shaders(), S.shadersW, simUnix, cla, clo, altV);
+            weather.Update(simUnix, cla, clo, altV);
             // M9ay: every ACTIVE window's lattice at mip 0, from the manager that owns them.
             weather.PinDomains(resMgr, hgtTenant);
             PROF_END(0);
@@ -4437,14 +4376,6 @@ bool FrameLoop::Frame() {
                 Log("[impact] the readers' buffer: %zu event(s), %zu words, SRV %u", m_impacts->Count(), words.size(), m_impactSrv);
             }
             m_impactGpu = m_impacts->Gpu(m_impactSrv, m_impactBase, simUnix);
-            // THE SHELF RUNG: the owned windows about this one answer the faces from a region about the
-            // window, asked every frame (a demanded owned window steps on the frame: WaterManager::Simulate).
-            if (m_impacts->Begun(simUnix) && swe.Ready() && weather.ActiveWindows() > 1) {
-                const double* bx = S.water.swe.box;
-                const double cLat = 0.5 * (bx[1] + bx[3]), cLon = 0.5 * (bx[0] + bx[2]);
-                const double rM = 0.5 * 111320.0 * std::hypot(bx[3] - bx[1], (bx[2] - bx[0]) * std::cos(cLat * 3.141592653589793 / 180.0)) + 2000.0;
-                weather.RequestRegionOwned(cLat, cLon, rM);
-            }
             if (waterBank) waterBank->SetImpact(m_impactGpu);
             if (waterBankB) waterBankB->SetImpact(m_impactGpu);
             if (m_A.waterBankEye) m_A.waterBankEye->SetImpact(m_impactGpu);

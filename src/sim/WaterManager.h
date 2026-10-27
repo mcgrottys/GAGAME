@@ -73,9 +73,12 @@ public:
               const TideModel* tides, const GlobeModel* globe, const SeaState* sea,
               const CurrentModel* currents);
 
-    // A stateful window. External windows (the Merrimack: driven by the render loop) are
-    // mirrored only; OWNED windows (Boston) are advanced by Update() and spun up lazily
-    // when the camera enters their footprint below the activation altitude.
+    // THE ONE WINDOW (stage 2 of one water on the tree, 2026-10-26, docs/WATER_V2.md 14): the solver
+    // stands where the eye is, the render loop drives it, the manager mirrors it (AddExternalWindow).
+    // The dormant windows -- Boston asleep until the camera came under the activation altitude, their
+    // own bed binding and station, the shelf rung's one-way nesting (the Gulf window answering the
+    // Merrimack's faces) -- went with the scene's `solvers` list: residency is the extent, and the one
+    // window carries the eye's water wherever the eye starts.
     // PHASE C1: a window stands where its solver's domain does (its lat/lon box); no world.flat.
     // PHASE C2: the scene's sea-state sources (SeaLayer::Sources), for Query's period and direction.
     void SetSeaSources(const std::vector<const SeaState*>& s) {
@@ -92,17 +95,10 @@ public:
     void LogProducers() const;   // the manifest
     void AddExternalWindow(const char* name, SweSolver* solver,
                            std::function<double(double)> oceanAt);
-    // A dormant window's river faces (cfg.faces) ride faceAt / faceQAt (sim/RiverModel.h
-    // RiverFaceClock: the face's deviation and its transport, per face); none given: zero.
-    using FaceClock = std::function<double(int, double)>;
-    void AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny, const SweConfig& cfg,
-                          std::function<double(double)> oceanAt, double spinupHours, FaceClock faceAt = {},
-                          FaceClock faceQAt = {});
-    // M9ar: the bed every OWNED solver binds at activation -- the height page tenant. There is
-    // no per-window bed texture any more.
-    // PHASE B2 (D4): the bed is the STANDING WINDOW (SurfaceFrame::StandAbout) at its slice; every
-    // owned solver binds the same window (it reads it where the window holds its cells, the cube
-    // elsewhere), and the pin and the wait ask for its tiles in its own uv.
+    // M9ar: the bed is the height page tenant; there is no per-window bed texture.
+    // PHASE B2 (D4): the bed is the STANDING WINDOW (SurfaceFrame::StandAbout) at its slice; the
+    // solver binds it (it reads it where the window holds its cells, the cube elsewhere), and the pin
+    // and the wait ask for its tiles in its own uv.
     void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
                        const hal::BlockBinding& standing, const SweSolver::BedWindow& bed,
                        double planetR) {
@@ -115,18 +111,13 @@ public:
         m_bed = bed;
     }
 
-    // Per frame (or before a physics batch): lazy activation and owned-solver advancement.
-    // Nothing here reads the GPU back: the CPU mirrors refresh on demand (RefreshMirrorsTo).
-    void Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir, double simUnix,
-                double camLatDeg, double camLonDeg, double camAltM);
-    // AN OWNED WINDOW WITH A CONSUMER STEPS ON THE FRAME (fast travel, 2026-10-12). A region
-    // request is answered only by a step recorded on the frame ring (SweSolver::Record: the
-    // readback rides the frame's fences); an owned window advanced on its own upload submits
-    // serves nothing, so a hull carried into Boston asked every frame and was never answered --
-    // it had no water for as long as it stayed. So: an owned window someone asked this frame
-    // (Demanded) is stepped HERE, on the frame's list, exactly as the external window is in
-    // SeaLayer::Simulate, and Update leaves it to this; one nobody asked advances as before.
-    void Simulate(hal::CommandContext& cmd, Gpu& gpu, double simUnix);
+    // Per frame: the eye's ground point and altitude, the demand signal. Stage 2 of one water on the
+    // tree: the one window stands about the eye's START (Assembly: the place's anchor on the global
+    // lattice); an eye that leaves it finds the tide plane, as it did beyond the box, said once. The
+    // window following the eye in flight -- re-stood about it, its bed, rivers and tide focus anew --
+    // is stage 2b's, with the chain's coarse mips; this is where it goes. Nothing here reads the GPU
+    // back: the CPU mirrors refresh on demand (RefreshMirrorsTo).
+    void Update(double simUnix, double camLatDeg, double camLonDeg, double camAltM);
     // M9ay: THE SOLVER DOMAINS STAY RESIDENT AT MIP 0 -- every ACTIVE window's lattice, on
     // the page it reads, every frame. The pin used to live in main for the Merrimack alone
     // (AUDIT_WATER item 6): an active Boston solver read slice 6 at whatever mip the camera
@@ -158,19 +149,6 @@ public:
     // Returns the samples taken.
     uint64_t ClaimedMips(const ResidencyManager& res, int hgtTenant, uint64_t hist[16],
                          const char* only = nullptr) const;
-    // THE SHELF RUNG (2026-10-26, docs/WATER_V2.md section 6 rung 2, built for the asteroid's bore): a
-    // dormant window's open sea rides the atlas PLUS this departure (the asteroid's wave by Green's law
-    // to the depth there; the frame loop gives it), its solver takes the scene's step budget, and the
-    // window inside it (the Merrimack) reads its level at the faces: OwnedLevelAt answers from the
-    // newest region an OWNED window holding the point delivered (RequestRegionOwned each frame, answered
-    // on the frame ring), as its tide plane plus its deviation. One-way nesting, level alone.
-    void SetLevelDeparture(std::function<double(double, double, double)> f) { m_levelDep = std::move(f); }
-    void SetStepBudget(uint32_t steps) { m_stepBudget = steps; }
-    void RequestRegionOwned(double latDeg, double lonDeg, double radiusM);
-    bool OwnedLevelAt(double latDeg, double lonDeg, double unixT, double& level) const;
-    // Force a dormant window up (the probe harness; interactive uses the camera rule).
-    bool Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                  const char* name, double simUnix);
 
     // THE MIRROR REFRESHES ON DEMAND, NEVER ON A CLOCK (step 2 of docs/PERF_EXPERIMENT.md).
     // Query reads a CPU mirror of each active window's eta/uv banks, and its only callers
@@ -212,6 +190,16 @@ public:
                         bool refineBySolver = true) const;
 
     int ActiveWindows() const;
+    // AN INSTRUMENT (stage 2, 2026-10-26): the one window's mirror as the readers see it -- the eta plane, its
+    // rows, and the solver's cell of a place -- so a dump can be checked against it offline. Null: no window.
+    const std::vector<float>* MirrorEta(uint32_t& w, uint32_t& h, const std::vector<float>** uv4, const SweSolver** solver) const {
+        for (const Window& x : m_windows) {
+            if (!x.active || !x.solver) continue;
+            w = x.etaW; h = x.etaH; if (uv4) *uv4 = &x.uv4; if (solver) *solver = x.solver;
+            return &x.eta;
+        }
+        return nullptr;
+    }
     // The planet's grids (the global wave grid WaveScale reads), or null.
     const GlobeModel* Globe() const { return m_globe; }
     std::string stats;   // "wx 2 windows (merrimack, boston)" for the title bar
@@ -221,25 +209,19 @@ private:
     hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtSlice = 6, m_hgtMips = 7;
     hal::BlockBinding m_stand{};      // PHASE B2: the standing window
-    SweSolver::BedWindow m_bed{};     // ...and its rows, for every owned solver
-    double m_planetR = 0.0;           // PHASE C1: an owned solver's chart is placed on this planet
+    SweSolver::BedWindow m_bed{};     // ...and its rows
+    double m_planetR = 0.0;           // PHASE C1: the planet the solver's chart is placed on
     std::vector<const SeaState*> m_seaSources;   // PHASE C2
     struct Window {
         std::string name;
-        SweSolver* solver = nullptr;              // external, or owned.get()
-        std::unique_ptr<SweSolver> owned;
-        uint32_t nx = 0, ny = 0;              // dormant windows: the domain's cells over box,
-                                              // taken on activation (the bed: the stack)
+        SweSolver* solver = nullptr;              // the frame loop's (AddExternalWindow)
         double box[4] = {0.0, 0.0, 0.0, 0.0}; // PHASE C1: lat0, lon0, lat1, lon1 (degrees)
         bool InBox(double latDeg, double lonDeg) const {
             return latDeg > box[0] && latDeg < box[2] && lonDeg > box[1] && lonDeg < box[3];
         }
         std::function<double(double)> oceanAt;    // NAVD level clock for forcing + queries
-        FaceClock faceAt, faceQAt;                // the river faces' clocks (zero when not given)
-        SweConfig cfg;
-        double spinupHours = 0.5;
         bool active = false;
-        bool servedLogged = false;   // said once: the window stepped on the frame for a consumer
+        bool beyondSaid = false;     // said once: the eye left the window (Update)
         // CPU mirrors
         std::vector<float> eta, uv4;
         uint32_t etaW = 0, etaH = 0, uvW = 0, uvH = 0;
@@ -248,14 +230,11 @@ private:
         char currentTag[48] = {0};
     };
     static constexpr double kMirrorDt = 2.0;      // a mirror may lag the asking clock this much
-    std::function<double(double, double, double)> m_levelDep;   // SetLevelDeparture
-    uint32_t m_stepBudget = 0;                                  // SetStepBudget (0 = the solver's own)
     void ReadMirrors(Gpu& gpu, double simUnix, double maxAge);
     // A window's lattice as a rectangle of the height page's uv (the pin's, and the bed wait's);
     // false where it does not reach inside the page.
     // PHASE B2: the domain's rectangles in the standing window's uv (modulo 16384: one, two or four).
     int DomainRects(const Window& w, float out[4][4]) const;
-    static constexpr double kActivateAltM = 30000.0;
     bool m_pinLogged = false;
 
     const Window* WindowAt(double latDeg, double lonDeg) const;

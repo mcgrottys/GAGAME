@@ -205,10 +205,14 @@ struct SweProps {
     // m^3/s at the first river face; < 0 = its gauge's, from data.river (sim/RiverModel.h DischargeAt)
     double riverQ = -1.0;
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
-    // PHASE C1: THE SOLVER'S DOMAIN -- a lat/lon box [lon0, lat0, lon1, lat1] (zeros: no solver),
-    // its cell (one angle both ways, cellM metres north-south) and the sponge's start from an open
-    // side. Where rivers enter it is data (data.river's reaches, sim/RiverModel.h).
-    double box[4] = {0.0, 0.0, 0.0, 0.0};
+    // STAGE 2 OF ONE WATER ON THE TREE (2026-10-26, WATER_V2.md 14): THE SOLVER STANDS WHERE THE EYE IS.
+    // No box: its window is this many tiles of 128 cells a side about the eye's start (the place's
+    // anchor), its corner on the global lattice of the cell's angle (so a place falls in the same cells
+    // whichever eye came), its bed the one height stack's, its open sea the tide atlas's. 0 = no solver.
+    // This is a budget (the tail's extent at two mips), not a place; the chain's coarse mips carrying the
+    // planet is what retires it. The cell: one angle both ways, cellM metres north-south. Where rivers
+    // enter the window is data (data.river's reaches, sim/RiverModel.h).
+    uint32_t windowTiles = 16;
     float cellM = 13.728f;
     float sponge = 1866.0f;
 };
@@ -478,15 +482,6 @@ struct NodeProps {
 struct ToolProps {
     std::string name;
     std::string args;
-};
-// A SOLVER ASLEEP UNTIL THE EYE COMES (sim/WaterManager.h AddDormantWindow): its domain a lat/lon
-// box of nx x ny cells, its bed the height stack at those cells, its open sea held to the tide of
-// `station` (a tide station's id in data.tides) on NAVD88, a river entering by `river`.
-struct SolverProps {
-    std::string name;
-    double box[4] = {0.0, 0.0, 0.0, 0.0};   // lon0, lat0, lon1, lat1
-    uint32_t nx = 0, ny = 0;
-    std::string station;
 };
 // PHASE C3: where a station of the scene's data stands when its own file does not say.
 struct StationProps {

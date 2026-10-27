@@ -65,8 +65,10 @@ struct SweConfig {
     float soilCapM = 0.10f, soilKs = 1.0e-5f, soilSuctionM = 0.05f;
 };
 
-// PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S CHART. A domain is declared by a lat/lon box
-// (water.swe.box); its ANCHOR is the box's centre and its lattice a window of its own planes there
+// PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S CHART. A domain is a lat/lon box -- since stage
+// 2 of one water on the tree (2026-10-26) the window about the eye's start on the global lattice of the
+// cell's angle (water.swe.windowTiles, app/Assembly.cpp), no scene's box -- its ANCHOR is the box's
+// centre and its lattice a window of its own planes there
 // (HIERARCHY 4.4: a ratio of planes about an anchor in doubles). A point P of the body (planet frame,
 // any scale) has the cell coordinates
 //     tx = (U . P) / (A . P),   ty = (V . P) / (A . P)
@@ -431,6 +433,7 @@ public:
     double DomainWeight(double latDeg, double lonDeg) const;
     // The newest delivered region's clock; a large negative number when none has been delivered.
     double DeliveredAsOf() const { return m_regions.empty() ? -1.0e18 : m_regions.front().asOf; }
+    size_t RegionCount() const { return m_regions.size(); }
 
 private:
     int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,
