@@ -1974,8 +1974,34 @@ void SweSolver::TailBoundary() {
 
 // STAGE 2b: THE TAIL'S BATCH -- its first instant (clear, bed, rest at mean sea), an impact due, then its steps up
 // to the batch's end, each: the twin's fold into its cells under the window, the faces, the share, the columns.
+TailGpu SweSolver::TailGpuDesc(float exag) const {
+    TailGpu g;
+    if (!m_tail) return g;
+    g.hSrv = m_hT.Srv();
+    g.bedSrv = m_bedT.Srv();
+    g.cells = m_domT.nx;
+    for (int i = 0; i < 3; ++i) {
+        g.up[i] = static_cast<float>(m_domT.A[i]);
+        g.east[i] = static_cast<float>(m_domT.E[i]);
+        g.north[i] = static_cast<float>(m_domT.N[i]);
+    }
+    g.R = static_cast<float>(m_domT.R);
+    g.ds = static_cast<float>(m_domT.dx / m_domT.R);
+    g.dt = static_cast<float>(m_domT.dy / m_domT.R);
+    g.exag = exag;
+    return g;
+}
+
+void SweSolver::TailTo(hal::CommandContext& cmd, D3D12_RESOURCE_STATES to) {
+    if (!m_tail || m_tailState == to) return;
+    cmd.Barrier(m_hT.Res(), m_tailState, to);
+    cmd.Barrier(m_bedT.Res(), m_tailState, to);
+    m_tailState = to;
+}
+
 void SweSolver::RecordTail(hal::CommandContext& cmd, Gpu& gpu, double batchEnd, bool reset) {
     PixScope scope(cmd.Native(), "swe.tail (the ocean's departure over mean sea, on its own clock)");
+    TailTo(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     TailCb();
     if (m_tailFresh) m_simTimeT = m_simTime;
     TailBoundary();
@@ -2116,8 +2142,17 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
     }
     if (m_tail && live) {   // stage 2b: what the tail carries at the anchor's cell and at the window's east edge
         Plane hT, bT;
-        readAll(m_hT, 0, hT);
-        readAll(m_bedT, 0, bT);
+        const auto readTail = [&](TileAtlas2D& bank, Plane& out) {
+            GpuTexture wrap;
+            wrap.res = bank.Res();
+            wrap.format = DXGI_FORMAT_R32_FLOAT;
+            wrap.width = bank.TilesX() * bank.TileW();
+            wrap.height = bank.TilesY() * bank.TileH();
+            wrap.state = m_tailState;   // the readers' state after a batch, the kernels' within one
+            out.raw = gpu.ReadbackTexture(wrap, &out.pitch, 0);
+        };
+        readTail(m_hT, hT);
+        readTail(m_bedT, bT);
         const uint32_t cx = m_tailCorner + ((m_cb.nx / 2u) >> m_tailShift), cy = m_tailCorner + ((m_cb.ny / 2u) >> m_tailShift);
         const uint32_t ex = m_tailCorner + (m_cb.nx >> m_tailShift);   // the first tail cell past the window's east edge
         float h0 = 0.0f, b0 = 0.0f, h1 = 0.0f, b1 = 0.0f;
@@ -2462,6 +2497,8 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     uvTo(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // stage 2b: the tail's h and bed likewise, for the far field's readers (TailRead.hlsli)
+    TailTo(cmd, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     char s[96];
     snprintf(s, sizeof(s), "swe %ut %.0f/%.0fMB %dss", ResidentTiles(), ResidentBytes() / 1048576.0,

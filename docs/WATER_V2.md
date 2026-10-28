@@ -1773,10 +1773,34 @@ far field is its one-depth train and the tail's is the bed's, and the 10 km ston
 (the guard stopped the spin-up with 0.43 h left): the window does not survive this stone, which is the window's
 matter and not the tail's.
 
+**The tail drawn (2026-10-27, Mark: "draw the tail").** The far field's readers -- the bank kernel's texel
+(`WaterBank.hlsl`) and the globe's vertex (`Globe.hlsl ImpactAt`, the pixel through `imp`) -- read the tail's
+column where the tail holds the point, in place of the impacts' analytic sum, which stays only for points the
+tail does not hold (`shaders/TailRead.hlsli`; `sim/ImpactGpu.h TailGpu`, `SweSolver::TailGpuDesc`, the layers'
+`SetTail` from the frame loop each frame beside `SetImpact`). The cell under a direction is the gnomonic chart's
+(s = d.E / d.A, t = d.N / d.A over the tail's anchor frame); the departure is the column less mean sea's over the
+bed, h + b, read bindlessly from the tail's two textures (a tile the tail does not hold reads 0: no sea,
+nothing); a land cell takes its nearest sea neighbour's (the coast within a tail cell); the slope is the
+neighbours' departures over the chart's true metric along the chart's east and north projected onto the tangent
+plane; the display exaggeration applies to the drawn departure as it did to the drawn law; the departure and
+its slope are shoaled from the water the tail stands in to the point's by the same bounded law. The tail's h and
+bed stand in the readers' state between batches (`TailTo`), as eta and uv do; the probe reads them in whatever
+state they stand. *The gate* (`scenes/demos/impact_tail_orbit.json`, out/review/stage3/stills): the 10 km stone
+an hour after it, the eye 3000 km over the impact, the drawn departure x10 -- with the tail, ONE BROAD FRONT 700
+km out with a few rings inside it, a little asymmetric where the bed is; with the tail off (no solver window:
+`--set water.swe.windowTiles=0`), the law's dense concentric train over one depth, the Bessel sum's dispersion
+and its ringing. The two stills differ only about the ring (mean 1.0 level of 255 inside 300 px of the impact,
+0.15 beyond): the field the eye sees is the tail's where the tail stands. At 4.5 h from 3000 km over the shelf the
+train is ten metres and shows in neither still even at x10 -- the globe's vertex carries it, the eye cannot see
+it from there; a shore eye sees the window's own water, the solver's. Stated: the hull's reader (WaterManager's
+`impacts` producer, the CPU sum) still reads the law beyond the window -- a boat far at sea on the tail's train
+is the next reader to turn; the far field's readers take the tail with no residency of their own (the tail's
+tiles are the run's).
+
 *Stated, not built:* the levels between the twin and the tail (a telescope of mips, so a 1 km stone's 19 km
-cavity, three tail cells, is resolved where it falls); the tail is not drawn (the readers' far field is the
-analytic law still; the bank and the globe read the window or the plane); the tail's residency is the run's
-(static, the sea from its edge); one tail, no second window; the metric's shear; the fold into the tail, kept off.
+cavity, three tail cells, is resolved where it falls); the hull's reader of the far field; the tail's residency
+is the run's (static, the sea from its edge); one tail, no second window; the metric's shear; the fold into the
+tail, kept off.
 
 ## Sources
 

@@ -153,6 +153,13 @@ cbuffer GlobeCb : register(b1) {
     // count. Appended at the END on both sides.
     float4 gImpA;
     uint4  gImpU;
+    // STAGE 2b (2026-10-27; shaders/TailRead.hlsli, sim/ImpactGpu.h TailGpu): the tail's chart and textures,
+    // read at the vertices in place of the law where the tail holds the point. Appended at the END on both sides.
+    float4 gTailA;
+    float4 gTailE;
+    float4 gTailN;
+    uint4  gTailU;
+    float4 gTailB;
 };
 
 
@@ -734,10 +741,24 @@ typedef float real;
 #define GA_PLANET_G (gImpA.z)
 #include "laws/Impact.hlsli"
 #include "ImpactRead.hlsli"
+#define TAIL_TEX gTex
+#include "TailRead.hlsli"
 float3 ImpactAt(float3 dir, float depth) {
-    if (gImpU.y == 0u) return 0.0f;
+    if (gImpU.y == 0u && !TailHolds()) return 0.0f;
     float3 slP;
-    const float eta = ImpactSumAt(gImpU.x, gImpU.y, gImpA.x, gImpA.y, dir, depth, slP);
+    float eta = 0.0f;
+    // STAGE 2b: where the tail holds the point, the far field is the tail's departure and its slope, shoaled from
+    // the water the tail stands in to the depth here by the same bounded law; the analytic sum beyond the tail
+    float tDep, tDepth;
+    if (TailAt(dir, tDep, tDepth, slP)) {
+        const float h0 = max(tDepth, kDepthFloorM);
+        eta = ImpactShoal(tDep, h0, depth);
+        slP *= ImpactShoalSlope(tDep, 1.0f, h0, depth);
+    } else if (gImpU.y > 0u) {
+        eta = ImpactSumAt(gImpU.x, gImpU.y, gImpA.x, gImpA.y, dir, depth, slP);
+    } else {
+        return 0.0f;
+    }
     const float3 slT = CsToTangent(slP);
     const float3 upT = CsToTangent(dir);
     const float3 axisT = float3(gCsR0.y, gCsR1.y, gCsR2.y);

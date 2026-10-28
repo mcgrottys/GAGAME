@@ -155,6 +155,13 @@ cbuffer BankCb : register(b0) {
     // count. Appended at the END on both sides.
     float4 gImpA;
     uint4  gImpU;
+    // STAGE 2b (2026-10-27; shaders/TailRead.hlsli, sim/ImpactGpu.h TailGpu): the tail's chart and textures,
+    // read in place of the law where the tail holds the texel. Appended at the END on both sides.
+    float4 gTailA;
+    float4 gTailE;
+    float4 gTailN;
+    uint4  gTailU;
+    float4 gTailB;
 };
 
 // The ladder's ring under k: its texel over ring 0's, its mapped set.
@@ -279,6 +286,8 @@ Texture2D gT[] : register(t0, space1);
 Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's array views
 StructuredBuffer<uint> gBufU[] : register(t0, space8);   // the heap as uint buffers (the impacts' tables)
 #include "ImpactRead.hlsli"
+#define TAIL_TEX gT
+#include "TailRead.hlsli"
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
 RWTexture2D<float4> gU[] : register(u0, space2);
@@ -594,11 +603,15 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // the solver's); the same tables the globe's vertices and the CPU sum. The texel's place is its
     // lat/lon (TilePlace), made a direction in the planet's frame (lat = asin(y), lon = atan2(z, x)).
     float impactEta = 0.0f;
-    if (gImpU.y > 0u) {
+    if (gImpU.y > 0u || TailHolds()) {
         const float la = place.x * 0.017453292519943295f, lo = place.y * 0.017453292519943295f;
         const float3 dirP = float3(cos(la) * cos(lo), sin(la), cos(la) * sin(lo));
         float3 slP;
-        impactEta = ImpactSumAt(gImpU.x, gImpU.y, gImpA.x, gImpA.y, dirP, level - bed, slP);
+        // STAGE 2b: where the tail holds the texel, the field is the tail's -- its departure, shoaled from the
+        // water it stands in to the texel's by the same bounded law; the analytic sum stands only beyond the tail
+        float tDep, tDepth;
+        if (TailAt(dirP, tDep, tDepth, slP)) impactEta = ImpactShoal(tDep, max(tDepth, kDepthFloorM), level - bed);
+        else if (gImpU.y > 0u) impactEta = ImpactSumAt(gImpU.x, gImpU.y, gImpA.x, gImpA.y, dirP, level - bed, slP);
     }
     float lvl = level + impactEta;
     float2 cur = 0.0f;

@@ -4396,6 +4396,12 @@ bool FrameLoop::Frame() {
             if (waterBank) waterBank->SetImpact(m_impactGpu);
             if (waterBankB) waterBankB->SetImpact(m_impactGpu);
             if (m_A.waterBankEye) m_A.waterBankEye->SetImpact(m_impactGpu);
+            // STAGE 2b (2026-10-27): the tail to the same readers -- the far field they draw is the tail's where it
+            // stands, the law's beyond it; the drawn departure takes the first event's exaggeration, as the law does
+            m_tailGpu = m_A.swe.HasTail() ? m_A.swe.TailGpuDesc(m_impacts->Any() ? float(m_impacts->Events().front().props.exag) : 1.0f) : TailGpu{};
+            if (waterBank) waterBank->SetTail(m_tailGpu);
+            if (waterBankB) waterBankB->SetTail(m_tailGpu);
+            if (m_A.waterBankEye) m_A.waterBankEye->SetTail(m_tailGpu);
         }
     }
     PROF_BEGIN();
@@ -5891,6 +5897,7 @@ void FrameLoop::WalkEye(const Eye& e, const EyeSky& es, bool dome,
         globe->keepOn = m_S.render.keep;
         globe->vrsOn = m_S.render.vrs;
         globe->SetImpact(m_impactGpu);
+        globe->SetTail(m_tailGpu);   // stage 2b
         globe->keepSunGrainDeg = static_cast<float>(m_S.render.keepSunGrainDeg);
         globe->keepTideGrainM = static_cast<float>(m_S.render.keepTideGrainM);
         globe->SetView(*e.cam, aspect, e.viewH, t);

@@ -258,6 +258,9 @@ public:
     // far edge: the impacts' law for events outside the tail (FrameLoop); unset, nothing.
     void SetTailLevelSource(std::function<double(double, double, double)> at) { m_tailLevelAt = std::move(at); }
     bool HasTail() const { return m_tail; }
+    // STAGE 2b: the tail to the readers of the far field (sim/ImpactGpu.h TailGpu; shaders/TailRead.hlsli): its
+    // textures, its cells, its chart; `exag` the display exaggeration on the drawn departure.
+    TailGpu TailGpuDesc(float exag) const;
     const SweDomain& TailDomain() const { return m_domT; }
     uint32_t TailBedMip() const { return m_tailBedMip; }   // the cube's mip the tail's cells read (WaterManager's want)
 
@@ -596,6 +599,8 @@ private:
     hal::Table m_table, m_tableB;
     D3D12_RESOURCE_STATES m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    D3D12_RESOURCE_STATES m_tailState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;   // stage 2b: the tail's h and bed, read by the far field's readers
+    void TailTo(hal::CommandContext& cmd, D3D12_RESOURCE_STATES to);
     Gpu::TextureReadback m_rbEta, m_rbUv;   // F13: the asynchronous read of the two fields
     static void UnpackFields(uint32_t nx, uint32_t ny, const std::vector<uint8_t>& etaData,
                              uint32_t etaPitch, const std::vector<uint8_t>& uvData, uint32_t uvPitch,

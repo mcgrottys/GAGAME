@@ -595,6 +595,7 @@ public:
     bool vrsOn = true;
     // THE IMPACTS (2026-10-25): the record's buffer and the instant, into the constants at SetView.
     void SetImpact(const ImpactGpu& g) { m_imp = g; }
+    void SetTail(const TailGpu& t) { m_tail = t; }   // stage 2b: the tail to the far field's readers
     float keepSunGrainDeg = 0.01f, keepTideGrainM = 0.001f;
     uint64_t keepFull = 0, keepKept = 0, keepPlain = 0, keepWhy[8] = {};
     int m_keepWhySaid = 0;
@@ -652,6 +653,7 @@ private:
     void SeamTable();
     // Mirrors GlobeCb in Globe.hlsl. (Count float4 rows on BOTH sides after any edit.)
     ImpactGpu m_imp;
+    TailGpu m_tail;
     struct GlobeCbData {
         float glo[4];
         float camAbs[4];
@@ -739,6 +741,13 @@ private:
         // the END on both sides.
         float impA[4];
         uint32_t impU[4];
+        // STAGE 2b (gTailA..gTailB; sim/ImpactGpu.h TailGpu, shaders/TailRead.hlsli): the tail's chart and
+        // textures for the far field. Appended at the END on both sides.
+        float tailA[4];
+        float tailE[4];
+        float tailN[4];
+        uint32_t tailU[4];
+        float tailB[4];
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {

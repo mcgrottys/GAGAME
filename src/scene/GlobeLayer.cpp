@@ -2566,6 +2566,21 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.impU[0] = m_imp.slot;
     m_cb.impU[1] = m_imp.events;
     m_cb.impU[2] = m_cb.impU[3] = 0u;
+    // STAGE 2b (SetTail): the tail's chart and textures to the far field's readers
+    for (int i = 0; i < 3; ++i) {
+        m_cb.tailA[i] = m_tail.up[i];
+        m_cb.tailE[i] = m_tail.east[i];
+        m_cb.tailN[i] = m_tail.north[i];
+    }
+    m_cb.tailA[3] = m_tail.R;
+    m_cb.tailE[3] = m_tail.ds;
+    m_cb.tailN[3] = m_tail.dt;
+    m_cb.tailU[0] = m_tail.hSrv;
+    m_cb.tailU[1] = m_tail.bedSrv;
+    m_cb.tailU[2] = m_tail.cells;
+    m_cb.tailU[3] = 0u;
+    m_cb.tailB[0] = m_tail.exag;
+    m_cb.tailB[1] = m_cb.tailB[2] = m_cb.tailB[3] = 0.0f;
     m_cb.colA[0] = m_colScale;
     m_cb.colA[1] = m_colBias;
     m_cb.colA[2] = m_cb.colA[3] = 0.0f;
