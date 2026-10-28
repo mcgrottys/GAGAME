@@ -675,6 +675,7 @@ private:
         bool sparse = false;
         uint32_t px = 0, py = 0;                // a patch: the event's cell (the probe reads there)
         uint32_t qx[6] = {}, qy[6] = {}, qn = 0;   // ...and the cells along the line from it to the anchor at kProbeKm (the convergence probe)
+        bool probesSaid = false;                // their ground distances printed once
         GpuTexture stats;                       // its tile statistics (CsSweTileStats on the departure)
         std::vector<uint32_t> freshH, freshF;   // tiles mapped since its last batch: cleared, bedded, rested
         std::vector<double> dryFor;             // per tile: how long quiet (the release's hysteresis)
@@ -701,7 +702,8 @@ private:
     double m_patchCellsPerLip = 8.0;
     float m_dampH = 0.0f;                                                              // the linear damping's e-folding time (h); 0 = none
     float DampOf(float dt) const { return m_dampH > 0.0f ? std::exp(-dt / (m_dampH * 3600.0f)) : 1.0f; }   // the factor a substep of dt applies
-    static constexpr double kProbeKm[6] = {300.0, 600.0, 1200.0, 1800.0, 2400.0, 3000.0};   // the convergence probes' distances on the chart
+    static constexpr double kProbeKm[6] = {300.0, 600.0, 1200.0, 1800.0, 2400.0, 3000.0};
+    bool m_lineProbesSaid = false;   // the line's probes' ground distances, printed once (the chart's km are not the sphere's)   // the convergence probes' distances on the chart
     std::function<double(double, double, double)> m_tailLevelAt;
     hal::Resource m_heightArr = nullptr, m_resMapArr = nullptr;   // the stack's page views, for a level made later
     uint32_t m_heightMips = 1;

@@ -2643,9 +2643,9 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
             for (size_t i = 0; i < m_imposed.size(); ++i) if (m_imposed[i]) last = int(i);
             if (last >= 0 && size_t(last) < m_impacts->Events().size()) {
                 const scene::ImpactProps& ep = m_impacts->Events()[size_t(last)].props;
-                for (auto& Lp : m_lv) {
+                for (auto& Lp : m_lv) {   // the event's patch too, at the same points: a tile it does not hold prints --
                     Level& L = *Lp;
-                    if (L.patch || L.fresh) continue;
+                    if (L.fresh) continue;
                     double axd = 0.0, ayd = 0.0, sxd = 0.0, syd = 0.0;
                     L.dom.CellOf(m_dom.latC, m_dom.lonC, axd, ayd);
                     L.dom.CellOf(ep.lat, ep.lon, sxd, syd);   // the chart's inverse holds beyond the rectangle
@@ -2653,22 +2653,40 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
                     if (D <= 0.0) continue;
                     Plane hL, bL;
                     bool read = false;
-                    std::string pts;
+                    std::string pts, said;
                     for (const double km : {2.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0, 640.0, 1280.0}) {
                         const double f = km * 1000.0 / D;
                         if (f > 1.0) break;
                         const double x = axd + (sxd - axd) * f, y = ayd + (syd - ayd) * f;
                         if (x < 0.0 || y < 0.0 || x >= double(L.nx) || y >= double(L.ny)) break;
+                        if (!m_lineProbesSaid) {   // THE CHART'S KM ARE NOT THE SPHERE'S (its cells shrink to 0.44 of their size far out): each point's ground distances, once
+                            double pla = 0.0, plo = 0.0;
+                            L.dom.LatLonOf(std::floor(x) + 0.5, std::floor(y) + 0.5, pla, plo);
+                            const double la0 = m_dom.latC * kSweD2R, lo0 = m_dom.lonC * kSweD2R, la1 = pla * kSweD2R, lo1 = plo * kSweD2R;
+                            const double hv = std::sin(0.5 * (la1 - la0)) * std::sin(0.5 * (la1 - la0)) + std::cos(la0) * std::cos(la1) * std::sin(0.5 * (lo1 - lo0)) * std::sin(0.5 * (lo1 - lo0));
+                            const double fromAnchor = 2.0 * m_dom.R * std::asin(std::sqrt((std::max)(hv, 0.0)));
+                            const double fromStone = m_impacts->Events()[size_t(last)].wave.DistanceM(pla, plo);
+                            snprintf(buf, sizeof buf, " %.0fkm = %.0f km from the anchor, %.0f from the stone (%.3f N %.3f E);", km, fromAnchor * 1.0e-3, fromStone * 1.0e-3, pla, plo);
+                            said += buf;
+                        }
                         if (!read) { readLevel(L.h, L.state, hL); readLevel(L.bed, L.state, bL); read = true; }
+                        if (!L.h.IsResident(uint32_t(x) / L.h.TileW(), uint32_t(y) / L.h.TileH())) {
+                            snprintf(buf, sizeof buf, " %.0fkm --", km);
+                            pts += buf;
+                            continue;
+                        }
                         float hk = 0.0f, bk = 0.0f;
-                        if (!at(hL, uint32_t(x), uint32_t(y), hk) || !at(bL, uint32_t(x), uint32_t(y), bk) || bk >= 0.0f) continue;
+                        if (!at(hL, uint32_t(x), uint32_t(y), hk) || !at(bL, uint32_t(x), uint32_t(y), bk)) continue;
+                        if (bk >= 0.0f) { snprintf(buf, sizeof buf, " %.0fkm land", km); pts += buf; continue; }
                         snprintf(buf, sizeof buf, " %.0fkm %+.3f", km, hk + bk);
                         pts += buf;
                     }
+                    if (!said.empty()) Log("[swe] the line's probes on %s, on the ground:%s", L.name.c_str(), said.c_str());
                     if (pts.empty()) continue;
                     snprintf(buf, sizeof buf, "  %s toward the stone:", L.name.c_str());
                     line += buf + pts;
                 }
+                m_lineProbesSaid = true;
             }
         }
         for (auto& Lp : m_lv) {
@@ -2683,6 +2701,22 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
                 snprintf(buf, sizeof buf, "  %s at the impact %+.1f (bed %.0f; %zu tiles)", L.name.c_str(), bb < 0.0f ? hh + bb : 0.0f, bb, L.list.size());
                 line += buf;
                 // along the line to the anchor: the departure where the level holds water (a tile it does not hold reads 0, bed 0)
+                if (L.qn > 0 && !L.probesSaid) {   // the chart's km from the stone are not the sphere's: each probe's ground distances, once
+                    std::string said;
+                    for (uint32_t k = 0; k < L.qn; ++k) {
+                        double pla = 0.0, plo = 0.0;
+                        L.dom.LatLonOf(double(L.qx[k]) + 0.5, double(L.qy[k]) + 0.5, pla, plo);
+                        const double la0 = m_dom.latC * kSweD2R, lo0 = m_dom.lonC * kSweD2R, la1 = pla * kSweD2R, lo1 = plo * kSweD2R;
+                        const double hv = std::sin(0.5 * (la1 - la0)) * std::sin(0.5 * (la1 - la0)) + std::cos(la0) * std::cos(la1) * std::sin(0.5 * (lo1 - lo0)) * std::sin(0.5 * (lo1 - lo0));
+                        const double fromAnchor = 2.0 * m_dom.R * std::asin(std::sqrt((std::max)(hv, 0.0)));
+                        double fromStone = 0.0;
+                        for (size_t i = 0; i < m_imposed.size() && i < m_impacts->Events().size(); ++i) if (m_imposed[i]) fromStone = m_impacts->Events()[i].wave.DistanceM(pla, plo);
+                        snprintf(buf, sizeof buf, " %.0fkm = %.0f km from the stone, %.0f from the anchor (%.3f N %.3f E);", kProbeKm[k], fromStone * 1.0e-3, fromAnchor * 1.0e-3, pla, plo);
+                        said += buf;
+                    }
+                    Log("[swe] %s's probes from the stone, on the ground:%s", L.name.c_str(), said.c_str());
+                    L.probesSaid = true;
+                }
                 for (uint32_t k = 0; k < L.qn; ++k) {
                     float hq = 0.0f, bq = 0.0f;
                     if (!at(hP, L.qx[k], L.qy[k], hq) || !at(bP, L.qx[k], L.qy[k], bq)) continue;

@@ -1951,7 +1951,14 @@ overwash's thin films (58-257 m/s in the hour the train is ashore; the step fall
 budget still covers a 2 s frame many times): not a blow-up, not the step starving. The first clip's rail
 (`impact_shore.json`) stood in the marsh behind the dune, where the sea is a strip at the horizon and the arrival
 reads as the marsh flooding at 0:12-0:18 -- the wave Mark could not find at 0:58 had passed forty minutes before;
-`scenes/rails/impact_shore_face.json` stands over the beach face looking the bore in the eye.
+`scenes/rails/impact_shore_face.json` stands over the beach face looking the bore in the eye. AND THE RAIL'S EYE WAS
+NEVER WHERE IT SAID: a lat/lon key resolved in the root's tangent frame (already a root pose) and was then carried
+place-to-root like a compass key, so every lat/lon rail eye stood off by the place's offset in the root -- 2 km west
+and 3 km south at the Merrimack (the log's `[space] ... the scene's place ... is at (-2005, -1, -3022) m in it`
+against the logged eye, three clips, the same offset) -- in the marsh behind the island for every shore clip since
+the rails took lat/lon keys. Fixed in `Rail::KeyMotor` (`RootMotorOf`: the orbit spelling is the planet's own, the
+compass and motor spellings are the place's and carried). The views' own lat/lon eye (`ViewEyeOrbit`) never carried
+and stood right.
 
 *Stated, not built:* the telescope's intake of a train from the tail (the line's x13 between 225 km and the
 window's edge: where, by the per-level probes); the window's fine/coarse interface in the levels' manner (the fine
