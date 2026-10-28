@@ -1150,6 +1150,870 @@ and the two processors read the bed's slope from different caches (the hull's He
 resident chain). So the fall's shape, the jet's parabola or the roller's slope, differs between them. A boat
 there is aground. The fix is one bed for both readers (the residency read of 2026-10-23, "two beds").
 
+### 12.16 The storm bar and the one text (2026-10-25)
+
+See docs/WATER_LAWS.md: the flat bar under the 3 m storm was the action transport dropping every ray
+convergence as a crease (80.9 % of the swell), fixed by conserving action (kSolverVersion 15); the solved
+field is no longer sheltered twice (the exposure page is the cascades' closure); and every closed-form law
+of the water is one text under `shaders/laws/`, compiled by the kernels and by `WaterTerms.h`.
+
+## 13. The asteroid (2026-10-25, Mark: "a massive impact in the middle of the Atlantic; two recordings")
+
+Built on PR 109's branch the evening the laws became one text. Section 6's ladder said how a tsunami
+reaches Newburyport; this is its first rung as ONE LAW with no stepping, and the two eyes Mark asked for.
+
+### 13.1 The law (`shaders/laws/Impact.hlsli`, one text for the GPU and the CPU)
+
+Ward & Asphaug (2000, 2003): the impact is a transient CAVITY, a parabola of depth D_c and radius R_c
+with a lip out to R_D = √2 R_c holding its water (net volume nought); its evolution is linear dispersive
+theory over a basin of one depth h0:
+
+    η(r, t) = ∫₀^∞ F(k) J₀(k r) cos(ω(k) t) k dk,     ω² = g k tanh(k h0),
+    F(k)    = D_c [ R_D J₁(k R_D) / k − 4 J₂(k R_D) / k² ]      (the lipped parabola's Hankel transform)
+
+evaluated as a SUM over a table of wavenumbers the host builds once (`sim/ImpactWave.h`: n terms from
+0 to 12 / R_D, A_n = F(k_n) k_n Δk). It holds at every r and t: the cavity at t = 0, the first ring,
+the dispersive train behind it. The discrete sum's image returns at r = 2π/Δk, so the terms follow from
+the REACH the scene asks (`reachM`, 6000 km by default): n = 12 reach / (π R_D), at most 4096 -- 880 for
+the 10 km impactor, 1600 for a 1 km one, 4000 for 300 m. (512 terms held a 1 km impactor's sum to
+3900 km only, and the image's wave stood at the Merrimack, 2625 km out, before the front: the numpy
+check showed ±50 m at the faces an hour early. The terms are the law's cost, a vertex and a texel each.) Near land the wave shoals by Green's law from h0 to the depth
+there, BOUNDED by the shore's saturation with one odd smooth law, a = b tanh(G η / b), b = γ h / 2
+(`Breaking.hlsli` kGammaHs: Hs ≤ γ h): a linear reader's wave stands no taller than a breaking one,
+and the solver's columns say the rest. The first bound was the depth itself; from orbit a trough at
+−h drained the coarse globe's banks to their bed and drew them as sea floor (the slabs of the first
+clip).
+
+The cavity from the impactor: the diameter by the pi-scaling form (Schmidt & Holsapple; Collins, Melosh
+& Marcus 2005 for rock) with its constant FITTED to W&A 2003's published case (1100 m, 2.2 g/cc,
+17.8 km/s → 18.9 km across: C = 1.374); the depth by the energy argument (9.4 % of the impactor's
+kinetic energy as the lipped parabola's potential energy π ρ g D_c² R_c² / 3), capped at the ocean's
+depth. Checked in numpy against W&A's figures for 1950 DA: 14 m at 800 km after an hour (×4.7 by
+Green's law to a 25 m beach: their "120 m from Cape Cod to Hatteras"), 3–5 m at 2800 km (their "about
+9 m mid-ocean"). The Bessel functions are Abramowitz & Stegun's polynomial forms, 5e-8 absolute,
+checked against the integral definition.
+
+### 13.2 The record of events (Mark: "a player or some director can cause impacts at will")
+
+An impact is an EVENT -- an impactor, where it lands, the instant it does -- and the water carries a
+RECORD of them (`sim/ImpactField.h`), appended to at any instant: the scene's `impacts` list at boot
+(each with its own `at`, or the water clock's first instant), the I key at the point under the cursor
+(`sea.impactor`, at the clock's instant; the globe's sea-level sphere from altitude, the ground below
+it), and anything else that holds the field. Each event keeps its own clock zero and its own table;
+the CPU sums every event's law, and the GPU readers sum the same tables from ONE buffer the field
+packs when the record changes (a header of eight words an event -- direction, zero on the record's
+base, basin depth, exaggeration, its terms' place and count -- then the terms; `shaders/ImpactRead.hlsli`
+reads it in the globe's vertex stage and the bank kernel, through the bindless uint buffers). A
+retired buffer lives until the run ends: the frames in flight read it. The record is replayable: a
+second player handed the same events sees the same sea. Hot-reloading the list is not here (a new list
+element is "needs a restart" to the scene reload, by its own law); the key is the live path.
+
+The exaggeration is applied to the DEEP wave before the shoaling's bound, so a wave over a shelf
+stands no taller than the shelf's water whatever the exaggeration: the first orbit clip exaggerated
+after the bound and drew the Gulf of Maine's banks as flat slabs ten times their depth.
+
+### 13.3 Where the law is read
+
+| reader | how |
+|---|---|
+| the hull, the twin | `WaterManager` Level producer `impacts` (SUM with the tide); `ImpactField::EtaAt` sums every event's wave with the depth from the height stack |
+| the solver's open faces | `SweSolver::SetLevelSource`: tide + the impact's level shoaled to the face's depth by Green's law UNBOUNDED (the solver is the nonlinear reader; the saturation bound is the drawn far field's and the hull's -- bounded, the asteroid's surge at the Merrimack's faces was six metres and the town stayed dry); the solver carries it inland and over the land |
+| the bank kernel (`CsBankFill`) | the same tables from the record's buffer (`ImpactRead.hlsli`); the texel's lat/lon (`TilePlace`) as a direction, the sum, the shoaling — added to the atlas level wherever the solver is silent |
+| the globe's vertices (`GlobeMesh.hlsl`) | `ImpactAt(dir, depth)` past the rings: the level, and the slope east/north into `VsOut.imp`; inside the rings the bank's level plane carries it |
+| the far sea's pixel (`WaterPixelColor`) | the level and the normal's tilt from `imp` past the rings (inside them the ring's slope) |
+
+`exag` exaggerates the DRAWN wave alone (the globe and the bank); the hull and the solver read it raw.
+The sum costs n Bessel evaluations a vertex and a texel per event (512 terms by default), nothing while
+no event has begun.
+
+### 13.4 The two scenes
+
+* `scenes/demos/impact_orbit.json` + `scenes/rails/impact_orbit.json`: 10 km at 20 km/s into 35 N
+  42 W at 15:00Z, the clock at 240×, the eye 3000 km over the cavity then west with the wave; the
+  drawn wave 10×. The cavity is 110 km across and 4000 m deep (the energy says 31 km: the ocean caps
+  it); 2.95e22 J ride the wave.
+* `scenes/demos/impact_newburyport.json` + `scenes/rails/impact_shore.json`: the same event; the first
+  wave reaches the Merrimack's mouth (2625 km) 3.68 h after it at √(g h0), 18:41Z; the scene starts at
+  18:20Z and runs 30× from the Plum Island dune by the north jetty, then up to 400 and 900 m over the
+  river. No exaggeration. By the law the faces see ±12 m before the front and hundreds of metres at it
+  (Green's law ×4 from the deep train's ±200 m): a 10 km impactor drowns everything in this window.
+* `scenes/demos/impact_newburyport_1km.json`: the same shore and instant under a 1 km impactor (1950
+  DA's class, Ward & Asphaug 2003): tens of metres at the faces, the dunes and the low town under, the
+  high ground standing -- the water washing over the land in view, which Mark asked to see.
+* `scenes/demos/impact_descent.json` + `scenes/rails/impact_descent.json` (Mark: "like the orbit one but
+  two minutes, the orbit going all the way down to a bird's eye view following the waves crashing onto
+  land"): the 1 km event on ONE clock at 170×, so the front reaches the mouth at 78 s of 120 and the
+  train's peak near 106 s, the eye 40 km over the inlet to meet it and 3 km over Plum Island through the
+  peak. The solver's window is on; the drawn far wave 10×, the solver's water raw. It was the 10 km
+  event at 130× first: the solver's step collapsed to nothing at that surge (a face velocity of 92 km/s
+  in the log; the same event at 30× it survived at 350 m/s) and the record ended on a dry shore.
+
+### 13.5 The rolling wave on the coast (Mark, 2026-10-26: "if the impact is big enough")
+
+A surge's front over the marsh is a BORE: a hydraulic jump marching inland. Two things make it a wave to
+the eye, its whitewater and its face. The whitewater is one law (`Breaking.hlsli` BoreFoam): Belanger's
+jump from a column h1 to a column h2 loses the head (h2 − h1)³ / (4 h1 h2), and against the deeper
+column's own head that loss is the share of the water's energy turned to turbulence — nought at a tide's
+creep (Δh³ over metres of water), whole at a surge's wetting front. The bank kernel reads the solver's
+columns a cell behind and a cell ahead along the flow and takes that fraction into the foam, ungated by
+the drawn sea's crests (it is not one of them); the churn remembers it and the pixel stage textures it
+as every foam. The face is the solver's own (its shock spans two or three cells), and it ROLLS by the
+same crest law as every crest (Mark: "feed the bore's face into the column plane so the surge's front
+overturns"): the bank kernel makes a crest of the front — its elevation across the front as the crest's
+eta about the mid-height, its half-jump the significant amplitude, three cells the wavelength, the jump
+over the depth's limit in the water ahead its excess, the bed's slope along the flow by the same height
+chain the cascades read — and `CrestLaw` throws its labels: to the cusp at the top of the face, down the
+face as the roller where the bed is flat (the marsh: spilling), into the flight where the bed is steep
+(the dune: plunging). The throw is added to the sheet's own displacement; the column plane folds where
+the labels overtake and MsLip draws the lip. No law of the land (Mark: "the voxels should get pushed and
+pulled along the topology like an extension of the seabed"): the bed is one surface and the columns
+ride it, and a creeping sheet throws centimetres. Not mirrored on the CPU twin yet: the hull rides the
+solver's level, not the bore's throw.
+
+What the clips of 2026-10-26 showed, stated: no rolling face yet, at any of four events. The mid-Atlantic
+1 km event rises at the Merrimack over minutes and floods the marsh as a thin tongue (a wetting front over
+dry ground has no face: a dam-break's tongue); the same impactor 800 km out swings the sea side −110 to
++130 m and swallows a 15 m eye; a 500 m one 800 km out (`impact_bore.json`, the eye 80 m over the jetty
+looking to sea) raises the sea +5 to +23 m over ten minutes in swings of a few metres, each crest of the
+train a kilometre long with a slope of a hundredth: nothing the crest law throws far. A bore steepens
+over a LONG shallow run (a river's tidal bore, the Qiantang's); this window's shelf is five kilometres,
+and the train's crests reach its faces as long gentle rises. The rolling face wants the shelf rung (the
+Gulf of Maine at 250 m, section 6's rung 2) carrying the train in nonlinear shallow water until its
+crests shock, and the window's faces fed by that. The mechanism at the face is ready for it.
+
+### 13.6 The shelf rung (2026-10-26, Mark: "build the shelf rung")
+
+Section 6's rung 2, as the engine already had the pieces: a second solver window over the Gulf of Maine
+(`solvers` in the scene: 1600 × 1150 cells of ~260 m from 41.75 N to 44.6 N, 71 W to 66 W, the entrance
+station's tide), asleep until the eye comes under 30 km inside its box, its bed the one height tree at its
+own level (Mark: "coarse and fine heights should be part of the same mega mega-texture" — the standing
+window where the page holds its cells, the tree's coarser levels elsewhere; no second bed, no coarse cache
+of its own; the bed before the water, as finding 48 has it). Its open sea rides the atlas plus the
+asteroid's wave by Green's law to the depth there (`WaterManager::SetLevelDeparture`), unbounded: at the
+Gulf's mouth that is ×2 of the deep wave over 200 m of water, and from there the solver's own nonlinear
+shallow water carries the train 120 km across the Gulf, shoaling and steepening it. The Merrimack window's
+faces read the shelf's level (`WaterManager::OwnedLevelAt`, from a region about the window the frame loop
+asks for every frame; a demanded owned window steps on the frame), the analytic wave only where no shelf
+answers. One-way nesting, level alone (no transport yet). The owned solver takes the scene's step budget.
+
+Its faces take the BOUNDED law (the shore's saturation): the box's landward sides cut coastal water, and
+Green's law unbounded into a few metres of depth forced those faces by ten times the deep wave and blew
+the solver up (820 m/s on 250 m cells; the Merrimack's faces, fed that noise, followed). At the Gulf's
+mouth, 200 m deep, the bound stands far above the wave. Newburyport's station carries no NAVD88 link in
+the tide data, so the window rides Boston's.
+
+Stated: the shelf activates on the first frame, after the Merrimack's own spin-up, which therefore ran on
+the analytic wave; the shelf spins up `water.swe.spinupH` before the start, so a scene starts after the
+train has entered the Gulf (the bore scene: the 500 m impactor's front enters at 15:50Z, the scene starts
+16:45Z with a 1.5 h spin-up). The bank kernel's far field outside the Merrimack window still draws the
+bounded analytic wave, not the shelf's level: a seam at the window's edge in the drawn sea.
+
+What the bounded take showed (05:30, 2026-10-26): the shelf solver stable (a 1.5 s step, 8 m/s at 450 m of
+water), and the Merrimack's sea side fed ±30 to ±60 m by the train it carried, the four points along the
+face reading a crest crossing obliquely; the Merrimack solver answering with 90 m of water in the inlet and
+190 m/s at its front. The picture from 80 m over the jetty does not yet read as a rolling wave: the sea
+rises and falls as a whole under a fixed eye with a five-minute period, the ordinary swell's striations
+dominate the sheet at that height, and the bore's throw (a cusp's length, 1/k ≈ 13 m) is a line from
+there; the whitewater shows as patches. The eye for the roll is a few metres over the bar in the seconds
+the face arrives, with the column plane at ring 0 under it — a rail timed to the train's crests, which the
+instrument now prints a minute apart. The physics of the rung is in place.
+
+### 13.7 What is not in this rung, stated
+
+* One depth for the propagation (the dispersion's h0): the shelf's slower speed and its refraction
+  (rung 2, the eikonal per frequency) are not here; the arrival at Newburyport is the deep-water
+  clock's, early by the Gulf of Maine's share. Green's law takes the depth's effect on the AMPLITUDE
+  only.
+* The cavity's cliff at R_D (the lip's edge) is under-resolved by the table (Gibbs ringing in the
+  cavity's own profile at t = 0: ±8 % of D_c); the far field is unaffected.
+* No reflection, no refraction, no breaking at sea: linear theory, as W&A's.
+* The classifier on the globe past the solver reads the raised level as the waterline (the coarse
+  globe's coast moves with the wave): the inundation picture from orbit is the mesh's, not a solver's.
+  Inside the solver's reach the survey's shoreline used to stand under 18 m of water (the mesh drew
+  teeth along the river: land vertices at their height beside water at the flood's). Mark, 2026-10-25:
+  "think of the water layer as always being a global sparse voxel tree; we might not have water in all
+  of its places, but it's there for water to flow into" -- land is a column with no water in it, and
+  the survey names the shore's shape at its datum, not the water now. So the classifier takes THE
+  COLUMN'S OWN ANSWER wherever a ring texel holds one: the bank's detail plane carries each column's
+  water weight (`DryWeight` of the solver's surface over the bed where the solver speaks), the mesh
+  hands it to `ComposedLandnessEdit` (`columnWet`; the pixel through `VsOut.colWet`), and a column
+  holding water is water whatever the survey said, with no band (a first cut used a 3 m band; Mark:
+  "why more than 3 m? we have everything designed to be sparse"). One direction only tonight: a
+  column's emptiness does not make land of the survey's water, because past the solver's domain the
+  bank's weight is the coarse bed's against the tide and the bank carries no domain weight to tell
+  the two apart. Next: the solver's domain weight in the bank, so the column decides both ways where
+  it is stepped, and the stateless column (tide over bed) past the rings.
+  Mark, on the classifier itself: "why do we care about wet/dry other than the visual look of wet
+  sand?" -- the answer is that today three things read it (which height a vertex takes, which shading
+  runs, the swash band), and under the column law the first two are the column's depth (the drawn
+  surface is max(bed, surface); the shading is whether the column holds water here) and only the third
+  is visual, a memory on the column like the foam's. The classifier is to collapse to that.
+* The solver STARVED at 30x: `SweSolver::kMaxSubsteps` (16 a frame since M5) is the budget past which
+  its clock re-anchors and its dynamics run time-dilated -- the surge rose at its faces at the scene's
+  rate and the water inside answered at a fraction of it, so the first beach clips stayed dry through a
+  600 m surge (the probe with the spin-up's batch, which steps whole, drowned the eye). The budget is a
+  scene value now (`water.swe.stepsPerFrame`): the beach records say 256, the descent 512.
+* A face point on land (the side's cubic asks four points; a window's corner can be land) took Green's
+  law at the depth floor, ×12.8: −1400 m at the north side's west end. A point with no water column
+  takes the deep wave as it is.
+* A small cavity's train peaks well after the √(g h0) front: the 1 km impactor's deep wave at the
+  Merrimack is 1 m at 3.7 h, 3 m at 4.0 h, 9 m by 5.2 h (the dominant 60 km wavelength's group speed
+  in 4000 m is 0.9 of the long-wave speed); a 512-term table (alias at 3900 km) had shown ±50 m at
+  3.3 h, the image's wave. The 1 km beach scene starts at 19:45Z.
+* THE SOLVER UNDER A SURGE FAR TALLER THAN ITS WATER: the 10 km event's faces rise hundreds of metres
+  over a 15 m column; at 30× the scheme carried it (velocities to 350 m/s, the step 0.012 s), at 130×
+  its step collapsed to nothing (92 km/s at a face) and the water never moved. The Flather face's flux is
+  positivity-clamped; the blow-up is inside. The open item for a forcing of that class; the 1 km event
+  (tens of metres at the faces) is carried at both clocks.
+* The wave solve re-keys on the solver's current every `water.swe.currentRefreshS` (90 s since F13): a
+  scene run at 30x re-solved 46 times in an hour of record, each a three-minute solve a headless
+  capture waits for. The beach scene holds the first current for its length; the cadence is a scene
+  value now.
+
+## 14. One water on the tree (2026-10-26, Mark: "big refactor time ... we deviated from the Cayley structure that would allow better water simulations at fine and coarse scale without ad hoc solvers")
+
+### 14.1 The deviation, named
+
+SPARSE_GA.md's own tests: the type IS the algebra (a product's grades from the Cayley table, at compile
+time); a product's residency comes from the Cayley closure, `And(algebra, physics)`; one reserved
+resource with mips, so that ZOOM CHANGES WHICH TILES ARE RESIDENT, NEVER WHICH CODE RUNS; the packed
+tail pinned as the floor a miss cannot fall through. The wave field passed into that structure (stage 2,
+byte-identical). The water's solvers did not:
+
+| piece today | how it deviates |
+|---|---|
+| `SweSolver` on a fixed lat/lon box (`water.swe.box`), its sponge, its Flather faces at the box's edge | a dense window where the tree has levels; the box is a policy, not residency; the open sea is a special case at a line the scene drew |
+| the dormant windows (`solvers`), `AddDormantWindow`, the activation altitude | more boxes, awake by a camera rule, each its own bed binding and tide station |
+| the shelf rung of 13.6: `SetLevelDeparture`, `OwnedLevelAt`, `RequestRegionOwned` | one box nested in another by a level lambda and a per-frame region; level alone; a seam the bank cannot see |
+| the impact's Bessel sum + Green's law at every reader (13.1-13.3) | an analytic law stitched to the solvers at their faces, bounded here and unbounded there, with a second shoaling (Green) the solver would do itself |
+| the bank kernel's level: `lerp(atlas + impact, solver, wDom)` | the stitching, drawn |
+
+Every edge case of 13.4-13.6 (the starving budget, the bound at the coastal edges, the land point's
+Green factor, the spin-up order, the station's datum link, the seam at the window's edge) is a seam
+between two of these. The structure that removes them is the one the rest of the engine already stands
+on: the column field on the tree, one law at every level, residency as the extent.
+
+### 14.2 The object
+
+**The column field.** One `GradeBank` on the planet's tree, mipped, the one reserved resource: per cell
+the water the column holds, h (grade 0), and its discharge, q = h v (grade 1). Two grades in one bank
+(SPARSE_GA.md 7: many GA objects per body; the current-field loader already carries a vector). The bed B
+is the height tree at the same cell (the same mega-texture: "coarse and fine heights should be part of
+the same mega mega-texture"); the level eta = B + h is an EXPRESSION, never stored (`Field<kG0> + Field<kG0>`);
+wet is h > 0, the classifier of 13.4 become the datum itself. A NULL tile is absence: no column there
+holds water the tree knows of, and the stateless sea answers (the tide atlas over the bed); the pinned
+tail guarantees every point resolves.
+
+**The law.** Shallow water in geometric calculus on the column field, written once:
+
+    dh/dt = -div q
+    dq/dt = -div(q q / h) - g h grad(B + h) + F
+
+with grad and div the vector derivative on the tree (`GradExpr<kG0>` is a scalar's gradient; the
+expression algebra already types it), F the forcing (wind stress, the waves' push -div S of 12.3, the
+rivers' discharge as sources at their cells, the soil's intake as a sink). The KERNEL BODY is
+`Swe.hlsl`'s as it is (Stelling & Duinmeijer's momentum advection, the hydrostatic face depth,
+positivity by the donor's water, wetting and drying, the soil), run over the RESIDENT LIST of a mip, as
+every `GradeBank` fill is (a fill dispatches from `ResidentList()`, never over the full domain). The mip
+is the scale: a cell at mip m is 2^m of the finest; its step is its own CFL; a coarse mip takes one step
+while the mip under it takes two (Berger & Oliger's subcycling, the standard of adaptive shallow water:
+GeoClaw, TRITON-G's tree refinement). The same code at every altitude.
+
+**The faces between levels are the tree's own laws** (HIERARCHY.md 4.20, the five relative laws): a
+coarse face bordering fine cells takes the SUM of the fine faces' fluxes (the fold: conservative
+restriction); a fine face bordering a coarse cell reads the coarse state magnified (the magnify law);
+the state of a coarse cell under fine ones is their sum (the fold again, after each fine step). No
+Flather face inside the resident set. The ONE boundary is the frontier of residency, wherever the
+resident set ends, at whatever level, and there the neighbour is the stateless sea: the Flather law
+once, written against the atlas's level and transport at that point. It is the same Flather the window
+has today; what changes is where it stands (the frontier, not a box) and that it is the only one.
+
+**Residency is the extent.** `DeriveDemand` as SPARSE_GA.md 13 has it, `And(algebra, physics)`: the
+algebra bounds where h can be non-zero (a column whose bed stands over the stateless level and holds
+nothing is NULL); the physics says which of the inside is carried at which mip: the eye's demand (fine
+at the inlet, as the tiled atlas asks for texels) and THE WATER'S OWN (a step asks for the cells its
+fluxes will reach next step: 12.3's "residency follows the water", now the law of extent, not a window's
+growth), so a tsunami's front demands its residency ahead of itself at the mip its wavelength needs.
+The pinned tail is the planet's water at the coarsest mips, always resident and always stepping: the
+basin solve is free, and nothing arrives from nowhere.
+
+**The sources are initial conditions and forcing, not solvers.** The impact of 13 becomes the cavity
+IMPOSED on the column field at t0 at the mip its radius needs (R_D over 8 cells), and the law carries
+it; the Bessel sum stays as the dispersive CHECK of the far field (the Hankel law is exact linear
+theory; shallow water is not dispersive: a 10 km cavity's train loses little, a 300 m one's loses the
+dispersion that spreads it; a Boussinesq term is a later grade-2 correction to F, stated, not built).
+Green's law goes: the solver shoals. The tide is the stateless fill and the frontier's exterior. The
+rivers are sources. The events' record (13.2) stays: an event writes its cavity into the field.
+
+**The readers do not change their contract.** The bank kernel, the twin, the hull, the globe read the
+column at the texel's level ("one water, two readers"): h and q where a tile is resident, the stateless
+sea where none is. The `lerp(atlas, solver, wDom)` goes, and the seam with it.
+
+### 14.3 What goes, what stays
+
+Goes: `SweDomain`'s box and sponge, `water.swe.box`, `solvers`, `AddDormantWindow`, the activation
+altitude, `SetLevelDeparture`, `OwnedLevelAt`, `RequestRegionOwned`, `SetLevelSource` as a box's
+exterior (it becomes the frontier's), the impact's readers in the bank kernel and the globe
+(`ImpactRead.hlsli`, `ImpactAt`), Green's law, the shoaling bound, `stepsPerFrame` (a mip's step is
+its CFL; the frame carries the mips it can and the rest starve honestly at the coarsest, never the
+finest), the shelf scene key. (Stage 2 took the box, `solvers`, `AddDormantWindow`, the activation
+altitude and the shelf rung's three verbs; the sponge went with the one edge law on 2026-10-27, below;
+`SetLevelSource` is the window's exterior still, the frontier's when the tail is the planet's.)
+Stays: `Swe.hlsl`'s flux and update laws, wetting and drying, the soil, the rivers' faces (as sources),
+the waves' push, the churn, the bank and its column plane, the crest law and the bore's face (13.5),
+`ImpactWave` as the source's cavity and the far field's check, the events' record, `laws/`.
+
+### 14.4 Stages, each with its gate (self-tests are a privilege: one run before, one after)
+
+| stage | what | gate |
+|---|---|---|
+| 0 | the column field as a `GradeBank` with mips over today's Merrimack extent; the kernel over the resident list of mip 0 instead of the box; the frontier's Flather at the resident set's edge (which IS the box, today) | the storm rail's `--water-probe` twin match byte for byte against today's window; the bar still |
+| 1 | mip 1 around mip 0 (the surround, the Gulf's near shelf at 2x), the fold and magnify faces between them, subcycling | the tide through the inlet: the anchor's level within a centimetre of today's; the prism by continuity closes |
+| 2 | the extent by demand: the eye's and the water's; the tail pinned and stepping; no `solvers`, no box | Boston Harbor floods with the eye there and no scene key; the wave probe at the Merrimack unchanged |
+| 3 | the impact as the cavity imposed at its mip; the train crosses in the tail's solve | arrival at the Merrimack within 10 % of sqrt(g h) from the Bessel law; amplitude at 2600 km against it within its dispersion |
+| 4 | the bore at the mouth: the front demands its own residency; the eye low over the bar | the clip Mark asked for on 2026-10-26 |
+
+Stage 0 is the one that proves the shape without changing a picture; it is where to start.
+
+**Stage 0, built (2026-10-26).** 0a: `SweSolver::m_h`, the water each column holds, is a `GradeBank` of
+grade 0 with as many mips as take the extent to one tile, in the one reserved resource; stage 0 fills
+mip 0 alone and the kernels run over its resident list as they did. 0b: the kernel's exterior is
+RESIDENCY'S EDGE, not the lattice's edge row -- `ExteriorLevel` answers for any cell no state tile holds
+(the tide plane as its level, the megatexture's bed as its sill in `FlatherFlux`), while the edge rows
+keep the side's cubic and the rivers' faces. The gate: `--dump-water-state` on the bar scene under the
+storm, 60 frames, before and after each half -- level, u, v and the shadow IDENTICAL byte for byte
+through both (the bed dump differs between any two runs: it reads the height stack at the dump's
+instant, 56,538 of 126,000 texels by up to 4.3 m, the loads' race). On this scene no live cell borders a
+NULL tile under its own surface, so the frontier never spoke; it is the law stage 2 extends the
+resident set against. Not in stage 0: the discharge as grade 1 in the same bank (the staggered faces are
+its home; stage 1 decides whether the vector lives on faces or at centres with a face reconstruction),
+the chain's reduction for h (the fold is a sum over the fine cells' water: `BuildChain` averages, so the
+coarse mips must be written by the solver's own fold, stage 1), and a frontier cell's departure beyond
+the tide plane (the impact's, the shelf's: stage 3 makes them the field's own).
+
+**Stage 1a, built (2026-10-26): the coarse twin.** Every per-cell bank carries the chain's mip 1 and the
+same kernels step the same lattice at mip 1 -- cells twice the size, the whole box resident (35 tiles),
+its own constants (the lattice halved, the faces' runs halved, the cell steps about the same anchor), its
+own lists and views (the twin's tables read the same height page: without those two SRV slots the bed fill
+wrote zeros, the first probe's lesson), half as many steps of twice the size over mip 0's interval (the
+subcycling), uncoupled from mip 0. Gate: mip 0's level, u and v byte-identical to the baseline through
+the twin's addition; the twin's level at the anchor against mip 0's, said once a sim-minute through the
+hour of spin-up under the ebb: 2 to 5 cm under mip 0 (its bed from the page's coarse mip is 6 cm deeper;
+its own faces, its own prism). That is the uncoupled coarse solve's discretization, what 1a can show; the
+centimetre gate is the coupled system's (1c, 1d), where the fine solve sets the level inside and the
+coarse only feeds its faces. The twin costs a quarter of mip 0's cells at half its steps.
+
+**Stage 1b, built (2026-10-26): the fold.** A coarse cell under four resident fine cells IS their fold
+(`Swe.hlsl` CsSweFold): the water their mean (the column's water per area), the bed their mean (so the
+level's mean follows), a face's velocity the mean of the two fine faces on it (the flux-weighted fold by
+the faces' water is 1c's). It runs each batch over the coarse tiles whose four children are resident,
+after the twin's bed fill and reset and before its steps, through a fold table per parity pair (the fine's
+newest velocity bank, the twin's read bank) that puts the fine banks at mip 0 in the kernel's read slots
+and the twin's at mip 1 in its written ones. The folded tiles are the fine's: the twin's flux kernel
+reads them (their faces to the outside are computed), its height and limit kernels leave them (stepped,
+the twin drifted 17 cm from the fine at the anchor over one batch of the spin-up's first transient, and
+2 cm after). Gate: mip 0 byte-identical; the twin at the anchor within 1 mm of mip 0 through the hour
+(the mean of four cells against the one). On this scene the fine set is the whole wet box, so the twin
+has no cells of its own yet; 1c gives the fine set's edge the coarse neighbour (the magnify) and 1d lets
+mip 0 be demand's, which is where the centimetre gate means something.
+
+**Stage 1c, built (2026-10-26): the magnify, through the chains.** A cell a mip holds no tile for is HELD
+by the mip above where its tile there is resident (`Swe.hlsl` UpLiveAt, from the mip above's live words
+on a root SRV), and its water, bed, face velocities and sea are the coarse cell's, magnified (nearest:
+the coarse value stands over its 2 x 2; HIERARCHY 4.20's magnify law). The kernels read the mip above
+through ONE ROOT TABLE OF THE CHAINS (`gHChain`, `gBedChain`, `gVelChain`, `gWaveChain`: every mip of
+each, indexed by the mip; `SweSolver::m_tableChain`, one per parity pair), since the kernel's 16-slot
+table is a mip's own views. So the fine set's edge borders the coarse water, not a frontier: the frontier
+(the stateless sea) stands only where NO mip holds the cell. The flux and velocity banks cover one cell
+past each state tile (the apron), because a face on the fine set's west or north edge is owned by the
+cell beyond it. The twin sweeps the sea at mip 1 from its own open sides; the fine set's sweeps take
+the coarse sea as their up-ray source (the fine set has no open side of its own) and its push continues
+across the edge. THE ORDER IS BERGER AND OLIGER'S: each coarse step is the fold of the fine's state,
+one step of the twin, then the fine's two steps reading the coarse neighbour the twin just advanced
+(`RecordCoarseBegin` / `RecordCoarseStep`, interleaved in `Record`'s loop). The first build stepped the
+fine's whole batch against a coarse state frozen for sixteen steps and then the twin against a fold
+frozen for eight; the probe line (the anchor, a line out to sea and across the fine set's seaward edge,
+every 30 s) showed a metre of ringing born at the last fine cells before the edge and growing to eight
+metres in the open sea before friction took it: two Dirichlet couplings alternating a batch apart. With
+the whole window fine under the same kernels the anchor matched stage 1b to the millimetre, so the
+kernel changes were sound and the interface was the fault. Interleaved, the line is quiet.
+
+**Stage 1d, built (2026-10-26): mip 0 by the eye's demand.** `water.swe.fineReachM` (0 = the whole
+window, today's): mip 0 is wanted where the water is AND within the reach of the eye's ground point
+(the spin-up's eye stands at the place's anchor; each frame's is the camera's, with `weather.Update`);
+beyond it the water is the twin's own, its fold having carried it there each coarse step, so a released
+tile's water stands at mip 1. The fine set is aligned to the coarse tiles (a 2 x 2 wanted whole, so
+every coarse tile over it is a fold and none is half its own); the boundary's tiles are kept only within
+the reach, beyond it the twin's edge rows are the box's boundary; a tile beyond the reach goes at once
+(demand, not dryness). The residency log draws the fine set a row a line. GATE (`merrimack_bar --storm
+3,10,95 --headless --frames 60 --dump-water-state --set water.swe.fineReachM=1500`, against stage 1b's
+run): 55 fine tiles of 120 (a 4 x 4 of 128-cell tiles about the inlet, the outer sea, the Sound and the
+river above Newburyport at mip 1); the anchor's level through the hour's spin-up within a millimetre of
+stage 1b's at every probe; the dump at the frames' end identical at the anchor, within 2.3 cm over the
+kilometre about it, 5.4 cm at most anywhere (beyond the reach, where the bank's readers still take the
+tide plane: they do not read mip 1 yet, stage 2's). The twin's limit kernel now runs over its whole
+lattice, the folded tiles included (measured a no-op: the dump byte-identical; the law is the honest
+one).
+
+Residuals, stated: the magnify is nearest (bilinear is a line); the fine's two steps read the coarse
+state at the end of the coarse step, not interpolated in time (first order; Berger and Oliger
+interpolate); the exchange across the edge is computed by both sides (the fine face against the
+magnified cell, the coarse face against the fold) and not refluxed, so mass across the edge is
+consistent to first order, not conserved to the bit (the fold of fluxes, 4.20's first law, is the
+next piece); the bank, the globe and the hull read mip 0 or the tide plane, never mip 1.
+
+**The sphere (Mark, 2026-10-26: "are you taking into account the spherical nature of things?").** Not
+inside the kernel. The solver's lattice is the window's equiangular lat/lon chart with ONE metre pair
+(dx, dy) for the whole box; the sphere enters at the bed (each cell's place is a direction from the
+anchor through the window's chart) and at the readers (the bank and the hull read the solver in that
+chart). Fine at 18 km; over the Gulf the east-west cell length drifts a few percent with latitude and
+the law does not know it. What maps well: the tree's laws are tile-local (fold, magnify, the frontier,
+demand) and only the kernel's metric is not; the cubed sphere (Ronchi, Iacono and Paolucci 1996; the
+lattice of MITgcm and FV3) is six quadtrees of tiles with per-cell metric terms, which is the origin
+lattice's and the cube-lattice blocks' shape already. The kernel stays one text: the metric becomes a
+per-cell face length and span the tree supplies as it supplies the bed, and Coriolis a bivector
+rotation of the face velocity. The first honest step is a per-row metric in the window; the tail of
+stage 2 (the planet's water at the coarse mips) is where the chart has to become the cube-sphere tree.
+
+**Stage 2, built (2026-10-26): the solver stands where the eye is.** No scene names a box or a solver now:
+`water.swe.box`, the `solvers` list, `AddDormantWindow`, the activation altitude, the shelf rung's one-way
+nesting (`SetLevelDeparture`, `OwnedLevelAt`, `RequestRegionOwned`) and the manager's owned windows are gone
+(`SweSolver`'s domain, `WaterManager`, `FrameLoop`, the schema; 376 lines out, 110 in). The window is
+`water.swe.windowTiles` tiles of 128 cells a side (16: 2048 cells, 28 km at the cell's 13.7 m) about the
+eye's start -- the place's anchor, where every view stands -- with its south-west corner on the GLOBAL
+LATTICE of the cell's angle, a tile's angle apart, so a place falls in the same cells whichever eye came to
+it (`Assembly.cpp`). Its bed is the one height stack at every cell, its tide focus the nearest station in
+it, its datum that station's link, its rivers whatever reaches of the world's river data cross its edge,
+its open sea the tide atlas along every edge cell whose bed lies below mean sea, the twin at mip 1 the
+whole window (the tail, pinned and stepping), mip 0 by the eye's demand within `fineReachM` (1d). The
+window's size is a budget, the tail's extent at two mips; the chain's coarse mips carrying the planet is
+what retires it, and the window following the eye in flight (re-stood about it: its bed, rivers, tide
+focus, standing window and the bank's ladder anew) is stage 2b's, with those mips -- today an eye that
+leaves the window finds the tide plane, as it did beyond the box, said once (`WaterManager::Update`).
+THE MERRIMACK (`merrimack_bar --storm 3,10,95 --headless --frames 60 --dump-water-state --set
+water.swe.fineReachM=1500`, against stage 1d's run): the window 42.683..42.936 N x -70.938..-70.686 E,
+2048 x 2048 cells, the bed whole in 0.5 s (1221 tiles), 81 fine tiles; the anchor's level through the
+hour's spin-up 10 to 14 cm UNDER stage 1d's at every probe (-1.108 against -1.0 at the hour's end, the
+plane -1.007), and the dump, where both runs' grids lie inside the fine set, 10.4 cm lower (median; 11.2 cm
+at most) -- not the kernels (1c/1d matched to the millimetre under the same kernels) but the boundary: the
+window's edges 10 km further out, the Merrimack's face 4.6 km further up the river (km 13.3, its prism
+5.36 km^2 against 3.40), the Ipswich entering on the south, the tide focus Plum Island instead of
+Newburyport (2 cm of datum). Run to run the dump is identical to the bit. Two readings of the dump that
+cost the evening: (1) 85 % of its grid read the DRY FLOOR (-0.65 under the plane) while the kernel held
+water there, because the dump's grid stands about the origin lattice's node, 2 km east and 3 km north of the
+eye, and the fine set is now the eye's 4 x 4 tiles -- beyond its reach the twin holds the water at mip 1 and
+no reader reads mip 1 (the residual stated under 1d, now visible; `SweSolver::ReadFields` says what the
+mirror holds with every read, and the dump exports the mirror and each cell's lattice cell); (2) the
+world's river composite carries a reach with no name (nhdplus 5860733) that the window's west edge now
+cuts, a nameless face with no discharge. BOSTON HARBOR (`scenes/demos/boston_harbor.json`: the anchor at
+the station, the clocks pinned, a view; no box, no station, no solver): the solver stands with no key --
+the window 42.225..42.478 N x -71.191..-70.938 E, Boston's station the focus and the datum (-1.678 m), no
+river, Flather on the atlas's level at 1525 edge cells, the twin's 64 tiles, the pin's rectangles across
+the page's seam (two, the harbour straddling u = 1 of the standing window's modulo-16384 addressing) --
+BUT THE KERNEL'S BED DID NOT LAND: the whole-bed wait maps 3 to 42 of its 1221 tiles in 60 s over 6000
+residency turns (the manager's claim m15 over the domain: nothing of slice 46 resident), while the same
+boot at the Merrimack, whose height tree is warm on disk, maps 1221 in half a second; two root loads (the
+colour's and the survey mask's, face 2) sit "in flight, never returned" from frame 1 under
+`streaming.offline`. The kernel read the cube's coarse heights instead (+33 m at Long Wharf against the
+stack's +0.5), nothing was wet, and the harbour did not flood. Moving the anchor 10 km east or north
+(scenes/debug/boston_seam*.json) changed the seam's cut (four rectangles) and the claim's progress (mip 0
+at 89 of 66049 samples, mip 3 at 5506) but not the outcome: the block is the order's at a cold place
+offline, not the seam's alone and not a water law's. The height tree's identity is the place's by design
+(the datum's offset is in it: `|norm x... -0.092`), so every new place paints cold. Stage 2's gate stood half met
+there for a night.
+
+**Stage 2, closed (2026-10-27): a cold place's bed is the cube's own level, and the solver wants what its
+kernel reads.** The block was not the seam, not the two root loads, not the order's need law, and not Google:
+it was the solver's want. A rank-2 standing window's pages hold mips 0..3 (10 m to 76 m of ground), and the
+height stack holds Boston only at its global tiers (ETOPO's 15", the 463 m tier: nothing finer is harvested
+there), so by the tree's own law (F14, `TileTree::Magnified`) EVERY page of the window is its parent magnified
+-- "known without a load", never mapped, and 1835 of them were. The kernel's read rule
+(`shaders/HeightPages.hlsli` `HpChainRead`) was already right: the standing window where it holds the cell's
+ground, the cube face by direction where it does not. But the solver's pin and its whole-bed wait asked for the
+window's slice alone, never the cube, and the wait ended only when the window's mip 0 was claimed over the
+domain -- which a place with no survey can never do; it ran to its 60 s bound while the kernel read the cube's
+root (m7, 78 km texels: +33 m at Long Wharf). Now `WaterManager::WantDomain` states the solver's want as the
+rule reads: the domain's rectangles on the standing window at mip 0 AND on the cube's faces under it at mip 0
+(`SurfaceFrame::CubeRectsLL`), the magnified law closing every tile below the own level without a load, so the
+ask lands at the own level wherever that is -- the window's pages at the Merrimack, the cube's m0 at Boston --
+and the wait ends when the order has answered every tile this reader's wants imply
+(`ResidencyManager::PendingOf(sampler, tenant)`: not held and not closed as magnified or refused; the colour's
+cold root, another reader's, no longer holds it). The bed wait's line now says what the kernel read, by slice
+kind and mip. BOSTON: the bed whole in 0.11 s (10 tiles, 16 turns; the cube's m0 over all 4194304 cells),
+17.5 % of the window below the tide, 120.87 km^2 of water joined to the sea through 1525 Flather face cells on
+the east edge, 0 km^2 unjoined at the edge, the harbour's level following the falling plane to within 5 to 9 cm
+through the hour (sea+1km -1.264 against the plane -1.320 at its end; the lag the Merrimack's sea shows too).
+The anchor's own texel, Long Wharf, is LAND at 611 m: the inner harbour does not exist at that grain, and that
+is what the tree holds, not a law -- a 1/9" tile harvested there would paint the window's pages and the same
+want would land them. THE MERRIMACK is byte-identical before and after (the window's pages win over the cube
+wherever they are resident; its bed whole in 0.48 s, 1229 tiles: the window's and the cube's column). The
+scene (`scenes/demos/boston_harbor.json`) holds the eye's start, its clocks and two views and names nothing
+(no `scene.name` either, Mark: "the only thing the scene should have about Boston is the camera's projection
+and coordinate location"). One instrument mended on the way: the flood test (`SweSolver::LogHoldsWater`)
+seeded only from the sponge of a side open along its WHOLE length and from river faces; Boston's east side is
+open on 1525 of 2048 cells, so it has Flather faces and no open side, and the instrument said "joined to
+none" of water the kernel had joined. Its seeds are now where the sea continues past the edge: the sponge's
+columns of a whole-open side, the Flather face cells elsewhere (`SweDomain::Bound`). Still open, not the
+water's: the colour's and the survey mask's face-2 root paints never return under `streaming.offline` (two Io
+threads of twelve for the run); a side open on most but not all of its cells gets faces and no sponge (the
+open-side law is whole-side -- made one law the same day, below). Stage 2's gate is met: the solver by demand
+with no key, the cold place flooding on what the tree holds, the Merrimack unchanged.
+
+**The edge is one law (2026-10-27, Mark: "make the open-side law one law for a side open on part of its
+cells").** Until this date the window's boundary had three laws: a side was *open* when every cell of it lay
+under +1.2 m NAVD88 and no river entered there (its every cell a Flather face on the Level, and an offshore
+sponge standing on it); on any other side only a cell whose bed lay below mean sea was the sea's; the rest were
+walls. Boston's harbour mouth, open on 1525 of 2048 cells of the east edge, had no open side. Now every edge
+cell with a bed that no river face holds is the stateless sea's exterior, pinned to the Level along its side
+(`Swe.hlsl OceanSideOf`, `SweDomain::SeaEdgeCell`): it holds the water that Level stands over its bed and none
+where the Level is under it (`CsSweHeight`), and its faces to the interior are Flather. That is the law
+residency's frontier already had (stage 0b: the tide plane over the megatexture's bed), standing at the
+lattice's edge too: a channel the edge cuts fills and drains with the sea and a dune at the edge stands over
+it, each instant, with no side open and none a wall. Gone with it: `openSides`, the sponge and
+`water.swe.sponge`, the whole-side test, the kernel's bitmask (its cbuffer slot kept as `gUnused0` so `gFaceA`
+stays on its register), the boundary's keep-forever tiles (`m_keep`; the tiles the boundary's water stands on
+are now computed each residency turn from the Level, `SweSolver::BoundaryTiles`, the same rule as any water),
+and the flood instrument's "crossings" (a wet edge cell is a seed, so there can be none). The spill flood seeds
+from every sea edge cell at its own bed; the sea source's point is the edge water's depth-weighted centroid;
+`OpenSeaLevel` is the mean Level over the edge cells it stands over; the cycle tool's ocean probe stands by the
+deepest edge cell. Gate (stage 2's two runs, before and after): Boston unchanged to 1 mm (its three land sides
+are dry exterior now as they were walls before); the Merrimack within 2 mm of level and 14 cm/s of current over
+the dump's area (mean 0.06 mm, 0.6 mm/s), the north and south edges' cells under the Level now the sea's (892
+and 568 of them under mean sea); the flood instrument joins the same 120.87 and 303.28 km^2 with nothing
+unjoined at the edge; its self-test rewritten to the law (the sea joins a cut channel from both ends, a pool
+the edge does not touch is reported, a reach a river face alone holds is said so, the crest a raised bed parts
+a reach at is found). Stated: where ground at +1 m lies at a land edge and the atlas's Level tops it, the sea
+enters there, as it does at residency's frontier; a dike is the bed's to say, not a side's.
+
+**Stage 3, built where the field stands (2026-10-27): the impact imposed on the columns.** An event of the
+record (`sim/ImpactField.h`) is IMPOSED on the column field at the first batch the field stands past its zero,
+at every mip the field holds -- mip 0's fine set and the twin, each on its own list and constants
+(`Swe.hlsl CsSweImpose`; `SweSolver::BeginImpose`, `RecordImpose`; the record reaches the solver through
+`SetImpacts`). What is imposed is the law's state at that instant: the level, the sum over the event's table at
+the cell's distance (`laws/Impact.hlsli ImpactTerm`: at T = 0 the cavity itself, the lipped parabola of net
+volume nought; later the train linear theory has carried), and its radial velocity from the same sum by
+continuity, u_r = sum A_n omega_n / (h0 k_n) J1(k_n r) sin(omega_n T), nought at T = 0 (the cavity is at rest) --
+each shoaled from the basin depth to the column's own water by Green's law (eta by (h0/h)^(1/4), u by (h0/h)^(3/4),
+the WKB limit of the same theory, unbounded: the columns are the nonlinear reader). The level goes into the column
+(h >= 0: a cavity deeper than the water stands on the bed), the velocity onto the cell's east and south faces
+radial from the impact, and the law carries it from there: the ring, the shoaling, the steepening, the run-up,
+with no analytic reader inside the window. The distance is in the anchor's chart with the impact placed its
+great-circle distance along its bearing (the chart's error against the sphere is second order in the window's
+size over that distance: 2 m at 2600 km). The table rides a root SRV (t5); the event's place, instant and term
+count are two float4 appended to the constants on both sides. One event a batch. The gate's probe
+(`ProbeCoarse`) says the law's own level beside the solver's every batch for the hour after an imposition.
+
+*The gate* (`scenes/demos/impact_bar.json`, out/review/stage3/impact_bar1): a 30 m stone at 20 km/s into the
+sea 7.2 km east of the Merrimack's mouth, ten minutes into the spin-up hour on the bar scene's pinned clocks;
+its cavity 1.3 km across and 25 m deep (the scene's basin depth; the bed under it is 41 m), 244 terms, imposed at
+T = 13 s. At the 3 km sea point (4.2 km from the impact, the twin's own cells, 26 m of water) the solver's first
+crest arrives at 168 s (+2.04 m) against the law's 197 s (+2.83 m) and the troughs coincide at 225 s (-1.86
+against -2.86); at the 1 km point (6.0 km, the fine set) the first motion is 284 s against 313 s and the crest
+299 s (+1.61) against 313 s (+3.22); between the two sea points the solver's crest travels 1.8 km in 131 s, 13.7
+m/s = sqrt(g h) for the 19 m of water between them, while the law's travels it in 116 s, 15.5 m/s = sqrt(g h) of
+its one depth. So the solver rides sqrt(g h) of the bed it has, and the 15 % by which it leads the law at the
+first point is the 41 m under the impact against the law's 25: the law has one depth, the solver the bed. The
+gate's first clause is met on sqrt(g h); against the law it is met at the 1 km point (9 %) and not at the 3 km
+point (15 %) for the reason stated. At the anchor, in the inlet between the jetties, the solver shows +0.90 m at
+419 s where the law says +2.6 to +2.8 (Green's law 1-D and unbounded into 5 m of water, which the jetties and
+the bar make false): no gate there. The law's second crest at the 1 km point (410 s) the solver does not carry:
+shallow water does not disperse a 1.3 km cavity's train, as 14.2 said. Amplitude: the solver's 0.65-0.72 of the
+law's at 4 km, 0.42-0.51 at 6 km -- measured, not settled: the imposition is 0.88 of the law's cavity to begin
+with (Green's law from 25 to 41 m), the twin's 27 m cells diffuse, and the linear law keeps what dispersion
+spreads. The Merrimack without an event is byte-identical through the change (merrimack7 = merrimack8).
+The exterior still reads the Bessel law at every edge cell (the one edge law), so the solver's own train
+meets the law's at the edge: the east edge's Level stood +2.16 m at T = 256 s.
+
+*Then not built:* the tail -- built the same day, below.
+
+**Stage 2b, built (2026-10-27, Mark: "build the tail"): the train crosses the ocean in the tail's own solve.**
+The tail is a third lattice of the same solver: the window's chart coarsened by 2^rank about the same anchor,
+`water.swe.tailCells` a side (2048 of 2^9: 5.2 x 7.0 km at the Merrimack, 10,560 x 14,395 km across on the
+tangent plane, the far corners' cells 0.44 of their size on the sphere), the window whole in its central cells
+(1022..1026 of 2048: its corner lies on the tail's lattice by construction), its CPU bed the one stack at the
+tail's grain (4 M cells in under 5 s) and its GPU bed the cube's mip 3 (wanted with the window's, `WantDomain`),
+its residency the tiles the sea reaches from its edge at mean sea (63 % of the cells, 213 tiles, for the run),
+its own constants, lists and step (1.77 s: the CFL at the deepest water, 8384 m, over the far corners' true cell,
+and as much again for the water's own speed under a falling lip), stepped ahead of each batch on its own clock
+(`RecordTail`). Its gauge is MEAN SEA: its columns rest at 0 m NAVD over their bed, its tide plane is 0, and what it
+carries is the DEPARTURE -- the train, a surge -- not the tide (an ocean tide solve at 5 km with no Coriolis would
+have fed the Merrimack a wrong tide; the tide is the atlas's, as before). Its own far edge reads the impacts' law
+alone (`SetTailLevelSource`). THE WINDOW'S EDGE KEEPS ITS ONE LAW, and the Level there is the atlas's PLUS the
+tail's departure and its velocity at the tail cell just beyond the side (`Swe.hlsl TailDepAt`, `TailUAt`: Berger
+and Oliger's ghost, never the cell the window lies in); the analytic law is no longer read at the window's edge
+where a tail stands. THE CHART'S METRIC (`CellM`): every kernel takes a cell's true size from its place in the
+tangent plane, the gnomonic chart's diagonal metric (R ds sqrt(1 + t^2) / q along s, R dt sqrt(1 + s^2) / q
+along t, q = 1 + s^2 + t^2; the shear s t / q left out, 0.2 at the tail's far corners) -- the window's cells
+change by 5e-6, and the Merrimack with the tail standing is within 0.16 mm of level and 2 mm/s of current of
+the run before. An impact is imposed on the levels that hold its cavity (the tail: yes; the window: not for a
+far event), and AT ITS INSTANT AS THE CAVITY ITSELF, closed (`laws/Impact.hlsli ImpactCavityAt`, while the front
+has moved less than a tenth of the lip): the table's sum, imposed at T = 6 s, had planted +-2 m at the window
+2600 km out and +-12 m before the front at the window's edge -- the truncation's leakage, a wave from nowhere.
+The fold of the twin into the tail is written (`CsSweFoldTail`) and OFF: the twin's departure from the window's
+tide plane carries the estuary's own lag against that plane, which folded into a 5 km ocean cell radiated back
+to the window's edge as a sea-level change before any event; the tail is one-way (the window's water does not
+return to the ocean; its feedback on a 5 km cell is nil). The spin-up stops itself, and says so, when the step
+collapses under 5 ms (a blow-up), instead of crawling for hours.
+
+*The gate* (`scenes/demos/impact_tail.json`, out/review/stage3/impact_tail2; impact_tail1_ray is the same run
+before the fastest-path instrument): the 10 km stone of 13.4 into 35 N 42 W at 15:00Z, 2625 km from the
+Merrimack's mouth, the spin-up from 14:30Z for 8 h (139 s of wall clock). The cavity (109.9 km across, 4000 m
+deep, 21 cells) imposed on the tail at T = 6 s; the tail SILENT at the window for five hours (0.000 m at the
+anchor's cell and east of the window); then the train. Its first 0.1 m of motion reaches the tail cell east of
+the window at 5.15 h and the anchor's cell at 5.31 h, the half-crest about 5.5 h, the crest at 5.70 h (east,
++9.4 m) and 5.85 h (the anchor's cell, +11.9 m), the trough -4.5 and -7.1 m at 6.7 h. The reference, two
+instruments on the tail's own bed at sqrt(g h): the great-circle ray 5.84 h (16 m of water at its shallowest,
+Nantucket's shoals) and the fastest path 5.90 h (Dijkstra over the sea cells at the chart's metric: the ray is
+already the quickest way on this bed); the one-depth law said 3.68 h, 2.2 h early, the shelf's share. So the
+crest rides sqrt(g h) over the bed to within 3 %, and the first motion runs 12 % ahead of it: the lip's step
+front, smeared by the first-order scheme over about 150 km after 500 cells of travel. The gate's first clause is
+met on the crest; its second (the amplitude at 2600 km within the law's dispersion) is not judged here: the law's
+far field is its one-depth train and the tail's is the bed's, and the 10 km stone's train at the Merrimack --
++10.7 m at the twin's sea point, +10.0 m at the anchor, then a 6 m trough -- collapses the window's step at 7.06 h
+(the guard stopped the spin-up with 0.43 h left): the window does not survive this stone, which is the window's
+matter and not the tail's.
+
+**The tail drawn (2026-10-27, Mark: "draw the tail").** The far field's readers -- the bank kernel's texel
+(`WaterBank.hlsl`) and the globe's vertex (`Globe.hlsl ImpactAt`, the pixel through `imp`) -- read the tail's
+column where the tail holds the point, in place of the impacts' analytic sum, which stays only for points the
+tail does not hold (`shaders/TailRead.hlsli`; `sim/ImpactGpu.h TailGpu`, `SweSolver::TailGpuDesc`, the layers'
+`SetTail` from the frame loop each frame beside `SetImpact`). The cell under a direction is the gnomonic chart's
+(s = d.E / d.A, t = d.N / d.A over the tail's anchor frame); the departure is the column less mean sea's over the
+bed, h + b, read bindlessly from the tail's two textures (a tile the tail does not hold reads 0: no sea,
+nothing); a land cell takes its nearest sea neighbour's (the coast within a tail cell); the slope is the
+neighbours' departures over the chart's true metric along the chart's east and north projected onto the tangent
+plane; the display exaggeration applies to the drawn departure as it did to the drawn law; the departure and
+its slope are shoaled from the water the tail stands in to the point's by the same bounded law. The tail's h and
+bed stand in the readers' state between batches (`TailTo`), as eta and uv do; the probe reads them in whatever
+state they stand. *The gate* (`scenes/demos/impact_tail_orbit.json`, out/review/stage3/stills): the 10 km stone
+an hour after it, the eye 3000 km over the impact, the drawn departure x10 -- with the tail, ONE BROAD FRONT 700
+km out with a few rings inside it, a little asymmetric where the bed is; with the tail off (no solver window:
+`--set water.swe.windowTiles=0`), the law's dense concentric train over one depth, the Bessel sum's dispersion
+and its ringing. The two stills differ only about the ring (mean 1.0 level of 255 inside 300 px of the impact,
+0.15 beyond): the field the eye sees is the tail's where the tail stands. At 4.5 h from 3000 km over the shelf the
+train is ten metres and shows in neither still even at x10 -- the globe's vertex carries it, the eye cannot see
+it from there; a shore eye sees the window's own water, the solver's. Stated: the hull's reader (WaterManager's
+`impacts` producer, the CPU sum) still reads the law beyond the window -- a boat far at sea on the tail's train
+is the next reader to turn; the far field's readers take the tail with no residency of their own (the tail's
+tiles are the run's).
+
+**Stage 2c, built (2026-10-27, Mark: "the telescope"): the levels.** The tail is now the coarsest of a LIST of
+levels (`SweSolver::Level`, `m_lv`, coarsest first), each a rectangle of the one anchor chart at its own cell size
+(2^rank window cells) with its corner on its parent's lattice so its cells nest exactly, stepped by the same
+kernels on its own banks, lists and clock, coarsest first each batch (`RecordLevel`). A level's edge is the
+sea's exterior at its PARENT's departure and velocity in the ghost cell beyond the side (the kernel's `gTail`
+is now "the parent's fields", `ParentFields`); the top's edge reads the impacts' law. A level of mean sea's
+gauge folds its wet cells' mean into its parent before each parent step (`CsSweFoldTail`, the same kernel; the
+window's twin, of the tide's gauge, still does not). THE ANCHOR LEVELS telescope from the tail to the window:
+`water.swe.telescopeLevels` of `telescopeCells`, `telescopeStep` ranks apart under the tail's (3 of 512, 2
+apart: ranks 7, 5, 3 -- 1.3 x 1.8 km, 320 x 440 m and 80 x 110 m cells, 900, 225 and 56 km across), the window's
+edge reading the finest that holds it with a ghost beyond (level 2^3). AN EVENT whose cavity is unresolved
+where it falls -- its lip over fewer than eight cells of the finest level holding it -- gets a PATCH of its own
+the batch it is imposed (`AddLevel` at run time: the stack's bed at its grain, its banks, its tables with the
+page views kept from `SetBed`): 512 cells at the rank its lip wants (R_D over eight window cells, a power of
+two), about its cavity, nested in and folding into the finest level that holds it. The chart's inverse carries
+a rectangle's offset (`SweDomain::ox, oy`) so every level's `CellOf` and `LatLonOf` stand. The readers take the
+finest level holding the point (`TailRead.hlsli` over `gLvlA[8]`/`gLvlU[8]`, coarsest first in the cbuffers, the
+search finest first); the manager wants each level's bed at the cube's mip its cells read (`LevelBoxes`).
+
+*The gate* (out/review/stage2/merrimack10; `scenes/demos/impact_telescope.json`, out/review/stage3/impact_telescope1):
+the Merrimack with four levels standing is BYTE-IDENTICAL to the run with the tail alone (the window's edge reads
+level 2^3's ghost, at rest as the tail was). The 1 km stone (1950 DA's class) at 35 N 42 W: its lip, 12.9 km,
+stood over 2.5 cells of the tail, so the event got `patch 2^7 (event 0)`, 512 cells of 1.3 x 1.8 km (660 x 900
+km, all sea, 16 tiles), parent the tail; its cavity (18.2 km across, 4000 m deep, 1777 terms) imposed there at
+T = 1 s -- the probe's cell 8 km off the centre read +2218 m, the lip, then -2 m a minute later, and the centre
+sloshed +-3 m for hours. Then the honest result: THE TRAIN DOES NOT SURVIVE THE CROSSING. At the window's east
+cell the tail's departure rose to 0.09 m (0.13 m at the anchor's cell) from 5.4 h, where the one-depth law says
++-20 m (Green's law unbounded to 68 m: +-9 m deep) and Ward & Asphaug 3 to 9 m deep; the window answered
++-0.5 m at the bar. The 10 km stone's 50 to 200 km waves crossed the tail at two thirds of the law's amplitude;
+this stone's 13 to 50 km waves are three to ten of the tail's 5 km cells, and the first-order upwind flux's
+diffusion over 460 cells of travel takes them (a 13 km wave to a few percent, a 30 km one to half, by the
+scheme's own diffusion u dx / 2 over the crossing's 3.5 h) -- and the law's dispersive train, which shallow
+water does not make, spreads what remains. So the telescope resolves the cavity WHERE IT FALLS and not ALONG
+THE WAY: the patch is a level about the impact, not a level that follows the front at the mip its wavelength
+needs (14.2's words), which is what this stone's train would need -- or a tail less diffusive than first
+order, or a finer tail (2.5 km at 4096 cells: 16 M cells). Stated, not built, and the next piece.
+
+**Stage 2d, built (2026-10-27, Mark: "follow the front"): the level that follows the train.** An event's
+patch is now a SPARSE level: its lattice is its parent's whole extent at the rank its lip needs (the tail's
+8192 x 8192 at 2^7, 1.3 x 1.8 km cells; a rank whose extent would pass 16384 cells is refused), its bed the
+stack's on the GPU alone (no CPU bed, no flood), resident about the cavity to begin with (four lip radii each
+way) and from there BY THE WINDOW'S OWN RESIDENCY LAW ON THE DEPARTURE: the tile statistics (`CsSweTileStats`,
+counting a column live where |h + b| passes the level's tolerance, 5 cm, over sea alone) read back outside the
+recording (after the batch in the spin-up, through the asynchronous ring on the frame), a tile across an edge
+the departure reaches mapped ahead of the front, a tile quiet past the hysteresis released; a tile mapped since
+the last batch is cleared, bedded and INITIALIZED FROM ITS PARENT (`CsSweMagnifyInit`: the parent cell's
+departure and velocities over its own bed -- Berger and Oliger's interpolation; a tile rested instead erased,
+through the fold, the train its parent carried under it), before any level folds or steps (every level's
+prelude first). A level's non-resident cells are HELD BY ITS PARENT in the magnify's sense (`gUp`: the shift
+and offset to the parent's cells; `UpLiveAt`, the chain reads at index 1 are the parent's), so a front leaving
+the resident set meets the parent's water, not a frontier. The fold is one thread a parent cell under the
+child's resident tiles (`CsSweFoldLevel`). The levels step in Berger and Oliger's order: the top steps, and
+after each of its steps its children step up to its time, recursively (`RecordLevel` recurses); the fine twin
+has run so since stage 1c, and running every level a whole batch apart had left the ring ringing.
+
+*The gate* (out/review/stage3/impact_front4; impact_front1..3 the runs before the interleaving, the magnify
+init and the land fix): the 1 km stone again. Its level grows from 2 tiles to 1427 by 7 h (the ring never
+calms: every resident tile keeps a column over 5 cm), the spin-up of 8 h takes 16 minutes, and at the window's
+east cell the departure reaches +0.26 m at 6.48 h and -0.34 m at 6.75 h (the window answers +0.5 / -0.9 m at
+the anchor), against 0.09 m with the static patch and the one-depth law's +-27 m there (Green's law to 68 m;
++-9.6 m deep). The interleaving and the parent initialization changed the numbers by nothing to three
+decimals. Two things stand, stated: a train crossing a level's residency edge is water the fine level loses
+(its flux into a non-resident cell goes to no column; the parent receives the fine's state only by the fold),
+so the ring must stay ahead of the front -- it does, at this stone's pace; and THE CAVITY IS A HOLE TO THE BED,
+4000 m deep and 9 km across in 4000 m of water, whose collapse in the nonlinear solver is a dam break that
+spends its energy in the rim's bores and the centre's sloshing (+-2 m at the impact for hours) -- which is what
+the hydrocode studies found against Ward and Asphaug's linear estimates (Gisler and others, 2011: deep cavities
+raise far smaller tsunamis than linear theory says). The 10 km stone's cavity, 55 km across for the same depth,
+is gentle, and its train crossed the tail at two thirds of the law. So the 1 km stone's 0.3 m at 2600 km may be
+nearer a nonlinear truth than the law's 9 m; the solver's own dissipation at the collapse (first order, on 1.3
+km cells) is not separated from the physics here. The separation is a convergence run: the same event at a
+finer patch (the lip over sixteen cells) and the departure at a fixed distance from the impact at both ranks.
+
+**The convergence run (09db298, the same night).** `scenes/demos/impact_convergence.json`: the 1 km stone, two
+hours of its time, the probe 300 km from the impact toward the anchor; `water.swe.patchCellsPerLip` 8 (the patch
+at rank 7, 1.3 km cells) against 16 (rank 6, 0.64 km cells). At 300 km the two ranks agree on the front: the
+first motion in the same probe (one minute's resolution), the leading crest +33.2 against +31.6 m, the trough
+-41.1 against -45.5 m, at the same minutes; the second crest does not (+38 against +27 m), the train behind the
+front being the scheme's. So the collapse is the physics (a converged 35 m front at 300 km from a cavity 4 km
+deep, where the law's 1/sqrt(r) from its 27 m at 2600 km would put 80), and the crossing is the scheme's:
+from 300 to 2600 km geometric spreading alone leaves 12 m and the rank-7 run arrived at 0.3. (I read that as the
+first-order flux's diffusion and named a second-order flux as next; the next day's clean line, below, shows the
+deep crossing holding 1/sqrt(r) and the loss standing between the shelf and the window's edge -- the second-order
+flux is not the piece.) Two more things the night fixed:
+the solver steps whenever levels exist (the sea layer skipped it above 60 km, and the first orbit clip drew the
+levels at rest), and a level's constants and lists are pushed once a batch in its prelude and bound by address
+in the steps (the Berger-Oliger recursion pushed them at every call: a few hundred a frame at 240x exhausted the
+frame's 4 MB constant arena). The clips: `out/review/stage3/clips/orbit_levels.mp4` (240x from orbit, 104 ms a
+frame with the window stepping too; stepping the levels alone when the sea is off is a follow-up) and
+`shore_levels.mp4` (the dune at 30x as the train arrives through the tail).
+
+**The columns over the marsh (2026-10-28).** The shore clip drew the marsh and the town as land-textured columns
+kilometres tall from nine minutes of sea time on. Not the levels (undrawn: the same; none: the same), not the stone
+(none: the same), not the levels' fields (every level's greatest departure stayed sane; the cavity's 5 km is the only
+large number and sits at the impact), not the readers' order (an event's patch, appended last, was read as "finest"
+at the shore -- fixed, the list is ordered by rank, 8c119ff), not the column plane, the wave table or the height
+pages. The writer is THE WINDOW: with `water.swe.fineReachM` (stage 1d) bounding mip 0 to 1500 m about the eye, the
+fine set moves from the anchor (the spin-up's eye) to the camera at the first frame, and at its edge across open
+water -- the river mouth off the dune, tile (7, 8) of the 4 x 4 block -- the window blows up in 6-15 minutes of sea
+time (columns 1e15..1e28 m, currents 92 km/s); the bank reads that surface (`SolverSurfaceDev`), its level plane
+goes to 1e20, every vertex under that waterline is water and rises with it, and the pixels still draw land. The reach
+at 300 m maps nothing (clean), at 6000 m changes nothing (clean), at 1500 m maps eight tiles under the twin's water
+and stands its edge in the channel (columns); at 1x a minute of sea time is too short to see it. Initializing a fresh
+mip-0 tile from the twin (the levels' CsSweMagnifyInit at mip 0) took the dam break away (1.8 m/s after the mapping
+turn against 20.7) and the blow-up came SOONER: the instability is the fine/coarse interface itself -- the fine edge
+reads the twin's magnified cells while the twin steps its own beyond, with no reflux -- not the fresh clear; reverted.
+Every gate recipe carried `--set water.swe.fineReachM=1500` (a speed knob) with the eye at the anchor, so no gate
+stood where the frames did. Clips and gates run at the default reach (0, the whole window) from here: the dune at
+60x for thirty minutes of sea time never crosses 60 m or 25 m/s there; the frame costs 117 ms against 85. The tools
+that found it: scenes/demos/impact_shore_quick*.json and shore_quick_*.json (the stone 115 km east, a quarter
+hour's spin-up, five minutes a render), `GAGAME_LEVEL_STATS=1` (every level's greatest departure and where; the
+window's deepest and fastest past 60 m / 25 m/s), `--bank-trace 150` (the bank's planes per ring), and a detector
+scoring the sky in a frame's top third. One more reading from the bar scene's gates at the default reach: the
+window's "fastest" current at its south edge tile climbs 26 -> 56 m/s over a minute with the tail standing and is
+quiet without it, while the twin grid 4 km about the anchor is byte-identical either way and the clip is clean. My
+reading: the derive's q / h in a thin edge cell the Flather inflow feeds on the ebb (the derive floors nothing above
+the wet tolerance); but the fastest TILE holds 9.3 m at its deepest and the fastest cell's own depth is not printed,
+so it is not shown -- OPEN: the window's edge with the parent level's ghost, at mip 0, on the frame ring.
+
+**The causal impose, the damping as a time, and the beach (2026-10-28).** Three findings from one day, in the order
+they fell. (1) `m_cb.damp = 0.99995f` a substep was a hidden linear damping: an e-folding of 1.7 h on the window
+(0.3 s steps), 2.4 h on the event's patch, 17 h on the tail -- the 1 km stone's train spends 5.6 h from 300 km to the
+beach, e^-2.3 from the damping alone. It is a stated time now, `water.swe.dampH` (hours; 0 = none, the default;
+`SweSolver::DampOf(dt)` wherever a step is set). (2) With the damping gone the window's step moved (its fastest
+current moved), the batch boundary moved, and the impose fell at T = 10 s instead of 4 -- past `CsSweImpose`'s
+threshold (the closed cavity while T c < 0.1 R_D, 6.5 s for this stone in 4 km of water; the truncated Bessel sum
+after) -- and the sum's truncation PLANTED metres over the whole ocean: every patch tile departed at the first
+statistics, fresh tiles 166 km out held 1.5-12 m within seconds, the ring mapped the ocean (+6, +10, +14 tiles a
+readback; 2600 tiles), and the line's probes read the planted field as the train (a 49.8 m "crest" at 600 km). The
+symptom to know it by: the departure's residency growing quadratically right after the impose, and thousands of
+metres on tiles far from the cavity. The law is one and continuous now: the cavity itself while T c < R_D (a
+minute), the sum beyond with a causal cutoff, `w = 1 - smoothstep(R_D + c T, + R_D, r)` on eta and u_r. (3) THE
+CLEAN LINE (`scenes/demos/impact_line.json`, probes at 300, 600, 1200, 1800, 2400 km on the chart, `kProbeKm`; the
+probes every ~69 s of a ~4 min period, so a crest reads 0.6-1.0 of itself): undamped 39.0, 38.1, 17.1, 16.2, 9.1 m;
+with the old damping stated (`dampH` 2.44) 35.4, 37.0, 16.3, 10.9, 4.5 m. The deep crossing holds 1/sqrt(r) within
+the sampling (38 at 600 km -> 19 at 2400 by spreading; 9 read, on the shelf, where the probe's cadence catches less
+of a shorter wave). The train reaches the window's east edge at 0.1-0.7 m (level 2^3's ghost cell, 49 m of water)
+and the beach at +-0.5-0.9 m: the loss is between the patch's 9 m at 225 km (the Gulf of Maine) and the window,
+in the telescope's intake from the tail (level 2^7's edge, 330 km out, reads the tail's ghost) or its shelf
+crossing (2^7 -> 2^5 -> 2^3). OPEN; the instrument is in: every level now prints its departure along the stone's
+line at 2, 5, 10 ... 1280 km from the anchor (` toward the stone:`), and the window's parent at the window's east
+edge and 2, 5, 10 km beyond. THE NEAR STONE (`scenes/demos/impact_shore_near.json`: the 1 km stone 115 km east on
+the shelf, 150 m of water, at 15:00Z; the cavity 18 km across to the bed) shows the telescope carrying a train it is
+imposed on: +16 m at 80 km, 8-9 m at 20 km, 6.7 m two kilometres off the window's east edge at 15:39Z, +8.0 m at the
+jetty at 15:48:40Z over a +0.9 tide, -7 m at 15:59Z, +2 m at 16:05Z; the window's land tiles 197 -> 205 (the
+overwash); the levels agree with each other at every probe. Two traps in reading it: the coarse probes run in the
+spin-up alone (`AfterBatch` on the frame path does not probe), so a scene whose spin-up ends before the arrival
+reads the tide and nothing after -- the near scene's probes stopped at 15:40Z with the train 2 km out, and I
+called the shore a wall on that (it is not); the arrival is read with `--set time.start=...17:00Z --set
+water.swe.spinupH=2.0 --headless --frames 1`. And the window's "fastest" statistic is the derive's q / h in the
+overwash's thin films (58-257 m/s in the hour the train is ashore; the step falls to 0.046 s and the 256-step
+budget still covers a 2 s frame many times): not a blow-up, not the step starving. The first clip's rail
+(`impact_shore.json`) stood in the marsh behind the dune, where the sea is a strip at the horizon and the arrival
+reads as the marsh flooding at 0:12-0:18 -- the wave Mark could not find at 0:58 had passed forty minutes before;
+`scenes/rails/impact_shore_face.json` stands over the beach face looking the bore in the eye. AND THE RAIL'S EYE WAS
+NEVER WHERE IT SAID: a lat/lon key resolved in the root's tangent frame (already a root pose) and was then carried
+place-to-root like a compass key, so every lat/lon rail eye stood off by the place's offset in the root -- 2 km west
+and 3 km south at the Merrimack (the log's `[space] ... the scene's place ... is at (-2005, -1, -3022) m in it`
+against the logged eye, three clips, the same offset) -- in the marsh behind the island for every shore clip since
+the rails took lat/lon keys. Fixed in `Rail::KeyMotor` (`RootMotorOf`: the orbit spelling is the planet's own, the
+compass and motor spellings are the place's and carried). The views' own lat/lon eye (`ViewEyeOrbit`) never carried
+and stood right.
+
+**The deep stone's loss is the slope, not a seam (the same evening).** With the event's patch probed at the tail's own
+points (the per-level line, with residency marks and each point's ground distance -- the chart's kilometres shrink
+to 0.44 of the sphere's far out, so "2400 km from the stone" on the chart is 2241 on the ground and 384 from the
+anchor, not 225), the fold is seen sound: the tail and the patch agree at 640 km (12.5 against 12.1 m) and at 1280
+(14 against 12). The train falls from 12 m to 1-3 m between 640 and 320 km of the anchor IN BOTH LEVELS ALIKE --
+the continental slope and shelf edge -- and the telescope carries what it gets from there (2.6 m at level 2^7's
+edge, 1.0 at the window's, +0.9 at the beach). The rank test on the slope (`patchCellsPerLip` 16, the patch at
+2^6, 645 m cells): before the slope the finer patch holds 1.7 times more (23.5 against 13.3 m at 640 km, 22 against
+12.7 at 1280 -- the collapse's train is still the rank's, as the first convergence run found of its second crest),
+and after it the two nearly agree (3.75 against 3.08 m at 320 km; the tail 2.33 against 2.65). A slope that returns
+the same bore whatever comes to it is the breaking, not the scheme -- a 13-23 m wave of four minutes' period cannot
+climb from 4000 m onto a 100-200 m shelf whole. One crest, one point, read as such. The rank-6 run died there of a
+device removal (0x887A0005) with its patch at 3492 resident tiles: A SPARSE LEVEL NEVER RELEASES behind this train
+(the trailing slosh of +-1-2 m never falls under the wet tolerance, so `dryFor` never runs), and at 2^6 over the
+whole ocean it grows until the GPU is lost -- the retirement law is next on that list.
+
+**The release behind a train (the same night, Mark: "yes, the release").** A sparse level's tile stays while a column
+of it departs from rest AND the parent cannot hold the field. The tile statistic gains a fourth word for a level:
+the range of the departure within a parent cell, the greatest over the tile (`CsSweTileStats`; the window keeps its
+ledger volume there). A wave of n parent cells a wavelength ranges 2 pi / n of its amplitude within one cell, and
+the level was made to hold its lip over `water.swe.patchCellsPerLip` cells (8), so a tile whose range is under
+2 pi / 8 of its greatest departure is the parent's to hold: it demands no neighbours and, quiet past the
+hysteresis, is released -- its fold already carries the mean, the parent carries the wave from there, and a tile
+mapped again takes the parent's state magnified. The old law is the limit where the parent's value is rest. On
+the 48 km deep-water train behind the front the tail's 5 km cells range 0.68 of the amplitude: released; on the
+shelf's 10 km waves they range twice it: kept. The convergence run's finer patch (16 cells a lip) releases at
+2 pi / 16, as it should. The residency line now says how many of the departing tiles are the parent's to hold.
+MEASURED (the line at rank 7): that clause alone releases almost nothing -- up to 230 of 1200 departing tiles are the
+parent's to hold at any statistics, one tile released in seven hours (1386 resident against 1376 without it). The
+train behind a collapse is a dispersive tail of waves shorter than the lip's cells hold, and a tile's held state
+flickers with the wave's phase, so the half-hour hysteresis never completes. So THE THIRD CLAUSE IS THE BUDGET, the
+residency's law everywhere else in the engine: `water.swe.levelTiles` (1024), and above it the wanted tiles are ranked
+by their worth -- the range within a parent cell, a tile wanted ahead of a front taking the front's -- and the least
+worthy beyond 7/8 of the budget are released at once, the parent holding their mean. The front and the shelf keep
+their tiles; the slosh in the deep ocean behind gives its up. THE GATE, the line at a budget of 512 against the
+unbounded run (1386 tiles): the residency holds at 448-460 from +220 min, releasing 60-160 tiles a statistics with the
+worth kept from about 5.5 m of range; the front, the slope (2.59 m at 320 km), level 2^7's readings at 2, 80 and
+320 km and the anchor's arrival are IDENTICAL; the patch's own values near the anchor move within 15 % (0.94 ->
+0.80 m at 80 km: its released tiles carry the tail's magnified state when mapped again), and the telescope reads
+level 2^7, not the patch, there; the run took 23 min against 27. And the rank-6 run died twice, not of memory (3 GB of
+7) but of a BLOW-UP: its greatest departure climbed to 85-105 m at a tile 3919 km east and 506 km north of the anchor,
+out by the Azores, and the device removal followed (DRED: a dispatch). The 645 m patch on steep volcanic slopes far
+from the anchor goes unstable where the 1.3 km one does not -- OPEN, with its place.
+
+*Stated, not built:* the 645 m patch's blow-up on steep volcanic slopes far from the anchor (the Azores, 3919 km E
+506 km N: 85-105 m departures, then the device removed; the 1.3 km patch is stable there); the window's fine/coarse interface in the levels' manner (the fine
+fluxes refluxed onto the twin, the ghost at the twin's time) or the reach retired; a floor on the derived current
+(and the level's step law with the current term, its factor 2 unexplained); the coarse probes on the frame path; the
+hull's reader of the far field; the anchor
+levels' residency is the run's; the metric's shear; the twin's fold into its parent, kept off (the gauge); a
+sparse level is never retired after its event; the cost: the 1 km stone's level at 1400 tiles took the spin-up
+from 3 to 16 minutes. A second-order flux is no longer on this list: the clean line crosses the deep ocean at
+1/sqrt(r).
+
 ## Sources
 
 - NOAA PMEL, [Tsunami propagation database (SIFT/MOST unit sources)](https://nctr.pmel.noaa.gov/propagation-database.html);

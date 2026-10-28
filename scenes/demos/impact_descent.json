@@ -1,0 +1,81 @@
+{
+  "_readme": [
+    "FROM THE IMPACT TO THE SHORE IN ONE TAKE (2026-10-25, Mark: \"like the orbit one but two minutes, the orbit",
+    "going all the way down to a bird's eye view following the waves crashing onto land\"). A 1 km impactor",
+    "(1950 DA's class) at 20 km/s into 35 N 42 W at the scene's start, on ONE clock at 170x: the front reaches",
+    "the Merrimack's mouth 3.68 h after the impact at 78 s of the 120 s record, the train's peak near 5 h at",
+    "106 s, and the eye is over the inlet from 80 s on, 3 km over Plum Island at the end as the water comes",
+    "up the creeks and over the marsh. The solver's window is on, its faces fed by the wave's level; the wave",
+    "solve keeps its first read of the solver's current. The drawn far wave is 10x (on the deep wave before",
+    "the shoaling's bound); the solver's water is raw.",
+    "",
+    "Why 1 km and not the orbit clip's 10 km: at that event's surge (hundreds of metres at the faces) the",
+    "shallow-water solver's step collapsed to nothing at 130x (a face velocity of 92 km/s in the log) and the",
+    "record ended on a dry shore. The 10 km surge at 30x is impact_newburyport.json; the solver's stability under",
+    "a surge far taller than its water is the open item (docs/WATER_V2.md 13.5).",
+    "",
+    "Record:  build\bin\\gagame.exe scenes\\demos\\impact_descent.json --mp4 out\review\\impact\\impact_descent.mp4"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-descent",
+    "view": "impact"
+  },
+  "time": {
+    "start": "2026-08-28T15:00:00Z",
+    "timeScale": 170
+  },
+  "impacts": [
+    {
+      "lat": 35.0,
+      "lon": -42.0,
+      "at": "",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 4000,
+      "exag": 10
+    }
+  ],
+  "sea": {
+    "impactor": {
+      "diameterM": 2000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 4000,
+      "exag": 10
+    }
+  },
+  "water": {
+    "swe": {
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 512
+    }
+  },
+  "views": [
+    {
+      "name": "impact",
+      "at": {
+        "lat": 35.0,
+        "lon": -42.0,
+        "alt": 0,
+        "heading": 0,
+        "tilt": 0,
+        "range": 3000000
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 1000
+    }
+  ],
+  "rails": {
+    "file": "scenes/rails/impact_descent.json"
+  },
+  "capture": {
+    "headless": true,
+    "frames": 3600,
+    "railDir": "out/rail_impact_descent"
+  }
+}

@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "sim/ImpactGpu.h"
 namespace ga {
 
 class SeaLayer;
@@ -145,6 +146,11 @@ public:
     // DEPARTURE from this (WaterBank.hlsl), so a tile the rings never mapped reads as the
     // waterline and not as 0 m NAVD; every reader adds it back, this layer's own included.
     void SetWaterline(double navdM) { m_waterline = static_cast<float>(navdM); }
+    // THE IMPACTS (2026-10-25): the record's buffer and the instant, to the kernel's level.
+    void SetImpact(const ImpactGpu& g) { m_imp = g; }
+    void SetTail(const LevelsGpu& t) { m_tail = t; }   // stage 2b/2c: the levels to the far field's readers
+    ImpactGpu m_imp;
+    LevelsGpu m_tail;
 
     uint32_t DispSrv() const { return m_disp.Srv(); }
     uint32_t ParamSrv() const { return m_param.Srv(); }
@@ -290,7 +296,7 @@ private:
         float peakDir[4];     // M7p: peak propagation dir xy, z valid (gPeakDir)
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
-        float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
+        float rmsRef[4];      // M8: unit-sea rms envelope per band, PHYSICAL m (crest gate / excess)
         uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
         float waveA[4];       // window org xy (the root's m, less the tiles' eye), 1/cellM, feather m
         float waveB[4];       // envMax, sumMax, chop, solved-at level
@@ -352,7 +358,7 @@ private:
         // size, on; dt (s), the drop's terminal speed (m/s), its life (s), the spawn gain.
         uint32_t sprayU[4];
         float sprayA[4];
-        // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (Jet.hlsli, the spray, the
+        // THE PLANET (core/Planet.h): x its surface gravity, GM / R^2 (shaders/laws, the spray, the
         // wakes). Appended at the END on both sides.
         float planet[4];
         // WATER V2, STAGE 2: THE TIDE'S ROTORS of this instant (WaterAtlas::Rotors), two constituents
@@ -365,6 +371,18 @@ private:
         // THE FOLDS HELD (gFoldClock): the sim clock in 0.1 s ticks, the hold in ticks, ring 0 re-anchored.
         // Appended at the END on both sides.
         float foldClock[4];
+        // THE IMPACTS (gImpA / gImpU; sim/ImpactField.h, shaders/ImpactRead.hlsli): the instant on the
+        // record's base, the planet's radius, g; the events' buffer SRV and their count. Appended at
+        // the END on both sides.
+        float impA[4];
+        uint32_t impU[4];
+        // STAGE 2b (gTailA..gTailB; sim/ImpactGpu.h TailGpu, shaders/TailRead.hlsli): the tail's chart and
+        // textures for the far field. Appended at the END on both sides.
+        float lvlChart[4];
+        float lvlE[4];
+        float lvlN[4];
+        float lvlA[8][4];
+        uint32_t lvlU[8][4];
     };
     struct BankTile {
         float orgXZ[2];

@@ -67,6 +67,7 @@
 #include "app/Tools.h"
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <cmath>
 #include <cstdio>
@@ -470,6 +471,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         sea->SetSurface(&surface);   // the world.flat chart, for the churn's tangent rows (PHASE C5)
         sea->SetGrid(seaGridOn ? &A->seaGrid : nullptr);
         sea->sweCurrentGain = S.water.swe.gain;
+        sea->sweCurrentRefreshS = S.water.swe.currentRefreshS;
         sea->heightScale = S.water.heightScale;
         sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         if (S.sea.storm.hs > 0.01f) sea->SetStorm(S.sea.storm.hs, S.sea.storm.tp, S.sea.storm.dir);
@@ -590,36 +592,45 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         return nullptr;
     }
 
-    // THE SOLVER'S DOMAIN (PHASE C1; 2026-10-21, Mark: "Data sets should never be specific to place,
-    // only the measurement type"). The scene's lat/lon box (water.swe.box) and the solver's cell
-    // (water.swe.cellM: one angle both ways, its north-south side in metres) -- its anchor the box's
-    // centre, its cells in true metres at the anchor (SweDomain: a ratio of planes about the anchor,
-    // HIERARCHY 4.4), its CPU bed the one height stack at every cell, whatever surveys the stack holds
-    // there. The box is the place's; the bed is the world's. Until this date the domain stood on a
-    // per-place survey file (data.bathy: the cell, the default window, and the water bank's gate), so a
-    // place no survey file named had no waves at all. No box, no solver. PHASE B2 (D4): ONE STANDING
-    // RANK-2 WINDOW about the anchor (rank 2: the finest whose texel is at most the solver's cell), held
-    // whole before the solver starts.
+    // THE SOLVER STANDS WHERE THE EYE IS (stage 2 of one water on the tree, 2026-10-26, WATER_V2.md 14;
+    // PHASE C1 until then: the scene's lat/lon box, water.swe.box, "the box is the place's; the bed is
+    // the world's"). No scene names a box now: the window is water.swe.windowTiles tiles of 128 cells a
+    // side about the eye's start -- the place's anchor, where every view stands -- with its south-west
+    // corner on the GLOBAL LATTICE of the cell's angle (water.swe.cellM: one angle both ways, its
+    // north-south side in metres), a tile's angle apart, so a place falls in the same cells whichever
+    // eye came to it and whatever the window about it. Its anchor is the window's centre, its cells in
+    // true metres there (SweDomain: a ratio of planes about the anchor, HIERARCHY 4.4), its CPU bed the
+    // one height stack at every cell, whatever surveys the stack holds there (Boston Harbor stands on
+    // ETOPO's 15" where no CUDEM tile is harvested; it floods all the same). The window's size is a
+    // budget, the tail's extent at two mips; the chain's coarse mips carrying the planet retire it.
+    // PHASE B2 (D4): ONE STANDING RANK-2 WINDOW about the anchor (rank 2: the finest whose texel is at
+    // most the solver's cell), held whole before the solver starts.
     // B4: the wind sea's fetch is walked over the same height tree (SeaLayer::FetchAt).
     if (sea && hgtCh >= 0) sea->SetHeightRead(&compositor, hgtCh);
-    if (hgtCh >= 0 && !marsMode) {
-        const double* bx = S.water.swe.box;
-        const double lon0 = bx[0], lat0 = bx[1], lon1 = bx[2], lat1 = bx[3];
-        if (lon0 != 0.0 || lat0 != 0.0 || lon1 != 0.0 || lat1 != 0.0) {
-            constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
-            const double cellDeg = double(S.water.swe.cellM) / (planetR * kD2Rd);
-            const auto cx = static_cast<uint32_t>(std::lround((lon1 - lon0) / cellDeg));
-            const auto cy = static_cast<uint32_t>(std::lround((lat1 - lat0) / cellDeg));
-            if (lon1 > lon0 && lat1 > lat0 && cx > 1 && cy > 1) {
-                sweDomain.Place(lat0, lon0, lat1, lon1, cx, cy, planetR);
-                sweDomain.FillBed([&](double la, double lo, double resM) {
-                    return compositor.SampleHeight(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
-                });
-                surface.StandAbout(sweDomain.latC, sweDomain.lonC, 2u);
-            } else {
-                Log("[swe] water.swe.box [%.5f, %.5f, %.5f, %.5f] REFUSED: not a box of at least "
-                    "two cells of %.2f m -- no solver", lon0, lat0, lon1, lat1, double(S.water.swe.cellM));
-            }
+    if (hgtCh >= 0 && !marsMode && S.water.swe.windowTiles > 0) {
+        constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
+        const double cellDeg = double(S.water.swe.cellM) / (planetR * kD2Rd);
+        const double tileDeg = 128.0 * cellDeg;
+        const uint32_t W = S.water.swe.windowTiles;
+        const double eyeLat = S.place.anchor[1], eyeLon = S.place.anchor[0];
+        const double lon0 = std::floor((eyeLon - 0.5 * W * tileDeg) / tileDeg) * tileDeg;
+        const double lat0 = std::floor((eyeLat - 0.5 * W * tileDeg) / tileDeg) * tileDeg;
+        const double lon1 = lon0 + W * tileDeg, lat1 = lat0 + W * tileDeg;
+        const uint32_t cells = W * 128u;
+        if (lat0 > -89.0 && lat1 < 89.0) {
+            sweDomain.Place(lat0, lon0, lat1, lon1, cells, cells, planetR);
+            Log("[swe] the solver stands where the eye is: %u x %u tiles of 128 cells of %.3f m (%.6f deg) about the "
+                "place's anchor %.5f N %.5f E, the window %.5f..%.5f N x %.5f..%.5f E on the global lattice (no scene box)",
+                W, W, double(S.water.swe.cellM), cellDeg, eyeLat, eyeLon, lat0, lat1, lon0, lon1);
+            const auto t0 = std::chrono::steady_clock::now();
+            sweDomain.FillBed([&](double la, double lo, double resM) {
+                return compositor.SampleHeight(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
+            });
+            Log("[swe] the window's CPU bed: %u cells from the height stack in %.1f s", cells * cells,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            surface.StandAbout(sweDomain.latC, sweDomain.lonC, 2u);
+        } else {
+            Log("[swe] the eye's start at %.5f N is too near a pole for the window's chart -- no solver", eyeLat);
         }
     }
     // PHASE C3: THE TIDE FOCUS is the station the water's point asks for: its reader is the
@@ -648,7 +659,19 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     if (sea && S.water.swe.enabled && sweDomain.Ready()) {
         SweConfig sweCfg;
         sweCfg.name = S.scene.name.c_str();
-        sweCfg.spongeM = S.water.swe.sponge;
+        // STAGE 2b: the tail across the ocean (its bed the stack at its grain, as the window's)
+        sweCfg.tailCells = S.water.swe.tailCells;
+        sweCfg.tailRank = S.water.swe.tailRank;
+        sweCfg.telescopeLevels = S.water.swe.telescopeLevels;
+        sweCfg.telescopeCells = S.water.swe.telescopeCells;
+        sweCfg.telescopeStep = S.water.swe.telescopeStep;
+        sweCfg.patchCellsPerLip = S.water.swe.patchCellsPerLip;
+        sweCfg.levelTiles = S.water.swe.levelTiles;
+        sweCfg.dampH = S.water.swe.dampH;
+        sweCfg.bedAt = [&compositor, hgtCh](double la, double lo, double resM) {
+            constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
+            return compositor.SampleHeight(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
+        };
         // THE RIVERS THAT ENTER IT (sim/RiverModel.h): every reach of data.river whose mouth the box
         // holds, a Flather face where its line leaves the box. Their clocks are the frame loop's.
         for (const RiverModel::Crossing& c : rivers.EntersBox(sweDomain.lat0, sweDomain.lon0, sweDomain.lat1, sweDomain.lon1)) {

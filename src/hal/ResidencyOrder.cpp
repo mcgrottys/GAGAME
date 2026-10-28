@@ -1519,6 +1519,22 @@ void ResidencyManager::Rescue(OrderTurnLedger& L) {
     }
 }
 
+uint32_t ResidencyManager::PendingOf(int sampler, int tenant) {
+    if (sampler < 0 || sampler >= kMaxSamplers) return 0;
+    const uint16_t bit = static_cast<uint16_t>(1u << sampler);
+    std::lock_guard<std::mutex> lk(m_mx);   // the loads write Tracked::state under it
+    uint32_t n = 0;
+    for (const OrderEntry& e : m_need) {   // the first P not held, as the last pass left it
+        const Tracked* tr = e.tile;
+        if (!tr || tr->tenant != tenant || tr->rec == UINT32_MAX) continue;
+        if (!(m_rec[tr->rec].mask & bit)) continue;   // another reader's want
+        if (tr->state == TileState::Failed) continue;   // closed: refused, or its parent answers
+        if (tr->state == TileState::Mapped && tr->landed) continue;   // held since the pass
+        ++n;
+    }
+    return n;
+}
+
 void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
                                  std::vector<std::shared_ptr<Tracked>>& batch,
                                  std::vector<std::shared_ptr<Tracked>>& refills) {

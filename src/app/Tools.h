@@ -112,7 +112,7 @@ void RunFidelityMap(const Options& opt, Compositor& compositor, const Space::Anc
 // --ocean-probe lat,lon: the weather manager's verification harness. The exit code when
 // "lat,lon" parsed; nullopt when it did not, and the run goes on exactly as it always has.
 std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu& gpu,
-                                 Renderer& renderer, SweSolver& swe, ResidencyManager& resMgr,
+                                 SweSolver& swe, ResidencyManager& resMgr,
                                  double simUnix, const std::function<double(double)>& oceanAt,
                                  const std::function<double(int, double)>& faceAt,
                                  const std::function<double(int, double)>& faceQAt,

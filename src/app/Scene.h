@@ -118,7 +118,7 @@ struct Scene : scene::SceneDocument {
     std::vector<SceneTool> tools;
     std::vector<scene::SourceProps> sources;   // rasters that are sources by being files
     std::vector<scene::StationProps> stations;   // PHASE C3: stations placed by the scene
-    std::vector<scene::SolverProps> solvers;     // the dormant solvers
+    std::vector<scene::ImpactProps> impacts;     // the asteroids into the sea (sim/ImpactField.h)
     JsonValue waterDoc;               // the `water` section as written (WaterComponent reads it)
 
     const SceneView* View(const std::string& name) const;

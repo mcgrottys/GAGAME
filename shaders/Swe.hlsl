@@ -36,7 +36,7 @@ cbuffer SweCb : register(b0) {
     uint  gEtaTilesX, gFluxTilesX;
     uint  gEtaTileW, gEtaTileH, gFluxTileW, gFluxTileH;
     uint  gListCount;
-    float gOpenSides;            // the open ocean sides, a bitmask: 1 N, 2 S, 4 W, 8 E (SweDomain::Bound)
+    float gUnused0;              // the slot the open-side bitmask held (the edge is one law since 2026-10-27); keeps gFaceA on its register
     float gDy;                   // M6r: north-south texel metres (equiangular CUDEM grid:
                                  // dy = 13.65 != dx = 10.08 -- the per-axis metric)
     float gFaceCount;            // the river faces (gFaceA, gFaceB; SweSolver.h SweConfig::faces)
@@ -52,7 +52,9 @@ cbuffer SweCb : register(b0) {
     float4 gFaceB[4];
     float gOceanU;               // the open sides' Flather u_ext, m/s + inward (SweSolver::Record: the
                                  // domain's stateless prism less the rivers' transport, over the sides' section)
-    float gPadA, gPadB, gPadC;
+    // STAGE 1c OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): the mip this dispatch runs at, how
+    // many mips the chain holds, and the tiles across at the mip above (UpLiveAt's row stride).
+    float gMip, gMips, gEtaTilesXUp;
     // PHASE C1: a cell's place in the domain's chart (SweSolver::SetBed): the first cell's centre in
     // the anchor's tangent plane over R and the steps (s0, ds, t0, dt); the anchor's up and R; its
     // east and the cell's grain (m). North = east x up.
@@ -72,10 +74,36 @@ cbuffer SweCb : register(b0) {
     // gSea2: the direction it travels (a unit vector, texture frame: x east, y south), 0, 0.
     float4 gSea;
     float4 gSea2;
+    // STAGE 3 OF ONE WATER ON THE TREE (2026-10-27, docs/WATER_V2.md 14): AN IMPACT IMPOSED ON THE COLUMNS
+    // (CsSweImpose). gImpactA: the impact's place in the anchor's chart (east, north; metres), the seconds since
+    // its zero at this batch's start, the basin depth h0 its table was built over; gImpactB: the table's term
+    // count (gImpactTerms: k, omega, A, 0 a term; 0 = nothing to impose), 0, 0, 0. APPENDED AT THE END on both sides.
+    float4 gImpactA;
+    float4 gImpactB;
+    // STAGE 2b (2026-10-27, docs/WATER_V2.md 14): THE TAIL -- the coarse lattice across the ocean, about the same
+    // anchor, its cells 2^rank of this lattice's. gTail: the shift from this lattice's cells to the tail's
+    // (rank less this mip; < 0 = no tail, or this IS the tail), the tail cell the window's corner lies in (x, y),
+    // the tail's cells across; gTail2: the tail's cells down, its tiles across, 0, 0. The lattice edge's
+    // exterior Level adds the tail's departure there (TailDepAt) and its velocity (TailUAt).
+    float4 gTail;
+    float4 gTail2;
+    float4 gImpactC;             // stage 3: the event's cavity radius R_c and depth D_c (m), 0, 0
+    // STAGE 2d (2026-10-27): THE MAGNIFY'S PARENT -- the shift from this lattice's cells to the one above's and the
+    // cell above the corner lies in (x, y): (1, 0, 0) for the window (mip 1 of its own banks), the parent level's for
+    // a level (UpLiveAt, the chain reads). A level's non-resident cell is held by its parent: the front of a train
+    // leaving the level's resident set meets the parent's water, not a frontier. w: 0.
+    float4 gUp;
 };
 
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
+// The water's laws this solver shares with the bank and the hull (shaders/laws): Guo's dispersion
+// and Battjes-Janssen's height, one text.
+typedef float real;
+#define GA_PLANET_G (gGravity)
+#include "laws/Dispersion.hlsli"
+#include "laws/Breaking.hlsli"
+#include "laws/Impact.hlsli"
 
 // THE CELL'S POINT about the domain's anchor C (the standing window's centre), in C's east / up /
 // north: the cell's place (s, t) in the anchor's tangent plane (over R) carried onto the sphere along
@@ -88,10 +116,26 @@ float3 SwePointAbout(float s, float t) {
     return gAnc.w * float3(s * k, -q / (r * (1.0f + r)), t * k);
 }
 
+// THE CHART'S METRIC (stage 2b, 2026-10-27): a cell's true size, metres along east and north, from its place
+// (s, t) in the anchor's tangent plane over R. A step ds on the plane is R ds sqrt(1 + t^2) / (1 + s^2 + t^2)
+// on the sphere along s, and dt is R dt sqrt(1 + s^2) / (1 + s^2 + t^2) along t: the gnomonic chart's diagonal
+// metric. Its shear, s t / (1 + s^2 + t^2), is left out -- nought on the axes through the anchor, 0.2 at the
+// tail's far corners (the sphere question of 14.4; the cube-sphere tree is its answer). gDx and gDy are the
+// sizes at the anchor (q = 1): a 28 km window's cells change by 5e-6, the tail's edge 5000 km out by 0.6.
+float2 CellM(int2 t) {
+    const float s = gCellX.x + float(t.x) * gCellX.y, tn = gCellX.z + float(t.y) * gCellX.w;
+    const float q = 1.0f + s * s + tn * tn;
+    return float2(gDx * sqrt(1.0f + tn * tn) / q, gDy * sqrt(1.0f + s * s) / q);
+}
+
 StructuredBuffer<uint> gTileList : register(t0);
 // THE LIVE TILES (C1): one word a tile of the state's bank, 1 where it is resident. A NULL tile holds
 // no water and takes none: its faces are walls until the residency maps it (SweSolver::Record).
 StructuredBuffer<uint> gLive : register(t3);
+// STAGE 1c: the live words of the mip above this dispatch's (SweSolver: m_live1 under mip 0; none above mip 1)
+StructuredBuffer<uint> gLiveUp : register(t4);
+StructuredBuffer<uint> gImpactTerms : register(t5);   // stage 3: an impact's table (k, omega, A, 0 a term), as floats
+StructuredBuffer<uint> gLiveTail : register(t6);      // stage 2b: the tail's live words (one a tile)
 // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. M9ax: the tenant's WHOLE array (cube faces 0..5 and
 // the eye's windows and the standing window: PHASE B2/B3) with its residency-map array, resolved by HeightPages.hlsli
 // exactly as the pixel stage resolves it. There is no solver-private copy of the bed, and no
@@ -142,6 +186,14 @@ RWTexture2D<float4> gWavePrev : register(u14);
 // min(1, V / (out dt)) -- Bollermann, Chen, Kurganov and Noelle's limit on draining cells (2013). Every
 // reader of a face's flux takes it times its donor's share (FluxEff).
 RWTexture2D<float> gLim : register(u15);
+// STAGE 1c: THE CHAINS -- the column field, the bed and the read velocity bank, every mip of each, in one
+// root table (SweSolver: m_tableChain[fine parity][twin parity]); a mip's kernels read the mip above through
+// them (UpLiveAt, the magnify). The registers are the chains', indexed by the mip.
+// STAGE 2b: index 2 is the tail's (its h, its bed, the velocity bank its last step wrote, a sea bank unread).
+RWTexture2D<float> gHChain[3] : register(u16);
+RWTexture2D<float> gBedChain[3] : register(u19);
+RWTexture2D<float2> gVelChain[3] : register(u22);
+RWTexture2D<float4> gWaveChain[3] : register(u25);   // the sea bank each mip's solve reads (the push, the sweeps' source)
 
 // The bed as the stack answers it at the cell (the instrument CsSweBedTrace reads this too).
 float BedAt(int2 t) {
@@ -162,9 +214,52 @@ bool LiveAt(int2 t) {
     return gLive[(uint(t.y) / gEtaTileH) * gEtaTilesX + uint(t.x) / gEtaTileW] != 0u;
 }
 
-float BedC(int2 t) { return gBedC[t]; }
-float HAt(int2 t) { return gH[t]; }        // NULL tiles read 0: no water
-float SurfaceAt(int2 t) { return gBedC[t] + gH[t]; }
+// STAGE 1c OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): THE MAGNIFY. A cell this mip holds no
+// tile for is held by the mip above where its tile there is resident (gLiveUp): its water, its bed and its
+// face velocities are the coarse cell's, magnified (nearest: the coarse cell's own value stands over its
+// 2 x 2 fine cells; HIERARCHY 4.20's magnify law). The fine set's edge thus borders the coarse water, not a
+// frontier; the frontier (the stateless sea) stands only where NO mip of the chain holds the cell.
+// the cell above this one (stage 2d: the parent's lattice by gUp -- mip 1 of the same banks for the window)
+int2 UpCell(int2 t) { return (t >> int(gUp.x)) + int2(gUp.yz); }
+bool UpLiveAt(int2 t) {
+    if (gMip + 1.0f >= gMips || !InLattice(t)) return false;
+    const uint2 c = uint2(UpCell(t));
+    return gLiveUp[(c.y / gEtaTileH) * uint(gEtaTilesXUp) + c.x / gEtaTileW] != 0u;
+}
+bool HoldsAt(int2 t) { return LiveAt(t) || UpLiveAt(t); }   // some mip of the chain holds the cell
+float BedC(int2 t) { return LiveAt(t) ? gBedC[t] : UpLiveAt(t) ? gBedChain[uint(gMip) + 1u][UpCell(t)] : 0.0f; }
+float HAt(int2 t) { return LiveAt(t) ? gH[t] : UpLiveAt(t) ? gHChain[uint(gMip) + 1u][UpCell(t)] : 0.0f; }   // NULL: no water
+float SurfaceAt(int2 t) { return BedC(t) + HAt(t); }
+float2 VelPrevAt(int2 t) { return LiveAt(t) ? gVelPrev[t] : UpLiveAt(t) ? gVelChain[uint(gMip) + 1u][UpCell(t)] : 0.0f; }
+
+// STAGE 2b: THE TAIL UNDER A CELL OF THIS LATTICE -- the tail cell it lies in (the window's corner lies in gTail.yz;
+// the shift is the rank less this mip), live where the tail holds a tile there. The tail's water is over mean
+// sea (its reset is MSL over the bed; its tide plane is 0 m): its DEPARTURE is its column less the column mean
+// sea would stand over the same bed -- the train it carries, a surge, nothing where it rests. Its velocity is the
+// cell's east and south faces'.
+// The tail cell BEYOND this lattice's side s at edge cell t: the one the cell lies in, stepped one cell outward
+// (Berger and Oliger's ghost: the tail cells under the window are the fold's, and reading them back at the edge
+// would echo the window into itself).
+bool TailCellOf(int s, int2 t, out int2 c) {
+    c = int2(0, 0);
+    if (gTail.x < 0.0f) return false;
+    c = (t >> int(gTail.x)) + int2(gTail.yz) + ((s == 0) ? int2(0, -1) : (s == 1) ? int2(0, 1) : (s == 2) ? int2(-1, 0) : int2(1, 0));
+    if (any(c < 0) || c.x >= int(gTail.w) || c.y >= int(gTail2.x)) return false;
+    return gLiveTail[(uint(c.y) / gEtaTileH) * uint(gTail2.y) + uint(c.x) / gEtaTileW] != 0u;
+}
+float TailDepAt(int s, int2 t) {
+    int2 c;
+    if (!TailCellOf(s, t, c)) return 0.0f;
+    const float b = gBedChain[2][c];
+    return (b < 0.0f) ? gHChain[2][c] + b : 0.0f;   // h - (0 - b): the column less mean sea's
+}
+// The tail's velocity INTO this lattice across its side s (0 N, 1 S, 2 W, 3 E), m/s: the ghost cell's faces.
+float TailUAt(int s, int2 t) {
+    int2 c;
+    if (!TailCellOf(s, t, c)) return 0.0f;
+    const float2 v = gVelChain[2][c];   // x across the east face (+ east), y across the south face (+ south)
+    return (s == 0) ? v.y : (s == 1) ? -v.y : (s == 2) ? v.x : -v.x;
+}
 
 uint2 EtaTexel(uint3 id) {
     const uint t = gTileList[id.z];
@@ -178,18 +273,20 @@ uint2 FluxTexel(uint3 id) {
 
 // ---- the boundary: the open sea's sides and the river faces ---------------------------------------
 
-// The side whose EXTERIOR cell `e` is, where the sea continues past the edge (-1: none). The exterior
-// cells are the sea's own water, pinned to its Level; the faces between them and the interior are
-// Flather. THE SEA CONTINUES where the domain cuts water that is always there: every cell of an open
-// side (SweDomain::Bound: all of it can be wet), and on any other side a cell whose bed lies below mean
-// sea (0 m NAVD88) -- a channel the edge cuts, Plum Island Sound's at the Merrimack window's south edge
-// -- never a marsh or a field. (The river faces are tested before this: ExteriorLevel.) A corner cell
-// answers its first side; SweSolver::SeaFaceCell is the twin.
+// The side whose EXTERIOR cell `e` is (-1: an interior cell). THE EDGE IS THE FRONTIER'S LAW (2026-10-27,
+// one water on the tree): every edge cell with a bed is the stateless sea's, pinned to the Level along
+// its side (OceanEtaAt). It holds the water that Level stands over its bed and none where the Level is
+// under it (CsSweHeight), and the faces between it and the interior are Flather -- so a channel the edge
+// cuts fills and drains with the sea and a dune at the edge stands over it, each instant, with no side
+// "open" and none a wall: the law residency's frontier already had (ExteriorLevel: the tide plane over
+// the megatexture's bed), standing at the lattice's edge too. (The river faces are tested before this:
+// ExteriorLevel.) A corner cell answers its first side; SweDomain::SeaEdgeCell is the twin. Until this
+// date a side was open when every cell of it lay under +1.2 m, else only its cells below mean sea were
+// the sea's: a harbour mouth across 1525 of 2048 cells had no open side.
 int OceanSideOf(int2 e) {
     const int s = (e.y == 0) ? 0 : (e.y == (int)gNy - 1) ? 1 : (e.x == 0) ? 2 : (e.x == (int)gNx - 1) ? 3 : -1;
     if (s < 0) return -1;
-    if ((((uint)gOpenSides) >> s) & 1u) return s;
-    return (BedC(e) < 0.0f) ? s : -1;
+    return (BedC(e) > -9000.0f) ? s : -1;
 }
 
 // The Level along open side `s` at its exterior cell `e`, NAVD: the four samples' cubic through the
@@ -202,7 +299,8 @@ float OceanEtaAt(int s, int2 e) {
     const float l1 = a * (a - 2.0f) * (a - 3.0f) / 2.0f;
     const float l2 = -a * (a - 1.0f) * (a - 3.0f) / 2.0f;
     const float l3 = a * (a - 1.0f) * (a - 2.0f) / 6.0f;
-    return gTideNavd + l0 * y.x + l1 * y.y + l2 * y.z + l3 * y.w;
+    // stage 2b: the tide atlas's Level, plus what the tail carries over it where the tail holds the cell
+    return gTideNavd + l0 * y.x + l1 * y.y + l2 * y.z + l3 * y.w + TailDepAt(s, e);
 }
 
 // The river face whose EXTERIOR cell `e` is (-1: none): a cell of a face's side, in its run, whose
@@ -232,7 +330,19 @@ bool ExteriorLevel(int2 e, out float etaX, out float uExt) {
     const int s = OceanSideOf(e);
     if (s >= 0) {
         etaX = OceanEtaAt(s, e);
-        uExt = gOceanU;
+        uExt = gOceanU + TailUAt(s, e);   // stage 2b: the prism's transport, and the tail's wave's
+        return true;
+    }
+    // THE FRONTIER (stage 0b of one water on the tree, docs/WATER_V2.md 14; 2026-10-26): wherever the
+    // resident set ends, at whatever cell, the neighbour is the stateless sea -- the tide plane over the
+    // megatexture's bed (FlatherFlux reads that bed for a cell no state tile holds). The lattice's edge
+    // rows keep their law above (the side's cubic, the rivers' faces); this is the same Flather, standing
+    // at residency's edge instead of the box's. A NULL tile whose bed stands over the tide takes nothing,
+    // as before; one under it is open sea. STAGE 1c: a cell the mip above holds is not the frontier's --
+    // its coarse water is the neighbour (FaceUpdate reads it magnified).
+    if (!HoldsAt(e)) {
+        etaX = gTideNavd;
+        uExt = 0.0f;
         return true;
     }
     return false;
@@ -322,6 +432,89 @@ void CsSweReset(uint3 id : SV_DispatchThreadID) {
     gLim[t] = 1.0f;
 }
 
+// STAGE 2d: A FRESH TILE OF A LEVEL TAKES ITS PARENT'S STATE (Berger and Oliger's interpolation, by the magnify's
+// nearest law): its column mean sea's over its own bed plus the parent cell's departure, its faces the parent
+// cell's velocities. A tile rested instead erased, through the fold, the train its parent had carried under it
+// (the 1 km stone's train reached the window at 3 % of the law's amplitude that way).
+[numthreads(16, 16, 1)]
+void CsSweMagnifyInit(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
+    const uint2 t = EtaTexel(id);
+    if (t.x >= gNx || t.y >= gNy) return;
+    const float b = gBedC[t];
+    const int2 c = UpCell(int2(t));
+    const float bP = gBedChain[1][c], hP = gHChain[1][c];
+    const float dep = (bP < 0.0f) ? hP + bP : 0.0f;
+    gH[t] = max(gTideNavd - b + dep, 0.0f);
+    gVelPrev[t] = gVelChain[1][c];
+    gSoilW[t] = 0.0f;
+    gLim[t] = 1.0f;
+}
+
+// STAGE 3 OF ONE WATER ON THE TREE (2026-10-27): AN IMPACT IMPOSED ON THE COLUMN FIELD, at the first batch the
+// field stands past the event's zero, at every mip the field holds (the twin's own constants on its own list).
+// The law's state then: its level, the sum over the table at the cell's distance (laws/Impact.hlsli ImpactTerm;
+// at T = 0 the cavity itself, the lipped parabola of net volume nought; later the train linear theory has
+// carried), and its radial velocity from the same sum by continuity, u_r = sum A omega / (h0 k) J1(k r)
+// sin(omega T) -- nought at T = 0, the cavity at rest -- each shoaled from the basin depth to the column's own
+// water by Green's law, eta by (h0 / h)^(1/4) and u by (h0 / h)^(3/4), the WKB limit of the same theory,
+// unbounded (the columns are the nonlinear reader). The level goes into the column, h >= 0 (a cavity deeper
+// than the water stands on the bed); the velocity onto the cell's east and south faces, radial from the impact.
+// From here the law carries it: the solver's own ring, shoaling, steepening, run-up and bore, with no analytic
+// reader inside the window. The distance is in the anchor's chart with the impact placed its great-circle
+// distance along its bearing (SweSolver::BeginImpose): the chart's error against the sphere is second order in
+// the window's size over that distance, 2 m at 2600 km for this window.
+[numthreads(16, 16, 1)]
+void CsSweImpose(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
+    const int2 t = int2(EtaTexel(id));
+    if (t.x >= (int)gNx || t.y >= (int)gNy) return;
+    const uint n = (uint)gImpactB.x;
+    if (n == 0u) return;
+    const float R = gAnc.w;
+    const float so = gCellX.x + float(t.x) * gCellX.y, to = gCellX.z + float(t.y) * gCellX.w;   // over R
+    const float s = so * R, tn = to * R;                                                          // east, north, m
+    const float2 d = float2(s - gImpactA.x, tn - gImpactA.y);   // the radial direction, in the chart
+    // the distance on the sphere, by the chord between the cell's direction and the impact's (stage 2b: the chart's
+    // planar distance was 2 m off at 2600 km for the window; across the tail it would be a tenth)
+    const float3 dir = normalize(gAnc.xyz + so * gEast.xyz + to * cross(gEast.xyz, gAnc.xyz));
+    const float r = max(2.0f * R * asin(min(0.5f * length(dir - gImpactB.yzw), 1.0f)), 1.0f);
+    const float T = max(gImpactA.z, 0.0f);
+    const float h0 = gImpactA.w;
+    float eta = 0.0f, ur = 0.0f;
+    // AT ITS INSTANT THE LAW IS THE CAVITY ITSELF, closed, while the long-wave front is still within the lip (T c < R_D:
+    // a minute for a 1 km stone in 4 km of water, the batch that imposes it a few seconds late); after, the sum. THE SUM
+    // IS CAUSAL (2026-10-28): its truncation plants metres thousands of km out -- imposed at T = 10 s instead of 4 (a
+    // batch boundary moved by the window's step) every tile of the event's patch departed at once, the ring mapped the
+    // whole ocean in minutes, and the line's probes read the planted field as the train -- so beyond the front the
+    // linear theory has carried, r > R_D + c T, the sum is nothing, fading over a lip's radius.
+    const float c0 = sqrt(gGravity * h0), RD = kImpactLipRatio * gImpactC.x;
+    if (T * c0 < RD) {
+        eta = ImpactCavityAt(r, gImpactC.x, gImpactC.y);
+    } else {
+        const float front = RD + c0 * T;
+        const float w = 1.0f - smoothstep(front, front + RD, r);
+        if (w > 0.0f) {
+            [loop] for (uint i = 0u; i < n; ++i) {
+                const float k = asfloat(gImpactTerms[4u * i]);
+                const float om = asfloat(gImpactTerms[4u * i + 1u]);
+                const float A = asfloat(gImpactTerms[4u * i + 2u]);
+                eta += ImpactTerm(A, k, om, r, T);
+                ur += A * om / (h0 * k) * BesselJ1(k * r) * sin(om * T);
+            }
+            eta *= w;
+            ur *= w;
+        }
+    }
+    const float h = max(gH[t], kDepthFloorM);
+    const float G = pow(h0 / h, 0.25f);
+    gH[t] = max(gH[t] + eta * G, 0.0f);
+    // the faces: radial from the impact at each face's centre (the east face + east, the south face + south)
+    const float2 dE = float2(d.x + 0.5f * gDx, d.y), dS = float2(d.x, d.y - 0.5f * gDy);
+    const float u = ur * G * G * G;
+    gVelPrev[t] = float2(u * dE.x / max(length(dE), 1.0f), -u * dS.y / max(length(dS), 1.0f));
+}
+
 [numthreads(16, 16, 1)]
 void CsSweClearFlux(uint3 id : SV_DispatchThreadID) {
     if (id.x >= gFluxTileW || id.y >= gFluxTileH) return;
@@ -369,7 +562,7 @@ float FaceDepth(int2 a, int2 b, float u) {
 // The velocity a face held the substep before: axis `ax` (0: the east face, 1: the south face) of cell c.
 float PrevU(int2 c, int ax) {
     if (!InLattice(c)) return 0.0f;
-    const float2 v = gVelPrev[c];
+    const float2 v = VelPrevAt(c);   // stage 1c: the coarse cell's where this mip holds none
     return (ax == 0) ? v.x : v.y;
 }
 
@@ -377,7 +570,7 @@ float PrevU(int2 c, int ax) {
 // the velocity before times the face's upwind depth now; none where either side is not live.
 float FaceP(int2 c, int ax) {
     const int2 e = (ax == 0) ? int2(1, 0) : int2(0, 1);
-    if (!LiveAt(c) || !LiveAt(c + e)) return 0.0f;
+    if (!HoldsAt(c) || !HoldsAt(c + e)) return 0.0f;
     const float u = PrevU(c, ax);
     return u * FaceDepth(c, c + e, u);
 }
@@ -385,9 +578,12 @@ float FaceP(int2 c, int ax) {
 // The sea's radiation stress at cell c over the water's density, (S_xx, S_yy, S_xy) / rho in the texture
 // frame (m^3/s^2): S_xx = E (n (1 + cos^2) - 1/2), S_yy = E (n (1 + sin^2) - 1/2), S_xy = E n sin cos,
 // E = g Hs^2 / 16 per density (Longuet-Higgins and Stewart 1964). None outside the lattice.
+// stage 1c: the sea of a cell the mip above holds is its coarse cell's -- without it the radiation stress fell to
+// nothing across the fine set's edge, a push that rang the inlet a metre in the first gate run
+float4 WaveAt(int2 c) { return LiveAt(c) ? gWave[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][UpCell(c)] : 0.0f; }
 float3 WaveS(int2 c) {
     if (!InLattice(c)) return 0.0f;
-    const float4 w = gWave[c];
+    const float4 w = WaveAt(c);
     const float cx = cos(w.w), cy = sin(w.w);
     const float e = gGravity * w.x;
     return e * float3(w.y * (1.0f + cx * cx) - 0.5f, w.y * (1.0f + cy * cy) - 0.5f, w.y * cx * cy);
@@ -415,7 +611,9 @@ float3 WaveS(int2 c) {
 // is not, nothing where neither can stand over the sill (a lake at rest stays at rest).
 float2 FaceUpdate(float u, int2 t, int2 d, float faceLen, float span) {
     const int2 n = t + d;
-    if (!LiveAt(n)) return 0.0f;   // a NULL tile holds no water and takes none
+    // a NULL tile holds no water and takes none; a cell the mip above holds is read magnified (stage 1c), and
+    // a face neither of whose cells this mip holds is the mip above's, not this one's
+    if (!HoldsAt(t) || !HoldsAt(n) || !(LiveAt(t) || LiveAt(n))) return 0.0f;
     const float b = BedC(t), bn = BedC(n);
     const float h = HAt(t), hn = HAt(n);
     const float sill = max(b, bn);
@@ -424,7 +622,8 @@ float2 FaceUpdate(float u, int2 t, int2 d, float faceLen, float span) {
 
     const int ax = (d.x != 0) ? 0 : 1;
     const int2 dn = int2(d.y, d.x);              // the transverse axis (south for an east face, east for a south face)
-    const float spanT = (ax == 0) ? gDy : gDx;   // the transverse cell size
+    const float2 cm = CellM(t);                  // the chart's metric at the cell (stage 2b)
+    const float spanT = (ax == 0) ? cm.y : cm.x;   // the transverse cell size
     const float hBar = max(0.5f * (h + hn), gWetEps);
     float adv = 0.0f;
     if (u > 0.0f) {
@@ -495,13 +694,16 @@ static float4 gWtCells = 0.0f;  // the exterior cell's surface less the tide pla
 float2 FlatherFlux(int f, float etaX, float uExt, int2 e, int2 i, float L) {
     const float hI = HAt(i);
     const float etaI = SurfaceAt(i);
-    const float sill = max(BedC(e), BedC(i));
+    // the exterior's bed: the cached one where a state tile holds it, the megatexture's at the frontier
+    const float bedE = HoldsAt(e) ? BedC(e) : BedAt(e);
+    const float sill = max(bedE, BedC(i));
     const float hf = max(max(etaX, etaI) - sill, 0.0f);
     float q = 0.0f;
     if (hf > 0.05f) {
         const float rad = sqrt(gGravity / hf) * (etaX - etaI);
         const float ub = uExt + rad;
-        const float V = gDx * gDy / gDt;                 // positivity, as everywhere
+        const float2 cm = CellM(i);
+        const float V = cm.x * cm.y / gDt;               // positivity, as everywhere (the cell's true area)
         q = clamp(hf * L * ub, -0.25f * hI * V, 0.25f * hf * V);
         SWE_FACE_LAW(f, rad, ub, hf * L * ub, -0.25f * hI * V, 0.25f * hf * V);
     }
@@ -523,8 +725,9 @@ void CsSweFlux(uint3 id : SV_DispatchThreadID) {
     if (t.x >= (int)gNx || t.y >= (int)gNy) return;
 
     const float2 u = gVelPrev[t];
-    float2 fe = FaceUpdate(u.x, t, int2(1, 0), gDy, gDx);   // east face (dy long, dx span): (u, q)
-    float2 fs = FaceUpdate(u.y, t, int2(0, 1), gDx, gDy);   // south face (texture +y)
+    const float2 cm = CellM(t);   // stage 2b: the cell's true size from the chart's metric
+    float2 fe = FaceUpdate(u.x, t, int2(1, 0), cm.y, cm.x);   // east face (dy long, dx span): (u, q)
+    float2 fs = FaceUpdate(u.y, t, int2(0, 1), cm.x, cm.y);   // south face (texture +y)
 
     // THE BOUNDARY (FlatherFlux): a thread owns its cell's east and south faces. A face with an
     // exterior cell on either side is the boundary's: between an exterior and an interior cell it is
@@ -536,11 +739,11 @@ void CsSweFlux(uint3 id : SV_DispatchThreadID) {
     const bool xS = InLattice(t + int2(0, 1)) && ExteriorLevel(t + int2(0, 1), etaS, uS);
     const int fT = (gFaceCount > 0.0f) ? FaceOfExterior(t) : -1;
     if (xT && xE) fe = 0.0f;
-    else if (xT && LiveAt(t + int2(1, 0))) fe = BoundaryFace(FlatherFlux(fT, etaT, uT, t, t + int2(1, 0), gDy), 1.0f, gDy);
-    else if (xE) fe = BoundaryFace(FlatherFlux((gFaceCount > 0.0f) ? FaceOfExterior(t + int2(1, 0)) : -1, etaE, uE, t + int2(1, 0), t, gDy), -1.0f, gDy);
+    else if (xT && LiveAt(t + int2(1, 0))) fe = BoundaryFace(FlatherFlux(fT, etaT, uT, t, t + int2(1, 0), cm.y), 1.0f, cm.y);
+    else if (xE) fe = BoundaryFace(FlatherFlux((gFaceCount > 0.0f) ? FaceOfExterior(t + int2(1, 0)) : -1, etaE, uE, t + int2(1, 0), t, cm.y), -1.0f, cm.y);
     if (xT && xS) fs = 0.0f;
-    else if (xT && LiveAt(t + int2(0, 1))) fs = BoundaryFace(FlatherFlux(fT, etaT, uT, t, t + int2(0, 1), gDx), 1.0f, gDx);
-    else if (xS) fs = BoundaryFace(FlatherFlux((gFaceCount > 0.0f) ? FaceOfExterior(t + int2(0, 1)) : -1, etaS, uS, t + int2(0, 1), t, gDx), -1.0f, gDx);
+    else if (xT && LiveAt(t + int2(0, 1))) fs = BoundaryFace(FlatherFlux(fT, etaT, uT, t, t + int2(0, 1), cm.x), 1.0f, cm.x);
+    else if (xS) fs = BoundaryFace(FlatherFlux((gFaceCount > 0.0f) ? FaceOfExterior(t + int2(0, 1)) : -1, etaS, uS, t + int2(0, 1), t, cm.x), -1.0f, cm.x);
 #ifdef SWE_FACE_TRACE
     if (gWtAlong >= 0) {
         gFaceTrace[uint2(0, gWtAlong)] = gWtFace;
@@ -555,7 +758,8 @@ void CsSweFlux(uint3 id : SV_DispatchThreadID) {
 }
 
 // The share of a column's outgoing fluxes its water pays this substep (gLim); 1 off the lattice.
-float LimAt(int2 c) { return InLattice(c) ? gLim[c] : 1.0f; }
+// stage 1c: a cell this mip does not hold pays the whole share (the coarse donor's positivity is its own step's)
+float LimAt(int2 c) { return LiveAt(c) ? gLim[c] : 1.0f; }
 
 // A face's flux as the water moves it: the face's own times its donor's share. axis 0: the east face of
 // c (to c + (1, 0)); 1: the south face (to c + (0, 1)).
@@ -584,7 +788,8 @@ void CsSweLimit(uint3 id : SV_DispatchThreadID) {
     const float qw = (t.x > 0) ? gFlux[int2(t.x - 1, t.y)].x : 0.0f;
     const float qn = (t.y > 0) ? gFlux[int2(t.x, t.y - 1)].y : 0.0f;
     const float drain = max(qc.x, 0.0f) + max(qc.y, 0.0f) + max(-qw, 0.0f) + max(-qn, 0.0f);
-    const float V = gH[t] * gDx * gDy;
+    const float2 cm = CellM(t);
+    const float V = gH[t] * cm.x * cm.y;   // the cell's true area (stage 2b)
     // a hair under the water it holds: an exact share lands the column a rounding either side of empty,
     // and the side below is lifted back to 0 by h >= 0 -- water from nowhere, every draining column, every
     // substep (the ledger saw 8e-5 of the prism)
@@ -610,7 +815,8 @@ void CsSweHeight(uint3 id : SV_DispatchThreadID) {
     const float qe = FluxEff(t, 0), qs = FluxEff(t, 1);
     const float qw = FluxEff(t - int2(1, 0), 0);   // across my west face (+ = into me)
     const float qn = FluxEff(t - int2(0, 1), 1);   // across my north face (+ = into me)
-    float h = gH[t] + gDt * ((qw - qe) + (qn - qs)) / (gDx * gDy);
+    const float2 cm = CellM(t);
+    float h = gH[t] + gDt * ((qw - qe) + (qn - qs)) / (cm.x * cm.y);   // over the cell's true area (stage 2b)
     // THE LAND SOAKS (C2; Mark: "water gets sponged up by dry cells but still spreads out and goes down
     // rivers; eventually soil saturation"). The column's soil holds water of its own, W <= C (gSoil.x),
     // and takes standing water at Green and Ampt's rate, K (1 + S / W) -- K the saturated conductivity
@@ -651,8 +857,9 @@ void CsSweDerive(uint3 id : SV_DispatchThreadID) {
     const float2 qc = float2(FluxEff(t, 0), FluxEff(t, 1));
     const float qw = FluxEff(t - int2(1, 0), 0);
     const float qn = FluxEff(t - int2(0, 1), 1);
-    const float u = 0.5f * (qc.x + qw) / (h * gDy);
-    const float v = -0.5f * (qc.y + qn) / (h * gDx);   // texture +y is south; world v is north
+    const float2 cm = CellM(t);
+    const float u = 0.5f * (qc.x + qw) / (h * cm.y);
+    const float v = -0.5f * (qc.y + qn) / (h * cm.x);   // texture +y is south; world v is north
     gUv[uint3(t, 0)] = float4(u, v, h, 1.0f);
 }
 
@@ -661,7 +868,13 @@ void CsSweDerive(uint3 id : SV_DispatchThreadID) {
 // THE WATER, TILE BY TILE: one group a resident state tile (a thread 8 x 8 of its cells) -- which of its
 // columns hold water and which of its edges water touches (the residency's ring), its deepest and
 // fastest column (the step), and the water it holds (the ledger of a tile the residency releases).
-groupshared uint gsFlags, gsHmax, gsUmax;
+// A LEVEL's fourth word is instead THE RANGE OF ITS DEPARTURE WITHIN A PARENT CELL, the greatest over the
+// tile (2026-10-28, the release behind a train): what the parent's one value cannot hold of the field. The
+// residency keeps a tile while that range is the departure's own scale (the field is the level's to resolve)
+// and releases it once the parent holds the field at the resolution the level was made for (SweSolver::
+// UpdateLevelResidency). A thread's block is 8 x 8 cells: the range is taken over each parent cell within
+// it (per <= 8), else over the block (a lower bound for a level four or more ranks under its parent).
+groupshared uint gsFlags, gsHmax, gsUmax, gsRange;
 groupshared float gsVol[256];
 [numthreads(16, 16, 1)]
 void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex) {
@@ -669,6 +882,7 @@ void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint g
         gsFlags = 0u;
         gsHmax = 0u;
         gsUmax = 0u;
+        gsRange = 0u;
     }
     GroupMemoryBarrierWithGroupSync();
     const uint tile = gTileList[gid.z];
@@ -683,26 +897,56 @@ void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint g
             if (t.x >= gNx || t.y >= gNy) continue;
             const float h = gH[t];
             vol += h;
-            if (h <= gWetEps) continue;
+            // stage 2d: a level of mean sea's gauge (gTail2.z = 1) counts a column live where it departs from rest,
+            // |h + b| over the wet tolerance -- the train, a surge -- so a front demands the tiles ahead of itself
+            // and the sea it has left is released; the window counts a column that holds water
+            const float b = gBedC[t];
+            const float sig = (gTail2.z > 0.5f) ? ((b < 0.0f) ? abs(h + b) : 0.0f) : h;   // no sea over land: nothing departs there
+            if (sig <= gWetEps) continue;
             flags |= 1u;
             if (c.y == 0u) flags |= 2u;
             if (c.y == gEtaTileH - 1u) flags |= 4u;
             if (c.x == 0u) flags |= 8u;
             if (c.x == gEtaTileW - 1u) flags |= 16u;
-            hm = max(hm, h);
+            hm = max(hm, (gTail2.z > 0.5f) ? sig : h);   // a level's statistic is its greatest departure
             um = max(um, length(gUv[uint3(t, 0)].xy));
+        }
+    }
+    float rm = 0.0f;
+    if (gTail2.z > 0.5f) {   // a level: the departure's range within each parent cell of this thread's block
+        const uint per = (gTail.x >= 0.0f) ? (1u << uint(gTail.x)) : 1u;
+        const uint cs = min(per, min(sx, sy));
+        for (uint by = 0u; by < sy; by += cs) {
+            for (uint bx = 0u; bx < sx; bx += cs) {
+                float lo = 1.0e30f, hi = -1.0e30f;
+                bool any = false;
+                for (uint j = 0u; j < cs; ++j) {
+                    for (uint i = 0u; i < cs; ++i) {
+                        const uint2 t = org + uint2(tid.x * sx + bx + i, tid.y * sy + by + j);
+                        if (t.x >= gNx || t.y >= gNy) continue;
+                        const float b = gBedC[t];
+                        if (b >= 0.0f) continue;   // land holds no departure
+                        const float d = gH[t] + b;
+                        lo = min(lo, d);
+                        hi = max(hi, d);
+                        any = true;
+                    }
+                }
+                if (any) rm = max(rm, hi - lo);
+            }
         }
     }
     InterlockedOr(gsFlags, flags);
     InterlockedMax(gsHmax, asuint(hm));
     InterlockedMax(gsUmax, asuint(um));
+    InterlockedMax(gsRange, asuint(rm));
     gsVol[gi] = vol;
     GroupMemoryBarrierWithGroupSync();
     for (uint s = 128u; s > 0u; s >>= 1u) {
         if (gi < s) gsVol[gi] += gsVol[gi + s];
         GroupMemoryBarrierWithGroupSync();
     }
-    if (gi == 0u) gTileStats[uint2(tile % gEtaTilesX, tile / gEtaTilesX)] = uint4(gsFlags, gsHmax, gsUmax, asuint(gsVol[0]));
+    if (gi == 0u) gTileStats[uint2(tile % gEtaTilesX, tile / gEtaTilesX)] = uint4(gsFlags, gsHmax, gsUmax, (gTail2.z > 0.5f) ? gsRange : asuint(gsVol[0]));
 }
 
 // THE BOUNDARY'S LEDGER: the water in through every boundary face this substep -- the list in t0 (its
@@ -759,11 +1003,10 @@ void CsSweLedger(uint gi : SV_GroupIndex) {
 // taller than the bank's own law lets it (BREAKING: Battjes and Janssen's clipped Rayleigh sea,
 // WaterTerms.h BreakHmax / BreakFactor, the same law the drawn sea is broken by). The dissipation D is
 // what the breaking takes; its force is the radiation stress's divergence (FaceUpdate).
-// The wavenumber: Guo's explicit approximation of the dispersion relation (2002, within 0.75 %).
+// The wavenumber: Guo's explicit approximation of the dispersion relation (laws/Dispersion.hlsli
+// ShoaledKh, the one text the bank and the hull read it from), from the deep-water k = omega^2 / g.
 float WaveK(float omega, float d) {
-    const float x = omega * omega * d / gGravity;
-    const float y = pow(max(1.0f - exp(-pow(omega * sqrt(d / gGravity), 2.5f)), 1e-6f), -0.4f);
-    return x * y / d;
+    return ShoaledKh(omega * omega / gGravity, d) / d;
 }
 
 float4 WavePrevAt(float2 p) {   // bilinear over the sweep before, at a point in cell units (centres at +0.5)
@@ -774,7 +1017,9 @@ float4 WavePrevAt(float2 p) {   // bilinear over the sweep before, at a point in
     [unroll] for (int k = 0; k < 4; ++k) {
         const int2 c = t0 + int2(k & 1, k >> 1);
         const float w = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
-        if (InLattice(c) && LiveAt(c)) acc += w * gWavePrev[c];
+        // stage 1c: up-ray of the fine set's edge the coarse cell's sea is the source (the twin sweeps its own
+        // lattice from the open sides; the fine set has no side of its own)
+        if (InLattice(c)) acc += w * (LiveAt(c) ? gWavePrev[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][UpCell(c)] : 0.0f);
     }
     return acc;
 }
@@ -834,7 +1079,7 @@ void CsSweWaves(uint3 id : SV_DispatchThreadID) {
         // (WaterTerms.h BreakHmax: Battjes and Janssen's Miche-bounded gamma h, a limit on Hs, read for one
         // wave as sqrt(2) of it: Hs = sqrt(2) Hrms) -- Hrms the arriving sea's.
         const float hrms2 = 8.0f * F / cg;    // Hrms^2 = 8 E with E = Hs^2 / 16
-        const float hb = 1.41421356f * (0.88f / k) * tanh(0.60f * k * h / 0.88f);
+        const float hb = 1.41421356f * BreakHmax(k, h);   // laws/Breaking.hlsli: the bank's own law
         const float D = 0.25f * (omega / 6.2831853f) * exp(-hb * hb / max(hrms2, 1e-8f)) * (hb * hb + hrms2);
         E = max(F - D * s, 0.0f) / cg;   // F and D both per rho g: the flux of Hrms^2 / 8
     }
@@ -851,6 +1096,67 @@ void CsSweClearTile(uint3 id : SV_DispatchThreadID) {
     gSoilW[t] = 0.0f;
     gEta[t] = 0.0f;
     gLim[t] = 1.0f;
+}
+
+// STAGE 1b OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): THE FOLD. A coarse cell under four
+// resident fine cells IS their fold -- the water their mean (the column's water per area), the bed their
+// mean (so the level's mean follows), a face's velocity the mean of the two fine faces that lie on it (the
+// flux-weighted fold, by the faces' water, is 1c's). Dispatched over the coarse tiles whose four children
+// are resident, with the twin's constants and the FOLD TABLE: gH, gBedC and gVelPrev are the fine banks at
+// mip 0 (read), gEta, gSoilW and gFlux the water, the bed and the twin's read velocity bank at mip 1
+// (written) -- the registers are the kernel's names, the views the fold's. The twin's own evolution
+// under the fine set is discarded each batch; the fine solve is the truth there, the twin carries the
+// rest and reads the folded cells at its edge.
+[numthreads(16, 16, 1)]
+void CsSweFold(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
+    const uint2 c = EtaTexel(id);
+    if (c.x >= gNx || c.y >= gNy) return;
+    const int2 f = int2(c) * 2;
+    const int2 fE = f + int2(1, 0), fS = f + int2(0, 1), fSE = f + int2(1, 1);
+    const float h = 0.25f * (gH[f] + gH[fE] + gH[fS] + gH[fSE]);
+    const float b = 0.25f * (gBedC[f] + gBedC[fE] + gBedC[fS] + gBedC[fSE]);
+    // the coarse east face is the right column's two east faces; its south face the bottom row's two
+    const float2 v = float2(0.5f * (gVelPrev[fE].x + gVelPrev[fSE].x), 0.5f * (gVelPrev[fS].y + gVelPrev[fSE].y));
+    gEta[c] = h;
+    gSoilW[c] = b;
+    gFlux[c] = v;
+}
+
+// STAGE 2c/2d: THE FOLD INTO THE PARENT (SweSolver::RecordLevel, before each parent step; the child's constants and
+// tile list bound, the fold's table: the child's water, bed and newest velocities in the read slots, the parent's
+// water and read velocities in the written ones, the parent's bed at gSoilW). One thread a parent cell under each
+// of the child's resident tiles (id.z the tile): the parent's column there becomes mean sea's over ITS bed plus
+// the mean, over the child's wet cells, of the child's surface less its tide plane (0 m for a level: the departure
+// the gauges share); its faces take the child's wet cells' mean velocities. Nothing where the child holds no
+// water or the parent no sea.
+[numthreads(16, 16, 1)]
+void CsSweFoldLevel(uint3 id : SV_DispatchThreadID) {
+    const uint per = 1u << uint(gTail.x);                 // child cells a parent cell
+    const uint across = max(gEtaTileW / per, 1u);         // parent cells across a child tile
+    if (id.x >= across || id.y >= across) return;
+    const uint t = gTileList[id.z];
+    const uint2 o = uint2(t % gEtaTilesX, t / gEtaTilesX) * uint2(gEtaTileW, gEtaTileH) + id.xy * per;   // the block's first child cell
+    if (o.x >= gNx || o.y >= gNy) return;
+    const int2 cellT = int2(o >> uint(gTail.x)) + int2(gTail.yz);
+    float sh = 0.0f, su = 0.0f, sv = 0.0f, n = 0.0f;
+    for (uint j = 0u; j < per; ++j) {
+        for (uint i = 0u; i < per; ++i) {
+            const uint2 c = o + uint2(i, j);
+            if (c.x >= gNx || c.y >= gNy) continue;
+            const float h = gH[c];
+            if (h <= gWetEps) continue;
+            sh += gBedC[c] + h - gTideNavd;
+            su += gVelPrev[c].x;
+            sv += gVelPrev[c].y;
+            n += 1.0f;
+        }
+    }
+    if (n <= 0.0f) return;
+    const float bT = gSoilW[cellT];   // the parent's bed
+    if (bT >= 0.0f) return;           // the parent holds no sea here
+    gEta[cellT] = max(-bT + sh / n, 0.0f);
+    gFlux[cellT] = float2(su, sv) / n;
 }
 
 // M9h: THE DERIVED FIELD. Central differences on the derived current, one dispatch over the

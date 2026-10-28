@@ -41,6 +41,7 @@ void WaterManager::AddExternalWindow(const char* name, SweSolver* solver,
         w.box[1] = d.lon0;
         w.box[2] = d.lat1;
         w.box[3] = d.lon1;
+        w.levels = solver->LevelBoxes();   // stage 2b/2c: the levels' beds are wanted with the window's
     }
     w.oceanAt = std::move(oceanAt);
     w.active = solver && solver->Ready();
@@ -48,78 +49,6 @@ void WaterManager::AddExternalWindow(const char* name, SweSolver* solver,
     snprintf(w.currentTag, sizeof(w.currentTag), "swe.%s (solved)", name);
     m_windows.push_back(std::move(w));
     Register();
-}
-
-void WaterManager::AddDormantWindow(const char* name, const double box[4], uint32_t nx, uint32_t ny,
-                                    const SweConfig& cfg,
-                                    std::function<double(double)> oceanAt,
-                                    double spinupHours, FaceClock faceAt, FaceClock faceQAt) {
-    // PHASE C1: a dormant window's domain (and its holds-water line) is made on activation, from its
-    // box and cells and the stack's bed.
-    Window w;
-    w.name = name;
-    for (int k = 0; k < 4; ++k) w.box[k] = box[k];
-    w.nx = nx;
-    w.ny = ny;
-    w.cfg = cfg;
-    w.cfg.name = nullptr;   // points at the caller's literal; rebound on activation
-    w.oceanAt = std::move(oceanAt);
-    const FaceClock zero = [](int, double) { return 0.0; };
-    w.faceAt = faceAt ? std::move(faceAt) : zero;
-    w.faceQAt = faceQAt ? std::move(faceQAt) : zero;
-    w.spinupHours = spinupHours;
-    snprintf(w.levelTag, sizeof(w.levelTag), "swe.%s + stations", name);
-    snprintf(w.currentTag, sizeof(w.currentTag), "swe.%s (solved)", name);
-    m_windows.push_back(std::move(w));
-    Register();
-}
-
-bool WaterManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                            const char* name, double simUnix) {
-    for (Window& w : m_windows) {
-        if (w.name != name) continue;
-        if (w.active) return true;
-        if (!w.nx || !w.ny) return false;
-        Log("[weather] spinning up the %s window (%ux%u cells, %.1f h of history -- a "
-            "one-time cost as the region becomes RESIDENT)",
-            w.name.c_str(), w.nx, w.ny, w.spinupHours);
-        // The window's bed is the ONE height channel at its cells (M6w): the scene's heights, the
-        // shelf beyond, hand edits on top -- lazily, as part of the activation cost.
-        if (!m_comp || m_hgtCh < 0 || !(m_planetR > 0.0)) return false;
-        SweDomain dom;
-        dom.Place(w.box[0], w.box[1], w.box[2], w.box[3], w.nx, w.ny, m_planetR);
-        dom.FillBed([&](double la, double lo, double resM) {
-            return m_comp->SampleHeight(m_hgtCh, la * kD2R, lo * kD2R, resM);
-        });
-        // M9ar: NO per-window bed texture. The owned solver reads the height megatexture --
-        // the same page slice the Merrimack solver, the sea shader and the water bank read.
-        if (!m_hgtArr || !m_hgtRes) {
-            Log("[weather] %s: cannot activate -- no height page bound and no fallback bed by "
-                "design",
-                w.name.c_str());
-            return false;
-        }
-        w.owned = std::make_unique<SweSolver>();
-        SweConfig cfg = w.cfg;
-        cfg.name = w.name.c_str();
-        w.owned->Init(gpu, sc, shaderDir, dom, cfg);
-        LogWindowHoldsWater(w.owned->Domain(), cfg, "on activation: on the CPU bed, the stack at the cells");
-        w.owned->SetBed(gpu, m_hgtArr, m_hgtRes, m_hgtMips, m_bed);   // PHASE B2: the standing window
-        if (m_atlas) {   // C1: the open sea rides the manager's Level
-            const WaterAtlas* atlas = m_atlas;
-            w.owned->SetLevelSource([atlas](double la, double lo, double t) {
-                return atlas->Ready() ? atlas->MslNavd(la, lo) + atlas->Level(la, lo, t) : NAN;
-            });
-        }
-        w.solver = w.owned.get();
-        w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, w.faceAt, w.faceQAt);
-        w.active = true;
-        // No mirror read here: the window's mirror fills on the first RefreshMirrorsTo (the
-        // probe harness calls it right after Update); the camera-rule activation in the
-        // loop has no reader to fill it for.
-        return true;
-    }
-    return false;
 }
 
 void WaterManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
@@ -160,11 +89,47 @@ void WaterManager::SolverRefine(double latDeg, double lonDeg, double unixT,
         w->solver->DeviationFromFields(latDeg, lonDeg, w->eta, w->etaW, w->uv4, w->uvW, w->mirrorT, d);
     if (!have) {
         // THE SOLVER OWNS THIS SURFACE AND HAS NOT ANSWERED HERE. The atlas is not its answer.
+        // Said once a run, with the point and the mirror's shape.
+        static bool said = false;
+        if (!said) {
+            said = true;
+            double tx = 0.0, ty = 0.0;
+            w->solver->Domain().CellOf(latDeg, lonDeg, tx, ty);
+            Log("[weather] the solver has not answered at %.5f N %.5f E (cell %.1f, %.1f of %u x %u): regions %s, "
+                "the mirror %zu eta / %zu uv floats, rows %u / %u, read at t=%.0f",
+                latDeg, lonDeg, tx, ty, w->solver->Nx(), w->solver->Ny(),
+                w->solver->DeviationAt(latDeg, lonDeg, d) ? "answered" : "silent", w->eta.size(), w->uv4.size(),
+                w->etaW, w->uvW, w->mirrorT);
+        }
         s.levelSrc = "-";
         s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
         return;
     }
     const double atlas = s.levelNavd;
+    // THE DRY FLOOR'S SIGNATURE, said once (stage 2 of one water on the tree, 2026-10-26): an answer of exactly
+    // the dry floor (-0.65: a zero surface and no water in the whole stencil) -- which path answered, the cell,
+    // and the mirror's own values at its corner. A reader beyond the fine set's reach gets this where the twin
+    // holds the water at mip 1: the mirror is mip 0's (the readers do not read mip 1 yet). The stage-2 dump
+    // read it over most of its grid, which stands about the origin lattice's node, 2 km east and 3 km north
+    // of the eye the fine set is about.
+    static bool saidFloor = false;
+    if (!saidFloor && std::fabs(double(d.dEta) + 0.65) < 0.02 && d.wet <= 0.0f) {
+        saidFloor = true;
+        double tx = 0.0, ty = 0.0;
+        w->solver->Domain().CellOf(latDeg, lonDeg, tx, ty);
+        SweSolver::Deviation r;
+        const bool byRegion = w->solver->DeviationAt(latDeg, lonDeg, r);
+        const int ix = int(std::floor(tx - 0.5)), iy = int(std::floor(ty - 0.5));
+        float e = 0.0f, h = 0.0f;
+        if (ix >= 0 && iy >= 0 && uint32_t(ix) < w->etaW && uint32_t(iy) < w->etaH) {
+            e = w->eta[size_t(iy) * w->etaW + size_t(ix)];
+            h = w->uv4[(size_t(iy) * w->uvW + size_t(ix)) * 4 + 2];
+        }
+        Log("[weather] the dry floor answered at %.5f N %.5f E (cell %.1f, %.1f): by %s (regions held %zu, as of %.0f); "
+            "the mirror at (%d, %d): eta %+.3f, h %.3f; dEta %+.3f wet %.2f, the plane %+.3f, the atlas %+.3f",
+            latDeg, lonDeg, tx, ty, byRegion ? "a REGION" : "the mirror", w->solver->RegionCount(),
+            w->solver->DeliveredAsOf(), ix, iy, e, h, d.dEta, d.wet, w->oceanAt(unixT), atlas);
+    }
     // the wet columns' surface; where none holds water, under the solver's bed (SweSolver Reconstruct)
     s.levelNavd = atlas + wDom * (w->oceanAt(unixT) + double(d.dEta) - atlas);
     s.levelSrc = w->levelTag;
@@ -200,20 +165,45 @@ int WaterManager::DomainRects(const Window& w, float out[4][4]) const {
     return SurfaceFrame::SliceRectsLL(m_stand, w.box[0], w.box[1], w.box[2], w.box[3], out);
 }
 
+int WaterManager::WantDomain(ResidencyManager& res, int sampler, int hgtTenant, const Window& w,
+                             float win[4][4], float cube[6][4], uint32_t& faces) const {
+    // PHASE B2: the standing window, in its own uv (modulo the page: one, two or four rectangles)...
+    const int n = DomainRects(w, win);
+    for (int k = 0; k < n; ++k) {
+        res.Want(sampler, hgtTenant, m_hgtSlice, 0u, win[k][0], win[k][1], win[k][2], win[k][3]);
+    }
+    // ...and the cube's faces under the domain, where the rule reads when the window holds nothing:
+    // the height tenant's slices 0..5 are the cube's faces (Assembly: "paint cube faces").
+    faces = SurfaceFrame::CubeRectsLL(w.box[0], w.box[1], w.box[2], w.box[3], cube);
+    for (uint32_t f = 0; f < 6u; ++f) {
+        if (!((faces >> f) & 1u)) continue;
+        res.Want(sampler, hgtTenant, f, 0u, cube[f][0], cube[f][1], cube[f][2], cube[f][3]);
+    }
+    // STAGE 2b: ...and the cube under the tail at the tail's own mip (its cells' grain): the tail's kernel reads the
+    // cube where the window holds nothing, which is everywhere but the window.
+    for (const SweSolver::LevelBox& lb : w.levels) {
+        if (!(lb.box[2] > lb.box[0])) continue;
+        float ct[6][4];
+        const uint32_t ft = SurfaceFrame::CubeRectsLL(lb.box[0], lb.box[1], lb.box[2], lb.box[3], ct);
+        for (uint32_t f = 0; f < 6u; ++f) {
+            if (!((ft >> f) & 1u)) continue;
+            res.Want(sampler, hgtTenant, f, lb.mip, ct[f][0], ct[f][1], ct[f][2], ct[f][3]);
+        }
+    }
+    return n;
+}
+
 void WaterManager::PinDomains(ResidencyManager& res, int hgtTenant) {
     if (hgtTenant < 0 || !m_hgtArr) return;
     std::string pinned;
     for (const Window& w : m_windows) {
         if (!w.active || !(w.box[2] > w.box[0])) continue;
-        float r[4][4];
-        const int n = DomainRects(w, r);
+        float r[4][4], c[6][4];
+        uint32_t faces = 0;
         // M13: the solver's domain is its own reader of the shared cache -- it pins the bed
         // under its lattice whether or not any view is looking there.
-        // Step 5: a standing reader, the order's first class (HIERARCHY 4.19). PHASE B2: in the
-        // standing window's uv.
-        for (int k = 0; k < n; ++k) {
-            res.Want(res.Sampler("solver", true), hgtTenant, m_hgtSlice, 0u, r[k][0], r[k][1], r[k][2], r[k][3]);
-        }
+        // Step 5: a standing reader, the order's first class (HIERARCHY 4.19).
+        const int n = WantDomain(res, res.Sampler("solver", true), hgtTenant, w, r, c, faces);
         if (!m_pinLogged) {
             char line[200];
             snprintf(line, sizeof(line), " %s in %d rectangle(s)%s", w.name.c_str(), n,
@@ -223,12 +213,18 @@ void WaterManager::PinDomains(ResidencyManager& res, int hgtTenant) {
                 snprintf(line, sizeof(line), " uv %.4f..%.4f x %.4f..%.4f", r[k][0], r[k][2], r[k][1], r[k][3]);
                 pinned += line;
             }
+            for (uint32_t f = 0; f < 6u; ++f) {
+                if (!((faces >> f) & 1u)) continue;
+                snprintf(line, sizeof(line), "; the cube's face %u uv %.4f..%.4f x %.4f..%.4f", f, c[f][0], c[f][2],
+                         c[f][1], c[f][3]);
+                pinned += line;
+            }
         }
     }
     if (!m_pinLogged && !pinned.empty()) {
         m_pinLogged = true;
-        Log("[weather] solver domains pinned on the standing window, slice %u mip 0:%s", m_hgtSlice,
-            pinned.c_str());
+        Log("[weather] solver domains pinned on the standing window, slice %u mip 0, and on the cube under them:%s",
+            m_hgtSlice, pinned.c_str());
     }
 }
 
@@ -272,18 +268,12 @@ WaterManager::BedWait WaterManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
                                                   int hgtTenant, const char* only) {
     BedWait bw;
     if (hgtTenant < 0 || !m_hgtArr) return bw;
-    struct Domain {
-        SweSolver* solver;
-        float r[4][4];   // PHASE B2: its rectangles in the standing window's uv
-        int n;
-    };
-    std::vector<Domain> domains;
-    for (Window& w : m_windows) {
+    std::vector<const Window*> domains;
+    for (const Window& w : m_windows) {
         if (!w.active || !w.solver || !w.solver->Ready()) continue;
         if (only && w.name != only) continue;
-        Domain d{w.solver, {}, 0};
-        d.n = DomainRects(w, d.r);
-        if (d.n) domains.push_back(d);
+        float r[4][4];
+        if (DomainRects(w, r)) domains.push_back(&w);
     }
     bw.windows = static_cast<uint32_t>(domains.size());
     if (domains.empty()) return bw;
@@ -293,20 +283,13 @@ WaterManager::BedWait WaterManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
     // The turn fills the frame's upload-ring slot, which a frame still in flight may be copying
     // from (an activation inside the loop); boot has nothing in flight and this costs nothing.
     gpu.WaitIdle();
-    // The manager's claim is read before the kernel's (it is cheap); the trace is the answer.
-    auto claimed = [&] {
-        uint64_t hist[16];
-        const uint64_t n = ClaimedMips(res, hgtTenant, hist, only);
-        return n > 0 && hist[0] == n;
-    };
-    SweSolver::BedTrace trace;
     for (;;) {
         // Asked again every turn, as the pin asks every frame: the ring gate admits a level only
         // under a mapped parent, so one ask brings one ring.
-        for (const Domain& d : domains) {
-            for (int k = 0; k < d.n; ++k) {
-                res.Want(sampler, hgtTenant, m_hgtSlice, 0u, d.r[k][0], d.r[k][1], d.r[k][2], d.r[k][3]);
-            }
+        for (const Window* w : domains) {
+            float r[4][4], c[6][4];
+            uint32_t faces = 0;
+            WantDomain(res, sampler, hgtTenant, *w, r, c, faces);
         }
         {
             hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
@@ -315,65 +298,82 @@ WaterManager::BedWait WaterManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
         }
         ++bw.turns;
         bw.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (claimed()) {
-            bw.cells = bw.whole = 0;
-            for (const Domain& d : domains) {
-                if (!d.solver->TraceBed(gpu, trace)) continue;
-                const uint32_t page = d.solver->PageSlice();
-                for (size_t i = 0; i < trace.bed.size(); ++i) {
-                    ++bw.cells;
-                    if (trace.mip[i] == 0 && trace.slice[i] == page) ++bw.whole;
-                }
-            }
-            if (bw.cells > 0 && bw.whole == bw.cells) {
-                bw.done = true;
-                break;
-            }
+        // THE END: the order has answered every tile the ask implies (the first turn states the ask;
+        // the pass that orders it runs in that turn, so from the second the count is the order's).
+        bw.pending = res.PendingOf(sampler, hgtTenant);
+        if (bw.turns >= 2 && bw.pending == 0) {
+            bw.done = true;
+            break;
         }
         if (bw.seconds > kBedWaitMaxS) break;
         // The loads run on the Io lane; a turn that finds nothing landed has nothing to map.
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     bw.tiles = res.MappedCount() - mapped0;
+    {   // What the kernel read, by slice kind and mip: the page (the standing window) or the cube.
+        SweSolver::BedTrace trace;
+        uint64_t page[16] = {}, cube[16] = {};
+        bw.cells = bw.whole = 0;
+        for (const Window* w : domains) {
+            if (!w->solver->TraceBed(gpu, trace)) continue;
+            const uint32_t slice = w->solver->PageSlice();
+            for (size_t i = 0; i < trace.bed.size(); ++i) {
+                ++bw.cells;
+                const uint32_t m = (std::min)(static_cast<uint32_t>(trace.mip[i]), 15u);
+                if (trace.slice[i] == slice) {
+                    ++page[m];
+                    if (m == 0u) ++bw.whole;
+                } else {
+                    ++cube[m];
+                }
+            }
+        }
+        char line[64];
+        for (int m = 0; m < 16; ++m) {
+            if (!page[m]) continue;
+            snprintf(line, sizeof(line), " page m%d:%llu", m, static_cast<unsigned long long>(page[m]));
+            bw.read += line;
+        }
+        for (int m = 0; m < 16; ++m) {
+            if (!cube[m]) continue;
+            snprintf(line, sizeof(line), " cube m%d:%llu", m, static_cast<unsigned long long>(cube[m]));
+            bw.read += line;
+        }
+        if (bw.read.empty()) bw.read = " nothing traced";
+    }
+    {   // what the manager's map claims over the domain at the wait's end, by mip (15 = outside the page)
+        uint64_t hist[16];
+        const uint64_t n = ClaimedMips(res, hgtTenant, hist, only);
+        std::string h;
+        for (int m = 0; m < 16; ++m) {
+            if (!hist[m]) continue;
+            h += " m" + std::to_string(m) + ":" + std::to_string(hist[m]);
+        }
+        Log("[weather] the bed wait's claim over %llu samples:%s (in flight at the end: the manager's own count)",
+            static_cast<unsigned long long>(n), h.empty() ? " none" : h.c_str());
+    }
     return bw;
 }
 
-void WaterManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                          double simUnix, double camLatDeg, double camLonDeg,
-                          double camAltM) {
+void WaterManager::Update(double simUnix, double camLatDeg, double camLonDeg, double camAltM) {
+    (void)simUnix;
     int active = 0;
     for (Window& w : m_windows) {
-        if (!w.active && w.nx && camAltM < kActivateAltM) {
-            // Residency rises on zoom: the camera entering a dormant window's footprint IS
-            // the demand signal, exactly as a CDLOD node entering the frustum demands tiles.
-            if (w.InBox(camLatDeg, camLonDeg)) Activate(gpu, sc, shaderDir, w.name.c_str(), simUnix);
+        if (!w.active) continue;
+        ++active;
+        // THE EYE LEFT THE WINDOW (stage 2): beyond it the tide plane carries the eye, as it did beyond the
+        // box; said once. Stage 2b re-stands the window about the eye here.
+        if (!w.beyondSaid && w.solver && w.solver->Ready() && camAltM < 30000.0 &&
+            !w.solver->Domain().Holds(camLatDeg, camLonDeg)) {
+            w.beyondSaid = true;
+            Log("[weather] the eye at %.5f N %.5f E (%.0f m up) is beyond the %s window: the tide plane carries "
+                "it there (stage 2b of one water on the tree re-stands the window about the eye)",
+                camLatDeg, camLonDeg, camAltM, w.name.c_str());
         }
-        if (w.active && w.owned && !w.solver->Demanded()) {
-            // Owned windows advance on their own submits; at real time this is one 64-substep
-            // batch every ~13 sim-seconds -- background noise. (One with a consumer this frame
-            // steps on the frame's list instead: Simulate.)
-            w.solver->AdvanceTo(gpu, simUnix, w.oceanAt, w.faceAt, w.faceQAt);
-        }
-        // The mirror used to refresh here every kMirrorDt (two readbacks, two WaitIdle
-        // drains, 8.7 M half->float: 17.9-27.2 ms on every 61st frame of the storm rail)
-        // for a Query nobody in the loop calls. RefreshMirrorsTo, on demand, replaced it.
-        if (w.active) ++active;
     }
     char s[96];
     snprintf(s, sizeof(s), "wx %d/%d windows", active, static_cast<int>(m_windows.size()));
     stats = s;
-}
-
-void WaterManager::Simulate(hal::CommandContext& cmd, Gpu& gpu, double simUnix) {
-    for (Window& w : m_windows) {
-        if (!w.active || !w.owned || !w.solver->Ready() || !w.solver->Demanded()) continue;
-        if (!w.servedLogged) {
-            w.servedLogged = true;
-            Log("[weather] the %s window has a consumer: it steps on the frame and answers its regions",
-                w.name.c_str());
-        }
-        w.solver->Record(cmd, gpu, simUnix, static_cast<float>(w.oceanAt(simUnix)));
-    }
 }
 
 int WaterManager::ActiveWindows() const {

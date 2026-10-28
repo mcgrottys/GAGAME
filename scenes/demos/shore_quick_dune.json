@@ -1,0 +1,58 @@
+{
+  "_readme": [
+    "shore_quick_bisect.json with the eye parked on the dune (the beach view, no rail): 30 s at 60x (a bisection scene, 2026-10-28)."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "shore-quick-dune",
+    "view": "beach"
+  },
+  "time": {
+    "start": "2026-08-28T15:05:00Z",
+    "timeScale": 60
+  },
+  "water": {
+    "clock": {
+      "bind": "time"
+    },
+    "swe": {
+      "spinupH": 0.25,
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 256
+    }
+  },
+  "sun": {
+    "clock": {
+      "start": "2026-08-28T16:00:00Z",
+      "rate": 0
+    },
+    "earth": {
+      "clock": {
+        "start": "2026-08-28T16:00:00Z",
+        "rate": 0
+      }
+    }
+  },
+  "impacts": [],
+  "views": [
+    {
+      "name": "beach",
+      "at": {
+        "lat": 42.8125,
+        "lon": -70.8075,
+        "alt": 18,
+        "heading": 75,
+        "tilt": 88,
+        "range": 0
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "capture": {
+    "headless": true,
+    "frames": 900,
+    "railDir": "out/rail_shore_quick_dune"
+  }
+}

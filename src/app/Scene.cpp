@@ -437,20 +437,26 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             out.sources.push_back(std::move(s));
         }
     }
-    if (const JsonValue* a = ListOf(doc, "solvers")) {
-        const PropDecl* decl = root.Find("solvers");
+    if (const JsonValue* a = ListOf(doc, "impacts")) {
+        const PropDecl* decl = root.Find("impacts");
         for (const JsonValue& e : a->arr) {
-            scene::SolverProps s;
-            ElementReader r(scene::ElementChain(*decl, e), e, "solvers", why, &ok);
-            r.Str("name", s.name);
-            if (const JsonValue* b = e.Get("box"); b && b->arr.size() == 4) {
-                for (int k = 0; k < 4; ++k) s.box[k] = b->arr[size_t(k)].number;
-            }
-            r.U32("nx", s.nx);
-            r.U32("ny", s.ny);
-            r.Str("station", s.station);
+            scene::ImpactProps s;
+            ElementReader r(scene::ElementChain(*decl, e), e, "impacts", why, &ok);
+            r.Bool("enabled", s.enabled);
+            r.F64("lat", s.lat);
+            r.F64("lon", s.lon);
+            r.F64("diameterM", s.diameterM);
+            r.F64("speedMs", s.speedMs);
+            r.F64("densityKgM3", s.densityKgM3);
+            r.F64("angleDeg", s.angleDeg);
+            r.Str("at", s.at);
+            r.F64("basinDepthM", s.basinDepthM);
+            r.F64("energyShare", s.energyShare);
+            r.F64("terms", s.terms);
+            r.F64("reachM", s.reachM);
+            r.F64("exag", s.exag);
             if (!ok) return false;
-            out.solvers.push_back(std::move(s));
+            if (s.enabled) out.impacts.push_back(std::move(s));
         }
     }
     if (const JsonValue* a = ListOf(doc, "stations")) {

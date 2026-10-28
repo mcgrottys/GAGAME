@@ -1,0 +1,26 @@
+{
+  "_readme": [
+    "STAGE 2b DRAWN: THE TAIL'S TRAIN FROM ORBIT (2026-10-27, docs/WATER_V2.md 14.4). The 10 km stone of impact_tail.json,",
+    "the eye 3000 km over the impact an hour after it (the spin-up starts half an hour before the event; the ring is 700 km out); the far",
+    "field the globe draws is the tail's departure where the tail holds the point (shaders/TailRead.hlsli), exaggerated",
+    "10x as the drawn law was. Beside it the same still with the tail off (--set water.swe.tailCells=0) draws the law's",
+    "one-depth rings: the gate is the two stills side by side -- the tail's train over the real bed, the law's over 4000 m.",
+    "",
+    "Stills:  build\\bin\\gagame.exe scenes\\demos\\impact_tail_orbit.json --headless --frames 30 --dump out\\review\\stage3\\tail_orbit_on.png --set streaming.offline=true",
+    "         ... --set water.swe.tailCells=0 --dump out\\review\\stage3\\tail_orbit_off.png"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "impact-tail-orbit", "view": "orbit"},
+  "time": {"start": "2026-08-28T16:00:00Z"},
+  "water": {"clock": {"bind": "time"}, "swe": {"spinupH": 1.5, "currentRefreshS": 1000000}},
+  "sun": {
+    "clock": {"start": "2026-08-28T16:00:00Z", "rate": 0},
+    "earth": {"clock": {"start": "2026-08-28T16:00:00Z", "rate": 0}}
+  },
+  "impacts": [
+    {"lat": 35.0, "lon": -42.0, "at": "2026-08-28T15:00:00Z", "diameterM": 10000, "speedMs": 20000, "densityKgM3": 3000, "angleDeg": 45, "basinDepthM": 4000, "exag": 10}
+  ],
+  "views": [
+    {"name": "orbit", "at": {"lat": 35.0, "lon": -42.0, "alt": 0, "heading": 0, "tilt": 0, "range": 3000000}, "fovY": 55, "gauge": "root", "nearZ": 1000}
+  ]
+}

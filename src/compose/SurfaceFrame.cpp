@@ -501,6 +501,40 @@ int SurfaceFrame::SliceRectsLL(const hal::BlockBinding& b, double lat0, double l
     return SliceRects(b, xmin, ymin, xmax, ymax, out);
 }
 
+uint32_t SurfaceFrame::CubeRectsLL(double lat0, double lon0, double lat1, double lon1, float out[6][4]) {
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    constexpr int kN = 16;   // the box sampled (kN + 1)^2 times: a face's edge through a 30 km box is found to 2 km
+    double lo[6][2], hi[6][2];
+    uint32_t faces = 0;
+    for (int j = 0; j <= kN; ++j) {
+        for (int i = 0; i <= kN; ++i) {
+            const double la = (lat0 + (lat1 - lat0) * double(j) / kN) * kD2R;
+            const double lo_ = (lon0 + (lon1 - lon0) * double(i) / kN) * kD2R;
+            const double d[3] = {std::cos(la) * std::cos(lo_), std::sin(la), std::cos(la) * std::sin(lo_)};
+            double uv[2];
+            const uint32_t f = CubeFaceOfDir(d, uv);
+            if (!((faces >> f) & 1u)) {
+                faces |= 1u << f;
+                lo[f][0] = hi[f][0] = uv[0];
+                lo[f][1] = hi[f][1] = uv[1];
+                continue;
+            }
+            lo[f][0] = (std::min)(lo[f][0], uv[0]);
+            lo[f][1] = (std::min)(lo[f][1], uv[1]);
+            hi[f][0] = (std::max)(hi[f][0], uv[0]);
+            hi[f][1] = (std::max)(hi[f][1], uv[1]);
+        }
+    }
+    for (uint32_t f = 0; f < 6; ++f) {
+        if (!((faces >> f) & 1u)) continue;
+        out[f][0] = float(lo[f][0]);
+        out[f][1] = float(lo[f][1]);
+        out[f][2] = float(hi[f][0]);
+        out[f][3] = float(hi[f][1]);
+    }
+    return faces;
+}
+
 SurfaceFrame::ChainRows SurfaceFrame::RowsOf(const EyeWindows& w, uint32_t slot,
                                              const Placement& own, const double eye[3],
                                              const uint32_t* slices) {

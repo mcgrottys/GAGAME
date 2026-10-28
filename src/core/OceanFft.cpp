@@ -123,15 +123,12 @@ double OceanFft::MeasureHs(Gpu& gpu) {
 void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
     m_shaderDir = shaderDir;
 
-    // Cascade bands: cuts at 60 m and 12 m wavelengths so no wave is synthesised twice.
-    const float cut01 = 2.0f * kPi / 60.0f;
-    const float cut12 = 2.0f * kPi / 12.0f;
-    m_bandLo[0] = 2.0f * kPi / m_patchL[0];
-    m_bandHi[0] = cut01;
-    m_bandLo[1] = cut01;
-    m_bandHi[1] = cut12;
-    m_bandLo[2] = cut12;
-    m_bandHi[2] = 0.9f * kPi * kN / m_patchL[2];   // guard band below Nyquist
+    // Cascade bands: cuts at 60 m and 12 m wavelengths so no wave is synthesised twice (BandCutK, the
+    // one source), the last a guard band below Nyquist.
+    for (uint32_t c = 0; c < kCascades; ++c) {
+        m_bandLo[c] = float(BandCutK(int(c)));
+        m_bandHi[c] = float(BandCutK(int(c) + 1));
+    }
 
     // Root signature: b1 root constants, b0 CBV (partitions), one table of 4 UAVs.
     m_rootSig = hal::RootLayout{}

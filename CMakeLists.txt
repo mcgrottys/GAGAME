@@ -149,7 +149,9 @@ add_executable(gagame
   src/scene/WaterBankLayer.cpp
 )
 
-target_include_directories(gagame PRIVATE src)
+# `shaders` too: the water's laws (shaders/laws/*.hlsli) are one text the kernels and the CPU host
+# (src/sim/WaterTerms.h) both compile.
+target_include_directories(gagame PRIVATE src shaders)
 # Every Win32 call in this project is the ...W variant, so the resource macros (IDC_ARROW and
 # friends) must resolve to their wide forms too.
 target_compile_definitions(gagame PRIVATE UNICODE _UNICODE)

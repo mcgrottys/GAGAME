@@ -1,0 +1,74 @@
+{
+  "_readme": [
+    "THE STONE THROWN CLOSE (2026-10-28; Mark: 'throw the stone closer so the waves seen from the shore are obvious and they should wash over the land'): the 1 km stone dropped 115 km east of the Merrimack on the shelf (150 m of water) at 15:00Z, the eye on the Plum Island dune by the north jetty on the beach rail (up and back over the river as the water comes), the clip from 40 minutes after the stone at 60x: an hour in 1800 frames, 15:40Z to 16:40Z. The quick scene (impact_shore_quick.json) ended at 16:05Z with the train's 14 m front 25 km off the beach (level 2^3's greatest departure); this clip holds the arrival and the overwash. THE CLOCK: one sim second a frame, so the 1800 frames are 15:40Z to 16:10Z; the train's +16 m at 80 km reaches the window's east edge at 15:39Z (6.7 m, 2 km out), the beach at 15:46Z, the jetty's +8 m at 15:48:40Z (0:17 of the clip), the -7 m trough at 15:59Z (0:38), a +2 m second crest at 16:05Z; the window's land tiles go 197 -> 205 (the overwash). The first clip's rail stood in the marsh behind the dune and showed the arrival as the marsh flooding at 0:12-0:18; the beach-face rail (scenes/rails/impact_shore_face.json) looks the bore in the eye.",
+    "Record:  build\bin\\gagame.exe scenes\\demos\\impact_shore_near.json --mp4 out\review\\stage3\\clips\\shore_near.mp4 --set streaming.offline=true"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-shore-near",
+    "view": "beach"
+  },
+  "time": {
+    "start": "2026-08-28T15:40:00Z",
+    "timeScale": 60
+  },
+  "water": {
+    "clock": {
+      "bind": "time"
+    },
+    "swe": {
+      "spinupH": 0.75,
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 256
+    }
+  },
+  "sun": {
+    "clock": {
+      "start": "2026-08-28T16:00:00Z",
+      "rate": 0
+    },
+    "earth": {
+      "clock": {
+        "start": "2026-08-28T16:00:00Z",
+        "rate": 0
+      }
+    }
+  },
+  "impacts": [
+    {
+      "lat": 42.75,
+      "lon": -69.4,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 150,
+      "exag": 1
+    }
+  ],
+  "views": [
+    {
+      "name": "beach",
+      "at": {
+        "lat": 42.8125,
+        "lon": -70.8075,
+        "alt": 18,
+        "heading": 75,
+        "tilt": 88,
+        "range": 0
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "rails": {
+    "file": "scenes/rails/impact_shore_face.json"
+  },
+  "capture": {
+    "headless": true,
+    "frames": 1800,
+    "railDir": "out/rail_impact_shore_near"
+  }
+}

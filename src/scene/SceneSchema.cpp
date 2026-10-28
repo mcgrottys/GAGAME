@@ -27,7 +27,6 @@ BuildingsLayerProps kBuildings;
 NodeProps kNode;
 ToolProps kTool;
 StationProps kStation;
-SolverProps kSolver;
 SourceProps kSource;
 
 using Q = Quantity;
@@ -201,11 +200,33 @@ const Schema& DatumSchema() {
     }();
     return *s;
 }
+const Schema& ImpactSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.sea.impactor;
+        Schema* sc = new Schema("sea.impactor", &p);
+        sc->Bind("enabled", p.enabled, "an asteroid into the sea: its cavity's linear dispersive wave, everywhere the water is read (in `impacts`, the event stands; in `sea.impactor`, the I key is armed)", R)
+            .Bind("lat", p.lat, Q::Angle, "deg", "where it lands", R)
+            .Bind("lon", p.lon, Q::Angle, "deg", "where it lands", R)
+            .Bind("diameterM", p.diameterM, Q::Length, "m", "the impactor's diameter", R)
+            .Bind("speedMs", p.speedMs, Q::Dimensionless, "1", "its speed, m/s", R)
+            .Bind("densityKgM3", p.densityKgM3, Q::Dimensionless, "1", "its density, kg/m^3", R)
+            .Bind("angleDeg", p.angleDeg, Q::Angle, "deg", "its angle from the horizontal", R)
+            .Bind("at", p.at, "the impact's instant: UTC text or unix seconds; \"\" = the water clock's first instant", R)
+            .Bind("basinDepthM", p.basinDepthM, Q::Length, "m", "the ocean's depth at the impact and across the basin (the dispersion's one depth; the cavity cannot be deeper)", R)
+            .Bind("energyShare", p.energyShare, Q::Dimensionless, "", "the share of the impactor's kinetic energy the cavity holds (Ward & Asphaug 2003: 0.094)", R)
+            .Bind("terms", p.terms, Q::Dimensionless, "", "the wavenumber table's size, 16..4096; 0 = from reachM", R)
+            .Bind("reachM", p.reachM, Q::Length, "m", "how far the sum must hold before its image returns (sets the terms: 12 reach / (pi R_D))", R)
+            .Bind("exag", p.exag, Q::Dimensionless, "", "display exaggeration of the drawn wave (the globe, the bank); the hull and the solver read it raw", R);
+        return sc;
+    }();
+    return *s;
+}
 const Schema& SeaSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.sea;
         Schema* sc = new Schema("sea", &p);
         sc->Nest("storm", StormSchema(), &p.storm, "the sandbox sea-state override")
+            .Nest("impactor", ImpactSchema(), &p.impactor, "the asteroid the I key drops at the point under the cursor, at the clock's instant (its lat, lon and at are ignored)")
             .Nest("datum", DatumSchema(), &p.datum, "the MLLW -> NAVD88 link")
             .BindBox("box", p.box, "where data.seastate's forecast stands when its file carries no box, [lon0, lat0, lon1, lat1] degrees; zeros = nowhere (the grid alone)", R);
         return sc;
@@ -221,12 +242,26 @@ const Schema& SweSchema() {
             .Bind("riverTide", p.riverTide, "the river faces' tide deviation; false = zeroed (--swe-river-off)", R)
             .Bind("spinupH", p.spinupH, Q::Time, "h", "history integrated before the first frame (--swe-spinup)", R)
             .Bind("gain", p.gain, Q::Dimensionless, "1", "solved-current gain (--swe-gain)", H)
+            .Bind("stepsPerFrame", p.stepsPerFrame, Q::Dimensionless, "1",
+                  "the solver's substeps a frame before it starves (its clock re-anchors, its dynamics run time-dilated); a fast clock's record sets what it needs", R)
+            .Bind("fineReachM", p.fineReachM, Q::Length, "m",
+                  "the eye's demand for the solver's finest mip: its tiles within this reach of the eye's ground point; 0 = the whole window (stage 1d of one water on the tree)", R)
+            .Bind("currentRefreshS", p.currentRefreshS, Q::Time, "s",
+                  "how often (sim s) the wave solve reads the solver's current and re-keys (a solve each); past the run's length = the first current throughout", R)
             .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)", R)
             .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
-            .BindBox("box", p.box, "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells `cellM` over it in true metres at that latitude, its bed the one height stack's; zeros = no solver", R)
+            .Bind("windowTiles", p.windowTiles, Q::Dimensionless, "1",
+                  "the solver's window: this many tiles of 128 cells a side about the eye's start (the place's anchor), its corner on the global lattice of the cell's angle, its bed the one height stack's, its open sea the tide atlas's; 0 = no solver (stage 2 of one water on the tree)", R)
             .Bind("cellM", p.cellM, Q::Length, "m", "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)", R)
-            .Bind("sponge", p.sponge, Q::Length, "m", "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it", R);
+            .Bind("tailCells", p.tailCells, Q::Dimensionless, "1", "the tail across the ocean (stage 2b of one water on the tree): this many cells a side about the same anchor, the window whole in its central cells; 0 = no tail", R)
+            .Bind("tailRank", p.tailRank, Q::Dimensionless, "1", "the tail's cell as a power of two of the window's (9: 512 window cells, 5 x 7 km at the Merrimack)", R)
+            .Bind("telescopeLevels", p.telescopeLevels, Q::Dimensionless, "1", "the telescope (stage 2c): this many anchor levels between the tail and the window, each about the window's centre", R)
+            .Bind("telescopeCells", p.telescopeCells, Q::Dimensionless, "1", "an anchor level's cells a side", R)
+            .Bind("telescopeStep", p.telescopeStep, Q::Dimensionless, "1", "the anchor levels' ranks this far apart below the tail's (2: ranks 7, 5, 3 under a rank-9 tail)", R)
+            .Bind("patchCellsPerLip", p.patchCellsPerLip, Q::Dimensionless, "1", "an event's own level: its cavity's lip radius over this many cells (8; 16 = one rank finer, the convergence run)", R)
+            .Bind("levelTiles", p.levelTiles, Q::Dimensionless, "1", "a sparse level's tile budget (0 = unbounded): above it, the resident tiles whose field the parent holds best (the least range of the departure within a parent cell) are released down to 7/8 of it, the parent holding their mean", R)
+            .Bind("dampH", p.dampH, Q::Time, "h", "the solver's linear damping, the velocity's e-folding time (0 = none: the bed's quadratic drag is the water's loss; it was 0.99995 a substep, 1.7 to 2.4 h, until 2026-10-28)", R);
         return sc;
     }();
     return *s;
@@ -291,6 +326,10 @@ const Schema& RenderSchema() {
                   "how far the terrain shadow's cast reaches from the lit point", H)
             .Bind("reflectLand", p.reflectLand,
                   "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky", H)
+            .Bind("vrs", p.vrs,
+                  "variable rate shading on the water: the sea's pixels shared four a side where the pixel's footprint "
+                  "is wider than the chop texture's texel, two a side nearer; foam, a held fold, the shore and the land "
+                  "keep their pixels (a device of tier 2)", H)
             .Bind("buildingShadowM", p.buildingShadowM, Q::Length, "m",
                   "the drawn buildings' shadow maps: the finest map is the eye's cell of the origin lattice at the "
                   "finest level whose cells are no wider than this (0 = the buildings cast no shadow)", H)
@@ -820,19 +859,6 @@ const Schema& StationSchema() {
     return *s;
 }
 
-const Schema& SolverSchema() {
-    static const Schema* s = [] {
-        Schema* sc = new Schema("solver", &kSolver);
-        sc->Bind("name", kSolver.name, "the window's name (the logs, the title)", R)
-            .BindBox("box", kSolver.box, "its domain, [lon0, lat0, lon1, lat1] degrees", R)
-            .Bind("nx", kSolver.nx, Q::Dimensionless, "1", "cells east to west", R)
-            .Bind("ny", kSolver.ny, Q::Dimensionless, "1", "cells south to north", R)
-            .Bind("station", kSolver.station, "the tide station (its id in data.tides) its open sea is held to", R);
-        return sc;
-    }();
-    return *s;
-}
-
 const Schema& PruneSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.prune;
@@ -883,7 +909,7 @@ const Schema& SceneFileSchema() {
             .Nest("debug", DebugSchema(), &kDoc.debug, "the debug views of the globe's surface")
             .List("sources", &SourceSchema(), "the scene's sources by name: a derived scene ADDS to its base's (merged in place by name, `remove: true` drops one), as every named list; their order is StackOrder's (`over`, then the coarser under the finer), not the list's")
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say; by name, merged as every named list")
-            .List("solvers", &SolverSchema(), "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide; by name, merged as every named list")
+            .List("impacts", &ImpactSchema(), "the asteroids into the sea, each an event with its own instant (sim/ImpactField.h: the record the I key appends to)", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .Nest("hud", HudSchema(), &kDoc.hud, "the windshield: readouts and the minimap on the glass")
             .List("views", &ViewSchema_(), "the cameras, by name")

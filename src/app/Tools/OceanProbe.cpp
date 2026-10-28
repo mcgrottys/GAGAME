@@ -22,13 +22,12 @@
 
 namespace ga::app::tools {
 
-// --ocean-probe lat,lon: the manager's verification harness. Standing at the point
-// below the activation altitude IS the zoom -- dormant windows containing it spin up
-// through the same rule the camera uses; then the sample prints at three rungs with
-// full provenance, plus consistency gates against the station truth.
+// --ocean-probe lat,lon: the manager's verification harness. The sample at the point prints at three
+// rungs with full provenance, plus consistency gates against the station truth. (The dormant windows
+// it once woke by standing under the activation altitude went with stage 2 of one water on the tree,
+// 2026-10-26: the one window stands about the eye's start.)
 std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu& gpu,
-                                 Renderer& renderer, SweSolver& swe,
-                                 ResidencyManager& resMgr, double simUnix,
+                                 SweSolver& swe, ResidencyManager& resMgr, double simUnix,
                                  const std::function<double(double)>& oceanAt,
                                  const std::function<double(int, double)>& faceAt,
                                  const std::function<double(int, double)>& faceQAt,
@@ -40,8 +39,7 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
         Log("[wx] probe: spinning the solver's window");
         if (swe.Ready()) swe.Spinup(gpu, simUnix, 0.5, oceanAt, faceAt, faceQAt);
         Log("[wx] probe: manager update at the probe point");
-        weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix, plat, plon,
-                       1000.0);
+        weather.Update(simUnix, plat, plon, 1000.0);
         // The probe reads the windows' CPU mirrors: fill them once, at its instant.
         weather.RefreshMirrorsTo(gpu, simUnix);
         auto show = [&](double res) {

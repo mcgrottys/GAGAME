@@ -49,6 +49,15 @@ public:
     // from THESE numbers rather than from a second copy of them. The bands are derived in
     // Init from the patch sizes and the grid; duplicating that derivation is how the two
     // processors would come to disagree about which cascade owns which wavenumber.
+    static double BandCutK(int edge) {
+        constexpr double kPi = 3.14159265358979323846;
+        switch (edge) {
+            case 0: return 2.0 * kPi / double(kPatchL[0]);
+            case 1: return 2.0 * kPi / 60.0;
+            case 2: return 2.0 * kPi / 12.0;
+            default: return 0.9 * kPi * double(kN) / double(kPatchL[2]);
+        }
+    }
     float BandLo(uint32_t c) const { return m_bandLo[c]; }
     float BandHi(uint32_t c) const { return m_bandHi[c]; }
     float Lambda() const { return m_lambda; }   // the choppy (Gerstner) displacement scale
@@ -88,7 +97,13 @@ private:
     hal::Pso m_mipPso;
 
     Cascade m_cascade[kCascades];
-    float m_patchL[kCascades] = {756.0f, 186.0f, 47.0f};
+    // THE PATCHES AND THE BAND CUTS, ONE SOURCE (2026-10-25): the three cascades' patch sizes, m, and
+    // the edges of their bands in rad/m -- 2 pi / 756 m (the long patch), 2 pi / 60 m, 2 pi / 12 m,
+    // and the guard band under the short patch's Nyquist, 0.9 pi kN / 47 m. The representative
+    // wavenumber of band c is sqrt(BandCutK(c) BandCutK(c + 1)). Four copies of these cuts lived in
+    // SeaLayer, FrameLoop and WaterBankLayer; they read this now.
+    static constexpr float kPatchL[kCascades] = {756.0f, 186.0f, 47.0f};
+    float m_patchL[kCascades] = {kPatchL[0], kPatchL[1], kPatchL[2]};
     float m_bandLo[kCascades] = {};
     float m_bandHi[kCascades] = {};
     uint32_t m_dispSrv[kCascades] = {};

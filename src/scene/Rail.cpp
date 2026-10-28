@@ -323,6 +323,25 @@ bool Rail::ResolvePose(const PoseDecl& d, const RailFrame& frame, RailPose& out,
     return true;
 }
 
+// A key's (or a key's view's) `at` as a motor said in the ROOT. The compass and motor spellings are written about
+// the scene's place and carried there (toRoot); the lat/lon spelling is the planet's own and PlanetToFlatPose in
+// the root's tangent frame (RailFrame::frame is the root's) already says it in the root -- carrying it too stood
+// every lat/lon rail eye off by the place's offset in the root (2026-10-28: 2 km west and 3 km south at the
+// Merrimack; the shore clips' eye "on the dune by the north jetty" stood in the marsh behind the island).
+static bool RootMotorOf(const JsonValue& at, const RailFrame& frame, const std::string& path, Motor& out, std::string* why) {
+    PoseSugar s;
+    if (!ReadPoseSugar(at, path, s, why)) return false;
+    if (s.kind == PoseSugar::Kind::Orbit) {
+        const double R = frame.frame.planetR;
+        const Camera g = LatLonPose(s.lat, s.lon, s.alt, s.lookAt, s.tLat, s.tLon, s.heading, s.tilt, s.roll, s.range, R);
+        out = FromCamera(PlanetToFlatPose(g, frame.frame.east, frame.frame.up, frame.frame.north, R));
+        return true;
+    }
+    if (!ResolveMotorSugar(at, frame.frame, path, out, why)) return false;
+    out = frame.frame.toRoot * out;   // written about the scene's place, said in the root
+    return true;
+}
+
 bool Rail::KeyMotor(const Segment& s, size_t i, const RailFrame& frame, Motor& out,
                     std::string* why) const {
     const std::string path = m_path + ".segments.keys[" + std::to_string(i) + "]";
@@ -337,11 +356,7 @@ bool Rail::KeyMotor(const Segment& s, size_t i, const RailFrame& frame, Motor& o
         // at 2.1 planet radii, aimed at the centre -- stands in when it declares none, which is
         // what the session's camGlobe was before the view's own `at` overrode it.
         const JsonValue* at = frame.viewAt ? frame.viewAt(s.keyView[i]) : nullptr;
-        if (at) {
-            if (!ResolveMotorSugar(*at, frame.frame, path + ".view", out, why)) return false;
-            out = frame.frame.toRoot * out;
-            return true;
-        }
+        if (at) return RootMotorOf(*at, frame, path + ".view", out, why);
         if (s.keyView[i] != "orbit") {
             return Refuse(why, path + ".view: view '" + s.keyView[i] + "' declares no eye");
         }
@@ -350,9 +365,7 @@ bool Rail::KeyMotor(const Segment& s, size_t i, const RailFrame& frame, Motor& o
         out = FromCamera(PlanetToFlatPose(g, frame.frame.east, frame.frame.up, frame.frame.north, R));
         return true;
     }
-    if (!ResolveMotorSugar(s.keyAt[i], frame.frame, path + ".at", out, why)) return false;
-    out = frame.frame.toRoot * out;
-    return true;
+    return RootMotorOf(s.keyAt[i], frame, path + ".at", out, why);
 }
 
 bool Rail::Resolve(const RailFrame& frame, std::string* why) {

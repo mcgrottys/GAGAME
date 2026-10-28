@@ -161,8 +161,28 @@ struct DatumProps {
     bool fromStation = true;          // CO-OPS resolves MLLW -> NAVD88; false = mllwToNavd
     float mllwToNavd = 0.0f;          // PHASE C3: no place's number; the scene declares its own
 };
+// AN ASTEROID INTO THE SEA (2026-10-25; laws/Impact.hlsli, sim/ImpactWave.h): the impactor and where
+// and when it lands; the wave is the one law's, evaluated everywhere (the globe's vertices, the
+// bank, the hull, the solver's faces). The scene's `impacts` list is the RECORD of events (each with
+// its `at`; "" = the water clock's first instant); `sea.impactor` is the one the I key drops at the
+// point under the cursor, at the clock's instant (sim/ImpactField.h holds the record).
+// `exag` exaggerates the DRAWN wave alone (the hull and the solver read it raw); `reachM` is how far
+// the sum must hold (the discrete sum's image returns at 2 pi / dk, dk = 12 / (R_D terms)): the terms
+// follow from it (12 reach / (pi R_D), at most 4096), or `terms` names them.
+struct ImpactProps {
+    bool enabled = true;
+    double lat = 35.0, lon = -42.0;
+    double diameterM = 10000.0, speedMs = 20000.0, densityKgM3 = 3000.0, angleDeg = 45.0;
+    std::string at;
+    double basinDepthM = 4000.0;
+    double energyShare = 0.094;
+    double terms = 0.0;        // 0 = by the reach: 12 reach / (pi R_D), the alias past the reach
+    double reachM = 6.0e6;     // how far the sum must hold before its image returns (the Atlantic)
+    double exag = 1.0;
+};
 struct SeaSection {
     StormProps storm;
+    ImpactProps impactor;   // the impactor the I key drops at the point under the cursor
     DatumProps datum;
     double box[4] = {0.0, 0.0, 0.0, 0.0};   // PHASE C2: data.seastate's place when its file says none
 };
@@ -171,15 +191,43 @@ struct SweProps {
     bool riverTide = true;            // the river faces' tide deviation; false = zeroed (--swe-river-off)
     double spinupH = 1.0;
     float gain = 1.0f;
+    // THE WAVE SOLVE'S READ OF THE SOLVER'S CURRENT, every this many sim seconds (WaveField::RefreshSweCurrent;
+    // 90 since F13): a new current is a new key and a new solve (~3 min), and a headless record waits for
+    // each. A scene run fast (the asteroid's arrival at 30x) sets it past its length and keeps the first.
+    double currentRefreshS = 90.0;
+    // THE SOLVER'S SUBSTEPS A FRAME (SweSolver::SetStepBudget; 16 since M5): past it the solver starves and
+    // runs time-dilated. A record at 30x with a surge's 0.012 s step needs ~90; the descent at 130x ~360.
+    double stepsPerFrame = 16.0;
+    // STAGE 1d OF ONE WATER ON THE TREE (2026-10-26, WATER_V2.md 14): the reach of the eye's demand for the
+    // solver's finest mip, m about its ground point; 0 = the whole window at mip 0. Beyond it the coarse twin
+    // carries the water (SweSolver::SetEye).
+    double fineReachM = 0.0;
     // m^3/s at the first river face; < 0 = its gauge's, from data.river (sim/RiverModel.h DischargeAt)
     double riverQ = -1.0;
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
-    // PHASE C1: THE SOLVER'S DOMAIN -- a lat/lon box [lon0, lat0, lon1, lat1] (zeros: no solver),
-    // its cell (one angle both ways, cellM metres north-south) and the sponge's start from an open
-    // side. Where rivers enter it is data (data.river's reaches, sim/RiverModel.h).
-    double box[4] = {0.0, 0.0, 0.0, 0.0};
+    // STAGE 2 OF ONE WATER ON THE TREE (2026-10-26, WATER_V2.md 14): THE SOLVER STANDS WHERE THE EYE IS.
+    // No box: its window is this many tiles of 128 cells a side about the eye's start (the place's
+    // anchor), its corner on the global lattice of the cell's angle (so a place falls in the same cells
+    // whichever eye came), its bed the one height stack's, its open sea the tide atlas's. 0 = no solver.
+    // This is a budget (the tail's extent at two mips), not a place; the chain's coarse mips carrying the
+    // planet is what retires it. The cell: one angle both ways, cellM metres north-south. Where rivers
+    // enter the window is data (data.river's reaches, sim/RiverModel.h).
+    uint32_t windowTiles = 16;
     float cellM = 13.728f;
-    float sponge = 1866.0f;
+    // STAGE 2b: THE TAIL -- the coarse lattice across the ocean about the same anchor: tailCells a side of cells
+    // 2^tailRank of the window's (2048 of 2^9: 5 x 7 km at the Merrimack, 10,000 x 14,000 km on the plane, the
+    // window whole in its central cells); 0 = no tail.
+    uint32_t tailCells = 2048;
+    uint32_t tailRank = 9;
+    // STAGE 2c: THE TELESCOPE -- the anchor levels between the tail and the window: this many, telescopeCells a
+    // side, their ranks telescopeStep apart below the tail's (3 of 512 cells, 2 apart: ranks 7, 5, 3 -- 1.76 km,
+    // 440 m, 110 m cells, 900, 225 and 56 km across).
+    uint32_t telescopeLevels = 3;
+    uint32_t telescopeCells = 512;
+    uint32_t telescopeStep = 2;
+    double patchCellsPerLip = 8.0;   // an event's patch: its lip's radius over this many cells (16 = one rank finer)
+    double levelTiles = 1024.0;      // a sparse level's tile budget (0 = unbounded): above it, the tiles whose field the parent holds best are released
+    double dampH = 0.0;              // the solver's linear damping as the velocity's e-folding time (h); 0 = none
 };
 struct BankProps {
     bool flatBed = false;
@@ -448,15 +496,6 @@ struct ToolProps {
     std::string name;
     std::string args;
 };
-// A SOLVER ASLEEP UNTIL THE EYE COMES (sim/WaterManager.h AddDormantWindow): its domain a lat/lon
-// box of nx x ny cells, its bed the height stack at those cells, its open sea held to the tide of
-// `station` (a tide station's id in data.tides) on NAVD88, a river entering by `river`.
-struct SolverProps {
-    std::string name;
-    double box[4] = {0.0, 0.0, 0.0, 0.0};   // lon0, lat0, lon1, lat1
-    uint32_t nx = 0, ny = 0;
-    std::string station;
-};
 // PHASE C3: where a station of the scene's data stands when its own file does not say.
 struct StationProps {
     std::string name;                 // the station's id in its file
@@ -490,6 +529,11 @@ struct RenderSection {
     // The water's mirror ray marched over the same field: where it meets land the reflection
     // is that land, not the sky behind it. A test (2026-10-15), off until the owner's eye says.
     bool reflectLand = false;
+    // VARIABLE RATE SHADING on the water (2026-10-25; shaders/GlobeMesh.hlsl SV_ShadingRate): the
+    // sea's pixels shared four a side where the pixel's footprint is wider than the chop texture's
+    // texel, two a side nearer; foam, a held fold, the shore and the land keep their pixels. On a
+    // device of tier 2; the A/B is `--set render.vrs=false`.
+    bool vrs = true;
     // THE DRAWN BUILDINGS' SHADOW (shaders/TerrainRay.hlsli SunMapClear; BuildingLayer::RenderSunMap;
     // docs/VISIBILITY_FIELD.md 9): the solids drawn about the eye, seen once more from the sun, a
     // depth map per CELL of the origin lattice -- the eye's ground cell at the finest lattice level

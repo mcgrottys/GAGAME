@@ -21,8 +21,7 @@
     { "key": "nodes", "kind": "list", "node": "component", "doc": "typed nodes (scene/Component.h), by name, typed by ComponentSchemas" },
     { "key": "prune", "kind": "object", "node": "tool", "doc": "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm" },
     { "key": "tools", "kind": "list", "node": "tool", "doc": "the one-shot modes this scene runs (--tool)" },
-    { "key": "stations", "kind": "list", "node": "station", "doc": "where a station of the data stands when its file does not say (PHASE C3)" },
-    { "key": "solvers", "kind": "list", "node": "solver", "doc": "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide" }
+    { "key": "stations", "kind": "list", "node": "station", "doc": "where a station of the data stands when its file does not say (PHASE C3)" }
   ],
   "placement": [
     { "spelling": "compass", "keys": ["x", "alt", "z", "az", "pitch"], "doc": "the flat world frame in metres and compass degrees: Camera::SetFromCompass, then FromCamera" },
@@ -47,7 +46,7 @@
       { "key": "debug", "type": "object", "field": "none", "schema": "debug", "reload": "hot", "doc": "the debug views of the globe's surface" },
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": true, "reload": "hot", "doc": "the scene's sources by name: a derived scene ADDS to its base's (merged in place by name, `remove: true` drops one), as every named list; their order is StackOrder's (`over`, then the coarser under the finer), not the list's" },
       { "key": "stations", "type": "list", "field": "none", "element": "station", "named": true, "reload": "hot", "doc": "where a station of the data stands when its file does not say; by name, merged as every named list" },
-      { "key": "solvers", "type": "list", "field": "none", "element": "solver", "named": true, "reload": "hot", "doc": "solvers asleep until the eye comes: a box of cells, the stack's bed, a station's tide; by name, merged as every named list" },
+      { "key": "impacts", "type": "list", "field": "none", "element": "sea.impactor", "named": false, "reload": "hot", "doc": "the asteroids into the sea, each an event with its own instant (sim/ImpactField.h: the record the I key appends to)" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
       { "key": "hud", "type": "object", "field": "none", "schema": "hud", "reload": "hot", "doc": "the windshield: readouts and the minimap on the glass" },
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
@@ -125,6 +124,7 @@
     ] },
     { "type": "sea", "keys": [
       { "key": "storm", "type": "object", "field": "none", "schema": "sea.storm", "reload": "hot", "doc": "the sandbox sea-state override" },
+      { "key": "impactor", "type": "object", "field": "none", "schema": "sea.impactor", "reload": "hot", "doc": "the asteroid the I key drops at the point under the cursor, at the clock's instant (its lat, lon and at are ignored)" },
       { "key": "datum", "type": "object", "field": "none", "schema": "sea.datum", "reload": "hot", "doc": "the MLLW -> NAVD88 link" },
       { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "where data.seastate's forecast stands when its file carries no box, [lon0, lat0, lon1, lat1] degrees; zeros = nowhere (the grid alone)" }
     ] },
@@ -132,6 +132,21 @@
       { "key": "hs", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "significant height; 0 = the forecast sea (--storm)" },
       { "key": "tp", "type": "number", "field": "f32", "quantity": "time", "unit": "s", "default": 10, "reload": "restart", "doc": "peak period" },
       { "key": "dir", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 90, "reload": "restart", "doc": "from-direction, compass" }
+    ] },
+    { "type": "sea.impactor", "keys": [
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "an asteroid into the sea: its cavity's linear dispersive wave, everywhere the water is read (in `impacts`, the event stands; in `sea.impactor`, the I key is armed)" },
+      { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 35, "reload": "restart", "doc": "where it lands" },
+      { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": -42, "reload": "restart", "doc": "where it lands" },
+      { "key": "diameterM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 10000, "reload": "restart", "doc": "the impactor's diameter" },
+      { "key": "speedMs", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 20000, "reload": "restart", "doc": "its speed, m/s" },
+      { "key": "densityKgM3", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 3000, "reload": "restart", "doc": "its density, kg/m^3" },
+      { "key": "angleDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 45, "reload": "restart", "doc": "its angle from the horizontal" },
+      { "key": "at", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the impact's instant: UTC text or unix seconds; \"\" = the water clock's first instant" },
+      { "key": "basinDepthM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 4000, "reload": "restart", "doc": "the ocean's depth at the impact and across the basin (the dispersion's one depth; the cavity cannot be deeper)" },
+      { "key": "energyShare", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.094, "reload": "restart", "doc": "the share of the impactor's kinetic energy the cavity holds (Ward & Asphaug 2003: 0.094)" },
+      { "key": "terms", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the wavenumber table's size, 16..4096; 0 = from reachM" },
+      { "key": "reachM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6000000, "reload": "restart", "doc": "how far the sum must hold before its image returns (sets the terms: 12 reach / (pi R_D))" },
+      { "key": "exag", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "display exaggeration of the drawn wave (the globe, the bank); the hull and the solver read it raw" }
     ] },
     { "type": "sea.datum", "keys": [
       { "key": "fromStation", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "CO-OPS resolves MLLW -> NAVD88 per station; false = mllwToNavd" },
@@ -160,11 +175,21 @@
       { "key": "riverTide", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the river faces' tide deviation; false = zeroed (--swe-river-off)" },
       { "key": "spinupH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 1, "reload": "restart", "doc": "history integrated before the first frame (--swe-spinup)" },
       { "key": "gain", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "solved-current gain (--swe-gain)" },
+      { "key": "stepsPerFrame", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 16, "reload": "restart", "doc": "the solver's substeps a frame before it starves (its clock re-anchors, its dynamics run time-dilated); a fast clock's record sets what it needs" },
+      { "key": "fineReachM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "the eye's demand for the solver's finest mip: its tiles within this reach of the eye's ground point; 0 = the whole window (stage 1d of one water on the tree)" },
+      { "key": "currentRefreshS", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 90, "reload": "restart", "doc": "how often (sim s) the wave solve reads the solver's current and re-keys (a solve each); past the run's length = the first current throughout" },
       { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "the discharge at the first river face, m^3/s; < 0 = its gauge's in data.river (--river)" },
       { "key": "bedWait", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "whole", "names": ["none", "map", "whole"], "reload": "restart", "doc": "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)" },
-      { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells `cellM` over it in true metres at that latitude, its bed the one height stack's; zeros = no solver" },
+      { "key": "windowTiles", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 16, "reload": "restart", "doc": "the solver's window: this many tiles of 128 cells a side about the eye's start (the place's anchor), its corner on the global lattice of the cell's angle, its bed the one height stack's, its open sea the tide atlas's; 0 = no solver (stage 2 of one water on the tree)" },
       { "key": "cellM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 13.728, "reload": "restart", "doc": "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)" },
-      { "key": "sponge", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 1866, "reload": "restart", "doc": "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it" }
+      { "key": "tailCells", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 2048, "reload": "restart", "doc": "the tail across the ocean (stage 2b of one water on the tree): this many cells a side about the same anchor, the window whole in its central cells; 0 = no tail" },
+      { "key": "tailRank", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 9, "reload": "restart", "doc": "the tail's cell as a power of two of the window's (9: 512 window cells, 5 x 7 km at the Merrimack)" },
+      { "key": "telescopeLevels", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 3, "reload": "restart", "doc": "the telescope (stage 2c): this many anchor levels between the tail and the window, each about the window's centre" },
+      { "key": "telescopeCells", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 512, "reload": "restart", "doc": "an anchor level's cells a side" },
+      { "key": "telescopeStep", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 2, "reload": "restart", "doc": "the anchor levels' ranks this far apart below the tail's (2: ranks 7, 5, 3 under a rank-9 tail)" },
+      { "key": "patchCellsPerLip", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 8, "reload": "restart", "doc": "an event's own level: its cavity's lip radius over this many cells (8; 16 = one rank finer, the convergence run)" },
+      { "key": "levelTiles", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1024, "reload": "restart", "doc": "a sparse level's tile budget (0 = unbounded): above it, the resident tiles whose field the parent holds best (the least range of the departure within a parent cell) are released down to 7/8 of it, the parent holding their mean" },
+      { "key": "dampH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 0, "reload": "restart", "doc": "the solver's linear damping, the velocity's e-folding time (0 = none: the bed's quadratic drag is the water's loss; it was 0.99995 a substep, 1.7 to 2.4 h, until 2026-10-28)" }
     ] },
     { "type": "water.bank", "keys": [
       { "key": "flatBed", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "replace the bed with a flat floor (--flat-bed)" },
@@ -248,6 +273,7 @@
       { "key": "shadowSteps", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 128, "reload": "hot", "doc": "the terrain shadow's cast toward the sun over the height's max lane: the traversal's cap in steps (0 = no terrain shadow)" },
       { "key": "shadowRangeM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 8000, "reload": "hot", "doc": "how far the terrain shadow's cast reaches from the lit point" },
       { "key": "reflectLand", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "hot", "doc": "the water's mirror ray marched over the height field: land it meets is reflected in place of the sky" },
+      { "key": "vrs", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "variable rate shading on the water: the sea's pixels shared four a side where the pixel's footprint is wider than the chop texture's texel, two a side nearer; foam, a held fold, the shore and the land keep their pixels (a device of tier 2)" },
       { "key": "buildingShadowM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2000, "reload": "hot", "doc": "the drawn buildings' shadow maps: the finest map is the eye's cell of the origin lattice at the finest level whose cells are no wider than this (0 = the buildings cast no shadow)" },
       { "key": "buildingShadowLevels", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 5, "reload": "hot", "doc": "how many levels of the lattice the shadow maps climb from the finest cell, the span doubling each (0 = the buildings cast no shadow)" },
       { "key": "buildingShadowView", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "hot", "doc": "an instrument: the buildings' faces drawn as their shadow maps' clear share (red) over a blue mark" }
@@ -282,13 +308,6 @@
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the station's id in its file" },
       { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its latitude" },
       { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its longitude" }
-    ] },
-    { "type": "solver", "keys": [
-      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the window's name (the logs, the title)" },
-      { "key": "box", "type": "latLonBox", "field": "double4", "quantity": "angle", "unit": "deg", "default": [0, 0, 0, 0], "reload": "restart", "doc": "its domain, [lon0, lat0, lon1, lat1] degrees" },
-      { "key": "nx", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "cells east to west" },
-      { "key": "ny", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "cells south to north" },
-      { "key": "station", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the tide station (its id in data.tides) its open sea is held to" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },

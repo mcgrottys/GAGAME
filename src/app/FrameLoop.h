@@ -62,6 +62,9 @@
 // ================================================================================================
 #pragma once
 
+#include "hal/Gpu.h"
+#include "sim/ImpactGpu.h"
+namespace ga { class ImpactField; }
 #include "app/Assembly.h"
 #include "app/FramePipe.h"
 #include "app/Options.h"
@@ -271,6 +274,17 @@ private:
     // dive rail's own schedule -- its helm pose and its law are that file's.
     scene::RailFrame m_railFrame;
     scene::Rail m_rail;
+    // THE IMPACTS (sim/ImpactField.h): the record of events -- the scene's `impacts`, the I key's --
+    // their law for the CPU readers, and ONE buffer of their tables for the GPU ones, rebuilt when
+    // the record changes (a retired buffer lives on until the run ends: the frames in flight read it).
+    std::shared_ptr<ImpactField> m_impacts;
+    GpuBuffer m_impactBuf;
+    std::vector<GpuBuffer> m_impactRetired;
+    uint32_t m_impactSrv = 0xFFFFFFFFu;
+    uint64_t m_impactVer = 0;
+    double m_impactBase = 0.0;
+    ImpactGpu m_impactGpu;
+    LevelsGpu m_tailGpu;   // stage 2b/2c: the levels to the far field's readers, each frame
     scene::Rail m_diveProbeRail;
     const scene::Rail* m_diveRail = nullptr;
     // THE CLOCKS (scene/SceneClocks.h). m_sceneUnix is the scene's own clock -- the one that runs, paced

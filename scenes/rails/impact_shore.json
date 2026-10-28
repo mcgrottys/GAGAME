@@ -1,0 +1,73 @@
+{
+  "_readme": "The arrival at the Merrimack (scenes/demos/impact_newburyport.json): on the Plum Island dune by the north jetty looking to sea, then up and back over the river as the water comes. 60 s at 30 fps = 30 min at the scene's 30x.",
+  "name": "impact_shore",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {
+          "t": 0,
+          "at": {
+            "lat": 42.8125,
+            "lon": -70.8075,
+            "alt": 18,
+            "lookAt": {
+              "lat": 42.8,
+              "lon": -70.7
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 20,
+          "at": {
+            "lat": 42.8125,
+            "lon": -70.8075,
+            "alt": 18,
+            "lookAt": {
+              "lat": 42.8,
+              "lon": -70.7
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 34,
+          "at": {
+            "lat": 42.816,
+            "lon": -70.82,
+            "alt": 400,
+            "lookAt": {
+              "lat": 42.805,
+              "lon": -70.77
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 60,
+          "at": {
+            "lat": 42.828,
+            "lon": -70.87,
+            "alt": 900,
+            "lookAt": {
+              "lat": 42.813,
+              "lon": -70.8
+            }
+          },
+          "view": "",
+          "pose": ""
+        }
+      ]
+    }
+  ]
+}

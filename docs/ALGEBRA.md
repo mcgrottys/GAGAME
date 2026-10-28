@@ -421,7 +421,7 @@ clipped distribution is
 E/E_raw = 1 − exp(−(Hmax/Hrms_raw)²), so with excess = Hrms_raw/Hmax every amplitude at the
 point carries L = √(1 − exp(−1/excess²)): deep water untouched (exponentially), the shore's
 rms tending to the limit from below, no corner anywhere. One function (WaterTerms.h
-BreakFactor, Jet.hlsli its twin) for the cascade bands in the bank kernel and the hull's
+BreakFactor, laws/Breaking.hlsli: one text) for the cascade bands in the bank kernel and the hull's
 twin (one factor on the three bands from the raw envelope they make) and for the solved
 field's cells (below). The raw excess stays the foam's indicator.
 
@@ -460,7 +460,7 @@ Independent verification: `proofs/inlet_storm.py` runs these same closed forms o
 engine's exported fields (numpy, no engine code); the match report holds the kernel to it
 (shape-normalized corr ≥ 0.9 per ring, mean |log ratio| ≤ ~4%).
 
-Code: `shaders/Jet.hlsli` (pure functions), `WaterBank.hlsl` (application),
+Code: `shaders/laws/*.hlsli` (the laws, one text for the kernels and the CPU: docs/WATER_LAWS.md), `WaterBank.hlsl` (application),
 `SeaLayer::BuildShadowMask`. Gates: `gatest` endpoint pins; the M7p match report.
 AST: `swe.solver → water.bank` (shadow), `compose.stack → water.bank` (corners).
 
@@ -757,14 +757,14 @@ so Newton is structurally unsafe here (the reference measured a 628 km wavelengt
 it). Scheme: 96 log-spaced candidates in [1e-4, 10^0.7] rad/m, first +→− sign change
 (provably the physical branch), 48 bisections; NO sign change ⇒ the BLOCKED mask — the
 wave is arrested, standing, breaking; flagged, never papered over. Deep-water blocking
-sits at U_opp = c₀/4 exactly — the origin of `Jet.hlsli`'s −0.245 threshold. Blocked
+sits at U_opp = c₀/4 exactly — the origin of `laws/Dispersion.hlsli`'s −0.245 threshold. Blocked
 cells hold k = 0.25·10^0.7 ≈ 1.2530 rad/m, a GRID-TUNED closure: k·Δ = 1.88 < π at
 Δ = 1.5 m; a different cell size must re-derive it from k·Δ < π.
 
 **Shoaling.** Ks = √(cg₀ / max(c_g + U_along, 0.15)) — energy-flux conservation, i.e.
 wave-action conservation with the factor √(σ_r/σ) dropped (underestimates opposing-current
 amplification by up to √2 ≈ 1.414 at deep blocking). The engine's factorization is
-complementary: `Jet.hlsli` WaveCurrentAmp is provably the EXACT deep-water action
+complementary: `laws/Dispersion.hlsli` WaveCurrentAmp is provably the EXACT deep-water action
 solution including σ_r/σ (verified 4e-16 over r ∈ [−0.24, 0.3]), and ShoalFactor is exact
 finite-depth action shoaling without current. The solved field supersedes both for
 DISPLAY inside its window; the closures stay for the foam/churn path and the fallback sea.
@@ -845,7 +845,7 @@ bathy/current/scenario): per-component k and a agree with the reference's cached
 to EXACTLY half an 8-bit LSB, phase spinor dot ≥ 0.999985 — the solver IS the reference,
 digit for digit. Wet 81.3%, Hs p50 2.384 m, excess>1 on 42.6% of wet cells, blocked 0.00%.
 
-Code: `proofs/wave_field.py`, `proofs/vqview_ref.py`, `shaders/Jet.hlsli`.
+Code: `proofs/wave_field.py`, `proofs/vqview_ref.py`, `shaders/laws/`.
 Gates: `gatest` block 6 (dispersion residual, branch selection, blocking margin,
 WaveCurrentAmp≡action, Green's law, limiter invariants, spinor error bound, Nyquist hold);
 the twin test.
@@ -1852,6 +1852,28 @@ SUM, not on the terms; the inversion of a sheet belongs to the structure that al
     and water height. Law: a reader of a solver's state weights by the continuous quantity a flag summarizes
     (here the water a column holds, h / (h + h_wet)). A flag may gate a cost, never a value that becomes
     geometry.
+59. **A convergence is not a crease** (2026-10-25; docs/WATER_LAWS.md, Mark at the Merrimack bar under a
+    3 m storm: "the waves are unusually flat around this bar"). Prior (W1): where the first-arrival phase
+    creases two ray families meet, and the losing family's flux may end there, because a single-valued
+    phase holds one sea. Measured on the storm's solve (the `--wave-map` layers and the action ledger):
+    80.9 % of the swell's action was dropped "at creases", in thin streaks over the whole window and
+    thickest in the ebb delta's lee — every mild convergence of the ray field over a bumpy bed, the
+    focusing a bar exists to do, was a "crease" to a discretization that fed a cell only from the side its
+    own velocity came from. Law: the steady balance div(N F) = 0 is discretized donor-cell, every entering
+    flow that goes the cell's way feeding the cell, which conserves action by construction; a head-on
+    family is a second sea the phase cannot carry, and it is turned back and counted; and a cell holds
+    no more action than one wave at the water's limit, so the loops the current closes near blocking,
+    and the foci geometric optics makes, are bounded by breaking as they are in the water. And
+    a closure that stood in for physics the model lacked (the line-of-sight exposure sheltering the
+    solved field, from before the solve had walls) is retired the day the physics arrives, or it counts
+    twice.
+60. **A law written twice is a drift waiting to be measured** (2026-10-25; docs/WATER_LAWS.md). Prior:
+    the CPU twin of a kernel's law is a transcription held by a gate. Measured: four drifts in the
+    inventory of 2026-10-22, a fifth by reading (the twin's breaking excess on the exaggerated band rms),
+    a third copy of the breaking height in the SWE's wave march, Guo's dispersion twice, the dry band
+    four times, the band cuts in four files. Law: a closed-form law has ONE text, `shaders/laws/*.hlsli`,
+    compiled by the kernels and by the CPU host (`WaterTerms.h`); the host owns the type and the
+    intrinsics, the law owns nothing but its algebra.
 
 ## verification — The gate map: which algebra is pinned where
 

@@ -2558,6 +2558,34 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.farSea[0] = m_farHsRef > 1e-6 ? static_cast<float>(1.0 / m_farHsRef) : 0.0f;
     m_cb.farSea[1] = m_farStorm ? 1.0f : 0.0f;
     m_cb.farSea[2] = m_cb.farSea[3] = 0.0f;
+    // THE IMPACTS (SetImpact): the record's buffer and the instant
+    m_cb.impA[0] = m_imp.tRel;
+    m_cb.impA[1] = m_imp.planetR;
+    m_cb.impA[2] = m_imp.g;
+    m_cb.impA[3] = 0.0f;
+    m_cb.impU[0] = m_imp.slot;
+    m_cb.impU[1] = m_imp.events;
+    m_cb.impU[2] = m_cb.impU[3] = 0u;
+    // STAGE 2b/2c (SetTail): the levels' chart and textures to the far field's readers
+    for (int i = 0; i < 3; ++i) {
+        m_cb.lvlChart[i] = m_tail.up[i];
+        m_cb.lvlE[i] = m_tail.east[i];
+        m_cb.lvlN[i] = m_tail.north[i];
+    }
+    m_cb.lvlChart[3] = m_tail.R;
+    m_cb.lvlE[3] = float(m_tail.count);
+    m_cb.lvlN[3] = m_tail.exag;
+    for (uint32_t k = 0; k < LevelsGpu::kMax; ++k) {
+        const LevelsGpu::Level& L = m_tail.level[k];
+        m_cb.lvlA[k][0] = L.s0;
+        m_cb.lvlA[k][1] = L.t0;
+        m_cb.lvlA[k][2] = L.ds;
+        m_cb.lvlA[k][3] = L.dt;
+        m_cb.lvlU[k][0] = k < m_tail.count ? L.hSrv : 0xFFFFFFFFu;
+        m_cb.lvlU[k][1] = k < m_tail.count ? L.bedSrv : 0xFFFFFFFFu;
+        m_cb.lvlU[k][2] = L.nx;
+        m_cb.lvlU[k][3] = L.ny;
+    }
     m_cb.colA[0] = m_colScale;
     m_cb.colA[1] = m_colBias;
     m_cb.colA[2] = m_cb.colA[3] = 0.0f;
@@ -2922,6 +2950,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
     }
 
     // 2) The surface (which marches the sparse cloud bank on its way down).
+    bool vrsSet = false;   // the water's shading rate, set for the mesh path's dispatches and reset after
     if (m_msPath && m_msPso && !meshlets.empty()) {
         // M6j: the unified surface -- meshlet records ride a frame-indexed upload buffer,
         // one DispatchMesh amplifies them from the composed channels.
@@ -2943,6 +2972,10 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
         else if (ResidencyLensOn() && m_msPsoLens) msSel = m_msPsoLens.Get();
         if (cacheLens && m_msPsoCache) msSel = m_msPsoCache.Get();
+        // VARIABLE RATE SHADING (2026-10-25): the water's rate per primitive, the mesh shader's own
+        // (GlobeMesh.hlsl); the shipped pipeline alone, on a device of tier 2 (hal/Context.h).
+        vrsSet = vrsOn && msSel == m_msPso.Get() && !overdrawProbe && ctx.gpu->VrsTier() >= 2u;
+        if (vrsSet) ctx.cmd->ShadingRatePerPrimitive(true);
         ctx.cmd->Pipeline(msSel);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
@@ -3125,6 +3158,8 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
                 }
             }
         }
+
+        if (vrsSet) ctx.cmd->ShadingRatePerPrimitive(false);   // every pass after the water shades 1x1
 
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
         // just drawn (SetView chose the slots, farthest first).

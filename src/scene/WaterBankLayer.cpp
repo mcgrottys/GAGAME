@@ -157,7 +157,9 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSign
     m_rs = hal::RootLayout{}
                .Cbv(0)
                .Srv(0)
-               .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5)})
+               // space8: the heap as uint buffers (the impacts' tables, ImpactRead.hlsli)
+               .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5),
+                       hal::SrvRange(0, hal::kUnbounded, 8)})
                // space2: the heap as float4 planes; space3: as uint planes (the column plane's
                // atomics).
                .Table({hal::UavRange(0, hal::kUnbounded, 2), hal::UavRange(0, hal::kUnbounded, 3),
@@ -1171,10 +1173,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.org[3] = static_cast<float>(m_simUnix);
     for (int c = 0; c < 3; ++c) cb.patch[c] = m_sea->FftPatchL(c);
     cb.patch[3] = m_sea->heightScale;
-    const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
-                            0.9 * kPiD * 256.0 / 47.0};
-    for (int c = 0; c < 3; ++c) {
-        cb.bandK[c] = static_cast<float>(std::sqrt(kCut[c] * kCut[c + 1]));
+    for (int c = 0; c < 3; ++c) {   // the band cuts' one source (OceanFft::BandCutK)
+        cb.bandK[c] = static_cast<float>(std::sqrt(OceanFft::BandCutK(c) * OceanFft::BandCutK(c + 1)));
     }
     if (m_swe && m_swe->Ready()) {
         cb.sweDims[0] = static_cast<float>(m_swe->Nx());
@@ -1216,7 +1216,9 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // rms envelopes let the kernel normalize eta for the crest gate and depth excess.
     for (int c = 0; c < 3; ++c) cb.slotsE[c] = m_sea->FftDerivSrv(c);
     cb.slotsE[3] = 0xFFFFFFFFu;
-    for (int c = 0; c < 3; ++c) cb.rmsRef[c] = m_sea->BandRms(c);
+    // PHYSICAL (2026-10-25): the kernel's laws read the unit sea's rms in metres and apply the
+    // exaggeration once, to the displacement; it used to carry heightScale and every law divided it out.
+    for (int c = 0; c < 3; ++c) cb.rmsRef[c] = static_cast<float>(m_sea->BandRmsPhysical(c));
     cb.rmsRef[3] = 0.0f;
     for (int c = 0; c < 3; ++c) cb.bandKFold[c] = m_sea->BandKFold(c);
     cb.bandKFold[3] = 0.0f;
@@ -1228,7 +1230,36 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.bandLift[3] = float(m_sea->Ocean().Lambda());   // the chop: the crest law's drawn orbit
     cb.sweB[0] = m_tidePlane;   // the solver is truth: its level is this plane plus its deviation
     cb.sweB[1] = (m_swe && m_swe->Ready()) ? m_swe->WetDepth() : 0.01f;   // its wet depth (SolverSurfaceDev)
-    cb.sweB[2] = cb.sweB[3] = 0.0f;
+    cb.sweB[2] = (m_swe && m_swe->Ready()) ? m_swe->CellM() : 0.0f;   // its cell (m): the bore's face is read a cell each way
+    cb.sweB[3] = 0.0f;
+    // THE IMPACTS (SetImpact): the record's buffer and the instant
+    cb.impA[0] = m_imp.tRel;
+    cb.impA[1] = m_imp.planetR;
+    cb.impA[2] = m_imp.g;
+    cb.impA[3] = 0.0f;
+    cb.impU[0] = m_imp.slot;
+    cb.impU[1] = m_imp.events;
+    cb.impU[2] = cb.impU[3] = 0u;
+    // STAGE 2b/2c (SetTail): the levels' chart and textures to the far field's readers
+    for (int i = 0; i < 3; ++i) {
+        cb.lvlChart[i] = m_tail.up[i];
+        cb.lvlE[i] = m_tail.east[i];
+        cb.lvlN[i] = m_tail.north[i];
+    }
+    cb.lvlChart[3] = m_tail.R;
+    cb.lvlE[3] = float(m_tail.count);
+    cb.lvlN[3] = m_tail.exag;
+    for (uint32_t k = 0; k < LevelsGpu::kMax; ++k) {
+        const LevelsGpu::Level& L = m_tail.level[k];
+        cb.lvlA[k][0] = L.s0;
+        cb.lvlA[k][1] = L.t0;
+        cb.lvlA[k][2] = L.ds;
+        cb.lvlA[k][3] = L.dt;
+        cb.lvlU[k][0] = k < m_tail.count ? L.hSrv : 0xFFFFFFFFu;
+        cb.lvlU[k][1] = k < m_tail.count ? L.bedSrv : 0xFFFFFFFFu;
+        cb.lvlU[k][2] = L.nx;
+        cb.lvlU[k][3] = L.ny;
+    }
     static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");
     memcpy(cb.hwU, &m_hw, sizeof(m_hw));   // PHASE B2: hwU..hwS, KernelRows' packing
     memcpy(cb.svU, m_sv, sizeof(m_sv));   // svU..svO, SweDomain::KernelRows' packing

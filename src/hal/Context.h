@@ -171,6 +171,24 @@ public:
         cl6->DispatchMesh(x, y, z);
     }
 
+    // VARIABLE RATE SHADING, PER PRIMITIVE (2026-10-25): on, the rasterizer shades each primitive at the
+    // rate its mesh shader exported (SV_ShadingRate: GlobeMesh.hlsl, the water's), the OVERRIDE combiner
+    // taking it over the pipeline's 1x1 and no screen image after it; off, every combiner passes the
+    // 1x1 through and the primitive's rate is ignored. RSSetShadingRate is List5's; the frame's List6
+    // is one. A list without it (the upload list, an old runtime) does nothing, and the caller tests
+    // Gpu::VrsTier() >= 2 before asking.
+    void ShadingRatePerPrimitive(bool on) {
+        ID3D12GraphicsCommandList6* cl6 = m_gpu->MeshList(m_cl);
+        if (!cl6) return;
+        if (on) {
+            const D3D12_SHADING_RATE_COMBINER c[2] = {D3D12_SHADING_RATE_COMBINER_OVERRIDE,
+                                                      D3D12_SHADING_RATE_COMBINER_PASSTHROUGH};
+            cl6->RSSetShadingRate(D3D12_SHADING_RATE_1X1, c);
+        } else {
+            cl6->RSSetShadingRate(D3D12_SHADING_RATE_1X1, nullptr);
+        }
+    }
+
     // ---- targets and the viewport -------------------------------------------------------------
     void Targets(D3D12_CPU_DESCRIPTOR_HANDLE rtv, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
         m_cl->OMSetRenderTargets(1, &rtv, FALSE, dsv);

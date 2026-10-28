@@ -173,6 +173,13 @@ public:
     // Tiles known but not yet mapped. The warm-cache loop drains this to zero before the camera
     // ever moves. The tiles of the order's first P not held yet, whatever they wait on.
     uint32_t PendingCount() const { return m_orderPending; }
+    // ONE READER'S OWN QUESTION (stage 2 of one water on the tree, WATER_V2 14.4): of the tiles this
+    // reader asked for of this tenant -- the whole column each want implies -- how many the order has
+    // not answered: not held (mapped, its bytes landed) and not closed (failed, or known as its parent
+    // magnified without a load, F14). Zero: what this reader reads is the finest the tree holds there,
+    // whatever another reader still waits on (the colour's cold root, say). The solver's bed wait ends
+    // on it, so a place the stack holds only at its global tiers is whole at the cube's own level.
+    uint32_t PendingOf(int sampler, int tenant);
     // THE GENERATION (2026-10-11): moves when a turn changed what is resident -- a tile mapped,
     // landed, let go or dropped. A reader whose inputs have not moved either may keep its last
     // walk (GlobeLayer::SetView) and name the same tiles again.

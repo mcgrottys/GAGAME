@@ -1,4 +1,4 @@
-﻿// ================================================================================================
+// ================================================================================================
 //  WaveField - M8: THE SOLVED WAVE FIELD. The stationary wave boundary-value problem, solved
 //  per cell over the inlet window and CACHED: per spectral component, a per-cell amplitude
 //  (shoaling * refraction * the total-Hs limiter), wavenumber (current-Doppler finite-depth
@@ -107,14 +107,16 @@ public:
     // field has curl wherever grad k is not parallel to d^), so it printed the integration
     // route into the sea as banding. Every cached solve carries the old, walked phase.
     // F28: 11, was 10 -- the eikonal is swept until still; every cached two-round phase re-solves.
-    // 12 (2026-10-22): the envelope's fourth channel is sqrt(tan beta), the bed's slope (Jet.hlsli PlungeShare).
+    // 12 (2026-10-22): the envelope's fourth channel is sqrt(tan beta), the bed's slope (laws/Crest.hlsli PlungeShare).
     // 13 (2026-10-24): W1, the amplitude is the action carried along the eikonal (no bar normal); W2, the
     // current is the manager's per cell (no proxy jet). Every cached solve re-solves.
     // 14 (2026-10-25): the same law as b28679e committed it -- but 13 also named the interim builds that led
     // to it, and the wave TREE's pages (prefilled once per identity, kept on disk: TileTree::Prefill skips a
     // tile it holds) were the first of them, so the drawn sea showed a discarded field under the hull's
     // fresh one (0.2 m apart at the bar). A law that changes must change the identity; 14 is the law's own.
-    static constexpr uint32_t kSolverVersion = 14;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
+    // 15 (2026-10-25): the action is conserved where rays converge (every entering flow feeds a cell; a
+    // head-on family is turned back) -- the crease drop that darkened a bar's lee is gone (docs/WATER_LAWS.md).
+    static constexpr uint32_t kSolverVersion = 15;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
@@ -127,9 +129,10 @@ public:
     // thread at a quantized cadence, resampled onto the solve grid (row-0-north flip
     // declared), scaled by the scene's gain, and their quantized bytes join the bucket key:
     // content identity, not a clock.
-    void SetSweCurrent(class SweSolver* swe, float gain) {
+    void SetSweCurrent(class SweSolver* swe, float gain, double refreshS = 90.0) {
         m_swe = swe;
         m_sweGain = gain;
+        m_sweRefreshS = refreshS;
     }
     // F25 (the instrument): every solve is made twice, with the memo and cold, and against the
     // cache's entry for its key when one stands; the differing bytes are printed ([wave-audit]).
@@ -420,6 +423,7 @@ private:
     mutable std::shared_ptr<wavecore::Memo> m_memo;
     uint64_t m_curSig = 0;                        // quantized content hash -> bucket key
     double m_curReadT = -1e18;                    // last refresh (sim s)
+    double m_sweRefreshS = 90.0;                  // the cadence (water.swe.currentRefreshS)
     // F13: the resample of the read-back flow, on a worker; adopted on the main thread when done.
     struct CurJob {
         SweSolver::FieldsRead read;   // the two readbacks, mapped and unpacked on the worker

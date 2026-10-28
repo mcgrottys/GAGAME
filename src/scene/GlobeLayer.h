@@ -33,6 +33,7 @@
 #include <thread>
 #include <vector>
 
+#include "sim/ImpactGpu.h"
 namespace ga {
 
 namespace scene { struct DebugSection; }
@@ -589,6 +590,12 @@ public:
     // generation and the clouds'. Measured at a frozen eye (--gpu-time): Tokyo's globe.mesh 9.4 ->
     // the kept frame's composite + water; the mouth's 13.2 likewise -- the numbers in the PR.
     bool keepOn = true;
+    // VARIABLE RATE SHADING on the water (render.vrs; GlobeMesh.hlsl SV_ShadingRate, the law is there):
+    // the shipped look only (no lens, wire or probe), on a device of tier 2.
+    bool vrsOn = true;
+    // THE IMPACTS (2026-10-25): the record's buffer and the instant, into the constants at SetView.
+    void SetImpact(const ImpactGpu& g) { m_imp = g; }
+    void SetTail(const LevelsGpu& t) { m_tail = t; }   // stage 2b/2c: the levels to the far field's readers
     float keepSunGrainDeg = 0.01f, keepTideGrainM = 0.001f;
     uint64_t keepFull = 0, keepKept = 0, keepPlain = 0, keepWhy[8] = {};
     int m_keepWhySaid = 0;
@@ -645,6 +652,8 @@ private:
     };
     void SeamTable();
     // Mirrors GlobeCb in Globe.hlsl. (Count float4 rows on BOTH sides after any edit.)
+    ImpactGpu m_imp;
+    LevelsGpu m_tail;
     struct GlobeCbData {
         float glo[4];
         float camAbs[4];
@@ -727,6 +736,18 @@ private:
         uint32_t colR[12];   // the column ladder's rings under: SRV, texels, tiles, on
         uint32_t sprayU[4];   // THE SPRAY (gSprayU): the droplets' SRV, the ring's size, on
         float farSea[4];      // THE SEA PAST THE RINGS (gFarSea): 1 / hsRef, storm
+        // THE IMPACTS (gImpA / gImpU; sim/ImpactField.h, shaders/ImpactRead.hlsli): the instant on the
+        // record's base, the planet's radius, g; the events' buffer SRV and their count. Appended at
+        // the END on both sides.
+        float impA[4];
+        uint32_t impU[4];
+        // STAGE 2b (gTailA..gTailB; sim/ImpactGpu.h TailGpu, shaders/TailRead.hlsli): the tail's chart and
+        // textures for the far field. Appended at the END on both sides.
+        float lvlChart[4];
+        float lvlE[4];
+        float lvlN[4];
+        float lvlA[8][4];
+        uint32_t lvlU[8][4];
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {

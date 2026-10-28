@@ -1,0 +1,129 @@
+{
+  "_readme": "The impact to the shore (scenes/demos/impact_descent.json): 3000 km over the cavity, west with the ring, down over the Gulf of Maine to meet the front at the Merrimack's mouth at 78 s (3.68 h at 170x), then a bird's eye 3 km over Plum Island through the train's peak. 120 s at 30 fps.",
+  "name": "impact_descent",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {
+          "t": 0,
+          "at": {
+            "lat": 35.0,
+            "lon": -42.0,
+            "alt": 3000000,
+            "lookAt": {
+              "lat": 35.0,
+              "lon": -42.0
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 18,
+          "at": {
+            "lat": 34.0,
+            "lon": -46.0,
+            "alt": 2500000,
+            "lookAt": {
+              "lat": 36.0,
+              "lon": -47.0
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 38,
+          "at": {
+            "lat": 37.0,
+            "lon": -56.0,
+            "alt": 1800000,
+            "lookAt": {
+              "lat": 39.0,
+              "lon": -62.0
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 58,
+          "at": {
+            "lat": 40.0,
+            "lon": -64.0,
+            "alt": 900000,
+            "lookAt": {
+              "lat": 42.0,
+              "lon": -69.5
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 72,
+          "at": {
+            "lat": 42.0,
+            "lon": -69.0,
+            "alt": 250000,
+            "lookAt": {
+              "lat": 42.75,
+              "lon": -70.75
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 82,
+          "at": {
+            "lat": 42.55,
+            "lon": -70.55,
+            "alt": 40000,
+            "lookAt": {
+              "lat": 42.81,
+              "lon": -70.8
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 92,
+          "at": {
+            "lat": 42.74,
+            "lon": -70.74,
+            "alt": 8000,
+            "lookAt": {
+              "lat": 42.815,
+              "lon": -70.81
+            }
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 120,
+          "at": {
+            "lat": 42.79,
+            "lon": -70.78,
+            "alt": 3000,
+            "lookAt": {
+              "lat": 42.815,
+              "lon": -70.83
+            }
+          },
+          "view": "",
+          "pose": ""
+        }
+      ]
+    }
+  ]
+}

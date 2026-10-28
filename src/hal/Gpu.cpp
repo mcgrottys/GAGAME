@@ -1,4 +1,4 @@
-﻿#include "hal/Gpu.h"
+#include "hal/Gpu.h"
 
 #include <algorithm>
 #include <chrono>
@@ -257,6 +257,12 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer,
     if (SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7, sizeof(o7)))) {
         Log("[gpu] mesh shader tier %d, sampler feedback tier %d",
             static_cast<int>(o7.MeshShaderTier), static_cast<int>(o7.SamplerFeedbackTier));
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS6 o6{};
+    if (SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS6, &o6, sizeof(o6)))) {
+        m_vrsTier = static_cast<uint32_t>(o6.VariableShadingRateTier);
+        Log("[gpu] variable rate shading tier %u (per primitive from tier 2; tile %u px)", m_vrsTier,
+            o6.ShadingRateImageTileSize);
     }
     D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_7};
     while (sm.HighestShaderModel > D3D_SHADER_MODEL_5_1 &&

@@ -23,6 +23,8 @@
 #pragma once
 
 #include "core/GradeField.h"
+#include "sim/ImpactField.h"
+#include <memory>
 #include "core/Lattice.h"
 #include "hal/Context.h"
 #include "hal/Gpu.h"
@@ -44,11 +46,13 @@ namespace ga {
 // validated estuary behavior.
 struct SweConfig {
     const char* name = "swe";   // PHASE C3: the scene names it (Assembly: scene.name)
-    // PHASE C1: THE SPONGE STANDS ON THE OPEN SIDES. A side of the domain is open sea when every cell
-    // along it can be wet (bed under +1.2 m NAVD, the residency law's own bound) and no river enters
-    // there; the sponge's ramp begins spongeM metres in from an open side and is whole 700 m nearer it
-    // (water.swe.sponge; 1866 m = where today's world-x ramp began, 1400 m east of the old origin).
-    float spongeM = 1866.0f;
+    // THE EDGE IS THE FRONTIER'S LAW (2026-10-27, one water on the tree): every edge cell of the window
+    // that no river face holds is the stateless sea's, pinned to the tide atlas's Level along its side
+    // (Swe.hlsl OceanSideOf); wet or dry is that Level over the cell's bed, each instant. No side is
+    // "open" and none is a wall: a channel the edge cuts fills and drains with the sea, a dune at the
+    // edge stands over it. (Until this date a side was open when EVERY cell of it lay under +1.2 m,
+    // else only its cells below mean sea were the sea's, and an offshore sponge stood on the open
+    // sides: three laws, and a harbour mouth open on 1525 of 2048 cells had no open side.)
     // THE RIVER FACES (2026-10-21): where a river enters the domain -- the crossing of its reach's line
     // with the box's edge (sim/RiverModel.h EntersBox) -- a Flather open boundary on that side, over the
     // run of wet-capable edge cells about the crossing (SweDomain::Bound). Until this date one face
@@ -58,6 +62,23 @@ struct SweConfig {
         double lat = 0.0, lon = 0.0; // where the river's line crosses the edge
         std::string name;
     };
+    // STAGE 2b OF ONE WATER ON THE TREE (2026-10-27): THE TAIL -- a coarse lattice across the ocean about the same
+    // anchor, tailCells a side of cells 2^tailRank of the window's, on the window's own lattice (the window sits
+    // whole in its central cells); its bed the one stack at that grain (bedAt: lat, lon degrees, the grain m);
+    // 0 cells = no tail (water.swe.tailCells, water.swe.tailRank).
+    uint32_t tailCells = 2048;
+    uint32_t tailRank = 9;
+    // STAGE 2c: the anchor levels between the tail and the window -- this many, each telescopeCells a side, their
+    // ranks telescopeStep apart below the tail's (water.swe.telescopeLevels / telescopeCells / telescopeStep)
+    uint32_t telescopeLevels = 3, telescopeCells = 512, telescopeStep = 2;
+    double patchCellsPerLip = 8.0;   // an event's patch: its lip's radius over this many cells (16 = a rank finer: the convergence run)
+    double levelTiles = 1024.0;      // a sparse level's tile budget (0 = unbounded; water.swe.levelTiles)
+    // THE LINEAR DAMPING, AS A TIME (2026-10-28): the velocity's e-folding time in hours, 0 = none (water.swe.dampH). It
+    // was 0.99995 a substep -- "a whisper for numerical hygiene" -- which is an e-folding of 1.7 h at the window's
+    // 0.3 s step and 2.4 h at an event's patch's 0.44 s: the 1 km stone's train lost e^-1.3 of itself crossing from
+    // 300 to 2600 km before any scheme's diffusion. The physics of a tsunami's loss is the quadratic drag; none here.
+    double dampH = 0.0;
+    std::function<float(double, double, double)> bedAt;
     std::vector<RiverFace> faces;    // at most kMaxRiverFaces
     // C2: THE LAND SOAKS -- one stated soil for now (WATER_V2 12.3): the water a dry column's soil can
     // take (m), its saturated conductivity (m/s: a sandy loam's 36 mm/h) and Green and Ampt's suction
@@ -65,8 +86,10 @@ struct SweConfig {
     float soilCapM = 0.10f, soilKs = 1.0e-5f, soilSuctionM = 0.05f;
 };
 
-// PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S CHART. A domain is declared by a lat/lon box
-// (water.swe.box); its ANCHOR is the box's centre and its lattice a window of its own planes there
+// PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S CHART. A domain is a lat/lon box -- since stage
+// 2 of one water on the tree (2026-10-26) the window about the eye's start on the global lattice of the
+// cell's angle (water.swe.windowTiles, app/Assembly.cpp), no scene's box -- its ANCHOR is the box's
+// centre and its lattice a window of its own planes there
 // (HIERARCHY 4.4: a ratio of planes about an anchor in doubles). A point P of the body (planet frame,
 // any scale) has the cell coordinates
 //     tx = (U . P) / (A . P),   ty = (V . P) / (A . P)
@@ -81,9 +104,8 @@ struct SweDomain {
     double U[3] = {}, V[3] = {};                             // the cells' planes (through the centre)
     uint32_t nx = 0, ny = 0;
     double dx = 0.0, dy = 0.0;                               // a cell, metres (true, at the anchor)
+    double ox = 0.0, oy = 0.0;   // stage 2c: a level's rectangle on the chart: the centred lattice's cell less this one's
     std::vector<float> elev;      // the bed at the cell centres, m NAVD88, row 0 north (the stack's)
-    uint32_t openSides = 0;       // bit 0 N, 1 S, 2 W, 3 E: the sides that are open sea (Bound)
-    std::vector<uint8_t> sponge;  // per cell: 1 where the sponge acts (the flood's seeds)
     // THE RIVER FACES' CELLS (Bound): a side and the run [c0, c1] along it (columns for N and S,
     // rows for W and E) of wet-capable edge cells (bed under +2 m) about the river's crossing.
     struct FaceCells {
@@ -96,9 +118,10 @@ struct SweDomain {
                                                                                       : size_t(a) * nx + (nx - 1);
     }
     std::vector<uint8_t> FaceMask() const;   // 1 at every face cell whose bed is under +2 m
-    // THE SEA CONTINUES PAST THE EDGE at edge cell `a` of `side` (Swe.hlsl OceanSideOf, on this bed): the
-    // side is open, or the cell's bed lies below mean sea (0 m NAVD88) -- and no river face holds it.
-    bool SeaFaceCell(int side, int a) const;
+    // THE SEA'S EDGE CELL: edge cell `a` of `side` is the stateless sea's exterior (Swe.hlsl OceanSideOf)
+    // when it has a bed and no river face holds it; the Level over that bed, each instant, says whether
+    // it holds water. One law for every edge cell: no open side, no wall.
+    bool SeaEdgeCell(int side, int a) const;
     bool Ready() const { return nx > 0 && ny > 0; }
     void Place(double boxLat0, double boxLon0, double boxLat1, double boxLon1, uint32_t cellsX,
                uint32_t cellsY, double planetR);
@@ -109,10 +132,8 @@ struct SweDomain {
     bool Holds(double latDeg, double lonDeg) const;   // the lattice holds the place
     // The bed at every cell's centre, from the one stack (bedAt(lat, lon, the cell's grain), degrees).
     void FillBed(const std::function<float(double, double, double)>& bedAt);
-    // The open sides and the sponge's cells, from the bed (elev filled first).
+    // The river faces' cells, from the bed (elev filled first).
     void Bound(const SweConfig& cfg);
-    // A cell's sponge weight (the kernel's SpongeAt, in doubles).
-    double SpongeAt(int i, int j, double spongeM) const;
     // THE ROWS A READER CARRIES (WindowRows.hlsli HP_SOLVER_ROWS_DECL): the planes U, V, W about a
     // frame whose origin is `origin` and whose axes are east / up / north (planet frame), over R so
     // their w is the cell at the origin; then (nx, ny, 1 = a solver stands, 0). Zeros: none.
@@ -121,11 +142,10 @@ struct SweDomain {
 };
 
 // A SOLVER'S WINDOW HOLDS ITS WATER (an instrument, said once where a window is made): the grid
-// flooded 4-connected (the kernel's faces) through cells whose bed is under `level`, from its open
-// boundaries -- the sponge's cells (SweDomain::sponge) and the river faces' cells (`face`, a mask a
-// cell; SweDomain::FaceMask). Water the sponge's flood does not
-// reach is listed, largest first, with where it meets the window's edge. `plantCrossEdge` lets the
-// flood run along the outside of an edge it reaches: the selftest's plant, a cut channel made whole.
+// flooded 4-connected (the kernel's faces) through cells whose bed is under `level`, from its
+// boundary -- every edge cell under the level (the sea's: the kernel's one edge law) and the river
+// faces' cells (`face`, a mask a cell; SweDomain::FaceMask). Water the sea's flood does not reach is
+// listed, largest first: a pool the edge does not touch, or water a river face alone holds.
 struct WaterPiece {
     struct EdgeRun {
         char edge;      // 'N', 'S', 'W', 'E'
@@ -136,30 +156,29 @@ struct WaterPiece {
     int cells = 0;
     int c0 = 0, r0 = 0, c1 = 0, r1 = 0;   // its box, cells
     bool face = false;                    // a river face reaches it (so it is held by the face alone)
-    std::vector<EdgeRun> runs;            // where it meets the window's edge
+    std::vector<EdgeRun> runs;            // where it meets the window's edge (a river face's cells only)
 };
 struct WaterHold {
-    int joined = 0;      // cells the sponge's flood reaches
+    int joined = 0;      // cells the sea's flood reaches
     int faceCells = 0;   // the river faces' seeds
     std::vector<WaterPiece> pieces;
-    std::vector<WaterPiece::EdgeRun> crossings;   // the sponge's water at the edge, not a boundary
-    std::vector<uint8_t> sea;                     // by label: 1 = the sponge's flood reaches it
+    std::vector<uint8_t> sea;   // by label: 1 = the sea's flood reaches it
 };
-WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, const uint8_t* face,
-                      bool plantCrossEdge = false, std::vector<int>* labels = nullptr);
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* face,
+                      std::vector<int>* labels = nullptr);
 // The two beds' floods side by side: the cells the grid's joins that the kernel's does not (and
 // back), the largest piece of the kernel's water the grid's joins, and where it parts from the
 // sea -- the cell of the lowest crest on its way there over the kernel's bed, and that cell's bed
 // in each.
 struct FloodParting {
-    int gridJoined = 0, kernelJoined = 0;   // the cells each bed's flood joins to the sponge
+    int gridJoined = 0, kernelJoined = 0;   // the cells each bed's flood joins to the sea
     int gridOnly = 0, kernelOnly = 0;
     WaterPiece piece;       // the kernel's piece (cells = those of it the grid joins); id -1 = none
     int crestCell = -1;
     float crestKernel = 0.0f, crestGrid = 0.0f;
 };
 FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
-                           const uint8_t* sponge, const uint8_t* face);
+                           const uint8_t* face);
 void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char* when,
                          const std::vector<float>* kernelBed = nullptr);
 bool RunWaterHoldSelfTest();
@@ -167,6 +186,12 @@ bool RunWaterHoldSelfTest();
 class SweSolver {
 public:
     static constexpr uint32_t kMaxSubsteps = 16;
+    // THE FRAME'S STEP BUDGET (2026-10-25, the asteroid's arrival at 30x): a fast clock asks more substeps
+    // than kMaxSubsteps a frame and the solver STARVES -- its clock re-anchors each frame and its
+    // dynamics run time-dilated, the surge at its faces rising at the scene's rate and the water inside
+    // answering at a fraction of it (the beach clip stayed dry through a 600 m surge). A scene says the
+    // budget (water.swe.stepsPerFrame); a headless record sets it to what its clock needs.
+    void SetStepBudget(uint32_t steps) { m_stepBudget = steps ? steps : kMaxSubsteps; }
 
     // M9ar: bind the bed -- the height tenant's array with its residency map, so the solver reads
     // the same megatexture the water shading and the globe read. Must be called before the first
@@ -218,18 +243,10 @@ public:
     double LedgerReleased() const { return m_released; }
     void Volumes(Gpu& gpu, double& columns, double& soil, std::vector<float>* hOut = nullptr);
     uint32_t StateTiles() const { return m_h.ResidentCount(); }
-    // The open sea's Level the last batch was given (m NAVD88): the tide plane plus the open sides'
-    // mean departure, the surge included.
-    double OpenSeaLevel() const {
-        double s = 0.0;
-        int k = 0;
-        for (int side = 0; side < 4; ++side) {
-            if (!(m_dom.openSides & (1u << side))) continue;   // the open sides' (the whole-sea sides)
-            for (int j = 0; j < 4; ++j) s += m_cb.oceanEta[4 * side + j];
-            k += 4;
-        }
-        return double(m_cb.tideNavd) + (k ? s / k : 0.0);
-    }
+    // The sea's Level at the window's edge the last batch was given (m NAVD88): the mean, over the edge
+    // cells that Level stands over, of the Level there (the surge included); the tide plane where it
+    // stands over none (OceanBoundary).
+    double OpenSeaLevel() const { return m_openSea; }
     uint32_t DryWaiting() const;   // resident state tiles holding no water, inside their hysteresis
     float WetDepth() const { return m_cb.wetEps; }   // wet is h > this (m): the readers' scale for a column's water
 
@@ -244,6 +261,21 @@ public:
     // the tide atlas (EOT20 and the stations). The open sides' exterior cells ride it; unset, they ride
     // the tide plane Record is given.
     void SetLevelSource(std::function<double(double, double, double)> levelAt) { m_levelAt = std::move(levelAt); }
+    // STAGE 3 OF ONE WATER ON THE TREE (2026-10-27): the impacts' record. Each event, at the first batch the field
+    // stands past its zero, is IMPOSED on the columns at every mip the field holds -- the law's level and radial
+    // velocity then (its cavity at T = 0), shoaled to the column's water -- and the law carries it from there
+    // (Swe.hlsl CsSweImpose; BeginImpose, RecordImpose). One event a batch; the next batch takes the next.
+    void SetImpacts(std::shared_ptr<const ImpactField> impacts) { m_impacts = std::move(impacts); }
+    // STAGE 2b: THE TAIL'S OWN EXTERIOR -- the departure from mean sea (m) at a place and instant at the tail's
+    // far edge: the impacts' law for events outside the tail (FrameLoop); unset, nothing.
+    void SetTailLevelSource(std::function<double(double, double, double)> at) { m_tailLevelAt = std::move(at); }
+    bool HasTail() const { return !m_lv.empty(); }
+    // STAGE 2c: the levels to the readers of the far field (sim/ImpactGpu.h LevelsGpu; shaders/TailRead.hlsli):
+    // their textures, cells and rectangles on the one chart; `exag` the display exaggeration on the drawn departure.
+    LevelsGpu LevelsGpuDesc(float exag) const;
+    // the levels' lat/lon bounds and the cube's mip each reads (WaterManager's want for their beds), coarsest first
+    struct LevelBox { double box[4]; uint32_t mip; };
+    std::vector<LevelBox> LevelBoxes() const;
 
     // Advance toward simUnix (records compute through cmd) and leave eta + uv sampleable.
     // tideNavd = the analytic water level, NAVD88 m. Returns substeps executed this frame.
@@ -255,6 +287,12 @@ public:
     template <typename F, typename G, typename Q>
     void AdvanceTo(Gpu& gpu, double targetUnix, F tideAt, G faceAt, Q faceQAt) {
         while (m_simTime < targetUnix - m_dt) {
+            // a step under 5 ms on these cells is a blow-up (a face at hundreds of metres a second), and the
+            // spin-up would crawl for hours: it stops here and says so (the 10 km stone's crest at the bar, 2026-10-27)
+            if (m_dt < 0.005f) {
+                Log("[swe] the step collapsed to %.4f s at t=%.0f (%.2f h of the spin-up left): the spin-up stops here", m_dt, m_simTime, (targetUnix - m_simTime) / 3600.0);
+                break;
+            }
             const double target = (std::min)(m_simTime + 64.0 * m_dt, targetUnix);
             for (int f = 0; f < FaceCount(); ++f) {
                 m_faceDEta[f] = static_cast<float>(faceAt(f, m_simTime));
@@ -300,12 +338,18 @@ public:
                m_velA.ResidentCount() + m_velB.ResidentCount();
     }
     uint64_t ResidentBytes() const {
-        return m_h.ResidentBytes() + m_bed.ResidentBytes() + m_eta.ResidentBytes() + m_flux.ResidentBytes() +
+        return m_h.Atlas().ResidentBytes() + m_bed.ResidentBytes() + m_eta.ResidentBytes() + m_flux.ResidentBytes() +
                m_velA.ResidentBytes() + m_velB.ResidentBytes();
     }
     // The domain's wet area (m^2) at a level L: the cells whose spill level is under it (Init's priority
     // flood from the open sides and the river faces) -- the hypsometry the open sea's prism comes from.
     double WetAreaAt(double levelNavd) const;
+    // THE LEVEL AT AN EDGE CELL (m NAVD88), as the kernel reads it: a river face's exterior level over its
+    // run, else the side's cubic through the Level's four samples (Swe.hlsl OceanEtaAt), from the last
+    // OceanBoundary. And the state tiles the boundary's water stands on now: a tile holding an edge cell
+    // that Level stands over -- wanted by the same rule as any water (UpdateResidency).
+    double EdgeLevel(int side, int a) const;
+    std::vector<uint8_t> BoundaryTiles() const;
     float PadW() const { return static_cast<float>(m_eta.TilesX() * m_eta.TileW()); }
     float PadH() const { return static_cast<float>(m_eta.TilesY() * m_eta.TileH()); }
 
@@ -425,6 +469,7 @@ public:
     double DomainWeight(double latDeg, double lonDeg) const;
     // The newest delivered region's clock; a large negative number when none has been delivered.
     double DeliveredAsOf() const { return m_regions.empty() ? -1.0e18 : m_regions.front().asOf; }
+    size_t RegionCount() const { return m_regions.size(); }
 
 private:
     int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,
@@ -454,7 +499,7 @@ private:
         uint32_t nx, ny, etaTilesX, fluxTilesX;
         uint32_t etaTileW, etaTileH, fluxTileW, fluxTileH;
         uint32_t listCount;
-        float openSides;   // the open ocean sides, a bitmask (SweDomain::openSides)
+        float unused0;     // the slot the open-side bitmask held (the edge is one law since 2026-10-27); keeps faceA on its register
         float dy;   // M6r: north-south texel size -- the CUDEM grid is EQUIANGULAR, so
                     // dy = dlat*mPerLat (13.65 m) != dx = dlon*mPerLon (10.08 m)
         float faceCount;  // the river faces (gFaceA, gFaceB)
@@ -467,7 +512,7 @@ private:
         // at the tide plane times the plane's rate) less the rivers' transport, over the sides' live
         // section (OceanBoundary). The prism arrives through the boundary; nothing books it as debt.
         float oceanU;
-        float padA, padB, padC;
+        float mip, mips, etaTilesXUp;   // stage 1c: the dispatch's mip, the chain's mips, the mip above's tiles across
         // PHASE C1: A CELL'S POINT in the domain's chart. cellX = the first cell's centre in the anchor's
         // tangent plane over R (east s0, north t0) and the steps (dx / R, -dy / R): cell (i, j) at
         // (s0 + i ds, t0 + j dt); anc = the anchor's up (planet frame) and R; east = its east and the
@@ -490,6 +535,17 @@ private:
         float testB[4];   // hL, hR, the lake's level, 0
         float sea[4];     // C4: Hs, the peak's angular frequency, Hs^2 / 16, 1 = waves push
         float sea2[4];    // the direction the sea travels (texture frame: x east, y south), 0, 0
+        // STAGE 3 (2026-10-27): an impact imposed on the columns (Swe.hlsl CsSweImpose, BeginImpose): its place in
+        // the anchor's chart (east, north; m), the seconds since its zero, the basin depth; then its table's term
+        // count (0 = nothing this batch), 0, 0, 0.
+        float impactA[4];
+        float impactB[4];
+        // STAGE 2b: the tail under this lattice (Swe.hlsl gTail/gTail2): the shift to its cells (< 0 none), the
+        // tail cell the window's corner lies in, its cells across; its cells down, its tiles across, 0, 0.
+        float tail[4];
+        float tail2[4];
+        float impactC[4];   // stage 3: the event's cavity radius and depth (m), 0, 0
+        float up[4];        // stage 2d: the magnify's parent -- the shift to its cells, the cell above the corner (x, y), 0
     };
 
     bool m_ready = false;
@@ -499,7 +555,12 @@ private:
     // C1: THE STATE -- the water each column holds (m_h), its bed cached a frame (m_bed), the faces'
     // velocities (m_velA and m_velB take turns: the advection reads the substep before), the soil's
     // water (m_soil, C2). m_flux holds each substep's fluxes. Every bank covers m_h's tiles.
-    TileAtlas2D m_h, m_bed, m_soil, m_velA, m_velB;
+    // STAGE 0 OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14): the column field is a GradeBank
+    // -- grade 0, the water each column holds -- with the chain's mips in the one reserved resource
+    // (unbuilt at stage 0: mip 0 is today's window, byte for byte). The discharge (grade 1) joins it when
+    // the staggered faces are the vector's own home (stage 1); until then the faces' banks below.
+    GradeBank m_h;
+    TileAtlas2D m_bed, m_soil, m_velA, m_velB;
     // C4: the sea in the columns, two banks taking turns sweep by sweep (Swe.hlsl CsSweWaves); the solve
     // reads m_waveB, where an even number of sweeps ends. m_waveTable[0] writes A from B, [1] B from A.
     TileAtlas2D m_waveA, m_waveB;
@@ -528,9 +589,12 @@ private:
     double m_ledgerBase = 0.0, m_released = 0.0;
     std::vector<uint32_t> m_freshH, m_freshF;
     std::vector<double> m_dryFor;
-    std::vector<uint8_t> m_keep;           // state tiles never released (the boundary's exterior cells)
-    double m_releaseS = 1800.0;            // the hysteresis: dry this long, released
+    double m_openSea = 0.0;                // OpenSeaLevel (OceanBoundary)
+    double m_releaseS = 1800.0;
+    bool m_levelStats = false;             // GAGAME_LEVEL_STATS: every level's greatest departure and where, as the sparse ones' (the instrument)            // the hysteresis: dry this long, released
     double m_surgeA = 0.0, m_surgePeak = 0.0, m_surgeTau = 3600.0;
+    double m_openSaidT[4] = {-1e18, -1e18, -1e18, -1e18};   // each side's level last said (sim s)
+    uint32_t m_stepBudget = kMaxSubsteps;   // SetStepBudget
     // M9h: grad(flow) -- residency derived from the Cayley closure, not a physics policy.
     GradeBank m_velGrad;
     ShaderCompiler* m_sc = nullptr;   // M9h: BuildChain compiles the reducer on first use
@@ -557,6 +621,125 @@ private:
                              std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
 
     SweCbData m_cb{};
+    // STAGE 1a OF ONE WATER ON THE TREE (2026-10-26, docs/WATER_V2.md 14.4): THE COARSE TWIN. The same
+    // lattice at mip 1 -- cells twice the size, the whole box resident -- stepped by the same kernels
+    // over its own lists with its own constants and views, after mip 0's steps and over the same
+    // interval (half as many steps of twice the size: the subcycling), uncoupled from mip 0 until 1b
+    // (the fold) and 1c (the faces). Its level at the anchor against mip 0's is the gate.
+    bool m_coarse = true;
+    SweCbData m_cb1{};
+    hal::Table m_table1, m_tableB1;
+    hal::Table m_waveTable1[2];   // stage 1c: the twin's sweeps' tables (the two sea banks in turn at mip 1)
+    std::vector<uint32_t> m_list1, m_fluxList1, m_live1;
+    bool m_coarseFresh = true;   // its tiles' first batch: cleared and reset to the stateless column
+    uint32_t m_velNew1 = 0;
+    // STAGE 1b: THE FOLD -- the coarse cells under four resident fine cells take their fold each batch
+    // (Swe.hlsl CsSweFold); one table per parity pair (the fine's newest velocity bank, the twin's read bank).
+    hal::Pso m_foldK;
+    hal::Table m_tableFold[2][2];
+    std::vector<uint32_t> m_foldList;
+    // STAGE 1c: THE CHAINS' TABLE (Swe.hlsl gHChain/gBedChain/gVelChain, root param 4): h and the bed at every
+    // mip, the velocity bank each mip reads, one table per parity pair [the fine's read][the twin's read].
+    hal::Table m_tableChain[2][2][2];   // stage 2b: [fine parity][twin parity][tail parity]
+    // STAGE 1d: THE EYE'S DEMAND -- mip 0 is wanted within reachM of the eye's ground point (0 = everywhere);
+    // the twin carries the rest as its own cells (UpdateResidency).
+    bool m_eyeOn = false;
+    double m_eyeLat = 0.0, m_eyeLon = 0.0, m_reachM = 0.0;
+    std::vector<uint32_t> m_stepList1;   // the twin's tiles outside the fine set: the ones its height and limit step
+    double m_probeAt = -1e18, m_probeLat = 0.0, m_probeLon = 0.0;
+    bool m_probeOn = false;
+    // stage 3: the impacts' record, which events are imposed, the instant of the last imposition (the probe says
+    // the law beside the solver for the hour after), this batch's event and its table on the GPU
+    std::shared_ptr<const ImpactField> m_impacts;
+    std::vector<uint8_t> m_imposed;
+    double m_imposedAt = -1e18;
+    int m_imposeEvent = -1;
+    D3D12_GPU_VIRTUAL_ADDRESS m_imposeVa = 0;
+    hal::Pso m_imposeK;
+    bool BeginImpose(Gpu& gpu, bool reset);
+    void RecordImpose(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS listVa, UINT count, const hal::Table& table);
+    // STAGE 2c (2026-10-27, Mark: "the telescope"): THE LEVELS -- the tail of stage 2b as the coarsest of a list, each a
+    // rectangle of the one anchor chart at its own cell size (2^rank window cells) with its corner on its parent's
+    // lattice, the same kernels on its own banks, lists and clock; its edge the sea's exterior at its parent's
+    // departure in the ghost cell beyond (the top's at the impacts' law); a level of mean sea's gauge folds its wet
+    // mean into its parent before each parent step. The anchor levels telescope from the tail to the window; an
+    // event whose cavity is unresolved where it falls gets a patch of its own at the rank its radius needs.
+    struct Level {
+        std::string name;
+        uint32_t rank = 9, nx = 0, ny = 0;      // the cell = 2^rank window cells; cells across and down
+        int64_t c0x = 0, c0y = 0;               // the corner in rank-0 (window) cells; the window's corner is (0, 0)
+        int parent = -1;                        // the next coarser level holding this one and a ghost beyond (-1: the top)
+        bool foldUp = false, patch = false;
+        // stage 2d: a SPARSE level -- the parent's whole extent, resident only where the water departs from rest and
+        // a tile ahead of it (the window's residency law on the departure: a train's front demands the tiles ahead of
+        // itself and the sea it has left is released); its bed is the stack's on the GPU alone (no CPU bed, no flood)
+        bool sparse = false;
+        uint32_t px = 0, py = 0;                // a patch: the event's cell (the probe reads there)
+        uint32_t qx[6] = {}, qy[6] = {}, qn = 0;   // ...and the cells along the line from it to the anchor at kProbeKm (the convergence probe)
+        bool probesSaid = false;                // their ground distances printed once
+        GpuTexture stats;                       // its tile statistics (CsSweTileStats on the departure)
+        std::vector<uint32_t> freshH, freshF;   // tiles mapped since its last batch: cleared, bedded, rested
+        std::vector<double> dryFor;             // per tile: how long quiet (the release's hysteresis)
+        double statsAt = -1.0e18, deepest = 0.0;
+        bool statsDue = false;                  // the statistics were dispatched this batch: read them back outside the recording
+        Gpu::TextureReadback rb;                // the frame ring's asynchronous read of them
+        SweDomain dom;
+        SweCbData cb{};
+        TileAtlas2D h, bed, soil, eta, flux, velA, velB, lim;
+        hal::Table table[2];                    // the step tables, by the read velocity bank
+        hal::Table chain[2];                    // the parent's views at the chain's slot 2, by the parent's parity
+        hal::Table fold[2][2];                  // [this level's newest bank][the parent's read bank]
+        std::vector<uint32_t> list, fluxList, live;
+        uint32_t velNew = 0, bedMip = 3;
+        double simTime = 0.0;
+        float dt = 1.0f, imposeN = 0.0f;
+        bool fresh = true;
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        D3D12_GPU_VIRTUAL_ADDRESS liveVa = 0, hlVa = 0, flVa = 0, cbVa = 0;   // pushed once a batch (the prelude); the steps bind them by address
+    };
+    std::vector<std::unique_ptr<Level>> m_lv;   // coarsest first
+    int m_winParent = -1;                        // the level the window's edge reads
+    std::function<float(double, double, double)> m_bedAt;
+    double m_patchCellsPerLip = 8.0;
+    double m_levelTiles = 1024.0;
+    float m_dampH = 0.0f;                                                              // the linear damping's e-folding time (h); 0 = none
+    float DampOf(float dt) const { return m_dampH > 0.0f ? std::exp(-dt / (m_dampH * 3600.0f)) : 1.0f; }   // the factor a substep of dt applies
+    static constexpr double kProbeKm[6] = {300.0, 600.0, 1200.0, 1800.0, 2400.0, 3000.0};
+    bool m_lineProbesSaid = false;   // the line's probes' ground distances, printed once (the chart's km are not the sphere's)   // the convergence probes' distances on the chart
+    std::function<double(double, double, double)> m_tailLevelAt;
+    hal::Resource m_heightArr = nullptr, m_resMapArr = nullptr;   // the stack's page views, for a level made later
+    uint32_t m_heightMips = 1;
+    hal::Pso m_foldTailK, m_magInitK;   // the fold into the parent; a fresh tile from the parent (stage 2d)
+    void ParentFields(SweCbData& cb, int parent, uint32_t rank, int64_t c0x, int64_t c0y) const;
+    uint32_t WinParentParity() const;
+    void LevelCb(Level& L);
+    void LevelBoundary(Level& L);
+    void LevelTables(Gpu& gpu, Level& L);
+    int AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, double cy, const char* name, bool patch, bool tables,
+                 bool sparse = false, uint32_t sparseHalfCells = 0);
+    void LevelLists(Level& L);
+    void UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8_t>& raw, uint32_t pitch);
+    void InitTelescope(Gpu& gpu, const SweConfig& cfg);
+    void LevelTo(hal::CommandContext& cmd, Level& L, D3D12_RESOURCE_STATES to);
+    void RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double batchEnd, bool reset, bool steps);   // the prelude (steps = false), then the steps
+    double TailRayArrivalS(double latDeg, double lonDeg, double h0, double& shallowest) const;
+    double TailFastestArrivalS(double latDeg, double lonDeg) const;   // the fastest sqrt(g h) path over the tail's sea (Fermat)
+    void CoarseCb(int n, int n1);
+    // STAGE 1c (2026-10-26): THE TWIN INTERLEAVED -- Berger and Oliger's order. Begin: the twin's constants, lists,
+    // clear, bed, reset and sea sweeps for the batch; Step: the fold of the fine's state, then ONE coarse step,
+    // after which the fine takes its two. Stepping the fine's whole batch against a coarse state frozen for
+    // sixteen steps, then the twin against a fold frozen for eight, grew a metre of ringing from the fine
+    // set's seaward edge (the gate runs cd..cd4): two Dirichlet couplings alternating a batch apart.
+    void RecordCoarseBegin(hal::CommandContext& cmd, Gpu& gpu, int n, int n1, bool reset);
+    void RecordCoarseStep(hal::CommandContext& cmd, Gpu& gpu);
+    D3D12_GPU_VIRTUAL_ADDRESS m_hl1Va = 0, m_fl1Va = 0, m_sl1Va = 0, m_live1Va = 0;
+    UINT m_hn1 = 0, m_fn1 = 0, m_sn1 = 0;
+    void ProbeCoarse(Gpu& gpu);
+public:
+    // The gate's probe: the level at this place, mip 0 against mip 1, said once a sim-minute (AfterBatch).
+    void SetProbe(double latDeg, double lonDeg) { m_probeLat = latDeg; m_probeLon = lonDeg; m_probeOn = true; }
+    void SetEye(double latDeg, double lonDeg, double reachM);   // stage 1d: the eye's ground point and its reach for mip 0
+private:
     double m_simTime = 0;
     float m_faceDEta[kMaxRiverFaces] = {};   // the faces' target deviations (m)
     float m_faceQ[kMaxRiverFaces] = {};      // their transport targets, m^3/s (+ inward)

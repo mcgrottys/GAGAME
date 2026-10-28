@@ -1,0 +1,70 @@
+{
+  "_readme": [
+    "THE SAME ASTEROID, FROM THE BEACH (2026-10-25; docs/WATER_V2.md section 13). The impact of",
+    "impact_orbit.json -- 10 km at 20 km/s into 35 N 42 W at 15:00Z -- is 2,625 km from the Merrimack's",
+    "mouth; its first wave arrives on the deep-water clock about 3.7 h later (18:41Z). The scene starts",
+    "at 18:20Z and runs 30x: the minute of record is 18:20 to 18:50, the sea rising over the dunes",
+    "before the front and the front itself (hundreds of metres at the faces: a 10 km impactor drowns",
+    "everything here; impact_newburyport_1km.json is the same shore under a 1 km one). The solver's open faces read the wave's level (laws/Impact.hlsli, Green's law to the",
+    "face's depth, unbounded: the solver is the nonlinear reader) and carry it up the river and over Plum Island; the bank and the globe",
+    "draw the same law where the solver is silent. No display exaggeration here: the hull and the",
+    "solver read the wave raw, and so does the eye. The wave solve keeps its first read of the",
+    "solver's current (water.swe.currentRefreshS past the run): at 30x a re-key every 90 sim seconds",
+    "is a three-minute solve every three seconds, and a headless record waits for each.",
+    "",
+    "Record:  build\\bin\\gagame.exe scenes\\demos\\impact_newburyport.json --mp4 out\\review\\impact\\impact_newburyport.mp4",
+    "Watch:   build\\bin\\gagame.exe scenes\\demos\\impact_newburyport.json --set capture.headless=false --set capture.frames=0"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-newburyport",
+    "view": "beach"
+  },
+  "time": {
+    "start": "2026-08-28T18:20:00Z",
+    "timeScale": 30
+  },
+  "impacts": [
+    {
+      "lat": 35.0,
+      "lon": -42.0,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 10000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 4000,
+      "exag": 1
+    }
+  ],
+  "water": {
+    "swe": {
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 256
+    }
+  },
+  "views": [
+    {
+      "name": "beach",
+      "at": {
+        "lat": 42.8125,
+        "lon": -70.8075,
+        "alt": 18,
+        "heading": 75,
+        "tilt": 88,
+        "range": 0
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "rails": {
+    "file": "scenes/rails/impact_shore.json"
+  },
+  "capture": {
+    "headless": true,
+    "frames": 1800,
+    "railDir": "out/rail_impact_shore"
+  }
+}

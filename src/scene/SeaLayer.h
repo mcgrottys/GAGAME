@@ -95,11 +95,6 @@ public:
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
-    // THE OTHER SOLVERS' FRAME STEP (fast travel, 2026-10-12): the frame loop hangs the weather
-    // manager's Simulate here, so an owned window with a consumer records on the same list, in
-    // the same pass, as the external one below -- the layer knows no manager, only that a step
-    // may be owed on its list.
-    std::function<void(const FrameContext&)> onSimulate;
     // PHASE B2: the churn's windows (the camera's world's rows) and the camera's eye, planet frame.
     void SetChurnWindows(const SurfaceFrame::ChainRows& rows, const double eye[3]) {
         SurfaceFrame::KernelRows(rows, m_churnHw);
@@ -222,6 +217,7 @@ public:
     // current as solved). The 3.2 that stood here was one place's calibration (the Merrimack's
     // ACT0816 against an old CUDEM window) and was always overwritten.
     float sweCurrentGain = 1.0f;
+    double sweCurrentRefreshS = 90.0;   // water.swe.currentRefreshS (WaveField::SetSweCurrent)
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
 
     // M9bq: the cascades, evaluated on the CPU for the hull. Owned here because this is where

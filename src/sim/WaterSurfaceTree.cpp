@@ -174,16 +174,12 @@ double TreeWater::WindowWeight(double wx, double wz) const {
     if (!m_wave || !m_wave->Ready()) return 0.0;
     const WaveField::GpuTable& t = m_wave->Table();
     if (t.nx < 2 || t.ny < 2 || !(t.invCell > 0.0f)) return 0.0;
-    // CsBankFill's own expression (WaterBank.hlsl:425): distance to the nearest window edge in
-    // CELLS, converted to metres, feathered over featherM. Same curve, same constants -- if this
-    // drifts from the kernel the twin will show a seam exactly at the window edge and nowhere
-    // else, which is the signature to look for.
+    // CsBankFill's own expression (laws/Bands.hlsli WindowEdgeM, WindowWeight: one text): the
+    // distance to the nearest window edge in metres, feathered over featherM.
     const double cx = (wx - double(t.orgX)) * double(t.invCell);
     const double cz = (wz - double(t.orgZ)) * double(t.invCell);
-    const double eCells = (std::min)((std::min)(cx, double(t.nx) - cx),
-                                     (std::min)(cz, double(t.ny) - cz));
-    const double eM = eCells / double(t.invCell);
-    return wt::Smoothstep(0.0, (std::max)(double(t.feather), 1.0), eM);   // HLSL's, as the kernel's feather
+    return law::WindowWeight(law::WindowEdgeM(cx, cz, double(t.nx), double(t.ny), 1.0 / double(t.invCell)),
+                             double(t.feather));
 }
 
 const WeatherSample& TreeWater::SlowAt(double wx, double wz, double simUnix) const {
@@ -222,35 +218,21 @@ double TreeWater::MeanLevelAt(double wx, double wz, double simUnix) const {
 void TreeWater::BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
                         double gain[OceanCpu::kCascades], double* brkOut, double* rmsRawOut,
                         double* kEffOut) const {
+    // THE BAND LAW is the kernel's text (laws/Bands.hlsli BandLaw): the gains, the raw envelope, the
+    // energy wavenumber, the one breaking factor. The twin's band rms is physical, as the kernel's
+    // gRmsRef now is. Without the cascades there is no band wavenumber: the depth laws stand down
+    // (depth 0 in the law), as this twin always had them.
     const double curX = q.currentSolved ? double(q.u) : 0.0;
     const double curZ = q.currentSolved ? double(q.v) : 0.0;
-    for (int c = 0; c < OceanCpu::kCascades; ++c) {
-        double amp = hsScale * expo;
-        if (depth > 0.05 && m_ocean && m_ocean->Ready()) {
-            const double kB = m_ocean->BandK(c);
-            const double cB = BandPhaseSpeed(kB, wt::Max(depth, 0.3));
-            const WaveCurrentGain ab = m_peakValid
-                                           ? WaveCurrentAmp(curX, curZ, m_peakDirX, m_peakDirZ, cB)
-                                           : WaveCurrentGain{1.0, 0.0};
-            amp *= ab.amp * ShoalFactor(kB, depth);
-        }
-        gain[c] = amp;
-    }
-    // F7: BREAKING, the clipped Rayleigh sea (WaterTerms.h BreakFactor): the raw envelope the
-    // gains make against what the depth allows, one factor on every band -- the kernel's brk.
-    double rms2 = 0.0, rms2k = 0.0;
-    for (int c = 0; c < OceanCpu::kCascades; ++c) {
-        const double e = gain[c] * gain[c] * m_bandRms[c] * m_bandRms[c];
-        rms2 += e;
-        rms2k += e * (m_ocean ? m_ocean->BandK(c) : 0.0);
-    }
-    const double kEff = rms2k / wt::Max(rms2, 1e-12);   // F7b: the sea's energy-weighted wavenumber
-    const double excess = std::sqrt(rms2) * 2.8284271247461903 / BreakHmax(kEff, depth);
-    const double brk = BreakFactor(excess);
-    for (int c = 0; c < OceanCpu::kCascades; ++c) gain[c] *= brk;
-    if (brkOut) *brkOut = brk;
-    if (rmsRawOut) *rmsRawOut = std::sqrt(rms2);
-    if (kEffOut) *kEffOut = kEff;
+    const bool bands = m_ocean && m_ocean->Ready();
+    const BandSea s = law::BandLaw(hsScale, expo, bands ? depth : 0.0, curX, curZ, m_peakDirX, m_peakDirZ,
+                                   m_peakValid, bands ? m_ocean->BandK(0) : 0.0,
+                                   bands ? m_ocean->BandK(1) : 0.0, bands ? m_ocean->BandK(2) : 0.0,
+                                   m_bandRms[0], m_bandRms[1], m_bandRms[2]);
+    for (int c = 0; c < OceanCpu::kCascades; ++c) gain[c] = s.gain[c] * s.factor;
+    if (brkOut) *brkOut = s.factor;
+    if (rmsRawOut) *rmsRawOut = s.rmsRaw;
+    if (kEffOut) *kEffOut = s.kEff;
 }
 
 bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[OceanCpu::kCascades],
@@ -263,7 +245,7 @@ bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[Oce
     double latDeg = 0.0, lonDeg = 0.0;
     PlaceOf(wx, wz, latDeg, lonDeg);
     const double depth = q.levelNavd - BedAt(q, latDeg, lonDeg);
-    dry = wt::Smoothstep(0.05, 0.65, depth);
+    dry = DryWeight(depth);
     const double hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
     BandLaw(q, depth, hsScale, ExposureAt(latDeg, lonDeg), gains);
     return true;
@@ -277,7 +259,7 @@ double TreeWater::BedAt(const WeatherSample& q, double latDeg, double lonDeg) co
 
 double TreeWater::ExposureAt(double latDeg, double lonDeg) const {
     double e = 1.0;
-    if (m_shadow && m_shadow->Read(latDeg, lonDeg, e)) return wt::Max(e, kSwellShadowFloor);
+    if (m_shadow && m_shadow->Read(latDeg, lonDeg, e)) return (std::max)(e, kSwellShadowFloor);
     return 1.0;   // no opinion: exposed, as the kernel reads an absent page
 }
 
@@ -324,7 +306,7 @@ void TreeWater::Prepare(double wx, double wz, double simUnix, Prep& p) const {
     // the local sea-state scale (WaveScale, the one law the bank's tile corners carry); the swell
     // shadow, the page texels the kernel read (ExposureAt).
     const double depth = p.depth = q.levelNavd - s.bedNavd;
-    p.dry = wt::Smoothstep(0.05, 0.65, depth);
+    p.dry = DryWeight(depth);
     p.expo = ExposureAt(latDeg, lonDeg);
     p.hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
     // THE SHORE STOP'S PROFILE (Prep): the dry weight at 8 stations each way along the sea's travel,
@@ -364,7 +346,7 @@ void TreeWater::Prepare(double wx, double wz, double simUnix, Prep& p) const {
             const double sx = wx + ux * p.profStep * i, sz = wz + uz * p.profStep * i;
             double latS = 0.0, lonS = 0.0;
             PlaceOf(sx, sz, latS, lonS);
-            p.dryProf[i + 8] = wt::Smoothstep(0.05, 0.65, q.levelNavd - BedAt(q, latS, lonS));
+            p.dryProf[i + 8] = DryWeight(q.levelNavd - BedAt(q, latS, lonS));
         }
     }
     lap(s_cycBed);
@@ -420,10 +402,10 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix, depth, m_waveChop);   // the depth's orbit, the throw's bound
         if (p.valid) {
             wWin = wGeom;
-            rmsSolved = double(p.rms) * expo;
-            // The swell shadow shelters the solved components as it does the cascades (the kernel's
-            // aW = a * aMax * expo).
-            const double wS = wWin * expo;
+            rmsSolved = double(p.rms);
+            // THE SOLVED FIELD IS NOT SHELTERED BY THE EXPOSURE PAGE (2026-10-25, docs/WATER_LAWS.md 5.1;
+            // the kernel's solved loop says the same): the solve carries its own walls and diffraction.
+            const double wS = wWin;
             // THE CREST LAW rides inside ProbeAt (the crest thrown forward by the solver's excess,
             // the depth's orbit): its dx/dz and Jacobian carry it; the chop is the scene's.
             const double lq = wS * m_waveChop;
@@ -478,8 +460,8 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             const double kB = m_ocean->BandK(c);
             latCoth[c] = OrbitCoth(kB, depth);
-            const double sw = SwashShare(hsBand[c], 6.283185307179586 / std::max(kB, 1e-6), depth);
-            latGain[c] = latCoth[c] * (1.0 + sw * (1.0 / std::max(brk, 1e-3) - 1.0));
+            latGain[c] = latCoth[c] * SwashFactor(1.0 / std::max(brk, 1e-3), hsBand[c],
+                                                  6.283185307179586 / std::max(kB, 1e-6), depth);
             // THE LIFT's cascade term (the kernel's liftE): vertical gain x lateral gain x the texture's
             // own E[h div D] (OceanCpu::LiftMoment, signed)
             liftC -= gain[c] * (gain[c] * latGain[c]) * m_ocean->LiftMoment(c);
@@ -546,7 +528,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
                 const double kSh = ShoaledKh(kD, hB) / hB;
                 const double cothBar = sAC / sA;
                 const double aEnvC = std::max(1.4142135623730951 * envD * brk, 1e-3);
-                const double excD = envD * 2.8284271247461903 / BreakHmax(kD, depth);
+                const double excD = SeaBreakAt(envD, kD, depth).excess;
                 // its drawn lateral amplitude, the swash's raise in it, HELD TO THE LANDING (the kernel's
                 // bound): the cascades' lateral, its Jacobian and its lift take the one factor
                 double aH = m_ocean->Lambda() * aEnvC * (sACR / sA);
@@ -566,7 +548,7 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
                     // the bed's slope Prepare read (Finish never touches the bed tree: it runs across the pool)
                     const double tanB = (CrestExcessShare(st.eta, aEnvC, excD) > 0.0) ? p.tanB : 0.0;
                     const double dBx = m_peakValid ? m_peakDirX : 0.0, dBz = m_peakValid ? m_peakDirZ : 0.0;
-                    CrestLaw(st, dBx, dBz, aEnvC, excD, kSh, cothBar, aH, 1.0, tanB, depth);
+                    st = CrestLaw(st, dBx, dBz, aEnvC, excD, kSh, cothBar, aH, 1.0, tanB, depth).s;
                     dispY = y0 + st.eta; dispX = dx0 + st.dx; dispZ = dz0 + st.dz;
                     slopeX = sx0 + st.sx; slopeZ = sz0 + st.sz;
                     jacXX = jxx0 + st.jxx; jacXZ = jxz0 + st.jxz; jacZZ = jzz0 + st.jzz;
@@ -588,14 +570,14 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     // ripple cannot push the hull anyway -- it would integrate to nothing across a panel -- so
     // resolving it would be cost without force.
     if (m_boatCount > 0) {
-        WakeSample w;
+        WakeSample w{};
         for (int i = 0; i < m_boatCount; ++i) {
             const WakeBoat& b = m_boats[i];
             if (!b.enabled) continue;
-            WakeVessel v;
+            WakeVessel v{};
             v.x = b.x; v.z = b.z; v.heading = b.headingRad; v.speed = b.speedMs;
             v.wakeAmp = b.ampM; v.hullHalfLen = b.halfLenM; v.enabled = true;
-            WakeOne(v, rwx, rwz, m_sampleM, w);
+            w = WakeOne(v, rwx, rwz, m_sampleM, w);
         }
         // The bank adds the wake to d.y BEFORE the exaggeration multiplies the total, so the
         // wake is exaggerated with everything else. Matching that is what keeps a hull riding
@@ -628,11 +610,10 @@ SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simU
     // The kernel's twin (WaterBank.hlsl, after `d *= dry * gPatch.w`); the slope takes the map's
     // derivative, sech^2, as the kernel's normals take it from the planes.
     if (eta < 0.0) {
-        const double colD = (std::max)(depth, 1e-3);
-        const double c = std::cosh(eta / colD);
+        const double c = std::cosh(eta / (std::max)(depth, 1e-3));
         sx /= c * c;
         sz /= c * c;
-        eta = -colD * std::tanh(-eta / colD);
+        eta = TroughBound(eta, depth);   // laws/Breaking.hlsli: the kernel's bound
     }
     s.dx = k * dispX;
     s.dz = k * dispZ;

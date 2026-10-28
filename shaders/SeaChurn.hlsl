@@ -36,7 +36,8 @@ cbuffer ChurnCb : register(b0) {
     float4 gTanN;
 };
 #define GA_PLANET_G (gMiscC.w)
-#include "Jet.hlsli"
+typedef float real;   // the laws' type: float in a kernel (shaders/laws/Laws.hlsli)
+#include "laws/Dispersion.hlsli"
 
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
@@ -122,7 +123,7 @@ void CsChurnUpdate(uint3 id : SV_DispatchThreadID) {
         // Chop phase speed at the LOCAL depth (gMiscC.x is the band wavenumber since M5c). The bed
         // is NAVD; the water level is taken as ~0 NAVD for the churn's coarse purposes.
         const float cChop = BandPhaseSpeed(gMiscC.x, max(depth, 0.4f));
-        const float blocked = (depth > 0.4f) ? WaveCurrentAmp(U, gWaveD.xy, cChop).y : 0.0f;
+        const float blocked = (depth > 0.4f) ? WaveCurrentAmp(U.x, U.y, gWaveD.x, gWaveD.y, cChop).blocked : 0.0f;
         if (blocked > 0.0f) {
             // Pattern the deposition by the chop's own Jacobian foam so the memory has the
             // streaky texture of the breaking that produced it. The floor is low on purpose:

@@ -259,6 +259,10 @@ struct SurfaceFrame {
                                double planetR, float out[4][4]);
     static int SliceRectsLL(const hal::BlockBinding& b, double lat0, double lon0, double lat1,
                             double lon1, float out[4][4]);
+    // ...of a lat/lon box (degrees) on the CUBE: a uv rectangle on every face the box reaches
+    // (CubeFaceOfDir over a grid of its points; a box across a face's edge lands on two or more).
+    // Returns the faces as a mask of bits 0..5; out[face] = u0, v0, u1, v1.
+    static uint32_t CubeRectsLL(double lat0, double lon0, double lat1, double lon1, float out[6][4]);
     // slices: the slice each rank reads (F9, SurfaceFrame::slice[set]); null = the set's own.
     static ChainRows RowsOf(const EyeWindows& w, uint32_t slot, const Placement& own, const double eye[3],
                             const uint32_t* slices = nullptr);
