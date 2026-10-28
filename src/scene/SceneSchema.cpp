@@ -260,6 +260,7 @@ const Schema& SweSchema() {
             .Bind("telescopeCells", p.telescopeCells, Q::Dimensionless, "1", "an anchor level's cells a side", R)
             .Bind("telescopeStep", p.telescopeStep, Q::Dimensionless, "1", "the anchor levels' ranks this far apart below the tail's (2: ranks 7, 5, 3 under a rank-9 tail)", R)
             .Bind("patchCellsPerLip", p.patchCellsPerLip, Q::Dimensionless, "1", "an event's own level: its cavity's lip radius over this many cells (8; 16 = one rank finer, the convergence run)", R)
+            .Bind("levelTiles", p.levelTiles, Q::Dimensionless, "1", "a sparse level's tile budget (0 = unbounded): above it, the resident tiles whose field the parent holds best (the least range of the departure within a parent cell) are released down to 7/8 of it, the parent holding their mean", R)
             .Bind("dampH", p.dampH, Q::Time, "h", "the solver's linear damping, the velocity's e-folding time (0 = none: the bed's quadratic drag is the water's loss; it was 0.99995 a substep, 1.7 to 2.4 h, until 2026-10-28)", R);
         return sc;
     }();

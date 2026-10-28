@@ -1976,9 +1976,36 @@ device removal (0x887A0005) with its patch at 3492 resident tiles: A SPARSE LEVE
 (the trailing slosh of +-1-2 m never falls under the wet tolerance, so `dryFor` never runs), and at 2^6 over the
 whole ocean it grows until the GPU is lost -- the retirement law is next on that list.
 
-*Stated, not built:* a sparse level's release behind a train (the departure's threshold for "quiet" above the
-wet tolerance, or the front's own wake released by time; at 2^6 the ocean-wide patch lost the GPU at 3492 tiles);
-the window's fine/coarse interface in the levels' manner (the fine
+**The release behind a train (the same night, Mark: "yes, the release").** A sparse level's tile stays while a column
+of it departs from rest AND the parent cannot hold the field. The tile statistic gains a fourth word for a level:
+the range of the departure within a parent cell, the greatest over the tile (`CsSweTileStats`; the window keeps its
+ledger volume there). A wave of n parent cells a wavelength ranges 2 pi / n of its amplitude within one cell, and
+the level was made to hold its lip over `water.swe.patchCellsPerLip` cells (8), so a tile whose range is under
+2 pi / 8 of its greatest departure is the parent's to hold: it demands no neighbours and, quiet past the
+hysteresis, is released -- its fold already carries the mean, the parent carries the wave from there, and a tile
+mapped again takes the parent's state magnified. The old law is the limit where the parent's value is rest. On
+the 48 km deep-water train behind the front the tail's 5 km cells range 0.68 of the amplitude: released; on the
+shelf's 10 km waves they range twice it: kept. The convergence run's finer patch (16 cells a lip) releases at
+2 pi / 16, as it should. The residency line now says how many of the departing tiles are the parent's to hold.
+MEASURED (the line at rank 7): that clause alone releases almost nothing -- up to 230 of 1200 departing tiles are the
+parent's to hold at any statistics, one tile released in seven hours (1386 resident against 1376 without it). The
+train behind a collapse is a dispersive tail of waves shorter than the lip's cells hold, and a tile's held state
+flickers with the wave's phase, so the half-hour hysteresis never completes. So THE THIRD CLAUSE IS THE BUDGET, the
+residency's law everywhere else in the engine: `water.swe.levelTiles` (1024), and above it the wanted tiles are ranked
+by their worth -- the range within a parent cell, a tile wanted ahead of a front taking the front's -- and the least
+worthy beyond 7/8 of the budget are released at once, the parent holding their mean. The front and the shelf keep
+their tiles; the slosh in the deep ocean behind gives its up. THE GATE, the line at a budget of 512 against the
+unbounded run (1386 tiles): the residency holds at 448-460 from +220 min, releasing 60-160 tiles a statistics with the
+worth kept from about 5.5 m of range; the front, the slope (2.59 m at 320 km), level 2^7's readings at 2, 80 and
+320 km and the anchor's arrival are IDENTICAL; the patch's own values near the anchor move within 15 % (0.94 ->
+0.80 m at 80 km: its released tiles carry the tail's magnified state when mapped again), and the telescope reads
+level 2^7, not the patch, there; the run took 23 min against 27. And the rank-6 run died twice, not of memory (3 GB of
+7) but of a BLOW-UP: its greatest departure climbed to 85-105 m at a tile 3919 km east and 506 km north of the anchor,
+out by the Azores, and the device removal followed (DRED: a dispatch). The 645 m patch on steep volcanic slopes far
+from the anchor goes unstable where the 1.3 km one does not -- OPEN, with its place.
+
+*Stated, not built:* the 645 m patch's blow-up on steep volcanic slopes far from the anchor (the Azores, 3919 km E
+506 km N: 85-105 m departures, then the device removed; the 1.3 km patch is stable there); the window's fine/coarse interface in the levels' manner (the fine
 fluxes refluxed onto the twin, the ghost at the twin's time) or the reach retired; a floor on the derived current
 (and the level's step law with the current term, its factor 2 unexplained); the coarse probes on the frame path; the
 hull's reader of the far field; the anchor

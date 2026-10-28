@@ -226,6 +226,7 @@ struct SweProps {
     uint32_t telescopeCells = 512;
     uint32_t telescopeStep = 2;
     double patchCellsPerLip = 8.0;   // an event's patch: its lip's radius over this many cells (16 = one rank finer)
+    double levelTiles = 1024.0;      // a sparse level's tile budget (0 = unbounded): above it, the tiles whose field the parent holds best are released
     double dampH = 0.0;              // the solver's linear damping as the velocity's e-folding time (h); 0 = none
 };
 struct BankProps {

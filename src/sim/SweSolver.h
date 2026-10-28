@@ -72,6 +72,7 @@ struct SweConfig {
     // ranks telescopeStep apart below the tail's (water.swe.telescopeLevels / telescopeCells / telescopeStep)
     uint32_t telescopeLevels = 3, telescopeCells = 512, telescopeStep = 2;
     double patchCellsPerLip = 8.0;   // an event's patch: its lip's radius over this many cells (16 = a rank finer: the convergence run)
+    double levelTiles = 1024.0;      // a sparse level's tile budget (0 = unbounded; water.swe.levelTiles)
     // THE LINEAR DAMPING, AS A TIME (2026-10-28): the velocity's e-folding time in hours, 0 = none (water.swe.dampH). It
     // was 0.99995 a substep -- "a whisper for numerical hygiene" -- which is an e-folding of 1.7 h at the window's
     // 0.3 s step and 2.4 h at an event's patch's 0.44 s: the 1 km stone's train lost e^-1.3 of itself crossing from
@@ -700,6 +701,7 @@ private:
     int m_winParent = -1;                        // the level the window's edge reads
     std::function<float(double, double, double)> m_bedAt;
     double m_patchCellsPerLip = 8.0;
+    double m_levelTiles = 1024.0;
     float m_dampH = 0.0f;                                                              // the linear damping's e-folding time (h); 0 = none
     float DampOf(float dt) const { return m_dampH > 0.0f ? std::exp(-dt / (m_dampH * 3600.0f)) : 1.0f; }   // the factor a substep of dt applies
     static constexpr double kProbeKm[6] = {300.0, 600.0, 1200.0, 1800.0, 2400.0, 3000.0};

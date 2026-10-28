@@ -868,7 +868,13 @@ void CsSweDerive(uint3 id : SV_DispatchThreadID) {
 // THE WATER, TILE BY TILE: one group a resident state tile (a thread 8 x 8 of its cells) -- which of its
 // columns hold water and which of its edges water touches (the residency's ring), its deepest and
 // fastest column (the step), and the water it holds (the ledger of a tile the residency releases).
-groupshared uint gsFlags, gsHmax, gsUmax;
+// A LEVEL's fourth word is instead THE RANGE OF ITS DEPARTURE WITHIN A PARENT CELL, the greatest over the
+// tile (2026-10-28, the release behind a train): what the parent's one value cannot hold of the field. The
+// residency keeps a tile while that range is the departure's own scale (the field is the level's to resolve)
+// and releases it once the parent holds the field at the resolution the level was made for (SweSolver::
+// UpdateLevelResidency). A thread's block is 8 x 8 cells: the range is taken over each parent cell within
+// it (per <= 8), else over the block (a lower bound for a level four or more ranks under its parent).
+groupshared uint gsFlags, gsHmax, gsUmax, gsRange;
 groupshared float gsVol[256];
 [numthreads(16, 16, 1)]
 void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex) {
@@ -876,6 +882,7 @@ void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint g
         gsFlags = 0u;
         gsHmax = 0u;
         gsUmax = 0u;
+        gsRange = 0u;
     }
     GroupMemoryBarrierWithGroupSync();
     const uint tile = gTileList[gid.z];
@@ -905,16 +912,41 @@ void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint g
             um = max(um, length(gUv[uint3(t, 0)].xy));
         }
     }
+    float rm = 0.0f;
+    if (gTail2.z > 0.5f) {   // a level: the departure's range within each parent cell of this thread's block
+        const uint per = (gTail.x >= 0.0f) ? (1u << uint(gTail.x)) : 1u;
+        const uint cs = min(per, min(sx, sy));
+        for (uint by = 0u; by < sy; by += cs) {
+            for (uint bx = 0u; bx < sx; bx += cs) {
+                float lo = 1.0e30f, hi = -1.0e30f;
+                bool any = false;
+                for (uint j = 0u; j < cs; ++j) {
+                    for (uint i = 0u; i < cs; ++i) {
+                        const uint2 t = org + uint2(tid.x * sx + bx + i, tid.y * sy + by + j);
+                        if (t.x >= gNx || t.y >= gNy) continue;
+                        const float b = gBedC[t];
+                        if (b >= 0.0f) continue;   // land holds no departure
+                        const float d = gH[t] + b;
+                        lo = min(lo, d);
+                        hi = max(hi, d);
+                        any = true;
+                    }
+                }
+                if (any) rm = max(rm, hi - lo);
+            }
+        }
+    }
     InterlockedOr(gsFlags, flags);
     InterlockedMax(gsHmax, asuint(hm));
     InterlockedMax(gsUmax, asuint(um));
+    InterlockedMax(gsRange, asuint(rm));
     gsVol[gi] = vol;
     GroupMemoryBarrierWithGroupSync();
     for (uint s = 128u; s > 0u; s >>= 1u) {
         if (gi < s) gsVol[gi] += gsVol[gi + s];
         GroupMemoryBarrierWithGroupSync();
     }
-    if (gi == 0u) gTileStats[uint2(tile % gEtaTilesX, tile / gEtaTilesX)] = uint4(gsFlags, gsHmax, gsUmax, asuint(gsVol[0]));
+    if (gi == 0u) gTileStats[uint2(tile % gEtaTilesX, tile / gEtaTilesX)] = uint4(gsFlags, gsHmax, gsUmax, (gTail2.z > 0.5f) ? gsRange : asuint(gsVol[0]));
 }
 
 // THE BOUNDARY'S LEDGER: the water in through every boundary face this substep -- the list in t0 (its

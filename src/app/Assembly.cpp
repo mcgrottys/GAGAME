@@ -666,6 +666,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         sweCfg.telescopeCells = S.water.swe.telescopeCells;
         sweCfg.telescopeStep = S.water.swe.telescopeStep;
         sweCfg.patchCellsPerLip = S.water.swe.patchCellsPerLip;
+        sweCfg.levelTiles = S.water.swe.levelTiles;
         sweCfg.dampH = S.water.swe.dampH;
         sweCfg.bedAt = [&compositor, hgtCh](double la, double lo, double resM) {
             constexpr double kD2Rd = 3.14159265358979323846 / 180.0;

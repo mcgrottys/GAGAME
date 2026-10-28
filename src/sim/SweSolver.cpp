@@ -1853,17 +1853,38 @@ void SweSolver::LevelLists(Level& L) {
 }
 
 // STAGE 2d: A SPARSE LEVEL'S RESIDENCY FOLLOWS THE DEPARTURE -- the window's law (UpdateResidency) on a level of mean
-// sea's gauge: a tile stays while a column of it departs from rest, and the tile across an edge the departure
-// reaches is mapped ahead of it (the ring); a tile quiet past the hysteresis is released. Fresh tiles are cleared,
-// bedded and rested at the level's next batch (RecordLevel).
+// sea's gauge: a tile stays while a column of it departs from rest AND THE PARENT CANNOT HOLD THE FIELD (2026-10-28:
+// the departure's range within a parent cell is the departure's own scale -- a front, a wave of fewer parent cells
+// than the lip's cells the level was made for, water.swe.patchCellsPerLip: a wave of n cells a wavelength ranges
+// 2 pi / n of its amplitude within one), and the tile across an edge the departure reaches is mapped ahead of it (the
+// ring); a tile quiet past the hysteresis, or one whose field the parent holds (its fold already carries the mean,
+// and the parent carries the wave from there; a tile mapped again takes the parent's state magnified), is
+// released. Before the second clause the level followed its train for ever: the slosh behind the front never fell
+// under the wet tolerance, the 2^7 patch held 1376 tiles after seven hours and the 2^6 one lost the GPU at 3492.
+// THE THIRD CLAUSE IS THE BUDGET (the residency's law everywhere else in the engine: worth under a budget): the
+// train behind a collapse is a dispersive tail of waves shorter than the parent holds at the lip's cells, so the
+// second clause alone released almost nothing (230 of 1200 tiles the parent's at any statistics, one released in
+// seven hours: the held state flickers with the wave's phase and the hysteresis never completes). Above
+// water.swe.levelTiles resident, the wanted tiles are ranked by their worth -- the range within a parent cell, what
+// the parent cannot hold; a tile wanted ahead of a front takes the front's -- and the least worthy beyond 7/8 of
+// the budget are released at once, the parent holding their mean. Fresh tiles are cleared, bedded and rested at
+// the level's next batch (RecordLevel).
 void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8_t>& raw, uint32_t pitch) {
     const uint32_t tX = L.h.TilesX(), tY = L.h.TilesY();
+    char buf[160];
     const double dtS = (L.statsAt > -1.0e17) ? (std::max)(L.simTime - L.statsAt, 0.0) : 0.0;
     L.statsAt = L.simTime;
-    std::vector<uint8_t> want(size_t(tX) * tY, 0);
-    uint32_t live = 0;
+    std::vector<uint8_t> want(size_t(tX) * tY, 0), over(size_t(tX) * tY, 0);
+    std::vector<float> worth(size_t(tX) * tY, 0.0f);   // the range of the departure within a parent cell: what the parent cannot hold
+    uint32_t live = 0, held = 0;
     float maxDep = 0.0f;
     uint32_t mxT = 0, myT = 0;
+    const float resolved = static_cast<float>(2.0 * 3.141592653589793 / m_patchCellsPerLip);   // the range, over the amplitude, of a wave of the lip's cells a wavelength
+    const auto wantAt = [&](uint32_t x, uint32_t y, float w) {
+        const size_t j = size_t(y) * tX + x;
+        want[j] = 1;
+        worth[j] = (std::max)(worth[j], w);
+    };
     for (uint32_t ty = 0; ty < tY; ++ty) {
         for (uint32_t tx = 0; tx < tX; ++tx) {
             if (!L.h.IsResident(tx, ty) || size_t(ty) * pitch + size_t(tx + 1) * 16 > raw.size()) continue;
@@ -1871,15 +1892,17 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
             memcpy(v, &raw[size_t(ty) * pitch + size_t(tx) * 16], 16);
             if (!(v[0] & 1u)) continue;
             ++live;
-            float hm = 0.0f;
+            float hm = 0.0f, range = 0.0f;
             memcpy(&hm, &v[1], 4);
+            memcpy(&range, &v[3], 4);
             if (hm > maxDep) { maxDep = hm; mxT = tx; myT = ty; }
-            if (m_levelStats && L.sparse && L.list.size() <= 12) Log("[swe]   %s tile (%u, %u): flags %u, the greatest departure %.3f m", L.name.c_str(), tx, ty, v[0], hm);
-            want[size_t(ty) * tX + tx] = 1;
-            if ((v[0] & 2u) && ty > 0) want[size_t(ty - 1) * tX + tx] = 1;
-            if ((v[0] & 4u) && ty + 1 < tY) want[size_t(ty + 1) * tX + tx] = 1;
-            if ((v[0] & 8u) && tx > 0) want[size_t(ty) * tX + tx - 1] = 1;
-            if ((v[0] & 16u) && tx + 1 < tX) want[size_t(ty) * tX + tx + 1] = 1;
+            if (m_levelStats && L.sparse && L.list.size() <= 12) Log("[swe]   %s tile (%u, %u): flags %u, the greatest departure %.3f m, its range within a parent cell %.3f", L.name.c_str(), tx, ty, v[0], hm, range);
+            if (L.sparse && L.parent >= 0 && range < resolved * hm) { ++held; continue; }   // the parent holds this tile's field: it demands nothing, and goes when quiet
+            wantAt(tx, ty, range);
+            if ((v[0] & 2u) && ty > 0) wantAt(tx, ty - 1, range);
+            if ((v[0] & 4u) && ty + 1 < tY) wantAt(tx, ty + 1, range);
+            if ((v[0] & 8u) && tx > 0) wantAt(tx - 1, ty, range);
+            if ((v[0] & 16u) && tx + 1 < tX) wantAt(tx + 1, ty, range);
         }
     }
     {   // THE INSTRUMENT (2026-10-28): the level's greatest departure and where it stands, km east and north of the anchor
@@ -1891,6 +1914,19 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
                 L.name.c_str(), maxDep, mxT, myT, eKm, nKm, live);
     }
     if (!L.sparse) return;   // an anchor level's residency is the run's: the statistic alone
+    uint32_t budgeted = 0;
+    float worthFloor = 0.0f;
+    if (m_levelTiles > 0.0) {   // THE BUDGET: the wanted tiles ranked by worth, the least worthy beyond 7/8 of it released at once
+        std::vector<size_t> wanted;
+        for (size_t i = 0; i < want.size(); ++i) if (want[i]) wanted.push_back(i);
+        const size_t keepN = size_t(m_levelTiles * 7.0 / 8.0);
+        if (wanted.size() > size_t(m_levelTiles) && keepN < wanted.size()) {
+            std::nth_element(wanted.begin(), wanted.begin() + std::ptrdiff_t(keepN), wanted.end(), [&](size_t a, size_t b) { return worth[a] > worth[b]; });
+            worthFloor = worth[wanted[keepN]];
+            for (size_t k = keepN; k < wanted.size(); ++k) { want[wanted[k]] = 0; over[wanted[k]] = 1; }
+            budgeted = uint32_t(wanted.size() - keepN);
+        }
+    }
     uint32_t mapped = 0, released = 0;
     for (uint32_t ty = 0; ty < tY; ++ty) {
         for (uint32_t tx = 0; tx < tX; ++tx) {
@@ -1903,7 +1939,7 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
                 }
             } else if (L.h.IsResident(tx, ty)) {
                 L.dryFor[i] += dtS;
-                if (L.dryFor[i] >= m_releaseS) {
+                if (over[i] || L.dryFor[i] >= m_releaseS) {
                     for (TileAtlas2D* b : {&L.h, &L.bed, &L.soil, &L.eta, &L.lim}) b->RequestUnmap(tx, ty);
                     L.dryFor[i] = 0.0;
                     ++released;
@@ -1933,8 +1969,9 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
         }
         for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->CommitMappings(gpu, nullptr);
     }
-    Log("[swe] %s: the departure's residency +%u / -%u tiles (%u depart; %zu resident; the greatest departure %.1f m)",
-        L.name.c_str(), mapped, released, live, L.list.size(), maxDep);
+    Log("[swe] %s: the departure's residency +%u / -%u tiles (%u depart, %u of them the parent's to hold; %zu resident; the greatest departure %.1f m%s)",
+        L.name.c_str(), mapped, released, live, held, L.list.size(), maxDep,
+        budgeted ? (snprintf(buf, sizeof buf, "; the budget of %.0f released %u, the worth kept from %.2f m", m_levelTiles, budgeted, worthFloor), buf) : "");
 }
 
 // A level's tables: its step tables (the same slots over its own banks; uv, gradient, stats and ledger the
@@ -2216,6 +2253,7 @@ void SweSolver::InitTelescope(Gpu& gpu, const SweConfig& cfg) {
     m_levelStats = std::getenv("GAGAME_LEVEL_STATS") != nullptr;   // the instrument: every level's greatest departure
     m_bedAt = cfg.bedAt;
     m_patchCellsPerLip = (std::max)(cfg.patchCellsPerLip, 1.0);
+    m_levelTiles = (std::max)(cfg.levelTiles, 0.0);
     if (!m_bedAt || cfg.tailCells == 0) return;
     const double cx = 0.5 * double(m_dom.nx), cy = 0.5 * double(m_dom.ny);   // the window's centre, rank-0 cells
     if (AddLevel(gpu, cfg.tailRank, cfg.tailCells, cx, cy, "tail", false, false) < 0) return;

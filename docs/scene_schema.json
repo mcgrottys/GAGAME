@@ -188,6 +188,7 @@
       { "key": "telescopeCells", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 512, "reload": "restart", "doc": "an anchor level's cells a side" },
       { "key": "telescopeStep", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 2, "reload": "restart", "doc": "the anchor levels' ranks this far apart below the tail's (2: ranks 7, 5, 3 under a rank-9 tail)" },
       { "key": "patchCellsPerLip", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 8, "reload": "restart", "doc": "an event's own level: its cavity's lip radius over this many cells (8; 16 = one rank finer, the convergence run)" },
+      { "key": "levelTiles", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1024, "reload": "restart", "doc": "a sparse level's tile budget (0 = unbounded): above it, the resident tiles whose field the parent holds best (the least range of the departure within a parent cell) are released down to 7/8 of it, the parent holding their mean" },
       { "key": "dampH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 0, "reload": "restart", "doc": "the solver's linear damping, the velocity's e-folding time (0 = none: the bed's quadratic drag is the water's loss; it was 0.99995 a substep, 1.7 to 2.4 h, until 2026-10-28)" }
     ] },
     { "type": "water.bank", "keys": [
