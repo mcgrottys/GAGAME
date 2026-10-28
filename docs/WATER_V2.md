@@ -1887,7 +1887,36 @@ frame's 4 MB constant arena). The clips: `out/review/stage3/clips/orbit_levels.m
 frame with the window stepping too; stepping the levels alone when the sea is off is a follow-up) and
 `shore_levels.mp4` (the dune at 30x as the train arrives through the tail).
 
-*Stated, not built:* a second-order flux; the hull's reader of the far field; the anchor
+**The columns over the marsh (2026-10-28).** The shore clip drew the marsh and the town as land-textured columns
+kilometres tall from nine minutes of sea time on. Not the levels (undrawn: the same; none: the same), not the stone
+(none: the same), not the levels' fields (every level's greatest departure stayed sane; the cavity's 5 km is the only
+large number and sits at the impact), not the readers' order (an event's patch, appended last, was read as "finest"
+at the shore -- fixed, the list is ordered by rank, 8c119ff), not the column plane, the wave table or the height
+pages. The writer is THE WINDOW: with `water.swe.fineReachM` (stage 1d) bounding mip 0 to 1500 m about the eye, the
+fine set moves from the anchor (the spin-up's eye) to the camera at the first frame, and at its edge across open
+water -- the river mouth off the dune, tile (7, 8) of the 4 x 4 block -- the window blows up in 6-15 minutes of sea
+time (columns 1e15..1e28 m, currents 92 km/s); the bank reads that surface (`SolverSurfaceDev`), its level plane
+goes to 1e20, every vertex under that waterline is water and rises with it, and the pixels still draw land. The reach
+at 300 m maps nothing (clean), at 6000 m changes nothing (clean), at 1500 m maps eight tiles under the twin's water
+and stands its edge in the channel (columns); at 1x a minute of sea time is too short to see it. Initializing a fresh
+mip-0 tile from the twin (the levels' CsSweMagnifyInit at mip 0) took the dam break away (1.8 m/s after the mapping
+turn against 20.7) and the blow-up came SOONER: the instability is the fine/coarse interface itself -- the fine edge
+reads the twin's magnified cells while the twin steps its own beyond, with no reflux -- not the fresh clear; reverted.
+Every gate recipe carried `--set water.swe.fineReachM=1500` (a speed knob) with the eye at the anchor, so no gate
+stood where the frames did. Clips and gates run at the default reach (0, the whole window) from here: the dune at
+60x for thirty minutes of sea time never crosses 60 m or 25 m/s there; the frame costs 117 ms against 85. The tools
+that found it: scenes/demos/impact_shore_quick*.json and shore_quick_*.json (the stone 115 km east, a quarter
+hour's spin-up, five minutes a render), `GAGAME_LEVEL_STATS=1` (every level's greatest departure and where; the
+window's deepest and fastest past 60 m / 25 m/s), `--bank-trace 150` (the bank's planes per ring), and a detector
+scoring the sky in a frame's top third. One more reading from the bar scene's gates at the default reach: the
+window's "fastest" current at its south edge tile climbs 26 -> 56 m/s over a minute with the tail standing and is
+quiet without it, while the twin grid is byte-identical either way: the derive's q / h in a thin edge film the
+Flather inflow feeds on the ebb, an instrument reading, not dynamics (the derive floors nothing above the wet
+tolerance; a reader of that current would see a jet) -- stated.
+
+*Stated, not built:* the window's fine/coarse interface in the levels' manner (the fine fluxes refluxed onto the
+twin, the ghost at the twin's time) or the reach retired; a floor on the derived current; a second-order flux; the
+hull's reader of the far field; the anchor
 levels' residency is the run's; the metric's shear; the twin's fold into its parent, kept off (the gauge); a
 sparse level is never retired after its event; the cost: the 1 km stone's level at 1400 tiles took the spin-up
 from 3 to 16 minutes.

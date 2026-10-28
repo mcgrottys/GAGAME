@@ -8,7 +8,7 @@
     "against the Bessel law's and against sqrt(g h0), within 10 % ('[swe] the probe' every batch for the hour after,",
     "the law's level in brackets; '[impact] stage 3' says where it fell and what lies under it).",
     "",
-    "Gate:  build\\bin\\gagame.exe scenes\\demos\\impact_bar.json --headless --frames 60 --dump-water-state --set streaming.offline=true --set water.swe.fineReachM=1500"
+    "Gate:  build\\bin\\gagame.exe scenes\\demos\\impact_bar.json --headless --frames 60 --dump-water-state --set streaming.offline=true"
   ],
   "base": "scenes/merrimack.json",
   "scene": {"name": "impact-bar", "view": "entrance_above"},

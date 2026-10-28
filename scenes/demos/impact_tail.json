@@ -8,7 +8,7 @@
     "the probe line every sim-minute ('tail: at the anchor ..., east of the window ...'). The window itself does not",
     "survive this stone: its +11 m crest at the bar collapses the step and the spin-up stops there, said in the log.",
     "",
-    "Gate:  build\\bin\\gagame.exe scenes\\demos\\impact_tail.json --headless --frames 60 --dump-water-state --set streaming.offline=true --set water.swe.fineReachM=1500"
+    "Gate:  build\\bin\\gagame.exe scenes\\demos\\impact_tail.json --headless --frames 60 --dump-water-state --set streaming.offline=true"
   ],
   "base": "scenes/merrimack.json",
   "scene": {"name": "impact-tail", "view": "entrance_above"},

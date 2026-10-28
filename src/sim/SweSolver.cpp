@@ -1204,7 +1204,8 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
     std::vector<uint8_t> want(size_t(tX) * tY, 0);
     std::vector<float> vol(size_t(tX) * tY, 0.0f);
     float hMax = 0.0f, uMax = 0.0f;
-    uint32_t wet = 0;
+    uint32_t wet = 0, hAtX = 0, hAtY = 0, uAtX = 0, uAtY = 0;
+    float hAtU = 0.0f;   // the fastest tile's deepest column (a thin film's q / h reads as a jet)
     for (uint32_t ty = 0; ty < tY; ++ty) {
         for (uint32_t tx = 0; tx < tX; ++tx) {
             if (!m_h.IsResident(tx, ty) || size_t(ty) * pitch + size_t(tx + 1) * 16 > raw.size()) continue;
@@ -1216,8 +1217,8 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
             memcpy(&vol[size_t(ty) * tX + tx], &v[3], 4);
             if (!(v[0] & 1u)) continue;
             ++wet;
-            hMax = (std::max)(hMax, hm);
-            uMax = (std::max)(uMax, um);
+            if (hm > hMax) { hMax = hm; hAtX = tx; hAtY = ty; }
+            if (um > uMax) { uMax = um; uAtX = tx; uAtY = ty; hAtU = hm; }
             want[size_t(ty) * tX + tx] = 1;
             // the ring: water on an edge wants the tile across it
             if ((v[0] & 2u) && ty > 0) want[size_t(ty - 1) * tX + tx] = 1;
@@ -1233,6 +1234,12 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
     // is half its own. The boundary's tiles (BoundaryTiles: where the Level stands over an edge cell now)
     // are kept only within the reach: beyond it the twin's edge rows are the box's boundary. A tile
     // beyond the reach goes at once (demand, not dryness).
+    // THE INSTRUMENT (2026-10-28, GAGAME_LEVEL_STATS): the window's deepest column and fastest current, every batch they
+    // stand past a sane sea's (the columns over the marsh: a dam break at a fresh tile, or worse)
+    if (m_levelStats && (hMax > 60.0f || uMax > 25.0f)) {
+        Log("[swe] the window at t=%.0f: deepest %.1f m at tile (%u, %u), fastest %.1f m/s at tile (%u, %u) whose deepest column is %.3f m; %u tiles hold water",
+            m_simTime, double(hMax), hAtX, hAtY, double(uMax), uAtX, uAtY, double(hAtU), wet);
+    }
     std::vector<uint8_t> keep = BoundaryTiles();
     std::vector<uint8_t> beyond(size_t(tX) * tY, 0);
     if (m_coarse && m_eyeOn && m_reachM > 0.0) {
