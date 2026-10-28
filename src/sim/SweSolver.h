@@ -538,6 +538,7 @@ private:
         float tail[4];
         float tail2[4];
         float impactC[4];   // stage 3: the event's cavity radius and depth (m), 0, 0
+        float up[4];        // stage 2d: the magnify's parent -- the shift to its cells, the cell above the corner (x, y), 0
     };
 
     bool m_ready = false;
@@ -661,6 +662,17 @@ private:
         int64_t c0x = 0, c0y = 0;               // the corner in rank-0 (window) cells; the window's corner is (0, 0)
         int parent = -1;                        // the next coarser level holding this one and a ghost beyond (-1: the top)
         bool foldUp = false, patch = false;
+        // stage 2d: a SPARSE level -- the parent's whole extent, resident only where the water departs from rest and
+        // a tile ahead of it (the window's residency law on the departure: a train's front demands the tiles ahead of
+        // itself and the sea it has left is released); its bed is the stack's on the GPU alone (no CPU bed, no flood)
+        bool sparse = false;
+        uint32_t px = 0, py = 0;                // a patch: the event's cell (the probe reads there)
+        GpuTexture stats;                       // its tile statistics (CsSweTileStats on the departure)
+        std::vector<uint32_t> freshH, freshF;   // tiles mapped since its last batch: cleared, bedded, rested
+        std::vector<double> dryFor;             // per tile: how long quiet (the release's hysteresis)
+        double statsAt = -1.0e18, deepest = 0.0;
+        bool statsDue = false;                  // the statistics were dispatched this batch: read them back outside the recording
+        Gpu::TextureReadback rb;                // the frame ring's asynchronous read of them
         SweDomain dom;
         SweCbData cb{};
         TileAtlas2D h, bed, soil, eta, flux, velA, velB, lim;
@@ -681,16 +693,19 @@ private:
     std::function<double(double, double, double)> m_tailLevelAt;
     hal::Resource m_heightArr = nullptr, m_resMapArr = nullptr;   // the stack's page views, for a level made later
     uint32_t m_heightMips = 1;
-    hal::Pso m_foldTailK;
+    hal::Pso m_foldTailK, m_magInitK;   // the fold into the parent; a fresh tile from the parent (stage 2d)
     void ParentFields(SweCbData& cb, int parent, uint32_t rank, int64_t c0x, int64_t c0y) const;
     uint32_t WinParentParity() const;
     void LevelCb(Level& L);
     void LevelBoundary(Level& L);
     void LevelTables(Gpu& gpu, Level& L);
-    int AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, double cy, const char* name, bool patch, bool tables);
+    int AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, double cy, const char* name, bool patch, bool tables,
+                 bool sparse = false, uint32_t sparseHalfCells = 0);
+    void LevelLists(Level& L);
+    void UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8_t>& raw, uint32_t pitch);
     void InitTelescope(Gpu& gpu, const SweConfig& cfg);
     void LevelTo(hal::CommandContext& cmd, Level& L, D3D12_RESOURCE_STATES to);
-    void RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double batchEnd, bool reset);
+    void RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double batchEnd, bool reset, bool steps);   // the prelude (steps = false), then the steps
     double TailRayArrivalS(double latDeg, double lonDeg, double h0, double& shallowest) const;
     double TailFastestArrivalS(double latDeg, double lonDeg) const;   // the fastest sqrt(g h) path over the tail's sea (Fermat)
     void CoarseCb(int n, int n1);

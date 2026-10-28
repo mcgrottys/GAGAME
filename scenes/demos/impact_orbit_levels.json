@@ -1,0 +1,36 @@
+{
+  "_readme": [
+    "THE LEVELS DRAWN FROM ORBIT (stage 2b-2d, 2026-10-27): the same event and rail as impact_orbit.json with the solver on -- the tail and the anchor levels stand (a 10 km stone needs no patch: its lip is 15 tail cells), the far field the globe draws is theirs where they hold the point, the law only beyond. The cavity is imposed at the clock's first instant.",
+    "AN ASTEROID INTO THE ATLANTIC, SEEN FROM ABOVE (2026-10-25; docs/WATER_V2.md section 13). A 10 km",
+    "impactor at 20 km/s lands at 35 N 42 W, the middle of the North Atlantic, at the scene's start. Its",
+    "cavity (laws/Impact.hlsli: Ward & Asphaug's lipped parabola, ~110 km across, as deep as the ocean)",
+    "evolves by linear dispersive theory, and the globe's vertices sum that law: the ring of the first wave",
+    "crosses the basin at sqrt(g h) ~ 200 m/s. The clock runs 240x so the four hours to the American",
+    "shelf pass in a minute. The drawn wave is exaggerated 10x (exag, on the deep wave before the",
+    "shoaling's bound); the physics is raw.",
+    "",
+    "`impacts` is the RECORD of events (sim/ImpactField.h); press I over the sea to drop another",
+    "(`sea.impactor`) at the point under the cursor, at the clock's instant.",
+    "",
+    "Record:  build\\bin\\gagame.exe scenes\\demos\\impact_orbit.json --mp4 out\\review\\impact\\impact_orbit.mp4",
+    "Watch:   build\\bin\\gagame.exe scenes\\demos\\impact_orbit.json --set capture.headless=false --set capture.frames=0",
+    "The companion scene impact_newburyport.json stands on the beach for the same event's arrival."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "impact-orbit-levels", "view": "impact"},
+  "time": {"start": "2026-08-28T15:00:00Z", "timeScale": 240},
+  "impacts": [
+    {
+      "lat": 35.0, "lon": -42.0, "at": "",
+      "diameterM": 10000, "speedMs": 20000, "densityKgM3": 3000, "angleDeg": 45,
+      "basinDepthM": 4000, "exag": 10
+    }
+  ],
+  "sea": {"impactor": {"diameterM": 2000, "speedMs": 20000, "densityKgM3": 3000, "angleDeg": 45, "basinDepthM": 4000, "exag": 10}},
+  "water": {"swe": {"spinupH": 0.5, "currentRefreshS": 1000000}},
+  "views": [
+    {"name": "impact", "at": {"lat": 35.0, "lon": -42.0, "alt": 0, "heading": 0, "tilt": 0, "range": 3000000}, "fovY": 55, "gauge": "root", "nearZ": 1000}
+  ],
+  "rails": {"file": "scenes/rails/impact_orbit.json"},
+  "capture": {"headless": true, "frames": 1800, "railDir": "out/rail_impact_orbit_levels"}
+}

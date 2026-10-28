@@ -1834,10 +1834,46 @@ THE WAY: the patch is a level about the impact, not a level that follows the fro
 needs (14.2's words), which is what this stone's train would need -- or a tail less diffusive than first
 order, or a finer tail (2.5 km at 4096 cells: 16 M cells). Stated, not built, and the next piece.
 
-*Stated, not built:* the level that follows a train's front (the telescope along the way); a second-order
-flux (the first-order upwind's diffusion is the tail's limit); the hull's reader of the far field; the levels'
-residency is the run's (static, the sea from each edge); the metric's shear; the twin's fold into its parent,
-kept off (the gauge); a patch is never released.
+**Stage 2d, built (2026-10-27, Mark: "follow the front"): the level that follows the train.** An event's
+patch is now a SPARSE level: its lattice is its parent's whole extent at the rank its lip needs (the tail's
+8192 x 8192 at 2^7, 1.3 x 1.8 km cells; a rank whose extent would pass 16384 cells is refused), its bed the
+stack's on the GPU alone (no CPU bed, no flood), resident about the cavity to begin with (four lip radii each
+way) and from there BY THE WINDOW'S OWN RESIDENCY LAW ON THE DEPARTURE: the tile statistics (`CsSweTileStats`,
+counting a column live where |h + b| passes the level's tolerance, 5 cm, over sea alone) read back outside the
+recording (after the batch in the spin-up, through the asynchronous ring on the frame), a tile across an edge
+the departure reaches mapped ahead of the front, a tile quiet past the hysteresis released; a tile mapped since
+the last batch is cleared, bedded and INITIALIZED FROM ITS PARENT (`CsSweMagnifyInit`: the parent cell's
+departure and velocities over its own bed -- Berger and Oliger's interpolation; a tile rested instead erased,
+through the fold, the train its parent carried under it), before any level folds or steps (every level's
+prelude first). A level's non-resident cells are HELD BY ITS PARENT in the magnify's sense (`gUp`: the shift
+and offset to the parent's cells; `UpLiveAt`, the chain reads at index 1 are the parent's), so a front leaving
+the resident set meets the parent's water, not a frontier. The fold is one thread a parent cell under the
+child's resident tiles (`CsSweFoldLevel`). The levels step in Berger and Oliger's order: the top steps, and
+after each of its steps its children step up to its time, recursively (`RecordLevel` recurses); the fine twin
+has run so since stage 1c, and running every level a whole batch apart had left the ring ringing.
+
+*The gate* (out/review/stage3/impact_front4; impact_front1..3 the runs before the interleaving, the magnify
+init and the land fix): the 1 km stone again. Its level grows from 2 tiles to 1427 by 7 h (the ring never
+calms: every resident tile keeps a column over 5 cm), the spin-up of 8 h takes 16 minutes, and at the window's
+east cell the departure reaches +0.26 m at 6.48 h and -0.34 m at 6.75 h (the window answers +0.5 / -0.9 m at
+the anchor), against 0.09 m with the static patch and the one-depth law's +-27 m there (Green's law to 68 m;
++-9.6 m deep). The interleaving and the parent initialization changed the numbers by nothing to three
+decimals. Two things stand, stated: a train crossing a level's residency edge is water the fine level loses
+(its flux into a non-resident cell goes to no column; the parent receives the fine's state only by the fold),
+so the ring must stay ahead of the front -- it does, at this stone's pace; and THE CAVITY IS A HOLE TO THE BED,
+4000 m deep and 9 km across in 4000 m of water, whose collapse in the nonlinear solver is a dam break that
+spends its energy in the rim's bores and the centre's sloshing (+-2 m at the impact for hours) -- which is what
+the hydrocode studies found against Ward and Asphaug's linear estimates (Gisler and others, 2011: deep cavities
+raise far smaller tsunamis than linear theory says). The 10 km stone's cavity, 55 km across for the same depth,
+is gentle, and its train crossed the tail at two thirds of the law. So the 1 km stone's 0.3 m at 2600 km may be
+nearer a nonlinear truth than the law's 9 m; the solver's own dissipation at the collapse (first order, on 1.3
+km cells) is not separated from the physics here. The separation is a convergence run: the same event at a
+finer patch (the lip over sixteen cells) and the departure at a fixed distance from the impact at both ranks.
+
+*Stated, not built:* the convergence run; a second-order flux; the hull's reader of the far field; the anchor
+levels' residency is the run's; the metric's shear; the twin's fold into its parent, kept off (the gauge); a
+sparse level is never retired after its event; the cost: the 1 km stone's level at 1400 tiles took the spin-up
+from 3 to 16 minutes.
 
 ## Sources
 

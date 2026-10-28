@@ -694,7 +694,8 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     makePso(L"CsSweVelGrad", m_velGradK);
     makePso(L"CsSweFold", m_foldK);   // stage 1b
     makePso(L"CsSweImpose", m_imposeK);   // stage 3
-    makePso(L"CsSweFoldTail", m_foldTailK);   // stage 2b
+    makePso(L"CsSweFoldLevel", m_foldTailK);   // stage 2c/2d: a level into its parent
+    makePso(L"CsSweMagnifyInit", m_magInitK);   // stage 2d: a fresh tile from its parent
 
     // t1, t2 filled by SetBed; the UAVs here. m_table reads m_velA (u7) and writes m_velB (u10);
     // m_tableB the other way (the substeps take turns: Record).
@@ -1179,6 +1180,16 @@ void SweSolver::SeaBoundary() {
 void SweSolver::AfterBatch(Gpu& gpu) {
     if (!m_ready || !m_testH.empty()) return;
     ProbeCoarse(gpu);
+    for (auto& Lp : m_lv) {   // stage 2d: a sparse level's statistics, read back after the batch (never inside its recording)
+        Level& L = *Lp;
+        if (!L.sparse || !L.statsDue) continue;
+        L.statsDue = false;
+        GpuTexture wrap = L.stats;
+        wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        uint32_t pitch = 0;
+        const std::vector<uint8_t> raw = gpu.ReadbackTexture(wrap, &pitch);
+        UpdateLevelResidency(gpu, L, raw, pitch);
+    }
     GpuTexture wrap = m_statsTex;
     wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     uint32_t pitch = 0;
@@ -1484,6 +1495,8 @@ void SweSolver::CoarseCb(int n, int n1) {
     m_cb1.cellX[2] = static_cast<float>((0.5 * double(m_cb1.ny) - 0.5) * double(-m_cb1.cellX[3]));
     m_cb1.mip = 1.0f;   // (the sea stays on: stage 1c sweeps it at mip 1 too)   // stage 1c: the twin's dispatches run at mip 1 (nothing above it)
     ParentFields(m_cb1, m_winParent, 1u, 0, 0);   // stage 2b/2c: the window's parent level under the twin's cells
+    m_cb1.up[0] = 1.0f;   // stage 2d: nothing above the twin in the magnify's sense (gMips = 1 there), the form kept
+    m_cb1.up[1] = m_cb1.up[2] = m_cb1.up[3] = 0.0f;
 }
 
 void SweSolver::RecordCoarseBegin(hal::CommandContext& cmd, Gpu& gpu, int n, int n1, bool reset) {
@@ -1655,13 +1668,14 @@ bool SweSolver::BeginImpose(Gpu& gpu, bool reset) {
                 m_dom.CellOf(w.P().lat, w.P().lon, cx, cy);   // the impact in rank-0 cells (the chart's inverse holds beyond the window)
                 char name[48];
                 snprintf(name, sizeof(name), "patch 2^%u (event %zu)", rank, i);
-                const int at = AddLevel(gpu, rank, 512u, cx, cy, name, true, true);
+                const uint32_t half = uint32_t((std::max)(4.0 * w.C().lipRadiusM / (cell0 * double(int64_t(1) << rank)), 8.0));
+                const int at = AddLevel(gpu, rank, 0u, cx, cy, name, true, true, true, half);
                 if (at >= 0) {
                     m_lv[size_t(at)]->imposeN = static_cast<float>(w.Terms());
-                    Log("[impact] stage 2c: the cavity's lip (R_D %.1f km) stood over %.1f cells of %s: the event's own level, %s, %u cells of %.0f m, its parent %s",
+                    Log("[impact] stage 2d: the cavity's lip (R_D %.1f km) stood over %.1f cells of %s: the event's own level, %s, cells of %.0f m over the whole of %s, "
+                        "resident %zu tiles about the cavity to begin with -- its tiles follow the departure from here",
                         w.C().lipRadiusM / 1000.0, w.C().lipRadiusM / (std::min)(F.dom.dx, F.dom.dy), F.name.c_str(), m_lv[size_t(at)]->name.c_str(),
-                        m_lv[size_t(at)]->nx, (std::min)(m_lv[size_t(at)]->dom.dx, m_lv[size_t(at)]->dom.dy),
-                        m_lv[size_t(at)]->parent >= 0 ? m_lv[size_t(m_lv[size_t(at)]->parent)]->name.c_str() : "none");
+                        (std::min)(m_lv[size_t(at)]->dom.dx, m_lv[size_t(at)]->dom.dy), F.name.c_str(), m_lv[size_t(at)]->list.size());
                 }
             }
         }
@@ -1756,8 +1770,15 @@ void SweSolver::LevelCb(Level& L) {
     cb.sea[3] = 0.0f;
     cb.oceanU = 0.0f;
     cb.mip = 0.0f;
-    cb.mips = 1.0f;
-    cb.etaTilesXUp = 0.0f;
+    const Level* P = (L.parent >= 0) ? m_lv[size_t(L.parent)].get() : nullptr;
+    // stage 2d: the parent holds this level's non-resident cells (the magnify): a train leaving the resident set
+    // meets the parent's water, not a frontier
+    cb.mips = P ? 2.0f : 1.0f;
+    cb.etaTilesXUp = P ? float(P->h.TilesX()) : 0.0f;
+    cb.up[0] = P ? float(P->rank - L.rank) : 1.0f;
+    cb.up[1] = P ? float((L.c0x - P->c0x) >> P->rank) : 0.0f;
+    cb.up[2] = P ? float((L.c0y - P->c0y) >> P->rank) : 0.0f;
+    cb.up[3] = 0.0f;
     const double ds0 = m_dom.dx / m_dom.R, dt0 = m_dom.dy / m_dom.R, per = double(int64_t(1) << L.rank);
     cb.cellX[0] = static_cast<float>((double(L.c0x) + 0.5 * per - 0.5 * double(m_dom.nx)) * ds0);
     cb.cellX[1] = static_cast<float>(per * ds0);
@@ -1766,6 +1787,8 @@ void SweSolver::LevelCb(Level& L) {
     cb.east[3] = static_cast<float>((std::min)(L.dom.dx, L.dom.dy));   // the cell's grain: the bed's level
     cb.impactB[0] = L.imposeN;   // the event's cavity inside this level, else nothing to impose here
     ParentFields(cb, L.parent, L.rank, L.c0x, L.c0y);
+    cb.tail2[2] = 1.0f;   // stage 2d: the stats count a column live where it departs from rest (a level's gauge is mean sea's)
+    cb.wetEps = 0.05f;    // the departure a level follows: 5 cm (the window's 1 cm wet tolerance kept 1462 tiles under a train's cm tail)
 }
 
 // A level's own exterior, four samples a side of its edge: the top level's the impacts' law (events outside the
@@ -1788,11 +1811,119 @@ void SweSolver::LevelBoundary(Level& L) {
     }
 }
 
+// A level's lists from its water bank's residency: the resident tiles, their live words, and the 8-byte banks'
+// tiles under them with a one-cell apron (a face on a resident tile's west or north edge is owned by the cell
+// beyond it, whose tile must hold its flux: CoverState's law).
+void SweSolver::LevelLists(Level& L) {
+    const uint32_t tX = L.h.TilesX(), tY = L.h.TilesY(), tw = L.h.TileW(), th = L.h.TileH();
+    L.list.clear();
+    L.live.assign(size_t(tX) * tY, 0u);
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            if (!L.h.IsResident(tx, ty)) continue;
+            L.list.push_back(ty * tX + tx);
+            L.live[size_t(ty) * tX + tx] = 1u;
+        }
+    }
+    L.fluxList.clear();
+    for (uint32_t ty = 0; ty < L.flux.TilesY(); ++ty) {
+        for (uint32_t tx = 0; tx < L.flux.TilesX(); ++tx) {
+            const uint32_t x0 = tx * L.flux.TileW(), y0 = ty * L.flux.TileH();
+            const uint32_t x1 = x0 + L.flux.TileW() - 1 + 1, y1 = y0 + L.flux.TileH() - 1 + 1;
+            bool live = false;
+            for (uint32_t hy = y0 / th; hy <= y1 / th && hy < tY && !live; ++hy) {
+                for (uint32_t hx = x0 / tw; hx <= x1 / tw && hx < tX; ++hx) {
+                    if (L.live[size_t(hy) * tX + hx]) { live = true; break; }
+                }
+            }
+            if (live) L.fluxList.push_back(ty * L.flux.TilesX() + tx);
+        }
+    }
+}
+
+// STAGE 2d: A SPARSE LEVEL'S RESIDENCY FOLLOWS THE DEPARTURE -- the window's law (UpdateResidency) on a level of mean
+// sea's gauge: a tile stays while a column of it departs from rest, and the tile across an edge the departure
+// reaches is mapped ahead of it (the ring); a tile quiet past the hysteresis is released. Fresh tiles are cleared,
+// bedded and rested at the level's next batch (RecordLevel).
+void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8_t>& raw, uint32_t pitch) {
+    const uint32_t tX = L.h.TilesX(), tY = L.h.TilesY();
+    const double dtS = (L.statsAt > -1.0e17) ? (std::max)(L.simTime - L.statsAt, 0.0) : 0.0;
+    L.statsAt = L.simTime;
+    std::vector<uint8_t> want(size_t(tX) * tY, 0);
+    uint32_t live = 0;
+    float maxDep = 0.0f;
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            if (!L.h.IsResident(tx, ty) || size_t(ty) * pitch + size_t(tx + 1) * 16 > raw.size()) continue;
+            uint32_t v[4];
+            memcpy(v, &raw[size_t(ty) * pitch + size_t(tx) * 16], 16);
+            if (!(v[0] & 1u)) continue;
+            ++live;
+            float hm = 0.0f;
+            memcpy(&hm, &v[1], 4);
+            maxDep = (std::max)(maxDep, hm);
+            want[size_t(ty) * tX + tx] = 1;
+            if ((v[0] & 2u) && ty > 0) want[size_t(ty - 1) * tX + tx] = 1;
+            if ((v[0] & 4u) && ty + 1 < tY) want[size_t(ty + 1) * tX + tx] = 1;
+            if ((v[0] & 8u) && tx > 0) want[size_t(ty) * tX + tx - 1] = 1;
+            if ((v[0] & 16u) && tx + 1 < tX) want[size_t(ty) * tX + tx + 1] = 1;
+        }
+    }
+    uint32_t mapped = 0, released = 0;
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            const size_t i = size_t(ty) * tX + tx;
+            if (want[i]) {
+                L.dryFor[i] = 0.0;
+                if (!L.h.IsResident(tx, ty)) {
+                    for (TileAtlas2D* b : {&L.h, &L.bed, &L.soil, &L.eta, &L.lim}) b->RequestMap(tx, ty);
+                    ++mapped;
+                }
+            } else if (L.h.IsResident(tx, ty)) {
+                L.dryFor[i] += dtS;
+                if (L.dryFor[i] >= m_releaseS) {
+                    for (TileAtlas2D* b : {&L.h, &L.bed, &L.soil, &L.eta, &L.lim}) b->RequestUnmap(tx, ty);
+                    L.dryFor[i] = 0.0;
+                    ++released;
+                }
+            }
+        }
+    }
+    if (mapped == 0 && released == 0) return;
+    std::vector<uint32_t> fresh;
+    L.h.CommitMappings(gpu, &fresh);
+    L.freshH.insert(L.freshH.end(), fresh.begin(), fresh.end());
+    for (TileAtlas2D* b : {&L.bed, &L.soil, &L.eta, &L.lim}) b->CommitMappings(gpu, nullptr);
+    const std::vector<uint32_t> before = L.fluxList;
+    LevelLists(L);
+    {   // the 8-byte banks: map what the new lists want, release what they no longer hold
+        std::vector<uint8_t> have(size_t(L.flux.TilesX()) * L.flux.TilesY(), 0);
+        for (uint32_t t : before) have[t] = 1;
+        for (uint32_t t : L.fluxList) {
+            if (!have[t]) {
+                for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->RequestMap(t % L.flux.TilesX(), t / L.flux.TilesX());
+                L.freshF.push_back(t);
+            }
+            have[t] = 2;
+        }
+        for (uint32_t t : before) {
+            if (have[t] == 1) for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->RequestUnmap(t % L.flux.TilesX(), t / L.flux.TilesX());
+        }
+        for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->CommitMappings(gpu, nullptr);
+    }
+    Log("[swe] %s: the departure's residency +%u / -%u tiles (%u depart; %zu resident; the deepest water %.0f m)",
+        L.name.c_str(), mapped, released, live, L.list.size(), maxDep);
+}
+
 // A level's tables: its step tables (the same slots over its own banks; uv, gradient, stats and ledger the
 // window's, unwritten there), its chain (the parent's h, bed and read velocity bank at the chain's slot 2, by the
 // parent's parity) and its fold into the parent (its banks in the read slots, the parent's water and read
 // velocities in the written ones, the parent's bed at gSoilW).
 void SweSolver::LevelTables(Gpu& gpu, Level& L) {
+    if (!L.stats.Valid()) {
+        L.stats = gpu.CreateTexture2D(L.h.TilesX(), L.h.TilesY(), DXGI_FORMAT_R32G32B32A32_UINT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"swe.level.stats (the departure, tile by tile)");
+    }
     for (int k = 0; k < 2; ++k) {
         hal::Table& t = L.table[k];
         t = hal::Table::Alloc(gpu, 16, "swe.level");
@@ -1805,7 +1936,7 @@ void SweSolver::LevelTables(Gpu& gpu, Level& L) {
         t.Uav2D(8, L.bed.Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(9, L.soil.Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(10, (k ? L.velA : L.velB).Res(), DXGI_FORMAT_R32G32_FLOAT);
-        t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        t.Uav2D(11, L.stats.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
         t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
         t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
         t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
@@ -1816,13 +1947,13 @@ void SweSolver::LevelTables(Gpu& gpu, Level& L) {
         hal::Table& t = L.chain[pp];
         t = hal::Table::Alloc(gpu, 12, "swe.level.chain");
         t.Uav2D(0, L.h.Res(), DXGI_FORMAT_R32_FLOAT);
-        t.Uav2D(1, L.h.Res(), DXGI_FORMAT_R32_FLOAT);
-        t.Uav2D(2, (P ? P->h : L.h).Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(1, (P ? P->h : L.h).Res(), DXGI_FORMAT_R32_FLOAT);      // stage 2d: the magnify reads the parent at index 1
+        t.Uav2D(2, (P ? P->h : L.h).Res(), DXGI_FORMAT_R32_FLOAT);      // ...and the edge's ghost at index 2
         t.Uav2D(3, L.bed.Res(), DXGI_FORMAT_R32_FLOAT);
-        t.Uav2D(4, L.bed.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(4, (P ? P->bed : L.bed).Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(5, (P ? P->bed : L.bed).Res(), DXGI_FORMAT_R32_FLOAT);
         t.Uav2D(6, L.velA.Res(), DXGI_FORMAT_R32G32_FLOAT);
-        t.Uav2D(7, L.velA.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(7, (P ? (pp ? P->velB : P->velA) : L.velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
         t.Uav2D(8, (P ? (pp ? P->velB : P->velA) : L.velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
         t.Uav2D(9, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
         t.Uav2D(10, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
@@ -1863,23 +1994,48 @@ void SweSolver::LevelTables(Gpu& gpu, Level& L) {
 // (the window's corner is (0, 0)); its corner on its parent's lattice; its CPU bed the stack at its grain; the
 // tiles the sea reaches from its edge at mean sea mapped once; its step from its deepest water and its far
 // corners' metric. Returns the level's index in the list (coarsest first), or -1 where no level can stand.
-int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, double cy, const char* name, bool patch, bool tables) {
-    if (!m_bedAt || cells < 16 || rank == 0) return -1;
+int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, double cy, const char* name, bool patch, bool tables,
+                        bool sparse, uint32_t sparseHalfCells) {
+    if (!m_bedAt || rank == 0) return -1;
     const int64_t per = int64_t(1) << rank;
-    // the parent: the finest level coarser than this one whose rectangle holds this one and a ghost cell beyond
     int parent = -1;
-    int64_t c0x = int64_t(std::floor(cx - 0.5 * double(cells) * double(per))), c0y = int64_t(std::floor(cy - 0.5 * double(cells) * double(per)));
-    for (int k = int(m_lv.size()) - 1; k >= 0; --k) {
-        const Level& P = *m_lv[size_t(k)];
-        if (P.rank <= rank) continue;
-        const int64_t pp = int64_t(1) << P.rank;
-        const int64_t ax = (c0x - P.c0x) / pp * pp + P.c0x, ay = (c0y - P.c0y) / pp * pp + P.c0y;   // aligned to P's lattice
-        const int64_t bx = ax + int64_t(cells) * per, by = ay + int64_t(cells) * per;
-        if (ax - pp >= P.c0x && ay - pp >= P.c0y && bx + pp <= P.c0x + int64_t(P.nx) * pp && by + pp <= P.c0y + int64_t(P.ny) * pp) {
-            parent = k;
-            c0x = ax;
-            c0y = ay;
-            break;
+    int64_t c0x = 0, c0y = 0;
+    if (sparse) {
+        // STAGE 2d: the parent's whole extent at this rank, resident about (cx, cy) alone to begin with: the finest
+        // level coarser than this one that holds the point
+        for (int k = int(m_lv.size()) - 1; k >= 0; --k) {
+            const Level& P = *m_lv[size_t(k)];
+            if (P.rank <= rank) continue;
+            const int64_t pp = int64_t(1) << P.rank;
+            if (cx >= double(P.c0x) && cy >= double(P.c0y) && cx < double(P.c0x + int64_t(P.nx) * pp) && cy < double(P.c0y + int64_t(P.ny) * pp)) {
+                parent = k;
+                c0x = P.c0x;
+                c0y = P.c0y;
+                cells = uint32_t((int64_t(P.nx) * pp) / per);
+                break;
+            }
+        }
+        if (parent < 0 || cells > 16384u) {
+            Log("[swe] stage 2d: no sparse level '%s' (2^%u): %s", name, rank, parent < 0 ? "no coarser level holds the point" : "its parent's extent exceeds 16384 cells at that rank");
+            return -1;
+        }
+    } else {
+        if (cells < 16) return -1;
+        // the parent: the finest level coarser than this one whose rectangle holds this one and a ghost cell beyond
+        c0x = int64_t(std::floor(cx - 0.5 * double(cells) * double(per)));
+        c0y = int64_t(std::floor(cy - 0.5 * double(cells) * double(per)));
+        for (int k = int(m_lv.size()) - 1; k >= 0; --k) {
+            const Level& P = *m_lv[size_t(k)];
+            if (P.rank <= rank) continue;
+            const int64_t pp = int64_t(1) << P.rank;
+            const int64_t ax = (c0x - P.c0x) / pp * pp + P.c0x, ay = (c0y - P.c0y) / pp * pp + P.c0y;   // aligned to P's lattice
+            const int64_t bx = ax + int64_t(cells) * per, by = ay + int64_t(cells) * per;
+            if (ax - pp >= P.c0x && ay - pp >= P.c0y && bx + pp <= P.c0x + int64_t(P.nx) * pp && by + pp <= P.c0y + int64_t(P.ny) * pp) {
+                parent = k;
+                c0x = ax;
+                c0y = ay;
+                break;
+            }
         }
     }
     if (parent < 0 && !m_lv.empty()) {
@@ -1895,7 +2051,12 @@ int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, doub
     L.c0y = c0y;
     L.parent = parent;
     L.patch = patch;
+    L.sparse = sparse;
     L.foldUp = parent >= 0;
+    if (sparse) {   // the event's cell in this level: the probe reads there
+        L.px = uint32_t(std::clamp((cx - double(c0x)) / double(per), 0.0, double(cells) - 1.0));
+        L.py = uint32_t(std::clamp((cy - double(c0y)) / double(per), 0.0, double(cells) - 1.0));
+    }
     L.dom = m_dom;
     L.dom.nx = L.dom.ny = cells;
     L.dom.dx = m_dom.dx * double(per);
@@ -1920,7 +2081,7 @@ int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, doub
         L.dom.lat0 = la0; L.dom.lat1 = la1; L.dom.lon0 = lo0; L.dom.lon1 = lo1;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    L.dom.FillBed(m_bedAt);
+    if (!sparse) L.dom.FillBed(m_bedAt);   // a sparse level's bed is the stack's on the GPU alone (its extent is the ocean's)
     L.dom.faces.clear();
     {
         const double texel0 = 0.5 * 3.141592653589793 * L.dom.R / 16384.0;
@@ -1928,7 +2089,7 @@ int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, doub
     }
     const uint32_t n = cells;
     std::vector<uint8_t> sea(size_t(n) * n, 0);
-    {
+    if (!sparse) {
         std::vector<uint32_t> q;
         const auto push = [&](uint32_t i) {
             if (!sea[i] && L.dom.elev[i] > -9000.0f && L.dom.elev[i] < 0.0f) { sea[i] = 1; q.push_back(i); }
@@ -1955,34 +2116,38 @@ int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, doub
     for (uint32_t i = 0; i < n * n; ++i) seaCells += sea[i];
     {
         const uint32_t tw = L.h.TileW(), th = L.h.TileH();
-        L.live.assign(size_t(L.h.TilesX()) * L.h.TilesY(), 0u);
+        L.dryFor.assign(size_t(L.h.TilesX()) * L.h.TilesY(), 0.0);
         for (uint32_t ty = 0; ty < L.h.TilesY(); ++ty) {
             for (uint32_t tx = 0; tx < L.h.TilesX(); ++tx) {
                 bool any = false;
-                for (uint32_t y = ty * th; y < (std::min)((ty + 1) * th, n) && !any; ++y) {
-                    for (uint32_t x = tx * tw; x < (std::min)((tx + 1) * tw, n); ++x) {
-                        if (sea[size_t(y) * n + x]) { any = true; break; }
+                if (sparse) {   // the tiles about the point, sparseHalfCells each way
+                    const int64_t x0 = int64_t(L.px) - int64_t(sparseHalfCells), x1 = int64_t(L.px) + int64_t(sparseHalfCells);
+                    const int64_t y0 = int64_t(L.py) - int64_t(sparseHalfCells), y1 = int64_t(L.py) + int64_t(sparseHalfCells);
+                    any = int64_t((tx + 1) * tw) > x0 && int64_t(tx * tw) <= x1 && int64_t((ty + 1) * th) > y0 && int64_t(ty * th) <= y1;
+                } else {
+                    for (uint32_t y = ty * th; y < (std::min)((ty + 1) * th, n) && !any; ++y) {
+                        for (uint32_t x = tx * tw; x < (std::min)((tx + 1) * tw, n); ++x) {
+                            if (sea[size_t(y) * n + x]) { any = true; break; }
+                        }
                     }
                 }
                 if (!any) continue;
-                L.list.push_back(ty * L.h.TilesX() + tx);
-                L.live[size_t(ty) * L.h.TilesX() + tx] = 1u;
                 for (TileAtlas2D* b : {&L.h, &L.bed, &L.soil, &L.eta, &L.lim}) b->RequestMap(tx, ty);
             }
         }
-        for (uint32_t ty = 0; ty < L.flux.TilesY(); ++ty) {
-            for (uint32_t tx = 0; tx < L.flux.TilesX(); ++tx) {
-                const uint32_t hx = (tx * L.flux.TileW()) / tw, hy = (ty * L.flux.TileH()) / th;
-                if (!L.live[size_t(hy) * L.h.TilesX() + hx]) continue;
-                L.fluxList.push_back(ty * L.flux.TilesX() + tx);
-                for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->RequestMap(tx, ty);
-            }
+        L.h.CommitMappings(gpu, nullptr);
+        for (TileAtlas2D* b : {&L.bed, &L.soil, &L.eta, &L.lim}) b->CommitMappings(gpu, nullptr);
+        LevelLists(L);   // the lists from the water's tiles; the 8-byte banks under them, with the apron
+        for (uint32_t t : L.fluxList) {
+            const uint32_t tx = t % L.flux.TilesX(), ty = t / L.flux.TilesX();
+            for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->RequestMap(tx, ty);
         }
-        for (TileAtlas2D* b : {&L.h, &L.bed, &L.soil, &L.eta, &L.lim, &L.flux, &L.velA, &L.velB}) b->CommitMappings(gpu, nullptr);
+        for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->CommitMappings(gpu, nullptr);
     }
     {
-        float deepest = 0.0f;
+        float deepest = sparse && parent >= 0 ? static_cast<float>(m_lv[size_t(parent)]->deepest) : 0.0f;   // a sparse level's: its parent's
         for (const float e : L.dom.elev) if (e > -9000.0f) deepest = (std::min)(deepest, e);
+        L.deepest = deepest;
         const double ds0 = m_dom.dx / m_dom.R, dt0 = m_dom.dy / m_dom.R;
         double mMin = 1.0;   // the metric at the rectangle's corners: the smallest true cell
         for (int k = 0; k < 4; ++k) {
@@ -2050,7 +2215,7 @@ void SweSolver::LevelTo(hal::CommandContext& cmd, Level& L, D3D12_RESOURCE_STATE
 // A LEVEL'S BATCH -- its first instant (clear, bed, rest at mean sea), an impact due, then its steps up to the
 // batch's end, each: its children's folds into it, the faces, the share, the columns. The levels run coarsest
 // first, so a level's edge reads the departure its parent has carried to it this batch.
-void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double batchEnd, bool reset) {
+void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double batchEnd, bool reset, bool steps) {
     PixScope scope(cmd.Native(), L.name.c_str());
     LevelTo(cmd, L, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     LevelCb(L);
@@ -2064,10 +2229,36 @@ void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double
     const D3D12_GPU_VIRTUAL_ADDRESS pLiveVa = P ? gpu.PushConstants(P->live.data(), P->live.size() * 4) : L.liveVa;
     cmd.ComputeConstants(0, L.cb);
     cmd.ComputeSrvAt(3, L.liveVa);
-    cmd.ComputeSrvAt(5, L.liveVa);   // nothing above in the magnify's sense (gMips = 1): unread
-    cmd.ComputeSrvAt(7, pLiveVa);    // the parent's live words: the ghost
+    cmd.ComputeSrvAt(5, pLiveVa);    // stage 2d: the parent's live words -- the magnify holds this level's non-resident cells
+    cmd.ComputeSrvAt(7, pLiveVa);    // ...and the edge's ghost
     cmd.ComputeTable(4, L.chain[P ? P->velNew : 0].Base());
     cmd.ComputeTable(2, L.table[L.velNew].Base());
+    if (steps) {   // the steps pass: the prelude has stood; its bindings again, then the steps
+        goto stepsPass;
+    }
+    if (!L.fresh && (!L.freshH.empty() || !L.freshF.empty())) {   // stage 2d: tiles mapped since the last batch -- cleared, bedded, rested
+        if (!L.freshH.empty()) {
+            const D3D12_GPU_VIRTUAL_ADDRESS fv = gpu.PushConstants(L.freshH.data(), L.freshH.size() * 4);
+            cmd.ComputeSrvAt(1, fv);
+            cmd.Pipeline(m_clearTileK.Get());
+            cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, static_cast<UINT>(L.freshH.size()));
+            cmd.UavBarriers({L.h.Res(), L.soil.Res(), L.eta.Res(), L.lim.Res()});
+            cmd.Pipeline(m_bedFillK.Get());
+            cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, static_cast<UINT>(L.freshH.size()));
+            cmd.UavBarrier(L.bed.Res());
+            cmd.Pipeline((P ? m_magInitK : m_resetK).Get());   // from the parent's state where there is one, else rest
+            cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, static_cast<UINT>(L.freshH.size()));
+            cmd.UavBarriers({L.h.Res(), L.soil.Res(), L.lim.Res(), L.velA.Res(), L.velB.Res()});
+        }
+        if (!L.freshF.empty()) {
+            cmd.ComputeSrvAt(1, gpu.PushConstants(L.freshF.data(), L.freshF.size() * 4));
+            cmd.Pipeline(m_clearFlux.Get());
+            cmd.Dispatch(L.flux.TileW() / 16, L.flux.TileH() / 16, static_cast<UINT>(L.freshF.size()));
+            cmd.UavBarriers({L.flux.Res(), L.velA.Res(), L.velB.Res()});
+        }
+        L.freshH.clear();
+        L.freshF.clear();
+    }
     if (L.fresh) {
         cmd.ComputeSrvAt(1, L.hlVa);
         cmd.Pipeline(m_clearTileK.Get());
@@ -2093,23 +2284,30 @@ void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double
     }
     L.fresh = false;
     RecordImpose(cmd, L.hlVa, hn, L.table[L.velNew]);   // stage 3: the event on this level where its cavity lies
-    int steps = 0;
-    while (L.simTime + double(L.dt) <= batchEnd + 1.0e-6 && steps < 256) {
+    return;   // the prelude alone: every level's tiles stand cleared, bedded and rested before any level folds or steps
+stepsPass:
+    int n = 0;
+    while (L.simTime + double(L.dt) <= batchEnd + 1.0e-6 && n < 256) {
         // the children's folds: each level of mean sea's gauge whose parent this is, its wet cells' mean into mine
         for (size_t k = 0; k < m_lv.size(); ++k) {
             Level& C = *m_lv[k];
             if (!C.foldUp || C.parent < 0 || m_lv[size_t(C.parent)].get() != &L || C.fresh) continue;
+            if (C.list.empty()) continue;
             LevelCb(C);
             cmd.ComputeConstants(0, C.cb);
             cmd.ComputeSrvAt(3, gpu.PushConstants(C.live.data(), C.live.size() * 4));
+            cmd.ComputeSrvAt(1, gpu.PushConstants(C.list.data(), C.list.size() * 4));
             cmd.ComputeTable(2, C.fold[C.velNew][L.velNew].Base());
             cmd.Pipeline(m_foldTailK.Get());
-            const uint32_t across = (std::max)(C.nx >> (L.rank - C.rank), 1u);
-            cmd.Dispatch(across * across, 1, 1);
+            const uint32_t per = 1u << (L.rank - C.rank), across = (std::max)(C.h.TileW() / per, 1u);   // parent cells across a child tile
+            cmd.Dispatch((across + 15) / 16, (across + 15) / 16, static_cast<UINT>(C.list.size()));
             cmd.UavBarriers({L.h.Res(), L.velA.Res(), L.velB.Res()});
         }
         cmd.ComputeConstants(0, L.cb);
         cmd.ComputeSrvAt(3, L.liveVa);
+        cmd.ComputeSrvAt(5, pLiveVa);
+        cmd.ComputeSrvAt(7, pLiveVa);
+        cmd.ComputeTable(4, L.chain[P ? P->velNew : 0].Base());   // the parent's parity now (its last step's bank)
         cmd.ComputeTable(2, L.table[L.velNew].Base());
         cmd.ComputeSrvAt(1, L.flVa);
         cmd.Pipeline(m_fluxK.Get());
@@ -2124,7 +2322,38 @@ void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double
         cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, hn);
         cmd.UavBarrier(L.h.Res());
         L.simTime += double(L.dt);
-        ++steps;
+        ++n;
+        // the children up to this level's time (Berger and Oliger), each with its own children in turn
+        for (auto& Cp : m_lv) {
+            Level& C = *Cp;
+            if (C.parent >= 0 && m_lv[size_t(C.parent)].get() == &L && !C.fresh) RecordLevel(cmd, gpu, C, L.simTime, reset, true);
+        }
+    }
+    // STAGE 2d: a sparse level's residency follows the departure, every few seconds of its own time: its tile
+    // statistics (the window's kernel, on the departure) dispatched here, read back OUTSIDE this recording -- in the
+    // spin-up after the batch (AfterBatch, as the window's), on the frame ring through the asynchronous readback
+    // (a read begun one frame is an answer a later one) -- and the tiles mapped and released then. A readback
+    // inside the recording broke the upload allocator (the first run: E_FAIL on its reset).
+    if (L.sparse && hn > 0) {
+        if (cmd.Who() == hal::Owner::Frame && L.rb.Pending() && gpu.ReadbackReady(L.rb)) {
+            const uint32_t pitch = L.rb.rowPitch;
+            const std::vector<uint8_t> raw = gpu.ReadbackTake(L.rb);
+            UpdateLevelResidency(gpu, L, raw, pitch);
+        }
+        if (L.simTime - L.statsAt >= 8.0 && !L.statsDue && !L.rb.Pending()) {
+            cmd.ComputeSrvAt(1, L.hlVa);
+            cmd.Pipeline(m_statsK.Get());
+            cmd.Dispatch(1, 1, hn);
+            cmd.UavBarrier(L.stats.res.Get());
+            if (cmd.Who() == hal::Owner::Frame) {
+                GpuTexture wrap = L.stats;
+                wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                L.rb = gpu.ReadbackTextureBegin(wrap);
+                L.statsAt = L.simTime;   // the ring answers later; the next read waits its turn
+            } else {
+                L.statsDue = true;
+            }
+        }
     }
 }
 
@@ -2160,6 +2389,7 @@ LevelsGpu SweSolver::LevelsGpuDesc(float exag) const {
 std::vector<SweSolver::LevelBox> SweSolver::LevelBoxes() const {
     std::vector<LevelBox> out;
     for (const auto& L : m_lv) {
+        if (L->sparse) continue;   // a sparse level reads the cube as it stands (made at run time, its extent the ocean's)
         LevelBox b;
         b.box[0] = L->dom.lat0; b.box[1] = L->dom.lon0; b.box[2] = L->dom.lat1; b.box[3] = L->dom.lon1;
         b.mip = L->bedMip;
@@ -2358,10 +2588,10 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
             Plane hP, bP;
             readLevel(L.h, L.state, hP);
             readLevel(L.bed, L.state, bP);
-            const uint32_t cx = L.nx / 2u, cy = L.ny / 2u;
+            const uint32_t cx = L.sparse ? L.px : L.nx / 2u, cy = L.sparse ? L.py : L.ny / 2u;
             float hh = 0.0f, bb = 0.0f;
             if (at(hP, cx, cy, hh) && at(bP, cx, cy, bb)) {
-                snprintf(buf, sizeof buf, "  %s at its centre %+.1f (bed %.0f)", L.name.c_str(), bb < 0.0f ? hh + bb : 0.0f, bb);
+                snprintf(buf, sizeof buf, "  %s at the impact %+.1f (bed %.0f; %zu tiles)", L.name.c_str(), bb < 0.0f ? hh + bb : 0.0f, bb, L.list.size());
                 line += buf;
             }
         }
@@ -2540,6 +2770,8 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     SeaBoundary();                       // C4: the sea there, whose waves push
     BeginImpose(gpu, reset);             // stage 3: an impact due this batch, its state onto the columns below
     ParentFields(m_cb, m_winParent, 0u, 0, 0);   // stage 2b/2c: the window's parent level under the fine lattice
+    m_cb.up[0] = 1.0f;   // stage 2d: the magnify's parent is mip 1 of the window's own banks
+    m_cb.up[1] = m_cb.up[2] = m_cb.up[3] = 0.0f;
 
     // STAGE 1c: this dispatch's mip, the chain's mips and the mip above's stride (Swe.hlsl UpLiveAt); the live
     // words of the mip above on root SRV 4, the chains' table on root param 4 (rebound a step: the parities)
@@ -2593,7 +2825,14 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     // STAGE 2b/2c: THE LEVELS AHEAD OF THE BATCH, coarsest first -- each its steps up to the batch's end on its own
     // clock, its edge reading the departure its parent has carried to it; then the fine's bindings
     if (!m_lv.empty()) {
-        for (auto& L : m_lv) RecordLevel(cmd, gpu, *L, m_simTime + double(n) * double(m_dt), reset);
+        // every level's prelude first (a tile mapped after the last batch is cleared, bedded and rested before any
+        // level folds it into its parent), then the steps, coarsest first
+        for (auto& L : m_lv) RecordLevel(cmd, gpu, *L, m_simTime + double(n) * double(m_dt), reset, false);
+        // STAGE 2d: BERGER AND OLIGER'S ORDER over the levels -- the top steps, and after each of its steps its children
+        // step up to its time, recursively (RecordLevel recurses); a child read its parent a batch ahead and a parent
+        // folded its child a batch behind when every level ran its whole batch, and the ring never calmed (stage 1c's
+        // lesson, at the levels)
+        for (auto& L : m_lv) if (L->parent < 0) RecordLevel(cmd, gpu, *L, m_simTime + double(n) * double(m_dt), reset, true);
         cmd.ComputeConstants(0, m_cb);
         cmd.ComputeTable(2, m_table.Base());
         cmd.ComputeSrvAt(3, liveVa);

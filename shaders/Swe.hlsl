@@ -88,6 +88,11 @@ cbuffer SweCb : register(b0) {
     float4 gTail;
     float4 gTail2;
     float4 gImpactC;             // stage 3: the event's cavity radius R_c and depth D_c (m), 0, 0
+    // STAGE 2d (2026-10-27): THE MAGNIFY'S PARENT -- the shift from this lattice's cells to the one above's and the
+    // cell above the corner lies in (x, y): (1, 0, 0) for the window (mip 1 of its own banks), the parent level's for
+    // a level (UpLiveAt, the chain reads). A level's non-resident cell is held by its parent: the front of a train
+    // leaving the level's resident set meets the parent's water, not a frontier. w: 0.
+    float4 gUp;
 };
 
 #define HP_WINDOW_ROWS 1
@@ -214,16 +219,18 @@ bool LiveAt(int2 t) {
 // face velocities are the coarse cell's, magnified (nearest: the coarse cell's own value stands over its
 // 2 x 2 fine cells; HIERARCHY 4.20's magnify law). The fine set's edge thus borders the coarse water, not a
 // frontier; the frontier (the stateless sea) stands only where NO mip of the chain holds the cell.
+// the cell above this one (stage 2d: the parent's lattice by gUp -- mip 1 of the same banks for the window)
+int2 UpCell(int2 t) { return (t >> int(gUp.x)) + int2(gUp.yz); }
 bool UpLiveAt(int2 t) {
     if (gMip + 1.0f >= gMips || !InLattice(t)) return false;
-    const uint2 c = uint2(t) >> 1;
+    const uint2 c = uint2(UpCell(t));
     return gLiveUp[(c.y / gEtaTileH) * uint(gEtaTilesXUp) + c.x / gEtaTileW] != 0u;
 }
 bool HoldsAt(int2 t) { return LiveAt(t) || UpLiveAt(t); }   // some mip of the chain holds the cell
-float BedC(int2 t) { return LiveAt(t) ? gBedC[t] : UpLiveAt(t) ? gBedChain[uint(gMip) + 1u][t >> 1] : 0.0f; }
-float HAt(int2 t) { return LiveAt(t) ? gH[t] : UpLiveAt(t) ? gHChain[uint(gMip) + 1u][t >> 1] : 0.0f; }   // NULL: no water
+float BedC(int2 t) { return LiveAt(t) ? gBedC[t] : UpLiveAt(t) ? gBedChain[uint(gMip) + 1u][UpCell(t)] : 0.0f; }
+float HAt(int2 t) { return LiveAt(t) ? gH[t] : UpLiveAt(t) ? gHChain[uint(gMip) + 1u][UpCell(t)] : 0.0f; }   // NULL: no water
 float SurfaceAt(int2 t) { return BedC(t) + HAt(t); }
-float2 VelPrevAt(int2 t) { return LiveAt(t) ? gVelPrev[t] : UpLiveAt(t) ? gVelChain[uint(gMip) + 1u][t >> 1] : 0.0f; }
+float2 VelPrevAt(int2 t) { return LiveAt(t) ? gVelPrev[t] : UpLiveAt(t) ? gVelChain[uint(gMip) + 1u][UpCell(t)] : 0.0f; }
 
 // STAGE 2b: THE TAIL UNDER A CELL OF THIS LATTICE -- the tail cell it lies in (the window's corner lies in gTail.yz;
 // the shift is the rank less this mip), live where the tail holds a tile there. The tail's water is over mean
@@ -425,6 +432,25 @@ void CsSweReset(uint3 id : SV_DispatchThreadID) {
     gLim[t] = 1.0f;
 }
 
+// STAGE 2d: A FRESH TILE OF A LEVEL TAKES ITS PARENT'S STATE (Berger and Oliger's interpolation, by the magnify's
+// nearest law): its column mean sea's over its own bed plus the parent cell's departure, its faces the parent
+// cell's velocities. A tile rested instead erased, through the fold, the train its parent had carried under it
+// (the 1 km stone's train reached the window at 3 % of the law's amplitude that way).
+[numthreads(16, 16, 1)]
+void CsSweMagnifyInit(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
+    const uint2 t = EtaTexel(id);
+    if (t.x >= gNx || t.y >= gNy) return;
+    const float b = gBedC[t];
+    const int2 c = UpCell(int2(t));
+    const float bP = gBedChain[1][c], hP = gHChain[1][c];
+    const float dep = (bP < 0.0f) ? hP + bP : 0.0f;
+    gH[t] = max(gTideNavd - b + dep, 0.0f);
+    gVelPrev[t] = gVelChain[1][c];
+    gSoilW[t] = 0.0f;
+    gLim[t] = 1.0f;
+}
+
 // STAGE 3 OF ONE WATER ON THE TREE (2026-10-27): AN IMPACT IMPOSED ON THE COLUMN FIELD, at the first batch the
 // field stands past the event's zero, at every mip the field holds (the twin's own constants on its own list).
 // The law's state then: its level, the sum over the table at the cell's distance (laws/Impact.hlsli ImpactTerm;
@@ -543,7 +569,7 @@ float FaceP(int2 c, int ax) {
 // E = g Hs^2 / 16 per density (Longuet-Higgins and Stewart 1964). None outside the lattice.
 // stage 1c: the sea of a cell the mip above holds is its coarse cell's -- without it the radiation stress fell to
 // nothing across the fine set's edge, a push that rang the inlet a metre in the first gate run
-float4 WaveAt(int2 c) { return LiveAt(c) ? gWave[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][c >> 1] : 0.0f; }
+float4 WaveAt(int2 c) { return LiveAt(c) ? gWave[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][UpCell(c)] : 0.0f; }
 float3 WaveS(int2 c) {
     if (!InLattice(c)) return 0.0f;
     const float4 w = WaveAt(c);
@@ -853,7 +879,12 @@ void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint g
             if (t.x >= gNx || t.y >= gNy) continue;
             const float h = gH[t];
             vol += h;
-            if (h <= gWetEps) continue;
+            // stage 2d: a level of mean sea's gauge (gTail2.z = 1) counts a column live where it departs from rest,
+            // |h + b| over the wet tolerance -- the train, a surge -- so a front demands the tiles ahead of itself
+            // and the sea it has left is released; the window counts a column that holds water
+            const float b = gBedC[t];
+            const float sig = (gTail2.z > 0.5f) ? ((b < 0.0f) ? abs(h + b) : 0.0f) : h;   // no sea over land: nothing departs there
+            if (sig <= gWetEps) continue;
             flags |= 1u;
             if (c.y == 0u) flags |= 2u;
             if (c.y == gEtaTileH - 1u) flags |= 4u;
@@ -945,7 +976,7 @@ float4 WavePrevAt(float2 p) {   // bilinear over the sweep before, at a point in
         const float w = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
         // stage 1c: up-ray of the fine set's edge the coarse cell's sea is the source (the twin sweeps its own
         // lattice from the open sides; the fine set has no side of its own)
-        if (InLattice(c)) acc += w * (LiveAt(c) ? gWavePrev[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][c >> 1] : 0.0f);
+        if (InLattice(c)) acc += w * (LiveAt(c) ? gWavePrev[c] : UpLiveAt(c) ? gWaveChain[uint(gMip) + 1u][UpCell(c)] : 0.0f);
     }
     return acc;
 }
@@ -1049,56 +1080,40 @@ void CsSweFold(uint3 id : SV_DispatchThreadID) {
     gFlux[c] = v;
 }
 
-// STAGE 2b: THE FOLD INTO THE TAIL (SweSolver::RecordTail, before each tail step; the twin's constants bound).
-// One group a tail cell under the window -- the window is 2^(rank-1) twin cells a side across and sits in
-// gTail.yz..+(gNx >> (rank-1)) of the tail -- each thread the sum of a 16 x 16 block of the twin's cells. The
-// tail's column there becomes mean sea's over ITS bed (gSoilW = the tail's bed here) plus the mean, over the
-// twin's wet cells, of the twin's surface less the window's tide plane: the departure the two gauges share.
-// Its faces take the twin's wet cells' mean velocities. Nothing where the twin holds no water or the tail no sea.
-groupshared float gsFoldH[256];
-groupshared float gsFoldU[256];
-groupshared float gsFoldV[256];
-groupshared float gsFoldN[256];
+// STAGE 2c/2d: THE FOLD INTO THE PARENT (SweSolver::RecordLevel, before each parent step; the child's constants and
+// tile list bound, the fold's table: the child's water, bed and newest velocities in the read slots, the parent's
+// water and read velocities in the written ones, the parent's bed at gSoilW). One thread a parent cell under each
+// of the child's resident tiles (id.z the tile): the parent's column there becomes mean sea's over ITS bed plus
+// the mean, over the child's wet cells, of the child's surface less its tide plane (0 m for a level: the departure
+// the gauges share); its faces take the child's wet cells' mean velocities. Nothing where the child holds no
+// water or the parent no sea.
 [numthreads(16, 16, 1)]
-void CsSweFoldTail(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex) {
-    const uint per = 1u << uint(gTail.x);                 // twin cells a tail cell
-    const uint across = max(gNx / per, 1u);               // tail cells across the window
-    const uint2 cellT = uint2(gid.x % across, gid.x / across) + uint2(gTail.yz);
-    const uint2 o = uint2(gid.x % across, gid.x / across) * per;   // the block's first twin cell
-    const uint sub = max(per / 16u, 1u);
+void CsSweFoldLevel(uint3 id : SV_DispatchThreadID) {
+    const uint per = 1u << uint(gTail.x);                 // child cells a parent cell
+    const uint across = max(gEtaTileW / per, 1u);         // parent cells across a child tile
+    if (id.x >= across || id.y >= across) return;
+    const uint t = gTileList[id.z];
+    const uint2 o = uint2(t % gEtaTilesX, t / gEtaTilesX) * uint2(gEtaTileW, gEtaTileH) + id.xy * per;   // the block's first child cell
+    if (o.x >= gNx || o.y >= gNy) return;
+    const int2 cellT = int2(o >> uint(gTail.x)) + int2(gTail.yz);
     float sh = 0.0f, su = 0.0f, sv = 0.0f, n = 0.0f;
-    for (uint j = 0u; j < sub; ++j) {
-        for (uint i = 0u; i < sub; ++i) {
-            const uint2 t = o + uint2(tid.x * sub + i, tid.y * sub + j);
-            if (t.x >= gNx || t.y >= gNy || !LiveAt(int2(t))) continue;
-            const float h = gH[t];
+    for (uint j = 0u; j < per; ++j) {
+        for (uint i = 0u; i < per; ++i) {
+            const uint2 c = o + uint2(i, j);
+            if (c.x >= gNx || c.y >= gNy) continue;
+            const float h = gH[c];
             if (h <= gWetEps) continue;
-            sh += gBedC[t] + h - gTideNavd;
-            su += gVelPrev[t].x;
-            sv += gVelPrev[t].y;
+            sh += gBedC[c] + h - gTideNavd;
+            su += gVelPrev[c].x;
+            sv += gVelPrev[c].y;
             n += 1.0f;
         }
     }
-    gsFoldH[gi] = sh;
-    gsFoldU[gi] = su;
-    gsFoldV[gi] = sv;
-    gsFoldN[gi] = n;
-    GroupMemoryBarrierWithGroupSync();
-    for (uint r = 128u; r > 0u; r >>= 1u) {
-        if (gi < r) {
-            gsFoldH[gi] += gsFoldH[gi + r];
-            gsFoldU[gi] += gsFoldU[gi + r];
-            gsFoldV[gi] += gsFoldV[gi + r];
-            gsFoldN[gi] += gsFoldN[gi + r];
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-    if (gi != 0u || gsFoldN[0] <= 0.0f) return;
-    const float bT = gSoilW[cellT];   // the tail's bed
-    if (bT >= 0.0f) return;           // the tail holds no sea here
-    const float dep = gsFoldH[0] / gsFoldN[0];
-    gEta[cellT] = max(-bT + dep, 0.0f);
-    gFlux[cellT] = float2(gsFoldU[0], gsFoldV[0]) / gsFoldN[0];
+    if (n <= 0.0f) return;
+    const float bT = gSoilW[cellT];   // the parent's bed
+    if (bT >= 0.0f) return;           // the parent holds no sea here
+    gEta[cellT] = max(-bT + sh / n, 0.0f);
+    gFlux[cellT] = float2(su, sv) / n;
 }
 
 // M9h: THE DERIVED FIELD. Central differences on the derived current, one dispatch over the
