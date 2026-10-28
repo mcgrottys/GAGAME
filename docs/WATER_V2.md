@@ -1910,9 +1910,10 @@ hour's spin-up, five minutes a render), `GAGAME_LEVEL_STATS=1` (every level's gr
 window's deepest and fastest past 60 m / 25 m/s), `--bank-trace 150` (the bank's planes per ring), and a detector
 scoring the sky in a frame's top third. One more reading from the bar scene's gates at the default reach: the
 window's "fastest" current at its south edge tile climbs 26 -> 56 m/s over a minute with the tail standing and is
-quiet without it, while the twin grid is byte-identical either way: the derive's q / h in a thin edge film the
-Flather inflow feeds on the ebb, an instrument reading, not dynamics (the derive floors nothing above the wet
-tolerance; a reader of that current would see a jet) -- stated.
+quiet without it, while the twin grid 4 km about the anchor is byte-identical either way and the clip is clean. My
+reading: the derive's q / h in a thin edge cell the Flather inflow feeds on the ebb (the derive floors nothing above
+the wet tolerance); but the fastest TILE holds 9.3 m at its deepest and the fastest cell's own depth is not printed,
+so it is not shown -- OPEN: the window's edge with the parent level's ghost, at mip 0, on the frame ring.
 
 *Stated, not built:* the window's fine/coarse interface in the levels' manner (the fine fluxes refluxed onto the
 twin, the ghost at the twin's time) or the reach retired; a floor on the derived current; a second-order flux; the
