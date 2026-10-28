@@ -1182,7 +1182,7 @@ void SweSolver::AfterBatch(Gpu& gpu) {
     ProbeCoarse(gpu);
     for (auto& Lp : m_lv) {   // stage 2d: a sparse level's statistics, read back after the batch (never inside its recording)
         Level& L = *Lp;
-        if (!L.sparse || !L.statsDue) continue;
+        if (!(L.sparse || m_levelStats) || !L.statsDue) continue;
         L.statsDue = false;
         GpuTexture wrap = L.stats;
         wrap.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -1852,6 +1852,7 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
     std::vector<uint8_t> want(size_t(tX) * tY, 0);
     uint32_t live = 0;
     float maxDep = 0.0f;
+    uint32_t mxT = 0, myT = 0;
     for (uint32_t ty = 0; ty < tY; ++ty) {
         for (uint32_t tx = 0; tx < tX; ++tx) {
             if (!L.h.IsResident(tx, ty) || size_t(ty) * pitch + size_t(tx + 1) * 16 > raw.size()) continue;
@@ -1861,7 +1862,7 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
             ++live;
             float hm = 0.0f;
             memcpy(&hm, &v[1], 4);
-            maxDep = (std::max)(maxDep, hm);
+            if (hm > maxDep) { maxDep = hm; mxT = tx; myT = ty; }
             want[size_t(ty) * tX + tx] = 1;
             if ((v[0] & 2u) && ty > 0) want[size_t(ty - 1) * tX + tx] = 1;
             if ((v[0] & 4u) && ty + 1 < tY) want[size_t(ty + 1) * tX + tx] = 1;
@@ -1869,6 +1870,15 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
             if ((v[0] & 16u) && tx + 1 < tX) want[size_t(ty) * tX + tx + 1] = 1;
         }
     }
+    {   // THE INSTRUMENT (2026-10-28): the level's greatest departure and where it stands, km east and north of the anchor
+        const double cxW = double(L.c0x) + double((uint64_t(mxT) * L.h.TileW() + L.h.TileW() / 2) << L.rank);
+        const double cyW = double(L.c0y) + double((uint64_t(myT) * L.h.TileH() + L.h.TileH() / 2) << L.rank);
+        const double eKm = (cxW - 0.5 * m_dom.nx) * m_dom.dx * 1.0e-3, nKm = -(cyW - 0.5 * m_dom.ny) * m_dom.dy * 1.0e-3;
+        if (maxDep > 20.0f || (m_levelStats && maxDep > 1.0f))
+            Log("[swe] %s: the greatest departure %.1f m at tile (%u, %u), %+.0f km E %+.0f km N of the anchor (%u tiles depart)",
+                L.name.c_str(), maxDep, mxT, myT, eKm, nKm, live);
+    }
+    if (!L.sparse) return;   // an anchor level's residency is the run's: the statistic alone
     uint32_t mapped = 0, released = 0;
     for (uint32_t ty = 0; ty < tY; ++ty) {
         for (uint32_t tx = 0; tx < tX; ++tx) {
@@ -1911,7 +1921,7 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
         }
         for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->CommitMappings(gpu, nullptr);
     }
-    Log("[swe] %s: the departure's residency +%u / -%u tiles (%u depart; %zu resident; the deepest water %.0f m)",
+    Log("[swe] %s: the departure's residency +%u / -%u tiles (%u depart; %zu resident; the greatest departure %.1f m)",
         L.name.c_str(), mapped, released, live, L.list.size(), maxDep);
 }
 
@@ -2185,6 +2195,7 @@ int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, doub
 // THE TELESCOPE AT INIT: the tail (the top), then the anchor levels telescoping to the window; the window's parent
 // is the finest level that holds it with a ghost cell beyond.
 void SweSolver::InitTelescope(Gpu& gpu, const SweConfig& cfg) {
+    m_levelStats = std::getenv("GAGAME_LEVEL_STATS") != nullptr;   // the instrument: every level's greatest departure
     m_bedAt = cfg.bedAt;
     m_patchCellsPerLip = (std::max)(cfg.patchCellsPerLip, 1.0);
     if (!m_bedAt || cfg.tailCells == 0) return;
@@ -2230,7 +2241,7 @@ void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double
         // at every call put a few hundred pushes a frame into the frame's 4 MB constant arena at 240x and broke it),
         // then the tiles mapped since the last batch, the first instant, the reset, the impact.
         LevelTo(cmd, L, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (L.sparse && cmd.Who() == hal::Owner::Frame && L.rb.Pending() && gpu.ReadbackReady(L.rb)) {
+        if ((L.sparse || m_levelStats) && cmd.Who() == hal::Owner::Frame && L.rb.Pending() && gpu.ReadbackReady(L.rb)) {
             const uint32_t pitch = L.rb.rowPitch;
             const std::vector<uint8_t> raw = gpu.ReadbackTake(L.rb);
             UpdateLevelResidency(gpu, L, raw, pitch);
@@ -2349,7 +2360,7 @@ void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double
     // spin-up after the batch (AfterBatch, as the window's), on the frame ring through the asynchronous readback
     // (begun here, taken at a later batch's prelude) -- and the tiles mapped and released then. A readback inside
     // the recording broke the upload allocator (the first run: E_FAIL on its reset).
-    if (L.sparse && hn > 0 && L.simTime - L.statsAt >= 8.0 && !L.statsDue && !L.rb.Pending()) {
+    if ((L.sparse || m_levelStats) && hn > 0 && L.simTime - L.statsAt >= (L.sparse ? 8.0 : 60.0) && !L.statsDue && !L.rb.Pending()) {
         cmd.ComputeSrvAt(1, L.hlVa);
         cmd.Pipeline(m_statsK.Get());
         cmd.Dispatch(1, 1, hn);
@@ -2377,9 +2388,17 @@ LevelsGpu SweSolver::LevelsGpuDesc(float exag) const {
     g.R = static_cast<float>(m_dom.R);
     g.exag = exag;
     const double ds0 = m_dom.dx / m_dom.R, dt0 = m_dom.dy / m_dom.R;
-    for (size_t k = 0; k < m_lv.size() && g.count < LevelsGpu::kMax; ++k) {
+    // COARSEST FIRST, FINEST LAST: the readers walk this list from its end and take the first level holding the
+    // point. The list's own order is the making's (an event's patch, rank 7, is appended after the anchor's 2^3),
+    // and read in that order the patch's 1.3 km cells stood in for the 80 m level at the shore once its ring
+    // reached the coast (the shore clip of 2026-10-28). Ties keep the making's order.
+    std::vector<size_t> order;
+    for (size_t k = 0; k < m_lv.size(); ++k) if (!m_lv[k]->fresh) order.push_back(k);   // fresh: not yet on the GPU
+    static const bool madeOrder = std::getenv("GAGAME_TAIL_ORDER_MADE") != nullptr;   // the making's order (a bisection switch)
+    if (!madeOrder) std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return m_lv[a]->rank > m_lv[b]->rank; });
+    for (size_t k : order) {
+        if (g.count >= LevelsGpu::kMax) break;
         const Level& L = *m_lv[k];
-        if (L.fresh) continue;   // not yet on the GPU
         LevelsGpu::Level& d = g.level[g.count++];
         d.hSrv = L.h.Srv();
         d.bedSrv = L.bed.Srv();

@@ -1,0 +1,74 @@
+{
+  "_readme": [
+    "THE COLUMNS, QUICKLY (2026-10-28): impact_shore_levels.json's eye and rail with the 1 km stone dropped 115 km east of the Merrimack on the shelf, the clip from five minutes after it at 60x (an hour in 1800 frames), a quarter hour's spin-up -- the event's patch holds the coast from its first batch, so whatever the patch's cells do to the shore's readers shows at once instead of 6.8 h in.",
+    "Record:  build\bin\\gagame.exe scenes\\demos\\impact_shore_quick.json --mp4 out\review\\stage3\\clips\\shore_quick.mp4 --set streaming.offline=true"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-shore-quick",
+    "view": "beach"
+  },
+  "time": {
+    "start": "2026-08-28T15:05:00Z",
+    "timeScale": 60
+  },
+  "water": {
+    "clock": {
+      "bind": "time"
+    },
+    "swe": {
+      "spinupH": 0.25,
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 256
+    }
+  },
+  "sun": {
+    "clock": {
+      "start": "2026-08-28T16:00:00Z",
+      "rate": 0
+    },
+    "earth": {
+      "clock": {
+        "start": "2026-08-28T16:00:00Z",
+        "rate": 0
+      }
+    }
+  },
+  "impacts": [
+    {
+      "lat": 42.75,
+      "lon": -69.4,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 150,
+      "exag": 1
+    }
+  ],
+  "views": [
+    {
+      "name": "beach",
+      "at": {
+        "lat": 42.8125,
+        "lon": -70.8075,
+        "alt": 18,
+        "heading": 75,
+        "tilt": 88,
+        "range": 0
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "rails": {
+    "file": "scenes/rails/impact_shore.json"
+  },
+  "capture": {
+    "headless": true,
+    "frames": 1800,
+    "railDir": "out/rail_impact_shore_quick"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "_readme": [
+    "impact_shore_quick.json with the telescope off (tailCells 0): the stone's far field from the law alone, no levels standing (a bisection scene, 2026-10-28)."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-shore-quick-nolevels",
+    "view": "beach"
+  },
+  "time": {
+    "start": "2026-08-28T15:05:00Z",
+    "timeScale": 60
+  },
+  "water": {
+    "clock": {
+      "bind": "time"
+    },
+    "swe": {
+      "spinupH": 0.25,
+      "currentRefreshS": 1000000,
+      "stepsPerFrame": 256,
+      "tailCells": 0
+    }
+  },
+  "sun": {
+    "clock": {
+      "start": "2026-08-28T16:00:00Z",
+      "rate": 0
+    },
+    "earth": {
+      "clock": {
+        "start": "2026-08-28T16:00:00Z",
+        "rate": 0
+      }
+    }
+  },
+  "impacts": [
+    {
+      "lat": 42.75,
+      "lon": -69.4,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 150,
+      "exag": 1
+    }
+  ],
+  "views": [
+    {
+      "name": "beach",
+      "at": {
+        "lat": 42.8125,
+        "lon": -70.8075,
+        "alt": 18,
+        "heading": 75,
+        "tilt": 88,
+        "range": 0
+      },
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "rails": {
+    "file": "scenes/rails/impact_shore.json"
+  },
+  "capture": {
+    "headless": true,
+    "frames": 1800,
+    "railDir": "out/rail_impact_shore_quick"
+  }
+}

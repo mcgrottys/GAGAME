@@ -584,7 +584,8 @@ private:
     std::vector<uint32_t> m_freshH, m_freshF;
     std::vector<double> m_dryFor;
     double m_openSea = 0.0;                // OpenSeaLevel (OceanBoundary)
-    double m_releaseS = 1800.0;            // the hysteresis: dry this long, released
+    double m_releaseS = 1800.0;
+    bool m_levelStats = false;             // GAGAME_LEVEL_STATS: every level's greatest departure and where, as the sparse ones' (the instrument)            // the hysteresis: dry this long, released
     double m_surgeA = 0.0, m_surgePeak = 0.0, m_surgeTau = 3600.0;
     double m_openSaidT[4] = {-1e18, -1e18, -1e18, -1e18};   // each side's level last said (sim s)
     uint32_t m_stepBudget = kMaxSubsteps;   // SetStepBudget

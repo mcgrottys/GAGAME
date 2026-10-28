@@ -890,7 +890,7 @@ void CsSweTileStats(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint g
             if (c.y == gEtaTileH - 1u) flags |= 4u;
             if (c.x == 0u) flags |= 8u;
             if (c.x == gEtaTileW - 1u) flags |= 16u;
-            hm = max(hm, h);
+            hm = max(hm, (gTail2.z > 0.5f) ? sig : h);   // a level's statistic is its greatest departure
             um = max(um, length(gUv[uint3(t, 0)].xy));
         }
     }
