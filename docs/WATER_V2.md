@@ -1870,7 +1870,24 @@ nearer a nonlinear truth than the law's 9 m; the solver's own dissipation at the
 km cells) is not separated from the physics here. The separation is a convergence run: the same event at a
 finer patch (the lip over sixteen cells) and the departure at a fixed distance from the impact at both ranks.
 
-*Stated, not built:* the convergence run; a second-order flux; the hull's reader of the far field; the anchor
+**The convergence run (09db298, the same night).** `scenes/demos/impact_convergence.json`: the 1 km stone, two
+hours of its time, the probe 300 km from the impact toward the anchor; `water.swe.patchCellsPerLip` 8 (the patch
+at rank 7, 1.3 km cells) against 16 (rank 6, 0.64 km cells). At 300 km the two ranks agree on the front: the
+first motion in the same probe (one minute's resolution), the leading crest +33.2 against +31.6 m, the trough
+-41.1 against -45.5 m, at the same minutes; the second crest does not (+38 against +27 m), the train behind the
+front being the scheme's. So the collapse is the physics (a converged 35 m front at 300 km from a cavity 4 km
+deep, where the law's 1/sqrt(r) from its 27 m at 2600 km would put 80), and the crossing is the scheme's:
+from 300 to 2600 km geometric spreading alone leaves 12 m and the rank-7 run arrived at 0.3 -- the first-order
+flux's diffusion over the 1800 cells between. A second-order flux (a limited reconstruction at the faces) is
+the piece that lets a train cross the ocean; it is stated as next, not built. Two more things the night fixed:
+the solver steps whenever levels exist (the sea layer skipped it above 60 km, and the first orbit clip drew the
+levels at rest), and a level's constants and lists are pushed once a batch in its prelude and bound by address
+in the steps (the Berger-Oliger recursion pushed them at every call: a few hundred a frame at 240x exhausted the
+frame's 4 MB constant arena). The clips: `out/review/stage3/clips/orbit_levels.mp4` (240x from orbit, 104 ms a
+frame with the window stepping too; stepping the levels alone when the sea is off is a follow-up) and
+`shore_levels.mp4` (the dune at 30x as the train arrives through the tail).
+
+*Stated, not built:* a second-order flux; the hull's reader of the far field; the anchor
 levels' residency is the run's; the metric's shear; the twin's fold into its parent, kept off (the gauge); a
 sparse level is never retired after its event; the cost: the 1 km stone's level at 1400 tiles took the spin-up
 from 3 to 16 minutes.
