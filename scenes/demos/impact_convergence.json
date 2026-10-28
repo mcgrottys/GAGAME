@@ -1,0 +1,64 @@
+{
+  "_readme": [
+    "THE CONVERGENCE RUN (stage 2d, 2026-10-27): the 1 km stone of impact_telescope.json, the spin-up from half an hour before it to 1.5 h after, the departure at the impact and 300 km from it toward the anchor every sim-minute; once with the patch at the rank its lip needs over eight cells (2^7, 1.3 km) and once one rank finer (--set water.swe.patchCellsPerLip=16: 2^6, 650 m). If the train's amplitude at 300 km stands with the rank, the loss across the ocean is the physics of a hole to the bed collapsing; if it grows, the scheme's dissipation at the collapse.",
+    "Runs:  build\bin\\gagame.exe scenes\\demos\\impact_convergence.json --headless --frames 60 --dump-water-state --set streaming.offline=true --set water.swe.fineReachM=1500",
+    "       ... --set water.swe.patchCellsPerLip=16"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-convergence",
+    "view": "entrance_above"
+  },
+  "time": {
+    "start": "2026-08-28T16:30:00Z"
+  },
+  "water": {
+    "clock": {
+      "bind": "time"
+    },
+    "swe": {
+      "spinupH": 2.0,
+      "currentRefreshS": 1000000
+    }
+  },
+  "sun": {
+    "clock": {
+      "start": "2026-08-28T16:00:00Z",
+      "rate": 0
+    },
+    "earth": {
+      "clock": {
+        "start": "2026-08-28T16:00:00Z",
+        "rate": 0
+      }
+    }
+  },
+  "impacts": [
+    {
+      "lat": 35.0,
+      "lon": -42.0,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 4000,
+      "exag": 1
+    }
+  ],
+  "views": [
+    {
+      "name": "entrance_above",
+      "at": {
+        "lat": 42.819,
+        "lon": -70.806,
+        "alt": 0,
+        "heading": 0,
+        "tilt": 0,
+        "range": 1400
+      },
+      "fovY": 55,
+      "gauge": "root"
+    }
+  ]
+}

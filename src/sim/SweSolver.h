@@ -71,6 +71,7 @@ struct SweConfig {
     // STAGE 2c: the anchor levels between the tail and the window -- this many, each telescopeCells a side, their
     // ranks telescopeStep apart below the tail's (water.swe.telescopeLevels / telescopeCells / telescopeStep)
     uint32_t telescopeLevels = 3, telescopeCells = 512, telescopeStep = 2;
+    double patchCellsPerLip = 8.0;   // an event's patch: its lip's radius over this many cells (16 = a rank finer: the convergence run)
     std::function<float(double, double, double)> bedAt;
     std::vector<RiverFace> faces;    // at most kMaxRiverFaces
     // C2: THE LAND SOAKS -- one stated soil for now (WATER_V2 12.3): the water a dry column's soil can
@@ -667,6 +668,7 @@ private:
         // itself and the sea it has left is released); its bed is the stack's on the GPU alone (no CPU bed, no flood)
         bool sparse = false;
         uint32_t px = 0, py = 0;                // a patch: the event's cell (the probe reads there)
+        uint32_t qx = 0, qy = 0;                // ...and the cell 300 km from it toward the anchor (the convergence probe)
         GpuTexture stats;                       // its tile statistics (CsSweTileStats on the departure)
         std::vector<uint32_t> freshH, freshF;   // tiles mapped since its last batch: cleared, bedded, rested
         std::vector<double> dryFor;             // per tile: how long quiet (the release's hysteresis)
@@ -685,11 +687,12 @@ private:
         float dt = 1.0f, imposeN = 0.0f;
         bool fresh = true;
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        D3D12_GPU_VIRTUAL_ADDRESS liveVa = 0, hlVa = 0, flVa = 0;
+        D3D12_GPU_VIRTUAL_ADDRESS liveVa = 0, hlVa = 0, flVa = 0, cbVa = 0;   // pushed once a batch (the prelude); the steps bind them by address
     };
     std::vector<std::unique_ptr<Level>> m_lv;   // coarsest first
     int m_winParent = -1;                        // the level the window's edge reads
     std::function<float(double, double, double)> m_bedAt;
+    double m_patchCellsPerLip = 8.0;
     std::function<double(double, double, double)> m_tailLevelAt;
     hal::Resource m_heightArr = nullptr, m_resMapArr = nullptr;   // the stack's page views, for a level made later
     uint32_t m_heightMips = 1;

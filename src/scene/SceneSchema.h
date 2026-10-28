@@ -225,6 +225,7 @@ struct SweProps {
     uint32_t telescopeLevels = 3;
     uint32_t telescopeCells = 512;
     uint32_t telescopeStep = 2;
+    double patchCellsPerLip = 8.0;   // an event's patch: its lip's radius over this many cells (16 = one rank finer)
 };
 struct BankProps {
     bool flatBed = false;

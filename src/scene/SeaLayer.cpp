@@ -931,7 +931,11 @@ void SeaLayer::Simulate(const FrameContext& ctx) {
     // to catch up, re-anchor or reset by its clock policy. Now it steps when the sea is drawn, or
     // when anyone asked it for a region this frame (SweSolver::Demanded) -- interest-driven, sparse,
     // and blind to where the eye is. Once a frame, however many views draw the sea.
-    if (!enabled && !m_swe->Demanded()) return;
+    // STAGE 2d (2026-10-27): the levels are a consumer too -- the far field the globe draws from orbit is theirs where
+    // they stand (TailRead.hlsli), so the solver steps whenever levels exist, the eye's height notwithstanding (the
+    // first orbit clip drew a sea at rest: the camera above 60 km had the sea disabled, nothing stepped, no event
+    // was imposed, and the readers found the levels at rest where the law used to stand)
+    if (!enabled && !m_swe->Demanded() && !m_swe->HasTail()) return;
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.swe");
     m_swe->Record(*ctx.cmd, *ctx.gpu, m_simUnix, m_seaLevel);
 }
