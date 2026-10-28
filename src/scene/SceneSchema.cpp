@@ -259,7 +259,8 @@ const Schema& SweSchema() {
             .Bind("telescopeLevels", p.telescopeLevels, Q::Dimensionless, "1", "the telescope (stage 2c): this many anchor levels between the tail and the window, each about the window's centre", R)
             .Bind("telescopeCells", p.telescopeCells, Q::Dimensionless, "1", "an anchor level's cells a side", R)
             .Bind("telescopeStep", p.telescopeStep, Q::Dimensionless, "1", "the anchor levels' ranks this far apart below the tail's (2: ranks 7, 5, 3 under a rank-9 tail)", R)
-            .Bind("patchCellsPerLip", p.patchCellsPerLip, Q::Dimensionless, "1", "an event's own level: its cavity's lip radius over this many cells (8; 16 = one rank finer, the convergence run)", R);
+            .Bind("patchCellsPerLip", p.patchCellsPerLip, Q::Dimensionless, "1", "an event's own level: its cavity's lip radius over this many cells (8; 16 = one rank finer, the convergence run)", R)
+            .Bind("dampH", p.dampH, Q::Time, "h", "the solver's linear damping, the velocity's e-folding time (0 = none: the bed's quadratic drag is the water's loss; it was 0.99995 a substep, 1.7 to 2.4 h, until 2026-10-28)", R);
         return sc;
     }();
     return *s;

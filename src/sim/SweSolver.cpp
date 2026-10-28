@@ -597,7 +597,8 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.dx = dx;
     m_cb.dy = dyM;
     m_cb.dt = m_dt;
-    m_cb.damp = 0.99995f;   // background linear part only; the real friction is quadratic drag
+    m_dampH = static_cast<float>(cfg.dampH);
+    m_cb.damp = DampOf(m_dt);   // the linear damping, an e-folding time stated by the scene (SweConfig::dampH; none by default)
     m_cb.wetEps = 0.01f;    // wet is h > 1 cm: the solver's one tolerance (GeoClaw's dry cells)
     m_cb.soilRate = 0.0f;
     m_cb.soil[0] = cfg.soilCapM;      // C2: the land soaks (Swe.hlsl CsSweHeight)
@@ -1288,6 +1289,7 @@ void SweSolver::UpdateResidency(Gpu& gpu, const std::vector<uint8_t>& raw, uint3
         const float c = std::sqrt(m_cb.gravity * (std::max)(hMax, 0.5f)) + uMax;
         m_dt = 0.45f * (std::min)(m_cb.dx, m_cb.dy) / c;
         m_cb.dt = m_dt;
+        m_cb.damp = DampOf(m_dt);
     }
     uint32_t mapped = 0, released = 0;
     double releasedM3 = 0.0;
@@ -1492,6 +1494,7 @@ void SweSolver::CoarseCb(int n, int n1) {
     m_cb1.dx = 2.0f * m_cb.dx;
     m_cb1.dy = 2.0f * m_cb.dy;
     m_cb1.dt = (n1 > 0) ? (float(n) * m_dt) / float(n1) : m_dt;
+    m_cb1.damp = DampOf(m_cb1.dt);
     for (int f = 0; f < kMaxRiverFaces; ++f) {
         m_cb1.faceA[4 * f + 1] = std::floor(m_cb.faceA[4 * f + 1] * 0.5f);
         m_cb1.faceA[4 * f + 2] = std::floor(m_cb.faceA[4 * f + 2] * 0.5f);
@@ -1771,6 +1774,7 @@ void SweSolver::LevelCb(Level& L) {
     cb.dx = static_cast<float>(L.dom.dx);
     cb.dy = static_cast<float>(L.dom.dy);
     cb.dt = L.dt;
+    cb.damp = DampOf(L.dt);
     cb.tideNavd = 0.0f;
     cb.faceCount = 0.0f;
     cb.soil[3] = 0.0f;
@@ -1870,6 +1874,7 @@ void SweSolver::UpdateLevelResidency(Gpu& gpu, Level& L, const std::vector<uint8
             float hm = 0.0f;
             memcpy(&hm, &v[1], 4);
             if (hm > maxDep) { maxDep = hm; mxT = tx; myT = ty; }
+            if (m_levelStats && L.sparse && L.list.size() <= 12) Log("[swe]   %s tile (%u, %u): flags %u, the greatest departure %.3f m", L.name.c_str(), tx, ty, v[0], hm);
             want[size_t(ty) * tX + tx] = 1;
             if ((v[0] & 2u) && ty > 0) want[size_t(ty - 1) * tX + tx] = 1;
             if ((v[0] & 4u) && ty + 1 < tY) want[size_t(ty + 1) * tX + tx] = 1;
@@ -2075,9 +2080,15 @@ int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, doub
         L.py = uint32_t(std::clamp((cy - double(c0y)) / double(per), 0.0, double(cells) - 1.0));
         const double ax = 0.5 * double(m_dom.nx), ay = 0.5 * double(m_dom.ny);
         const double ex = (ax - cx) * m_dom.dx, ny = (ay - cy) * m_dom.dy, D = std::hypot(ex, ny);
-        const double f = D > 1.0 ? 300000.0 / D : 0.0;
-        L.qx = uint32_t(std::clamp((cx + (ax - cx) * f - double(c0x)) / double(per), 0.0, double(cells) - 1.0));
-        L.qy = uint32_t(std::clamp((cy + (ay - cy) * f - double(c0y)) / double(per), 0.0, double(cells) - 1.0));
+        // the probes along the line from the event to the anchor, at kProbeKm on the chart, as far as the line goes
+        L.qn = 0;
+        for (const double km : kProbeKm) {
+            if (km * 1000.0 > D - 50000.0) break;
+            const double f = km * 1000.0 / D;
+            L.qx[L.qn] = uint32_t(std::clamp((cx + (ax - cx) * f - double(c0x)) / double(per), 0.0, double(cells) - 1.0));
+            L.qy[L.qn] = uint32_t(std::clamp((cy + (ay - cy) * f - double(c0y)) / double(per), 0.0, double(cells) - 1.0));
+            ++L.qn;
+        }
     }
     L.dom = m_dom;
     L.dom.nx = L.dom.ny = cells;
@@ -2181,10 +2192,10 @@ int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, doub
         L.dt = static_cast<float>(0.45 * (std::min)(L.dom.dx, L.dom.dy) * mMin / (2.0 * std::sqrt(PlanetGWave() * (std::max)(-double(deepest) + 10.0, 50.0))));
         Log("[swe] stage 2c: LEVEL '%s' -- %u x %u cells of 2^%u of the window's (%.2f x %.2f km at the anchor; %.0f x %.0f km across on the plane; "
             "the corners' cells %.2f of their size on the sphere), corner (%lld, %lld) in window cells, parent %s; the sea from its edge reaches "
-            "%u cells (%.0f%%) in %zu tiles; the deepest water %.0f m; its step %.2f s; its bed the cube's mip %u; CPU bed in %.1f s%s",
+            "%u cells (%.0f%%) in %zu tiles; the deepest water %.0f m; its step %.2f s (the damping %.6f a step); its bed the cube's mip %u; CPU bed in %.1f s%s",
             L.name.c_str(), n, n, rank, L.dom.dx / 1000.0, L.dom.dy / 1000.0, n * L.dom.dx / 1000.0, n * L.dom.dy / 1000.0, mMin,
             static_cast<long long>(c0x), static_cast<long long>(c0y), parent >= 0 ? m_lv[size_t(parent)]->name.c_str() : "none (the top: its edge reads the law)",
-            seaCells, 100.0 * seaCells / double(n) / double(n), L.list.size(), -deepest, L.dt, L.bedMip,
+            seaCells, 100.0 * seaCells / double(n) / double(n), L.list.size(), -deepest, L.dt, DampOf(L.dt), L.bedMip,
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), patch ? " -- an event's own patch" : "");
     }
     // the list stays coarsest first: this level goes after the last level of a rank above its own
@@ -2546,7 +2557,7 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
     // the points: the anchor, then a line out to sea (inside the fine set, then the twin's own) and one up the
     // river (the twin's own at a 1.5 km reach) -- where a disturbance stands first says where it is from
     struct Pt { const char* name; double dLat, dLon; };
-    static const Pt kPts[] = {{"anchor", 0.0, 0.0}, {"sea+1km", 0.0, 0.013}, {"sea+3km", 0.0, 0.035}, {"river-3km", -0.0023, -0.035},
+    static const Pt kPts[] = {{"anchor", 0.0, 0.0}, {"sea+1km", 0.0, 0.013}, {"sea+3km", 0.0, 0.035}, {"sea+9km", 0.0, 0.110}, {"river-3km", -0.0023, -0.035},
                               {"n2.2", 0.020, 0.013}, {"n1.1", 0.010, 0.013}, {"s1.1", -0.010, 0.013}, {"s2.2", -0.020, 0.013},
                               {"s3.3", -0.030, 0.013}, {"s4.4", -0.040, 0.013}, {"s6.7", -0.060, 0.013}};
     struct Plane { std::vector<uint8_t> raw; uint32_t pitch = 0; };
@@ -2598,22 +2609,66 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
             wrap.state = state;   // the readers' state after a batch, the kernels' within one
             out.raw = gpu.ReadbackTexture(wrap, &out.pitch, 0);
         };
-        {
-            Level& T = *m_lv[0];
+        {   // the window's parent (the finest anchor level; the tail when there is none): at the anchor, at the first cell
+            // past the window's east edge (the ghost the edge reads), and 2, 5 and 10 km beyond it -- a train from the east
+            // stands here as it meets the edge (2026-10-28: the near stone's 14 m stood 25 km out while the beach saw the tide)
+            Level& T = *m_lv[(m_winParent >= 0 && m_winParent < int(m_lv.size())) ? size_t(m_winParent) : 0];
             Plane hT, bT;
             readLevel(T.h, T.state, hT);
             readLevel(T.bed, T.state, bT);
             double cxd = 0.0, cyd = 0.0, exd = 0.0, eyd = 0.0;
             T.dom.CellOf(m_dom.latC, m_dom.lonC, cxd, cyd);
             const uint32_t cx = uint32_t(std::clamp(cxd, 0.0, double(T.nx) - 1.0)), cy = uint32_t(std::clamp(cyd, 0.0, double(T.ny) - 1.0));
-            const uint32_t ex = uint32_t(std::clamp(double((int64_t(m_dom.nx) - T.c0x) >> T.rank), 0.0, double(T.nx) - 1.0));   // the first tail cell past the window's east edge
+            const uint32_t ex = uint32_t(std::clamp(double((int64_t(m_dom.nx) - T.c0x) >> T.rank), 0.0, double(T.nx) - 1.0));   // the first parent cell past the window's east edge
             float h0 = 0.0f, b0 = 0.0f, h1 = 0.0f, b1 = 0.0f;
             if (at(hT, cx, cy, h0) && at(bT, cx, cy, b0) && at(hT, ex, cy, h1) && at(bT, ex, cy, b1)) {
                 T.dom.LatLonOf(ex + 0.5, cy + 0.5, exd, eyd);
                 const double law = (b1 < 0.0f) ? m_impacts->EtaAt(exd, eyd, m_simTime, -double(b1), false) : 0.0;
-                snprintf(buf, sizeof buf, "  tail: at the anchor %+.3f (bed %.0f), east of the window %+.3f (bed %.0f; the law there %+.3f)",
-                         b0 < 0.0f ? h0 + b0 : 0.0f, b0, b1 < 0.0f ? h1 + b1 : 0.0f, b1, law);
+                snprintf(buf, sizeof buf, "  %s: at the anchor %+.3f (bed %.0f), east of the window %+.3f (bed %.0f; the law there %+.3f)",
+                         T.name.c_str(), b0 < 0.0f ? h0 + b0 : 0.0f, b0, b1 < 0.0f ? h1 + b1 : 0.0f, b1, law);
                 line += buf;
+                for (const double km : {2.0, 5.0, 10.0}) {
+                    const uint32_t x = uint32_t(std::clamp(double(ex) + km * 1000.0 / T.dom.dx, 0.0, double(T.nx) - 1.0));
+                    float hk = 0.0f, bk = 0.0f;
+                    if (!at(hT, x, cy, hk) || !at(bT, x, cy, bk)) continue;
+                    snprintf(buf, sizeof buf, ", +%.0f km %+.3f", km, bk < 0.0f ? hk + bk : 0.0f);
+                    line += buf;
+                }
+            }
+        }
+        {   // EVERY level along the stone's line, at 2, 5, 10 ... km from the anchor toward the last event imposed: the
+            // same points on the telescope's levels say which level loses the train (2026-10-28: the near stone's 9 m
+            // 225 km out became 0.7 m at the window's edge); a point outside a level's rectangle, or on land, is not printed
+            int last = -1;
+            for (size_t i = 0; i < m_imposed.size(); ++i) if (m_imposed[i]) last = int(i);
+            if (last >= 0 && size_t(last) < m_impacts->Events().size()) {
+                const scene::ImpactProps& ep = m_impacts->Events()[size_t(last)].props;
+                for (auto& Lp : m_lv) {
+                    Level& L = *Lp;
+                    if (L.patch || L.fresh) continue;
+                    double axd = 0.0, ayd = 0.0, sxd = 0.0, syd = 0.0;
+                    L.dom.CellOf(m_dom.latC, m_dom.lonC, axd, ayd);
+                    L.dom.CellOf(ep.lat, ep.lon, sxd, syd);   // the chart's inverse holds beyond the rectangle
+                    const double D = std::hypot((sxd - axd) * L.dom.dx, (syd - ayd) * L.dom.dy);
+                    if (D <= 0.0) continue;
+                    Plane hL, bL;
+                    bool read = false;
+                    std::string pts;
+                    for (const double km : {2.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0, 640.0, 1280.0}) {
+                        const double f = km * 1000.0 / D;
+                        if (f > 1.0) break;
+                        const double x = axd + (sxd - axd) * f, y = ayd + (syd - ayd) * f;
+                        if (x < 0.0 || y < 0.0 || x >= double(L.nx) || y >= double(L.ny)) break;
+                        if (!read) { readLevel(L.h, L.state, hL); readLevel(L.bed, L.state, bL); read = true; }
+                        float hk = 0.0f, bk = 0.0f;
+                        if (!at(hL, uint32_t(x), uint32_t(y), hk) || !at(bL, uint32_t(x), uint32_t(y), bk) || bk >= 0.0f) continue;
+                        snprintf(buf, sizeof buf, " %.0fkm %+.3f", km, hk + bk);
+                        pts += buf;
+                    }
+                    if (pts.empty()) continue;
+                    snprintf(buf, sizeof buf, "  %s toward the stone:", L.name.c_str());
+                    line += buf + pts;
+                }
             }
         }
         for (auto& Lp : m_lv) {
@@ -2623,12 +2678,17 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
             readLevel(L.h, L.state, hP);
             readLevel(L.bed, L.state, bP);
             const uint32_t cx = L.sparse ? L.px : L.nx / 2u, cy = L.sparse ? L.py : L.ny / 2u;
-            float hh = 0.0f, bb = 0.0f, hq = 0.0f, bq = 0.0f;
+            float hh = 0.0f, bb = 0.0f;
             if (at(hP, cx, cy, hh) && at(bP, cx, cy, bb)) {
-                const bool q = L.sparse && at(hP, L.qx, L.qy, hq) && at(bP, L.qx, L.qy, bq);
-                snprintf(buf, sizeof buf, "  %s at the impact %+.1f (bed %.0f; %zu tiles)%s%+.3f", L.name.c_str(), bb < 0.0f ? hh + bb : 0.0f, bb, L.list.size(),
-                         q ? " at 300 km " : " at 300 km --", q ? (bq < 0.0f ? hq + bq : 0.0f) : 0.0f);
+                snprintf(buf, sizeof buf, "  %s at the impact %+.1f (bed %.0f; %zu tiles)", L.name.c_str(), bb < 0.0f ? hh + bb : 0.0f, bb, L.list.size());
                 line += buf;
+                // along the line to the anchor: the departure where the level holds water (a tile it does not hold reads 0, bed 0)
+                for (uint32_t k = 0; k < L.qn; ++k) {
+                    float hq = 0.0f, bq = 0.0f;
+                    if (!at(hP, L.qx[k], L.qy[k], hq) || !at(bP, L.qx[k], L.qy[k], bq)) continue;
+                    snprintf(buf, sizeof buf, " %.0fkm %+.3f", kProbeKm[k], bq < 0.0f ? hq + bq : 0.0f);
+                    line += buf;
+                }
             }
         }
     }

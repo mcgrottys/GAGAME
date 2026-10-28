@@ -1,0 +1,64 @@
+{
+  "_readme": [
+    "THE LINE (2026-10-28): impact_convergence.json's 1 km stone carried to the shore -- the departure every sim-minute at the impact and along the line from it to the anchor at 300, 600, 1200, 1800 and 2400 km on the chart (SweSolver::kProbeKm), the spin-up from half an hour before the stone to 6.5 h after it, when the shore scene's probe saw the train at the anchor. Where the amplitude goes between 300 km (a converged 35 m front) and the shore (0.3 m) is read off the line: 1/sqrt(r) is spreading, the rest is the scheme's -- run once with the old linear damping stated as its e-folding time (--set water.swe.dampH=2.44: 0.99995 a 0.44 s substep) and once without (the default).",
+    "Runs:  build\bin\\gagame.exe scenes\\demos\\impact_line.json --headless --frames 30 --set streaming.offline=true --set water.swe.dampH=2.44",
+    "       build\bin\\gagame.exe scenes\\demos\\impact_line.json --headless --frames 30 --set streaming.offline=true"
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {
+    "name": "impact-line",
+    "view": "entrance_above"
+  },
+  "time": {
+    "start": "2026-08-28T21:30:00Z"
+  },
+  "water": {
+    "clock": {
+      "bind": "time"
+    },
+    "swe": {
+      "spinupH": 7.0,
+      "currentRefreshS": 1000000
+    }
+  },
+  "sun": {
+    "clock": {
+      "start": "2026-08-28T16:00:00Z",
+      "rate": 0
+    },
+    "earth": {
+      "clock": {
+        "start": "2026-08-28T16:00:00Z",
+        "rate": 0
+      }
+    }
+  },
+  "impacts": [
+    {
+      "lat": 35.0,
+      "lon": -42.0,
+      "at": "2026-08-28T15:00:00Z",
+      "diameterM": 1000,
+      "speedMs": 20000,
+      "densityKgM3": 3000,
+      "angleDeg": 45,
+      "basinDepthM": 4000,
+      "exag": 1
+    }
+  ],
+  "views": [
+    {
+      "name": "entrance_above",
+      "at": {
+        "lat": 42.819,
+        "lon": -70.806,
+        "alt": 0,
+        "heading": 0,
+        "tilt": 0,
+        "range": 1400
+      },
+      "fovY": 55,
+      "gauge": "root"
+    }
+  ]
+}

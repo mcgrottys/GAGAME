@@ -482,17 +482,28 @@ void CsSweImpose(uint3 id : SV_DispatchThreadID) {
     const float T = max(gImpactA.z, 0.0f);
     const float h0 = gImpactA.w;
     float eta = 0.0f, ur = 0.0f;
-    // AT ITS INSTANT THE LAW IS THE CAVITY ITSELF, closed (the front has moved less than a tenth of the lip's radius:
-    // the sum's truncation would plant metres thousands of km out, a wave from nowhere); after, the sum.
-    if (T * sqrt(gGravity * h0) < 0.1f * kImpactLipRatio * gImpactC.x) {
+    // AT ITS INSTANT THE LAW IS THE CAVITY ITSELF, closed, while the long-wave front is still within the lip (T c < R_D:
+    // a minute for a 1 km stone in 4 km of water, the batch that imposes it a few seconds late); after, the sum. THE SUM
+    // IS CAUSAL (2026-10-28): its truncation plants metres thousands of km out -- imposed at T = 10 s instead of 4 (a
+    // batch boundary moved by the window's step) every tile of the event's patch departed at once, the ring mapped the
+    // whole ocean in minutes, and the line's probes read the planted field as the train -- so beyond the front the
+    // linear theory has carried, r > R_D + c T, the sum is nothing, fading over a lip's radius.
+    const float c0 = sqrt(gGravity * h0), RD = kImpactLipRatio * gImpactC.x;
+    if (T * c0 < RD) {
         eta = ImpactCavityAt(r, gImpactC.x, gImpactC.y);
     } else {
-        [loop] for (uint i = 0u; i < n; ++i) {
-            const float k = asfloat(gImpactTerms[4u * i]);
-            const float om = asfloat(gImpactTerms[4u * i + 1u]);
-            const float A = asfloat(gImpactTerms[4u * i + 2u]);
-            eta += ImpactTerm(A, k, om, r, T);
-            ur += A * om / (h0 * k) * BesselJ1(k * r) * sin(om * T);
+        const float front = RD + c0 * T;
+        const float w = 1.0f - smoothstep(front, front + RD, r);
+        if (w > 0.0f) {
+            [loop] for (uint i = 0u; i < n; ++i) {
+                const float k = asfloat(gImpactTerms[4u * i]);
+                const float om = asfloat(gImpactTerms[4u * i + 1u]);
+                const float A = asfloat(gImpactTerms[4u * i + 2u]);
+                eta += ImpactTerm(A, k, om, r, T);
+                ur += A * om / (h0 * k) * BesselJ1(k * r) * sin(om * T);
+            }
+            eta *= w;
+            ur *= w;
         }
     }
     const float h = max(gH[t], kDepthFloorM);

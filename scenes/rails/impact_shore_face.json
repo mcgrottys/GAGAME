@@ -1,0 +1,22 @@
+{
+  "_readme": "The arrival seen from the beach face (scenes/demos/impact_shore_near.json; 2026-10-28, Mark: 'the waves seen from the shore are obvious and they should wash over the land'): the eye over the foreshore south of the north jetty looking to sea, held through the bore's arrival (the 9 km point rises at 0:05 of the clip, the beach at 0:13, the jetty's +8 m at 0:17), then up over the dune as the island overwashes, and higher for the drawdown (the 7 m trough at 0:38) and the second crest. 60 s at 30 fps = 30 min at the scene's 60x, one sim second a frame. The first rail (impact_shore.json) stood behind the dune in the marsh at -70.8075, where the sea was a strip at the horizon and the arrival read as the marsh flooding; -70.801 was still the flats behind the dune (the water rose about the eye at 0:14), so the eye stands at -70.792, on the beach face or just off it.",
+  "name": "impact_shore_face",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {"t": 0, "at": {"lat": 42.8115, "lon": -70.792, "alt": 20, "lookAt": {"lat": 42.806, "lon": -70.765}}, "view": "", "pose": ""},
+        {"t": 20, "at": {"lat": 42.8115, "lon": -70.792, "alt": 20, "lookAt": {"lat": 42.806, "lon": -70.765}}, "view": "", "pose": ""},
+        {"t": 28, "at": {"lat": 42.814, "lon": -70.812, "alt": 250, "lookAt": {"lat": 42.806, "lon": -70.785}}, "view": "", "pose": ""},
+        {"t": 42, "at": {"lat": 42.818, "lon": -70.83, "alt": 500, "lookAt": {"lat": 42.805, "lon": -70.775}}, "view": "", "pose": ""},
+        {"t": 60, "at": {"lat": 42.828, "lon": -70.87, "alt": 900, "lookAt": {"lat": 42.813, "lon": -70.8}}, "view": "", "pose": ""}
+      ]
+    }
+  ]
+}

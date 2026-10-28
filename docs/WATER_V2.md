@@ -1877,9 +1877,10 @@ first motion in the same probe (one minute's resolution), the leading crest +33.
 -41.1 against -45.5 m, at the same minutes; the second crest does not (+38 against +27 m), the train behind the
 front being the scheme's. So the collapse is the physics (a converged 35 m front at 300 km from a cavity 4 km
 deep, where the law's 1/sqrt(r) from its 27 m at 2600 km would put 80), and the crossing is the scheme's:
-from 300 to 2600 km geometric spreading alone leaves 12 m and the rank-7 run arrived at 0.3 -- the first-order
-flux's diffusion over the 1800 cells between. A second-order flux (a limited reconstruction at the faces) is
-the piece that lets a train cross the ocean; it is stated as next, not built. Two more things the night fixed:
+from 300 to 2600 km geometric spreading alone leaves 12 m and the rank-7 run arrived at 0.3. (I read that as the
+first-order flux's diffusion and named a second-order flux as next; the next day's clean line, below, shows the
+deep crossing holding 1/sqrt(r) and the loss standing between the shelf and the window's edge -- the second-order
+flux is not the piece.) Two more things the night fixed:
 the solver steps whenever levels exist (the sea layer skipped it above 60 km, and the first orbit clip drew the
 levels at rest), and a level's constants and lists are pushed once a batch in its prelude and bound by address
 in the steps (the Berger-Oliger recursion pushed them at every call: a few hundred a frame at 240x exhausted the
@@ -1915,12 +1916,52 @@ reading: the derive's q / h in a thin edge cell the Flather inflow feeds on the 
 the wet tolerance); but the fastest TILE holds 9.3 m at its deepest and the fastest cell's own depth is not printed,
 so it is not shown -- OPEN: the window's edge with the parent level's ghost, at mip 0, on the frame ring.
 
-*Stated, not built:* the window's fine/coarse interface in the levels' manner (the fine fluxes refluxed onto the
-twin, the ghost at the twin's time) or the reach retired; a floor on the derived current; a second-order flux; the
+**The causal impose, the damping as a time, and the beach (2026-10-28).** Three findings from one day, in the order
+they fell. (1) `m_cb.damp = 0.99995f` a substep was a hidden linear damping: an e-folding of 1.7 h on the window
+(0.3 s steps), 2.4 h on the event's patch, 17 h on the tail -- the 1 km stone's train spends 5.6 h from 300 km to the
+beach, e^-2.3 from the damping alone. It is a stated time now, `water.swe.dampH` (hours; 0 = none, the default;
+`SweSolver::DampOf(dt)` wherever a step is set). (2) With the damping gone the window's step moved (its fastest
+current moved), the batch boundary moved, and the impose fell at T = 10 s instead of 4 -- past `CsSweImpose`'s
+threshold (the closed cavity while T c < 0.1 R_D, 6.5 s for this stone in 4 km of water; the truncated Bessel sum
+after) -- and the sum's truncation PLANTED metres over the whole ocean: every patch tile departed at the first
+statistics, fresh tiles 166 km out held 1.5-12 m within seconds, the ring mapped the ocean (+6, +10, +14 tiles a
+readback; 2600 tiles), and the line's probes read the planted field as the train (a 49.8 m "crest" at 600 km). The
+symptom to know it by: the departure's residency growing quadratically right after the impose, and thousands of
+metres on tiles far from the cavity. The law is one and continuous now: the cavity itself while T c < R_D (a
+minute), the sum beyond with a causal cutoff, `w = 1 - smoothstep(R_D + c T, + R_D, r)` on eta and u_r. (3) THE
+CLEAN LINE (`scenes/demos/impact_line.json`, probes at 300, 600, 1200, 1800, 2400 km on the chart, `kProbeKm`; the
+probes every ~69 s of a ~4 min period, so a crest reads 0.6-1.0 of itself): undamped 39.0, 38.1, 17.1, 16.2, 9.1 m;
+with the old damping stated (`dampH` 2.44) 35.4, 37.0, 16.3, 10.9, 4.5 m. The deep crossing holds 1/sqrt(r) within
+the sampling (38 at 600 km -> 19 at 2400 by spreading; 9 read, on the shelf, where the probe's cadence catches less
+of a shorter wave). The train reaches the window's east edge at 0.1-0.7 m (level 2^3's ghost cell, 49 m of water)
+and the beach at +-0.5-0.9 m: the loss is between the patch's 9 m at 225 km (the Gulf of Maine) and the window,
+in the telescope's intake from the tail (level 2^7's edge, 330 km out, reads the tail's ghost) or its shelf
+crossing (2^7 -> 2^5 -> 2^3). OPEN; the instrument is in: every level now prints its departure along the stone's
+line at 2, 5, 10 ... 1280 km from the anchor (` toward the stone:`), and the window's parent at the window's east
+edge and 2, 5, 10 km beyond. THE NEAR STONE (`scenes/demos/impact_shore_near.json`: the 1 km stone 115 km east on
+the shelf, 150 m of water, at 15:00Z; the cavity 18 km across to the bed) shows the telescope carrying a train it is
+imposed on: +16 m at 80 km, 8-9 m at 20 km, 6.7 m two kilometres off the window's east edge at 15:39Z, +8.0 m at the
+jetty at 15:48:40Z over a +0.9 tide, -7 m at 15:59Z, +2 m at 16:05Z; the window's land tiles 197 -> 205 (the
+overwash); the levels agree with each other at every probe. Two traps in reading it: the coarse probes run in the
+spin-up alone (`AfterBatch` on the frame path does not probe), so a scene whose spin-up ends before the arrival
+reads the tide and nothing after -- the near scene's probes stopped at 15:40Z with the train 2 km out, and I
+called the shore a wall on that (it is not); the arrival is read with `--set time.start=...17:00Z --set
+water.swe.spinupH=2.0 --headless --frames 1`. And the window's "fastest" statistic is the derive's q / h in the
+overwash's thin films (58-257 m/s in the hour the train is ashore; the step falls to 0.046 s and the 256-step
+budget still covers a 2 s frame many times): not a blow-up, not the step starving. The first clip's rail
+(`impact_shore.json`) stood in the marsh behind the dune, where the sea is a strip at the horizon and the arrival
+reads as the marsh flooding at 0:12-0:18 -- the wave Mark could not find at 0:58 had passed forty minutes before;
+`scenes/rails/impact_shore_face.json` stands over the beach face looking the bore in the eye.
+
+*Stated, not built:* the telescope's intake of a train from the tail (the line's x13 between 225 km and the
+window's edge: where, by the per-level probes); the window's fine/coarse interface in the levels' manner (the fine
+fluxes refluxed onto the twin, the ghost at the twin's time) or the reach retired; a floor on the derived current
+(and the level's step law with the current term, its factor 2 unexplained); the coarse probes on the frame path; the
 hull's reader of the far field; the anchor
 levels' residency is the run's; the metric's shear; the twin's fold into its parent, kept off (the gauge); a
 sparse level is never retired after its event; the cost: the 1 km stone's level at 1400 tiles took the spin-up
-from 3 to 16 minutes.
+from 3 to 16 minutes. A second-order flux is no longer on this list: the clean line crosses the deep ocean at
+1/sqrt(r).
 
 ## Sources
 

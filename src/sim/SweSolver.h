@@ -72,6 +72,11 @@ struct SweConfig {
     // ranks telescopeStep apart below the tail's (water.swe.telescopeLevels / telescopeCells / telescopeStep)
     uint32_t telescopeLevels = 3, telescopeCells = 512, telescopeStep = 2;
     double patchCellsPerLip = 8.0;   // an event's patch: its lip's radius over this many cells (16 = a rank finer: the convergence run)
+    // THE LINEAR DAMPING, AS A TIME (2026-10-28): the velocity's e-folding time in hours, 0 = none (water.swe.dampH). It
+    // was 0.99995 a substep -- "a whisper for numerical hygiene" -- which is an e-folding of 1.7 h at the window's
+    // 0.3 s step and 2.4 h at an event's patch's 0.44 s: the 1 km stone's train lost e^-1.3 of itself crossing from
+    // 300 to 2600 km before any scheme's diffusion. The physics of a tsunami's loss is the quadratic drag; none here.
+    double dampH = 0.0;
     std::function<float(double, double, double)> bedAt;
     std::vector<RiverFace> faces;    // at most kMaxRiverFaces
     // C2: THE LAND SOAKS -- one stated soil for now (WATER_V2 12.3): the water a dry column's soil can
@@ -669,7 +674,7 @@ private:
         // itself and the sea it has left is released); its bed is the stack's on the GPU alone (no CPU bed, no flood)
         bool sparse = false;
         uint32_t px = 0, py = 0;                // a patch: the event's cell (the probe reads there)
-        uint32_t qx = 0, qy = 0;                // ...and the cell 300 km from it toward the anchor (the convergence probe)
+        uint32_t qx[6] = {}, qy[6] = {}, qn = 0;   // ...and the cells along the line from it to the anchor at kProbeKm (the convergence probe)
         GpuTexture stats;                       // its tile statistics (CsSweTileStats on the departure)
         std::vector<uint32_t> freshH, freshF;   // tiles mapped since its last batch: cleared, bedded, rested
         std::vector<double> dryFor;             // per tile: how long quiet (the release's hysteresis)
@@ -694,6 +699,9 @@ private:
     int m_winParent = -1;                        // the level the window's edge reads
     std::function<float(double, double, double)> m_bedAt;
     double m_patchCellsPerLip = 8.0;
+    float m_dampH = 0.0f;                                                              // the linear damping's e-folding time (h); 0 = none
+    float DampOf(float dt) const { return m_dampH > 0.0f ? std::exp(-dt / (m_dampH * 3600.0f)) : 1.0f; }   // the factor a substep of dt applies
+    static constexpr double kProbeKm[6] = {300.0, 600.0, 1200.0, 1800.0, 2400.0, 3000.0};   // the convergence probes' distances on the chart
     std::function<double(double, double, double)> m_tailLevelAt;
     hal::Resource m_heightArr = nullptr, m_resMapArr = nullptr;   // the stack's page views, for a level made later
     uint32_t m_heightMips = 1;
