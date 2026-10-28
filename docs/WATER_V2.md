@@ -1960,8 +1960,25 @@ the rails took lat/lon keys. Fixed in `Rail::KeyMotor` (`RootMotorOf`: the orbit
 compass and motor spellings are the place's and carried). The views' own lat/lon eye (`ViewEyeOrbit`) never carried
 and stood right.
 
-*Stated, not built:* the telescope's intake of a train from the tail (the line's x13 between 225 km and the
-window's edge: where, by the per-level probes); the window's fine/coarse interface in the levels' manner (the fine
+**The deep stone's loss is the slope, not a seam (the same evening).** With the event's patch probed at the tail's own
+points (the per-level line, with residency marks and each point's ground distance -- the chart's kilometres shrink
+to 0.44 of the sphere's far out, so "2400 km from the stone" on the chart is 2241 on the ground and 384 from the
+anchor, not 225), the fold is seen sound: the tail and the patch agree at 640 km (12.5 against 12.1 m) and at 1280
+(14 against 12). The train falls from 12 m to 1-3 m between 640 and 320 km of the anchor IN BOTH LEVELS ALIKE --
+the continental slope and shelf edge -- and the telescope carries what it gets from there (2.6 m at level 2^7's
+edge, 1.0 at the window's, +0.9 at the beach). The rank test on the slope (`patchCellsPerLip` 16, the patch at
+2^6, 645 m cells): before the slope the finer patch holds 1.7 times more (23.5 against 13.3 m at 640 km, 22 against
+12.7 at 1280 -- the collapse's train is still the rank's, as the first convergence run found of its second crest),
+and after it the two nearly agree (3.75 against 3.08 m at 320 km; the tail 2.33 against 2.65). A slope that returns
+the same bore whatever comes to it is the breaking, not the scheme -- a 13-23 m wave of four minutes' period cannot
+climb from 4000 m onto a 100-200 m shelf whole. One crest, one point, read as such. The rank-6 run died there of a
+device removal (0x887A0005) with its patch at 3492 resident tiles: A SPARSE LEVEL NEVER RELEASES behind this train
+(the trailing slosh of +-1-2 m never falls under the wet tolerance, so `dryFor` never runs), and at 2^6 over the
+whole ocean it grows until the GPU is lost -- the retirement law is next on that list.
+
+*Stated, not built:* a sparse level's release behind a train (the departure's threshold for "quiet" above the
+wet tolerance, or the front's own wake released by time; at 2^6 the ocean-wide patch lost the GPU at 3492 tiles);
+the window's fine/coarse interface in the levels' manner (the fine
 fluxes refluxed onto the twin, the ghost at the twin's time) or the reach retired; a floor on the derived current
 (and the level's step law with the current term, its factor 2 unexplained); the coarse probes on the frame path; the
 hull's reader of the far field; the anchor
