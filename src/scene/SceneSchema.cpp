@@ -255,7 +255,10 @@ const Schema& SweSchema() {
                   "the solver's window: this many tiles of 128 cells a side about the eye's start (the place's anchor), its corner on the global lattice of the cell's angle, its bed the one height stack's, its open sea the tide atlas's; 0 = no solver (stage 2 of one water on the tree)", R)
             .Bind("cellM", p.cellM, Q::Length, "m", "the solver's cell: one angle east and north, this many metres north-south (13.728 m = 4/9 arc-second)", R)
             .Bind("tailCells", p.tailCells, Q::Dimensionless, "1", "the tail across the ocean (stage 2b of one water on the tree): this many cells a side about the same anchor, the window whole in its central cells; 0 = no tail", R)
-            .Bind("tailRank", p.tailRank, Q::Dimensionless, "1", "the tail's cell as a power of two of the window's (9: 512 window cells, 5 x 7 km at the Merrimack)", R);
+            .Bind("tailRank", p.tailRank, Q::Dimensionless, "1", "the tail's cell as a power of two of the window's (9: 512 window cells, 5 x 7 km at the Merrimack)", R)
+            .Bind("telescopeLevels", p.telescopeLevels, Q::Dimensionless, "1", "the telescope (stage 2c): this many anchor levels between the tail and the window, each about the window's centre", R)
+            .Bind("telescopeCells", p.telescopeCells, Q::Dimensionless, "1", "an anchor level's cells a side", R)
+            .Bind("telescopeStep", p.telescopeStep, Q::Dimensionless, "1", "the anchor levels' ranks this far apart below the tail's (2: ranks 7, 5, 3 under a rank-9 tail)", R);
         return sc;
     }();
     return *s;

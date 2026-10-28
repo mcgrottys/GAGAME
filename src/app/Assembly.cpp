@@ -662,6 +662,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // STAGE 2b: the tail across the ocean (its bed the stack at its grain, as the window's)
         sweCfg.tailCells = S.water.swe.tailCells;
         sweCfg.tailRank = S.water.swe.tailRank;
+        sweCfg.telescopeLevels = S.water.swe.telescopeLevels;
+        sweCfg.telescopeCells = S.water.swe.telescopeCells;
+        sweCfg.telescopeStep = S.water.swe.telescopeStep;
         sweCfg.bedAt = [&compositor, hgtCh](double la, double lo, double resM) {
             constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
             return compositor.SampleHeight(hgtCh, la * kD2Rd, lo * kD2Rd, resM);

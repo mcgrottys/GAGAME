@@ -157,11 +157,14 @@ cbuffer BankCb : register(b0) {
     uint4  gImpU;
     // STAGE 2b (2026-10-27; shaders/TailRead.hlsli, sim/ImpactGpu.h TailGpu): the tail's chart and textures,
     // read in place of the law where the tail holds the texel. Appended at the END on both sides.
-    float4 gTailA;
-    float4 gTailE;
-    float4 gTailN;
-    uint4  gTailU;
-    float4 gTailB;
+    // STAGE 2c: the levels (shaders/TailRead.hlsli; sim/ImpactGpu.h LevelsGpu): the chart's anchor up and R; its
+    // east and the level count; its north and the exaggeration; each level's first cell centre and steps on the
+    // chart; each level's h and bed SRVs and its cells. Coarsest first. Appended at the END on both sides.
+    float4 gLvlChart;
+    float4 gLvlE;
+    float4 gLvlN;
+    float4 gLvlA[8];
+    uint4  gLvlU[8];
 };
 
 // The ladder's ring under k: its texel over ring 0's, its mapped set.

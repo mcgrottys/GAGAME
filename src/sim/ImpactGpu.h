@@ -16,11 +16,15 @@ struct ImpactGpu {
 // STAGE 2b (2026-10-27): THE TAIL to the readers of the far field (shaders/TailRead.hlsli; SweSolver::TailGpuDesc):
 // its h and bed textures on the heap, its cells a side, its chart (the anchor's up, east and north in the planet's
 // frame, R, the cell's angle east and north over R), and the display exaggeration on the drawn departure.
-struct TailGpu {
-    uint32_t hSrv = 0xFFFFFFFFu, bedSrv = 0xFFFFFFFFu;
-    uint32_t cells = 0;   // 0 = no tail
+struct LevelsGpu {
+    static constexpr uint32_t kMax = 8;
+    struct Level {
+        uint32_t hSrv = 0xFFFFFFFFu, bedSrv = 0xFFFFFFFFu, nx = 0, ny = 0;
+        float s0 = 0.0f, t0 = 0.0f, ds = 0.0f, dt = 0.0f;   // the first cell's centre over R and the steps (dt < 0: rows go south)
+    };
+    uint32_t count = 0;   // 0 = no levels
     float up[3] = {0.0f, 1.0f, 0.0f}, east[3] = {1.0f, 0.0f, 0.0f}, north[3] = {0.0f, 0.0f, 1.0f};
-    float R = 6371000.0f, ds = 0.0f, dt = 0.0f;
-    float exag = 1.0f;
+    float R = 6371000.0f, exag = 1.0f;
+    Level level[kMax];   // coarsest first; the readers take the finest that holds the point
 };
 }  // namespace ga

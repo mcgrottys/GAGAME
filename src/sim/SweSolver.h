@@ -24,6 +24,7 @@
 
 #include "core/GradeField.h"
 #include "sim/ImpactField.h"
+#include <memory>
 #include "core/Lattice.h"
 #include "hal/Context.h"
 #include "hal/Gpu.h"
@@ -67,6 +68,9 @@ struct SweConfig {
     // 0 cells = no tail (water.swe.tailCells, water.swe.tailRank).
     uint32_t tailCells = 2048;
     uint32_t tailRank = 9;
+    // STAGE 2c: the anchor levels between the tail and the window -- this many, each telescopeCells a side, their
+    // ranks telescopeStep apart below the tail's (water.swe.telescopeLevels / telescopeCells / telescopeStep)
+    uint32_t telescopeLevels = 3, telescopeCells = 512, telescopeStep = 2;
     std::function<float(double, double, double)> bedAt;
     std::vector<RiverFace> faces;    // at most kMaxRiverFaces
     // C2: THE LAND SOAKS -- one stated soil for now (WATER_V2 12.3): the water a dry column's soil can
@@ -93,6 +97,7 @@ struct SweDomain {
     double U[3] = {}, V[3] = {};                             // the cells' planes (through the centre)
     uint32_t nx = 0, ny = 0;
     double dx = 0.0, dy = 0.0;                               // a cell, metres (true, at the anchor)
+    double ox = 0.0, oy = 0.0;   // stage 2c: a level's rectangle on the chart: the centred lattice's cell less this one's
     std::vector<float> elev;      // the bed at the cell centres, m NAVD88, row 0 north (the stack's)
     // THE RIVER FACES' CELLS (Bound): a side and the run [c0, c1] along it (columns for N and S,
     // rows for W and E) of wet-capable edge cells (bed under +2 m) about the river's crossing.
@@ -257,12 +262,13 @@ public:
     // STAGE 2b: THE TAIL'S OWN EXTERIOR -- the departure from mean sea (m) at a place and instant at the tail's
     // far edge: the impacts' law for events outside the tail (FrameLoop); unset, nothing.
     void SetTailLevelSource(std::function<double(double, double, double)> at) { m_tailLevelAt = std::move(at); }
-    bool HasTail() const { return m_tail; }
-    // STAGE 2b: the tail to the readers of the far field (sim/ImpactGpu.h TailGpu; shaders/TailRead.hlsli): its
-    // textures, its cells, its chart; `exag` the display exaggeration on the drawn departure.
-    TailGpu TailGpuDesc(float exag) const;
-    const SweDomain& TailDomain() const { return m_domT; }
-    uint32_t TailBedMip() const { return m_tailBedMip; }   // the cube's mip the tail's cells read (WaterManager's want)
+    bool HasTail() const { return !m_lv.empty(); }
+    // STAGE 2c: the levels to the readers of the far field (sim/ImpactGpu.h LevelsGpu; shaders/TailRead.hlsli):
+    // their textures, cells and rectangles on the one chart; `exag` the display exaggeration on the drawn departure.
+    LevelsGpu LevelsGpuDesc(float exag) const;
+    // the levels' lat/lon bounds and the cube's mip each reads (WaterManager's want for their beds), coarsest first
+    struct LevelBox { double box[4]; uint32_t mip; };
+    std::vector<LevelBox> LevelBoxes() const;
 
     // Advance toward simUnix (records compute through cmd) and leave eta + uv sampleable.
     // tideNavd = the analytic water level, NAVD88 m. Returns substeps executed this frame.
@@ -599,8 +605,6 @@ private:
     hal::Table m_table, m_tableB;
     D3D12_RESOURCE_STATES m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    D3D12_RESOURCE_STATES m_tailState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;   // stage 2b: the tail's h and bed, read by the far field's readers
-    void TailTo(hal::CommandContext& cmd, D3D12_RESOURCE_STATES to);
     Gpu::TextureReadback m_rbEta, m_rbUv;   // F13: the asynchronous read of the two fields
     static void UnpackFields(uint32_t nx, uint32_t ny, const std::vector<uint8_t>& etaData,
                              uint32_t etaPitch, const std::vector<uint8_t>& uvData, uint32_t uvPitch,
@@ -641,38 +645,52 @@ private:
     std::vector<uint8_t> m_imposed;
     double m_imposedAt = -1e18;
     int m_imposeEvent = -1;
-    float m_imposeTailN = 0.0f;   // this batch's event's terms where its cavity lies in the tail (else 0)
     D3D12_GPU_VIRTUAL_ADDRESS m_imposeVa = 0;
     hal::Pso m_imposeK;
     bool BeginImpose(Gpu& gpu, bool reset);
     void RecordImpose(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS listVa, UINT count, const hal::Table& table);
-    // STAGE 2b (2026-10-27): THE TAIL. The same kernels on a third lattice -- the window's chart coarsened by
-    // 2^rank, tailCells a side, the window whole in its central cells -- carrying the ocean's DEPARTURE from mean
-    // sea (its columns rest at MSL over the stack's bed at its grain; its tide plane is 0 m; its own edge reads the
-    // impacts' law), stepped on its own clock at its own CFL ahead of each batch, every tile the sea reaches from
-    // its edge resident for the run. The window's lattice edge keeps its one law, with the Level there the tide
-    // atlas's PLUS the tail's departure and its velocity (Swe.hlsl TailDepAt, TailUAt); the twin's wet cells fold
-    // into the tail's cells under the window before each tail step (CsSweFoldTail); an impact is imposed on the
-    // tail as on the window. The chart's metric (CellM) makes the tail's far cells their true size.
-    bool m_tail = false;
-    SweDomain m_domT;
-    SweCbData m_cbT{};
-    TileAtlas2D m_hT, m_bedT, m_soilT, m_etaT, m_fluxT, m_velAT, m_velBT, m_limT;
-    hal::Table m_tableT, m_tableBT;          // the tail's step tables (its read velocity bank in turn)
-    hal::Table m_tableFoldT[2][2];           // [the twin's newest bank][the tail's read bank]
-    std::vector<uint32_t> m_listT, m_fluxListT, m_liveT;
-    uint32_t m_velNewT = 0;
-    double m_simTimeT = 0.0;
-    float m_dtT = 1.0f;
-    bool m_tailFresh = true;
-    uint32_t m_tailCorner = 0, m_tailShift = 9, m_tailBedMip = 3;
-    hal::Pso m_foldTailK;
-    D3D12_GPU_VIRTUAL_ADDRESS m_liveTVa = 0, m_hlTVa = 0, m_flTVa = 0;
+    // STAGE 2c (2026-10-27, Mark: "the telescope"): THE LEVELS -- the tail of stage 2b as the coarsest of a list, each a
+    // rectangle of the one anchor chart at its own cell size (2^rank window cells) with its corner on its parent's
+    // lattice, the same kernels on its own banks, lists and clock; its edge the sea's exterior at its parent's
+    // departure in the ghost cell beyond (the top's at the impacts' law); a level of mean sea's gauge folds its wet
+    // mean into its parent before each parent step. The anchor levels telescope from the tail to the window; an
+    // event whose cavity is unresolved where it falls gets a patch of its own at the rank its radius needs.
+    struct Level {
+        std::string name;
+        uint32_t rank = 9, nx = 0, ny = 0;      // the cell = 2^rank window cells; cells across and down
+        int64_t c0x = 0, c0y = 0;               // the corner in rank-0 (window) cells; the window's corner is (0, 0)
+        int parent = -1;                        // the next coarser level holding this one and a ghost beyond (-1: the top)
+        bool foldUp = false, patch = false;
+        SweDomain dom;
+        SweCbData cb{};
+        TileAtlas2D h, bed, soil, eta, flux, velA, velB, lim;
+        hal::Table table[2];                    // the step tables, by the read velocity bank
+        hal::Table chain[2];                    // the parent's views at the chain's slot 2, by the parent's parity
+        hal::Table fold[2][2];                  // [this level's newest bank][the parent's read bank]
+        std::vector<uint32_t> list, fluxList, live;
+        uint32_t velNew = 0, bedMip = 3;
+        double simTime = 0.0;
+        float dt = 1.0f, imposeN = 0.0f;
+        bool fresh = true;
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        D3D12_GPU_VIRTUAL_ADDRESS liveVa = 0, hlVa = 0, flVa = 0;
+    };
+    std::vector<std::unique_ptr<Level>> m_lv;   // coarsest first
+    int m_winParent = -1;                        // the level the window's edge reads
+    std::function<float(double, double, double)> m_bedAt;
     std::function<double(double, double, double)> m_tailLevelAt;
-    void InitTail(Gpu& gpu, const SweConfig& cfg);
-    void TailCb();
-    void TailBoundary();
-    void RecordTail(hal::CommandContext& cmd, Gpu& gpu, double batchEnd, bool reset);
+    hal::Resource m_heightArr = nullptr, m_resMapArr = nullptr;   // the stack's page views, for a level made later
+    uint32_t m_heightMips = 1;
+    hal::Pso m_foldTailK;
+    void ParentFields(SweCbData& cb, int parent, uint32_t rank, int64_t c0x, int64_t c0y) const;
+    uint32_t WinParentParity() const;
+    void LevelCb(Level& L);
+    void LevelBoundary(Level& L);
+    void LevelTables(Gpu& gpu, Level& L);
+    int AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, double cy, const char* name, bool patch, bool tables);
+    void InitTelescope(Gpu& gpu, const SweConfig& cfg);
+    void LevelTo(hal::CommandContext& cmd, Level& L, D3D12_RESOURCE_STATES to);
+    void RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double batchEnd, bool reset);
     double TailRayArrivalS(double latDeg, double lonDeg, double h0, double& shallowest) const;
     double TailFastestArrivalS(double latDeg, double lonDeg) const;   // the fastest sqrt(g h) path over the tail's sea (Fermat)
     void CoarseCb(int n, int n1);

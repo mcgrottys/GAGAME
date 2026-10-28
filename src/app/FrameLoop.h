@@ -284,7 +284,7 @@ private:
     uint64_t m_impactVer = 0;
     double m_impactBase = 0.0;
     ImpactGpu m_impactGpu;
-    TailGpu m_tailGpu;   // stage 2b: the tail to the far field's readers, each frame
+    LevelsGpu m_tailGpu;   // stage 2b/2c: the levels to the far field's readers, each frame
     scene::Rail m_diveProbeRail;
     const scene::Rail* m_diveRail = nullptr;
     // THE CLOCKS (scene/SceneClocks.h). m_sceneUnix is the scene's own clock -- the one that runs, paced

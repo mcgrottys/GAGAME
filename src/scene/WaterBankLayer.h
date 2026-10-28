@@ -148,9 +148,9 @@ public:
     void SetWaterline(double navdM) { m_waterline = static_cast<float>(navdM); }
     // THE IMPACTS (2026-10-25): the record's buffer and the instant, to the kernel's level.
     void SetImpact(const ImpactGpu& g) { m_imp = g; }
-    void SetTail(const TailGpu& t) { m_tail = t; }   // stage 2b: the tail to the far field's readers
+    void SetTail(const LevelsGpu& t) { m_tail = t; }   // stage 2b/2c: the levels to the far field's readers
     ImpactGpu m_imp;
-    TailGpu m_tail;
+    LevelsGpu m_tail;
 
     uint32_t DispSrv() const { return m_disp.Srv(); }
     uint32_t ParamSrv() const { return m_param.Srv(); }
@@ -378,11 +378,11 @@ private:
         uint32_t impU[4];
         // STAGE 2b (gTailA..gTailB; sim/ImpactGpu.h TailGpu, shaders/TailRead.hlsli): the tail's chart and
         // textures for the far field. Appended at the END on both sides.
-        float tailA[4];
-        float tailE[4];
-        float tailN[4];
-        uint32_t tailU[4];
-        float tailB[4];
+        float lvlChart[4];
+        float lvlE[4];
+        float lvlN[4];
+        float lvlA[8][4];
+        uint32_t lvlU[8][4];
     };
     struct BankTile {
         float orgXZ[2];

@@ -63,8 +63,8 @@ void SweDomain::Place(double boxLat0, double boxLon0, double boxLat1, double box
 bool SweDomain::CellOfDir(const double P[3], double& tx, double& ty) const {
     const double pa = Dot3(P, A);
     if (!Ready() || !(pa > 0.0)) return false;
-    tx = Dot3(P, U) / pa;
-    ty = Dot3(P, V) / pa;
+    tx = Dot3(P, U) / pa - ox;
+    ty = Dot3(P, V) / pa - oy;
     return true;
 }
 
@@ -75,7 +75,7 @@ bool SweDomain::CellOf(double latDeg, double lonDeg, double& tx, double& ty) con
 }
 
 void SweDomain::LatLonOf(double tx, double ty, double& latDeg, double& lonDeg) const {
-    const double s = (tx - 0.5 * double(nx)) * dx / R, t = (0.5 * double(ny) - ty) * dy / R;
+    const double s = (tx + ox - 0.5 * double(nx)) * dx / R, t = (0.5 * double(ny) - (ty + oy)) * dy / R;
     double p[3];
     for (int i = 0; i < 3; ++i) p[i] = A[i] + s * E[i] + t * N[i];
     const double l = std::sqrt(Dot3(p, p));
@@ -190,8 +190,13 @@ void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapAr
     (void)gpu;
     std::vector<hal::Table*> tables = {&m_table, &m_tableB, &m_waveTable[0], &m_waveTable[1], &m_table1, &m_tableB1, &m_waveTable1[0], &m_waveTable1[1],
                                        &m_tableFold[0][0], &m_tableFold[0][1], &m_tableFold[1][0], &m_tableFold[1][1]};   // stage 1a/1b: every table reads the same page
-    if (m_tail) {   // stage 2b: the tail's bed fill reads the same stack (its first run read nothing: a dry tail)
-        for (hal::Table* t : {&m_tableT, &m_tableBT, &m_tableFoldT[0][0], &m_tableFoldT[0][1], &m_tableFoldT[1][0], &m_tableFoldT[1][1]}) tables.push_back(t);
+    m_heightArr = heightArr;   // stage 2c: a level made later (an event's patch) takes the same views
+    m_resMapArr = resMapArr;
+    m_heightMips = mips;
+    for (auto& L : m_lv) {   // stage 2b/2c: every level's bed fill reads the same stack (the tail's first run read nothing: a dry tail)
+        for (hal::Table* t : {&L->table[0], &L->table[1], &L->fold[0][0], &L->fold[0][1], &L->fold[1][0], &L->fold[1][1]}) {
+            if (t->Valid()) tables.push_back(t);
+        }
     }
     for (hal::Table* t : tables) {
         t->SrvArray(0, heightArr, heightArr ? heightArr->GetDesc().Format : DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
@@ -358,7 +363,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         Log("[swe] stage 1a: the coarse twin at mip 1 -- %u x %u tiles of the water (%u standard mips of %u), %u of the fluxes (%u standard mips), the whole box",
             m_h.Atlas().TilesX(1), m_h.Atlas().TilesY(1), m_h.Atlas().StandardMips(), m_h.Atlas().MipCount(), static_cast<unsigned>(m_fluxList1.size()), m_flux.StandardMips());
     }
-    if (cfg.tailCells > 0 && cfg.bedAt && m_testH.empty()) InitTail(gpu, cfg);   // stage 2b
+    if (cfg.tailCells > 0 && cfg.bedAt && m_testH.empty()) InitTelescope(gpu, cfg);   // stage 2b/2c (the levels' tables below, once every bank stands)
     {
         // M9h: grad(flow). The first field here whose residency comes from the ALGEBRA rather
         // than from a physics policy. grad is a grade-1 operator and the flow is grade 1, so
@@ -737,8 +742,9 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     // STAGE 1c: THE CHAINS' TABLE -- h and the bed at mips 0 and 1, and the velocity bank each mip reads (the
     // fine's parity fp, the twin's cp), and the sea bank each mip's solve reads: u16 h[0], u17 h[1], u18 bed[0],
     // u19 bed[1], u20 vel[0], u21 vel[1], u22 wave[0], u23 wave[1]
-    // STAGE 2b: the tail's views at index 2 of each chain (its h, its bed, the bank its last step wrote, a sea bank
-    // unread); the window's own at mip 0 where there is no tail (never read: gTail.x < 0).
+    // STAGE 2b/2c: the window's parent level's views at index 2 of each chain (its h, its bed, the bank its last step
+    // wrote, by its parity; a sea bank unread); the window's own at mip 0 where no level holds it (never read: gTail.x < 0).
+    const Level* WP = (m_winParent >= 0) ? m_lv[size_t(m_winParent)].get() : nullptr;
     for (int fp = 0; fp < 2; ++fp) {
         for (int cp = 0; cp < 2; ++cp) {
             for (int tp = 0; tp < 2; ++tp) {
@@ -746,63 +752,20 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                 t = hal::Table::Alloc(gpu, 12, "swe.chain");
                 t.Uav2D(0, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 0);
                 t.Uav2D(1, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 1);
-                t.Uav2D(2, (m_tail ? m_hT : m_h.Atlas()).Res(), DXGI_FORMAT_R32_FLOAT, 0);
+                t.Uav2D(2, (WP ? WP->h : m_h.Atlas()).Res(), DXGI_FORMAT_R32_FLOAT, 0);
                 t.Uav2D(3, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 0);
                 t.Uav2D(4, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 1);
-                t.Uav2D(5, (m_tail ? m_bedT : m_bed).Res(), DXGI_FORMAT_R32_FLOAT, 0);
+                t.Uav2D(5, (WP ? WP->bed : m_bed).Res(), DXGI_FORMAT_R32_FLOAT, 0);
                 t.Uav2D(6, (fp ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 0);
                 t.Uav2D(7, (cp ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
-                t.Uav2D(8, (m_tail ? (tp ? m_velBT : m_velAT) : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 0);
+                t.Uav2D(8, (WP ? (tp ? WP->velB : WP->velA) : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 0);
                 t.Uav2D(9, (fp ? m_waveB : m_waveA).Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);   // m_table / m_tableB's gWave
                 t.Uav2D(10, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);                    // m_table1's gWave
                 t.Uav2D(11, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);                    // unread
             }
         }
     }
-    // STAGE 2b: the tail's step tables (the same slots over its own banks; uv, gradient, stats and ledger the
-    // window's, unwritten there: the derive, the stats and the ledger do not run on the tail) and the fold's
-    // (the twin's banks at mip 1 in the read slots, the tail's water and read velocities in the written ones,
-    // the tail's bed at gSoilW).
-    if (m_tail) {
-        for (int k = 0; k < 2; ++k) {
-            hal::Table& t = k ? m_tableBT : m_tableT;
-            t = hal::Table::Alloc(gpu, 16, "swe.tail");
-            t.Uav2D(2, m_etaT.Res(), DXGI_FORMAT_R32_FLOAT);
-            t.Uav2D(3, m_fluxT.Res(), DXGI_FORMAT_R32G32_FLOAT);
-            t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
-            t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
-            t.Uav2D(6, m_hT.Res(), DXGI_FORMAT_R32_FLOAT);
-            t.Uav2D(7, (k ? m_velBT : m_velAT).Res(), DXGI_FORMAT_R32G32_FLOAT);
-            t.Uav2D(8, m_bedT.Res(), DXGI_FORMAT_R32_FLOAT);
-            t.Uav2D(9, m_soilT.Res(), DXGI_FORMAT_R32_FLOAT);
-            t.Uav2D(10, (k ? m_velAT : m_velBT).Res(), DXGI_FORMAT_R32G32_FLOAT);
-            t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
-            t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-            t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
-            t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
-            t.Uav2D(15, m_limT.Res(), DXGI_FORMAT_R32_FLOAT);
-        }
-        for (int cp = 0; cp < 2; ++cp) {
-            for (int tp = 0; tp < 2; ++tp) {
-                hal::Table& t = m_tableFoldT[cp][tp];
-                t = hal::Table::Alloc(gpu, 16, "swe.foldtail");
-                t.Uav2D(2, m_hT.Res(), DXGI_FORMAT_R32_FLOAT);
-                t.Uav2D(3, (tp ? m_velBT : m_velAT).Res(), DXGI_FORMAT_R32G32_FLOAT);
-                t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
-                t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
-                t.Uav2D(6, m_h.Atlas().Res(), DXGI_FORMAT_R32_FLOAT, 1);
-                t.Uav2D(7, (cp ? m_velB : m_velA).Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
-                t.Uav2D(8, m_bed.Res(), DXGI_FORMAT_R32_FLOAT, 1);
-                t.Uav2D(9, m_bedT.Res(), DXGI_FORMAT_R32_FLOAT);
-                t.Uav2D(10, m_velA.Res(), DXGI_FORMAT_R32G32_FLOAT, 1);
-                t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
-                t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-                t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
-                t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
-                t.Uav2D(15, m_lim.Res(), DXGI_FORMAT_R32_FLOAT, 1);
-            }
-        }
-    }
+    for (auto& L : m_lv) LevelTables(gpu, *L);   // stage 2c: every level's tables, once every bank stands
     // STAGE 1c: the twin's sweeps' tables -- m_table1's views with the two sea banks in turn at mip 1
     for (int k = 0; k < 2; ++k) {
         hal::Table& t = m_waveTable1[k];
@@ -1520,7 +1483,7 @@ void SweSolver::CoarseCb(int n, int n1) {
     m_cb1.cellX[0] = static_cast<float>((0.5 - 0.5 * double(m_cb1.nx)) * double(m_cb1.cellX[1]));
     m_cb1.cellX[2] = static_cast<float>((0.5 * double(m_cb1.ny) - 0.5) * double(-m_cb1.cellX[3]));
     m_cb1.mip = 1.0f;   // (the sea stays on: stage 1c sweeps it at mip 1 too)   // stage 1c: the twin's dispatches run at mip 1 (nothing above it)
-    m_cb1.tail[0] = m_tail ? float(m_tailShift - 1u) : -1.0f;   // stage 2b: the tail under the twin's cells
+    ParentFields(m_cb1, m_winParent, 1u, 0, 0);   // stage 2b/2c: the window's parent level under the twin's cells
 }
 
 void SweSolver::RecordCoarseBegin(hal::CommandContext& cmd, Gpu& gpu, int n, int n1, bool reset) {
@@ -1622,7 +1585,7 @@ void SweSolver::RecordCoarseStep(hal::CommandContext& cmd, Gpu& gpu) {
     // ONE COARSE STEP: the faces over the whole lattice, the share every column pays (the folded ones' faces are
     // the twin's flux kernel's, so their share is the law's), the step over the twin's own cells
     cmd.ComputeTable(2, (m_velNew1 ? m_tableB1 : m_table1).Base());
-    cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][m_velNewT].Base());   // stage 1c (nothing above mip 1: unread)
+    cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][WinParentParity()].Base());   // stage 1c (nothing above mip 1: unread)
     cmd.ComputeSrvAt(1, m_fl1Va);
     cmd.Pipeline(m_fluxK.Get());
     cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, m_fn1);
@@ -1669,10 +1632,39 @@ bool SweSolver::BeginImpose(Gpu& gpu, bool reset) {
         // 2600 km out for a 10 km stone, which planted on the window would be a wave from nowhere)
         double txW = 0.0, tyW = 0.0;
         const bool inW = m_dom.CellOf(w.P().lat, w.P().lon, txW, tyW) && txW >= 0.0 && tyW >= 0.0 && txW < double(m_cb.nx) && tyW < double(m_cb.ny);
-        double txT = 0.0, tyT = 0.0;
-        const bool inT = m_tail && m_domT.CellOf(w.P().lat, w.P().lon, txT, tyT) && txT >= 0.0 && tyT >= 0.0 && txT < double(m_domT.nx) && tyT < double(m_domT.ny);
         m_cb.impactB[0] = inW ? static_cast<float>(w.Terms()) : 0.0f;
-        m_imposeTailN = inT ? static_cast<float>(w.Terms()) : 0.0f;
+        // STAGE 2c: the levels that hold the cavity take it; where the finest of them holds its lip over fewer than
+        // eight cells, the event gets a PATCH of its own at the rank its radius needs (R_D over eight window cells,
+        // as a power of two), about its cavity, with that level as its parent -- made now, imposed this batch.
+        bool inT = false;
+        int finest = -1;
+        for (int k = 0; k < int(m_lv.size()); ++k) {
+            Level& L = *m_lv[size_t(k)];
+            double tx = 0.0, ty = 0.0;
+            const bool in = L.dom.CellOf(w.P().lat, w.P().lon, tx, ty) && tx >= 0.0 && ty >= 0.0 && tx < double(L.nx) && ty < double(L.ny);
+            L.imposeN = in ? static_cast<float>(w.Terms()) : 0.0f;
+            if (in) { inT = true; if (finest < 0 || L.rank < m_lv[size_t(finest)]->rank) finest = k; }
+        }
+        if (finest >= 0 && m_bedAt) {
+            const Level& F = *m_lv[size_t(finest)];
+            const double cell0 = (std::min)(m_dom.dx, m_dom.dy);
+            const double need = w.C().lipRadiusM / 8.0;   // the cell the lip wants
+            if (need < (std::min)(F.dom.dx, F.dom.dy) * 0.999) {
+                const uint32_t rank = uint32_t(std::clamp(std::floor(std::log2((std::max)(need / cell0, 1.0))), 2.0, double(F.rank) - 1.0));
+                double cx = 0.0, cy = 0.0;
+                m_dom.CellOf(w.P().lat, w.P().lon, cx, cy);   // the impact in rank-0 cells (the chart's inverse holds beyond the window)
+                char name[48];
+                snprintf(name, sizeof(name), "patch 2^%u (event %zu)", rank, i);
+                const int at = AddLevel(gpu, rank, 512u, cx, cy, name, true, true);
+                if (at >= 0) {
+                    m_lv[size_t(at)]->imposeN = static_cast<float>(w.Terms());
+                    Log("[impact] stage 2c: the cavity's lip (R_D %.1f km) stood over %.1f cells of %s: the event's own level, %s, %u cells of %.0f m, its parent %s",
+                        w.C().lipRadiusM / 1000.0, w.C().lipRadiusM / (std::min)(F.dom.dx, F.dom.dy), F.name.c_str(), m_lv[size_t(at)]->name.c_str(),
+                        m_lv[size_t(at)]->nx, (std::min)(m_lv[size_t(at)]->dom.dx, m_lv[size_t(at)]->dom.dy),
+                        m_lv[size_t(at)]->parent >= 0 ? m_lv[size_t(m_lv[size_t(at)]->parent)]->name.c_str() : "none");
+                }
+            }
+        }
         m_cb.impactC[0] = static_cast<float>(w.C().radiusM);
         m_cb.impactC[1] = static_cast<float>(w.C().depthM);
         m_cb.impactC[2] = m_cb.impactC[3] = 0.0f;
@@ -1692,7 +1684,7 @@ bool SweSolver::BeginImpose(Gpu& gpu, bool reset) {
             i, m_simTime - ev[i].zeroUnix, in ? "inside" : "outside", D / 1000.0, std::atan2(be, bn) / kSweD2R,
             in ? "; the bed under it " : "; ", in ? bedAt : 0.0f, w.C().diameterM / 1000.0, w.C().depthM,
             w.P().basinDepthM, w.Terms());
-        if (m_tail) {   // stage 2b's gate: the ray's own arrival over the tail's bed, against the one-depth law's
+        if (!m_lv.empty()) {   // stage 2b's gate: the ray's own arrival over the tail's bed, against the one-depth law's
             double shallow = 0.0;
             const double ray = TailRayArrivalS(w.P().lat, w.P().lon, w.P().basinDepthM, shallow);
             const double fastest = TailFastestArrivalS(w.P().lat, w.P().lon);
@@ -1707,12 +1699,482 @@ bool SweSolver::BeginImpose(Gpu& gpu, bool reset) {
     return false;
 }
 
+// ================================================================================================
+//  STAGE 2c OF ONE WATER ON THE TREE (2026-10-27, Mark: "the telescope"): THE LEVELS. The tail of stage 2b is
+//  the coarsest of a LIST of levels, each a rectangle of the one anchor chart at its own cell size (2^rank window
+//  cells), its corner on its parent's lattice so its cells nest in the parent's exactly, stepped by the same
+//  kernels on its own banks, lists and clock, coarsest first each batch. A level's edge is the sea's exterior
+//  (the one edge law) at ITS PARENT's departure and velocity in the ghost cell beyond the side (Swe.hlsl
+//  TailDepAt / TailUAt with gTail the parent's); the top level's edge reads the impacts' law. A level of mean
+//  sea's gauge folds its wet cells' mean into its parent before each parent step (CsSweFoldTail; the window's
+//  twin, of the tide's gauge, does not). The ANCHOR LEVELS telescope from the tail down to the window
+//  (water.swe.telescopeLevels of telescopeCells, telescopeStep ranks apart), the window's edge reading the finest
+//  of them; an EVENT whose cavity is unresolved where it falls (R_D under eight cells of the finest level holding
+//  it) gets a PATCH of its own at the rank its radius needs, about its cavity, the batch it is imposed. All
+//  levels carry departures over mean sea; the tide is the atlas's at the window alone.
+// ================================================================================================
+
+// THE PARENT'S FIELDS in a level's (or the window's) constants: the shift from its cells to the parent's, the
+// parent cell its corner lies in, the parent's cells across and down, its tiles across (Swe.hlsl gTail/gTail2).
+void SweSolver::ParentFields(SweCbData& cb, int parent, uint32_t rank, int64_t c0x, int64_t c0y) const {
+    if (parent < 0 || parent >= int(m_lv.size())) {
+        cb.tail[0] = -1.0f;
+        cb.tail[1] = cb.tail[2] = cb.tail[3] = 0.0f;
+        cb.tail2[0] = cb.tail2[1] = cb.tail2[2] = cb.tail2[3] = 0.0f;
+        return;
+    }
+    const Level& P = *m_lv[size_t(parent)];
+    cb.tail[0] = float(P.rank - rank);
+    cb.tail[1] = float((c0x - P.c0x) >> P.rank);
+    cb.tail[2] = float((c0y - P.c0y) >> P.rank);
+    cb.tail[3] = float(P.nx);
+    cb.tail2[0] = float(P.ny);
+    cb.tail2[1] = float(P.h.TilesX());
+    cb.tail2[2] = cb.tail2[3] = 0.0f;
+}
+
+uint32_t SweSolver::WinParentParity() const {
+    return (m_winParent >= 0 && m_winParent < int(m_lv.size())) ? m_lv[size_t(m_winParent)]->velNew : 0u;
+}
+
+// A level's constants: the window's with its own lattice, chart, step and clock; no river, no sea's push, no
+// soil; its tide plane mean sea (0 m); nothing above it in the magnify's sense; its parent's fields for its edge.
+void SweSolver::LevelCb(Level& L) {
+    SweCbData& cb = L.cb;
+    cb = m_cb;
+    cb.nx = L.nx;
+    cb.ny = L.ny;
+    cb.etaTilesX = L.h.TilesX();
+    cb.fluxTilesX = L.flux.TilesX();
+    cb.listCount = static_cast<uint32_t>(L.list.size());
+    cb.dx = static_cast<float>(L.dom.dx);
+    cb.dy = static_cast<float>(L.dom.dy);
+    cb.dt = L.dt;
+    cb.tideNavd = 0.0f;
+    cb.faceCount = 0.0f;
+    cb.soil[3] = 0.0f;
+    cb.sea[3] = 0.0f;
+    cb.oceanU = 0.0f;
+    cb.mip = 0.0f;
+    cb.mips = 1.0f;
+    cb.etaTilesXUp = 0.0f;
+    const double ds0 = m_dom.dx / m_dom.R, dt0 = m_dom.dy / m_dom.R, per = double(int64_t(1) << L.rank);
+    cb.cellX[0] = static_cast<float>((double(L.c0x) + 0.5 * per - 0.5 * double(m_dom.nx)) * ds0);
+    cb.cellX[1] = static_cast<float>(per * ds0);
+    cb.cellX[2] = static_cast<float>((0.5 * double(m_dom.ny) - double(L.c0y) - 0.5 * per) * dt0);
+    cb.cellX[3] = static_cast<float>(-per * dt0);
+    cb.east[3] = static_cast<float>((std::min)(L.dom.dx, L.dom.dy));   // the cell's grain: the bed's level
+    cb.impactB[0] = L.imposeN;   // the event's cavity inside this level, else nothing to impose here
+    ParentFields(cb, L.parent, L.rank, L.c0x, L.c0y);
+}
+
+// A level's own exterior, four samples a side of its edge: the top level's the impacts' law (events outside the
+// field); a nested level's nought -- its parent's departure stands in the ghost cell (the kernel adds it).
+void SweSolver::LevelBoundary(Level& L) {
+    for (float& v : L.cb.oceanEta) v = 0.0f;
+    if (L.parent >= 0 || !m_tailLevelAt) return;
+    const double nx = double(L.nx), ny = double(L.ny);
+    for (int s = 0; s < 4; ++s) {
+        const double len = s < 2 ? nx : ny;
+        for (int k = 0; k < 4; ++k) {
+            const double a = len * k / 3.0;
+            const double tx = s == 2 ? 0.5 : s == 3 ? nx - 0.5 : a;
+            const double ty = s == 0 ? 0.5 : s == 1 ? ny - 0.5 : a;
+            double la = 0.0, lo = 0.0;
+            L.dom.LatLonOf(tx, ty, la, lo);
+            const double v = m_tailLevelAt(la, lo, L.simTime);
+            L.cb.oceanEta[4 * s + k] = static_cast<float>(std::isfinite(v) ? v : 0.0);
+        }
+    }
+}
+
+// A level's tables: its step tables (the same slots over its own banks; uv, gradient, stats and ledger the
+// window's, unwritten there), its chain (the parent's h, bed and read velocity bank at the chain's slot 2, by the
+// parent's parity) and its fold into the parent (its banks in the read slots, the parent's water and read
+// velocities in the written ones, the parent's bed at gSoilW).
+void SweSolver::LevelTables(Gpu& gpu, Level& L) {
+    for (int k = 0; k < 2; ++k) {
+        hal::Table& t = L.table[k];
+        t = hal::Table::Alloc(gpu, 16, "swe.level");
+        t.Uav2D(2, L.eta.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(3, L.flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        t.Uav2D(6, L.h.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(7, (k ? L.velB : L.velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(8, L.bed.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(9, L.soil.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(10, (k ? L.velA : L.velB).Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+        t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        t.Uav2D(15, L.lim.Res(), DXGI_FORMAT_R32_FLOAT);
+    }
+    const Level* P = (L.parent >= 0) ? m_lv[size_t(L.parent)].get() : nullptr;
+    for (int pp = 0; pp < 2; ++pp) {
+        hal::Table& t = L.chain[pp];
+        t = hal::Table::Alloc(gpu, 12, "swe.level.chain");
+        t.Uav2D(0, L.h.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(1, L.h.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(2, (P ? P->h : L.h).Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(3, L.bed.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(4, L.bed.Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(5, (P ? P->bed : L.bed).Res(), DXGI_FORMAT_R32_FLOAT);
+        t.Uav2D(6, L.velA.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(7, L.velA.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(8, (P ? (pp ? P->velB : P->velA) : L.velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
+        t.Uav2D(9, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        t.Uav2D(10, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+        t.Uav2D(11, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+    }
+    if (P) {
+        for (int cn = 0; cn < 2; ++cn) {
+            for (int pr = 0; pr < 2; ++pr) {
+                hal::Table& t = L.fold[cn][pr];
+                t = hal::Table::Alloc(gpu, 16, "swe.level.fold");
+                t.Uav2D(2, P->h.Res(), DXGI_FORMAT_R32_FLOAT);
+                t.Uav2D(3, (pr ? P->velB : P->velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
+                t.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+                t.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+                t.Uav2D(6, L.h.Res(), DXGI_FORMAT_R32_FLOAT);
+                t.Uav2D(7, (cn ? L.velB : L.velA).Res(), DXGI_FORMAT_R32G32_FLOAT);
+                t.Uav2D(8, L.bed.Res(), DXGI_FORMAT_R32_FLOAT);
+                t.Uav2D(9, P->bed.Res(), DXGI_FORMAT_R32_FLOAT);
+                t.Uav2D(10, L.velA.Res(), DXGI_FORMAT_R32G32_FLOAT);
+                t.Uav2D(11, m_statsTex.res.Get(), DXGI_FORMAT_R32G32B32A32_UINT);
+                t.Uav2D(12, m_ledgerTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+                t.Uav2D(13, m_waveB.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+                t.Uav2D(14, m_waveA.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0);
+                t.Uav2D(15, L.lim.Res(), DXGI_FORMAT_R32_FLOAT);
+            }
+        }
+    }
+    if (m_heightArr) {   // the stack's page views (SetBed fills them for every table; a level made later takes them here)
+        for (hal::Table* t : {&L.table[0], &L.table[1], &L.fold[0][0], &L.fold[0][1], &L.fold[1][0], &L.fold[1][1]}) {
+            if (!t->Valid()) continue;
+            t->SrvArray(0, m_heightArr, m_heightArr->GetDesc().Format, 0, UINT32_MAX, m_heightMips);
+            t->SrvArray(1, m_resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
+        }
+    }
+}
+
+// A LEVEL: cells of 2^rank window cells, `cells` a side, about the rank-0 cell (cx, cy) of the window's lattice
+// (the window's corner is (0, 0)); its corner on its parent's lattice; its CPU bed the stack at its grain; the
+// tiles the sea reaches from its edge at mean sea mapped once; its step from its deepest water and its far
+// corners' metric. Returns the level's index in the list (coarsest first), or -1 where no level can stand.
+int SweSolver::AddLevel(Gpu& gpu, uint32_t rank, uint32_t cells, double cx, double cy, const char* name, bool patch, bool tables) {
+    if (!m_bedAt || cells < 16 || rank == 0) return -1;
+    const int64_t per = int64_t(1) << rank;
+    // the parent: the finest level coarser than this one whose rectangle holds this one and a ghost cell beyond
+    int parent = -1;
+    int64_t c0x = int64_t(std::floor(cx - 0.5 * double(cells) * double(per))), c0y = int64_t(std::floor(cy - 0.5 * double(cells) * double(per)));
+    for (int k = int(m_lv.size()) - 1; k >= 0; --k) {
+        const Level& P = *m_lv[size_t(k)];
+        if (P.rank <= rank) continue;
+        const int64_t pp = int64_t(1) << P.rank;
+        const int64_t ax = (c0x - P.c0x) / pp * pp + P.c0x, ay = (c0y - P.c0y) / pp * pp + P.c0y;   // aligned to P's lattice
+        const int64_t bx = ax + int64_t(cells) * per, by = ay + int64_t(cells) * per;
+        if (ax - pp >= P.c0x && ay - pp >= P.c0y && bx + pp <= P.c0x + int64_t(P.nx) * pp && by + pp <= P.c0y + int64_t(P.ny) * pp) {
+            parent = k;
+            c0x = ax;
+            c0y = ay;
+            break;
+        }
+    }
+    if (parent < 0 && !m_lv.empty()) {
+        Log("[swe] stage 2c: no level '%s' (2^%u, %u cells about (%.0f, %.0f)): no coarser level holds it", name, rank, cells, cx, cy);
+        return -1;
+    }
+    auto Lp = std::make_unique<Level>();
+    Level& L = *Lp;
+    L.name = name;
+    L.rank = rank;
+    L.nx = L.ny = cells;
+    L.c0x = c0x;
+    L.c0y = c0y;
+    L.parent = parent;
+    L.patch = patch;
+    L.foldUp = parent >= 0;
+    L.dom = m_dom;
+    L.dom.nx = L.dom.ny = cells;
+    L.dom.dx = m_dom.dx * double(per);
+    L.dom.dy = m_dom.dy * double(per);
+    for (int i = 0; i < 3; ++i) {
+        L.dom.U[i] = L.dom.R / L.dom.dx * L.dom.E[i] + 0.5 * double(cells) * L.dom.A[i];
+        L.dom.V[i] = 0.5 * double(cells) * L.dom.A[i] - L.dom.R / L.dom.dy * L.dom.N[i];
+    }
+    // the rectangle's place on the chart: the centred lattice's cell less this one's (SweDomain::ox, oy)
+    L.dom.ox = (double(c0x) - 0.5 * double(m_dom.nx)) / double(per) + 0.5 * double(cells);
+    L.dom.oy = (double(c0y) - 0.5 * double(m_dom.ny)) / double(per) + 0.5 * double(cells);
+    {
+        double la0 = 90.0, la1 = -90.0, lo0 = 180.0, lo1 = -180.0;
+        const double n = double(cells);
+        const double pts[8][2] = {{0, 0}, {n, 0}, {0, n}, {n, n}, {0.5 * n, 0}, {0.5 * n, n}, {0, 0.5 * n}, {n, 0.5 * n}};
+        for (const auto& q : pts) {
+            double la = 0.0, lo = 0.0;
+            L.dom.LatLonOf(q[0], q[1], la, lo);
+            la0 = (std::min)(la0, la); la1 = (std::max)(la1, la);
+            lo0 = (std::min)(lo0, lo); lo1 = (std::max)(lo1, lo);
+        }
+        L.dom.lat0 = la0; L.dom.lat1 = la1; L.dom.lon0 = lo0; L.dom.lon1 = lo1;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    L.dom.FillBed(m_bedAt);
+    L.dom.faces.clear();
+    {
+        const double texel0 = 0.5 * 3.141592653589793 * L.dom.R / 16384.0;
+        L.bedMip = uint32_t((std::max)(std::floor(std::log2((std::min)(L.dom.dx, L.dom.dy) / texel0)), 0.0));
+    }
+    const uint32_t n = cells;
+    std::vector<uint8_t> sea(size_t(n) * n, 0);
+    {
+        std::vector<uint32_t> q;
+        const auto push = [&](uint32_t i) {
+            if (!sea[i] && L.dom.elev[i] > -9000.0f && L.dom.elev[i] < 0.0f) { sea[i] = 1; q.push_back(i); }
+        };
+        for (uint32_t a = 0; a < n; ++a) { push(a); push((n - 1) * n + a); push(a * n); push(a * n + n - 1); }
+        for (size_t k = 0; k < q.size(); ++k) {
+            const uint32_t i = q[k], c = i % n, r = i / n;
+            if (c > 0) push(i - 1);
+            if (c + 1 < n) push(i + 1);
+            if (r > 0) push(i - n);
+            if (r + 1 < n) push(i + n);
+        }
+    }
+    const std::wstring wn(L.name.begin(), L.name.end());
+    L.h.Init(gpu, n, n, DXGI_FORMAT_R32_FLOAT, (wn + L" h (the columns over mean sea)").c_str(), 64, 1);
+    L.bed.Init(gpu, n, n, DXGI_FORMAT_R32_FLOAT, (wn + L" bed").c_str(), 64, 1);
+    L.soil.Init(gpu, n, n, DXGI_FORMAT_R32_FLOAT, (wn + L" soil (unused)").c_str(), 64, 1);
+    L.eta.Init(gpu, n, n, DXGI_FORMAT_R32_FLOAT, (wn + L" eta (unpublished)").c_str(), 64, 1);
+    L.flux.Init(gpu, n, n, DXGI_FORMAT_R32G32_FLOAT, (wn + L" flux").c_str(), 64, 1);
+    L.velA.Init(gpu, n, n, DXGI_FORMAT_R32G32_FLOAT, (wn + L" vel (one turn)").c_str(), 64, 1);
+    L.velB.Init(gpu, n, n, DXGI_FORMAT_R32G32_FLOAT, (wn + L" vel (the other)").c_str(), 64, 1);
+    L.lim.Init(gpu, n, n, DXGI_FORMAT_R32_FLOAT, (wn + L" lim").c_str(), 64, 1);
+    uint32_t seaCells = 0;
+    for (uint32_t i = 0; i < n * n; ++i) seaCells += sea[i];
+    {
+        const uint32_t tw = L.h.TileW(), th = L.h.TileH();
+        L.live.assign(size_t(L.h.TilesX()) * L.h.TilesY(), 0u);
+        for (uint32_t ty = 0; ty < L.h.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < L.h.TilesX(); ++tx) {
+                bool any = false;
+                for (uint32_t y = ty * th; y < (std::min)((ty + 1) * th, n) && !any; ++y) {
+                    for (uint32_t x = tx * tw; x < (std::min)((tx + 1) * tw, n); ++x) {
+                        if (sea[size_t(y) * n + x]) { any = true; break; }
+                    }
+                }
+                if (!any) continue;
+                L.list.push_back(ty * L.h.TilesX() + tx);
+                L.live[size_t(ty) * L.h.TilesX() + tx] = 1u;
+                for (TileAtlas2D* b : {&L.h, &L.bed, &L.soil, &L.eta, &L.lim}) b->RequestMap(tx, ty);
+            }
+        }
+        for (uint32_t ty = 0; ty < L.flux.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < L.flux.TilesX(); ++tx) {
+                const uint32_t hx = (tx * L.flux.TileW()) / tw, hy = (ty * L.flux.TileH()) / th;
+                if (!L.live[size_t(hy) * L.h.TilesX() + hx]) continue;
+                L.fluxList.push_back(ty * L.flux.TilesX() + tx);
+                for (TileAtlas2D* b : {&L.flux, &L.velA, &L.velB}) b->RequestMap(tx, ty);
+            }
+        }
+        for (TileAtlas2D* b : {&L.h, &L.bed, &L.soil, &L.eta, &L.lim, &L.flux, &L.velA, &L.velB}) b->CommitMappings(gpu, nullptr);
+    }
+    {
+        float deepest = 0.0f;
+        for (const float e : L.dom.elev) if (e > -9000.0f) deepest = (std::min)(deepest, e);
+        const double ds0 = m_dom.dx / m_dom.R, dt0 = m_dom.dy / m_dom.R;
+        double mMin = 1.0;   // the metric at the rectangle's corners: the smallest true cell
+        for (int k = 0; k < 4; ++k) {
+            const double s = (double(c0x) + ((k & 1) ? double(cells) * double(per) : 0.0) - 0.5 * double(m_dom.nx)) * ds0;
+            const double t = (0.5 * double(m_dom.ny) - double(c0y) - ((k & 2) ? double(cells) * double(per) : 0.0)) * dt0;
+            const double q = 1.0 + s * s + t * t;
+            mMin = (std::min)(mMin, (std::min)(std::sqrt(1.0 + t * t), std::sqrt(1.0 + s * s)) / q);
+        }
+        L.dt = static_cast<float>(0.45 * (std::min)(L.dom.dx, L.dom.dy) * mMin / (2.0 * std::sqrt(PlanetGWave() * (std::max)(-double(deepest) + 10.0, 50.0))));
+        Log("[swe] stage 2c: LEVEL '%s' -- %u x %u cells of 2^%u of the window's (%.2f x %.2f km at the anchor; %.0f x %.0f km across on the plane; "
+            "the corners' cells %.2f of their size on the sphere), corner (%lld, %lld) in window cells, parent %s; the sea from its edge reaches "
+            "%u cells (%.0f%%) in %zu tiles; the deepest water %.0f m; its step %.2f s; its bed the cube's mip %u; CPU bed in %.1f s%s",
+            L.name.c_str(), n, n, rank, L.dom.dx / 1000.0, L.dom.dy / 1000.0, n * L.dom.dx / 1000.0, n * L.dom.dy / 1000.0, mMin,
+            static_cast<long long>(c0x), static_cast<long long>(c0y), parent >= 0 ? m_lv[size_t(parent)]->name.c_str() : "none (the top: its edge reads the law)",
+            seaCells, 100.0 * seaCells / double(n) / double(n), L.list.size(), -deepest, L.dt, L.bedMip,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), patch ? " -- an event's own patch" : "");
+    }
+    // the list stays coarsest first: this level goes after the last level of a rank above its own
+    size_t at = m_lv.size();
+    while (at > 0 && m_lv[at - 1]->rank < rank) --at;
+    m_lv.insert(m_lv.begin() + static_cast<std::ptrdiff_t>(at), std::move(Lp));
+    for (size_t k = 0; k < m_lv.size(); ++k) {   // the indices the parents are named by move with the insertion
+        if (m_lv[k]->parent >= int(at)) ++m_lv[k]->parent;
+    }
+    if (m_winParent >= int(at)) ++m_winParent;
+    if (tables) LevelTables(gpu, *m_lv[at]);
+    return int(at);
+}
+
+// THE TELESCOPE AT INIT: the tail (the top), then the anchor levels telescoping to the window; the window's parent
+// is the finest level that holds it with a ghost cell beyond.
+void SweSolver::InitTelescope(Gpu& gpu, const SweConfig& cfg) {
+    m_bedAt = cfg.bedAt;
+    if (!m_bedAt || cfg.tailCells == 0) return;
+    const double cx = 0.5 * double(m_dom.nx), cy = 0.5 * double(m_dom.ny);   // the window's centre, rank-0 cells
+    if (AddLevel(gpu, cfg.tailRank, cfg.tailCells, cx, cy, "tail", false, false) < 0) return;
+    for (uint32_t k = 1; k <= cfg.telescopeLevels; ++k) {
+        const int64_t r = int64_t(cfg.tailRank) - int64_t(k) * int64_t(cfg.telescopeStep);
+        if (r < 2) break;
+        char name[32];
+        snprintf(name, sizeof(name), "level 2^%lld", static_cast<long long>(r));
+        if (AddLevel(gpu, uint32_t(r), cfg.telescopeCells, cx, cy, name, false, false) < 0) break;
+    }
+    // the window's parent: the finest level holding the window and one of its own cells beyond each side
+    m_winParent = -1;
+    for (int k = int(m_lv.size()) - 1; k >= 0; --k) {
+        const Level& P = *m_lv[size_t(k)];
+        const int64_t pp = int64_t(1) << P.rank;
+        if (P.c0x + pp <= 0 && P.c0y + pp <= 0 && P.c0x + int64_t(P.nx) * pp >= int64_t(m_dom.nx) + pp && P.c0y + int64_t(P.ny) * pp >= int64_t(m_dom.ny) + pp) {
+            m_winParent = k;
+            break;
+        }
+    }
+    Log("[swe] stage 2c: %zu level(s); the window's edge reads %s", m_lv.size(),
+        m_winParent >= 0 ? m_lv[size_t(m_winParent)]->name.c_str() : "the atlas alone (no level holds the window)");
+}
+
+void SweSolver::LevelTo(hal::CommandContext& cmd, Level& L, D3D12_RESOURCE_STATES to) {
+    if (L.state == to) return;
+    cmd.Barrier(L.h.Res(), L.state, to);
+    cmd.Barrier(L.bed.Res(), L.state, to);
+    L.state = to;
+}
+
+// A LEVEL'S BATCH -- its first instant (clear, bed, rest at mean sea), an impact due, then its steps up to the
+// batch's end, each: its children's folds into it, the faces, the share, the columns. The levels run coarsest
+// first, so a level's edge reads the departure its parent has carried to it this batch.
+void SweSolver::RecordLevel(hal::CommandContext& cmd, Gpu& gpu, Level& L, double batchEnd, bool reset) {
+    PixScope scope(cmd.Native(), L.name.c_str());
+    LevelTo(cmd, L, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    LevelCb(L);
+    if (L.fresh) L.simTime = m_simTime;
+    LevelBoundary(L);
+    L.liveVa = gpu.PushConstants(L.live.data(), L.live.size() * 4);
+    L.hlVa = gpu.PushConstants(L.list.data(), L.list.size() * 4);
+    L.flVa = gpu.PushConstants(L.fluxList.data(), L.fluxList.size() * 4);
+    const UINT hn = static_cast<UINT>(L.list.size()), fn = static_cast<UINT>(L.fluxList.size());
+    const Level* P = (L.parent >= 0) ? m_lv[size_t(L.parent)].get() : nullptr;
+    const D3D12_GPU_VIRTUAL_ADDRESS pLiveVa = P ? gpu.PushConstants(P->live.data(), P->live.size() * 4) : L.liveVa;
+    cmd.ComputeConstants(0, L.cb);
+    cmd.ComputeSrvAt(3, L.liveVa);
+    cmd.ComputeSrvAt(5, L.liveVa);   // nothing above in the magnify's sense (gMips = 1): unread
+    cmd.ComputeSrvAt(7, pLiveVa);    // the parent's live words: the ghost
+    cmd.ComputeTable(4, L.chain[P ? P->velNew : 0].Base());
+    cmd.ComputeTable(2, L.table[L.velNew].Base());
+    if (L.fresh) {
+        cmd.ComputeSrvAt(1, L.hlVa);
+        cmd.Pipeline(m_clearTileK.Get());
+        cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, hn);
+        cmd.ComputeSrvAt(1, L.flVa);
+        cmd.Pipeline(m_clearFlux.Get());
+        cmd.Dispatch(L.flux.TileW() / 16, L.flux.TileH() / 16, fn);
+        cmd.UavBarriers({L.h.Res(), L.soil.Res(), L.eta.Res(), L.flux.Res(), L.velA.Res(), L.velB.Res(), L.lim.Res()});
+        cmd.ComputeSrvAt(1, L.hlVa);
+        cmd.Pipeline(m_bedFillK.Get());
+        cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, hn);
+        cmd.UavBarrier(L.bed.Res());
+    }
+    if (L.fresh || reset) {
+        cmd.ComputeSrvAt(1, L.hlVa);
+        cmd.Pipeline(m_resetK.Get());
+        cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, hn);
+        cmd.ComputeSrvAt(1, L.flVa);
+        cmd.Pipeline(m_clearFlux.Get());
+        cmd.Dispatch(L.flux.TileW() / 16, L.flux.TileH() / 16, fn);
+        cmd.UavBarriers({L.h.Res(), L.soil.Res(), L.flux.Res(), L.velA.Res(), L.velB.Res(), L.lim.Res()});
+        if (reset) L.simTime = m_simTime;
+    }
+    L.fresh = false;
+    RecordImpose(cmd, L.hlVa, hn, L.table[L.velNew]);   // stage 3: the event on this level where its cavity lies
+    int steps = 0;
+    while (L.simTime + double(L.dt) <= batchEnd + 1.0e-6 && steps < 256) {
+        // the children's folds: each level of mean sea's gauge whose parent this is, its wet cells' mean into mine
+        for (size_t k = 0; k < m_lv.size(); ++k) {
+            Level& C = *m_lv[k];
+            if (!C.foldUp || C.parent < 0 || m_lv[size_t(C.parent)].get() != &L || C.fresh) continue;
+            LevelCb(C);
+            cmd.ComputeConstants(0, C.cb);
+            cmd.ComputeSrvAt(3, gpu.PushConstants(C.live.data(), C.live.size() * 4));
+            cmd.ComputeTable(2, C.fold[C.velNew][L.velNew].Base());
+            cmd.Pipeline(m_foldTailK.Get());
+            const uint32_t across = (std::max)(C.nx >> (L.rank - C.rank), 1u);
+            cmd.Dispatch(across * across, 1, 1);
+            cmd.UavBarriers({L.h.Res(), L.velA.Res(), L.velB.Res()});
+        }
+        cmd.ComputeConstants(0, L.cb);
+        cmd.ComputeSrvAt(3, L.liveVa);
+        cmd.ComputeTable(2, L.table[L.velNew].Base());
+        cmd.ComputeSrvAt(1, L.flVa);
+        cmd.Pipeline(m_fluxK.Get());
+        cmd.Dispatch(L.flux.TileW() / 16, L.flux.TileH() / 16, fn);
+        cmd.UavBarriers({L.flux.Res(), L.velA.Res(), L.velB.Res()});
+        L.velNew ^= 1;
+        cmd.ComputeSrvAt(1, L.hlVa);
+        cmd.Pipeline(m_limitK.Get());
+        cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, hn);
+        cmd.UavBarrier(L.lim.Res());
+        cmd.Pipeline(m_heightK.Get());
+        cmd.Dispatch(L.h.TileW() / 16, L.h.TileH() / 16, hn);
+        cmd.UavBarrier(L.h.Res());
+        L.simTime += double(L.dt);
+        ++steps;
+    }
+}
+
+// THE LEVELS to the readers of the far field (sim/ImpactGpu.h LevelsGpu; shaders/TailRead.hlsli): coarsest first.
+LevelsGpu SweSolver::LevelsGpuDesc(float exag) const {
+    LevelsGpu g;
+    if (m_lv.empty()) return g;
+    for (int i = 0; i < 3; ++i) {
+        g.up[i] = static_cast<float>(m_dom.A[i]);
+        g.east[i] = static_cast<float>(m_dom.E[i]);
+        g.north[i] = static_cast<float>(m_dom.N[i]);
+    }
+    g.R = static_cast<float>(m_dom.R);
+    g.exag = exag;
+    const double ds0 = m_dom.dx / m_dom.R, dt0 = m_dom.dy / m_dom.R;
+    for (size_t k = 0; k < m_lv.size() && g.count < LevelsGpu::kMax; ++k) {
+        const Level& L = *m_lv[k];
+        if (L.fresh) continue;   // not yet on the GPU
+        LevelsGpu::Level& d = g.level[g.count++];
+        d.hSrv = L.h.Srv();
+        d.bedSrv = L.bed.Srv();
+        d.nx = L.nx;
+        d.ny = L.ny;
+        const double per = double(int64_t(1) << L.rank);
+        d.s0 = static_cast<float>((double(L.c0x) + 0.5 * per - 0.5 * double(m_dom.nx)) * ds0);
+        d.t0 = static_cast<float>((0.5 * double(m_dom.ny) - double(L.c0y) - 0.5 * per) * dt0);
+        d.ds = static_cast<float>(per * ds0);
+        d.dt = static_cast<float>(-per * dt0);
+    }
+    return g;
+}
+
+std::vector<SweSolver::LevelBox> SweSolver::LevelBoxes() const {
+    std::vector<LevelBox> out;
+    for (const auto& L : m_lv) {
+        LevelBox b;
+        b.box[0] = L->dom.lat0; b.box[1] = L->dom.lon0; b.box[2] = L->dom.lat1; b.box[3] = L->dom.lon1;
+        b.mip = L->bedMip;
+        out.push_back(b);
+    }
+    return out;
+}
+
 // STAGE 2b: THE RAY'S ARRIVAL -- from the impact to the anchor along the great circle, the long wave's time
 // sum ds / sqrt(g h) cell by cell over the tail's CPU bed (h0 where the tail holds no cell; 5 m the least), and
 // the shallowest water met. An instrument: the gate's reference beside the one-depth law.
 double SweSolver::TailRayArrivalS(double latDeg, double lonDeg, double h0, double& shallowest) const {
     shallowest = 1.0e9;
-    if (!m_tail) return 0.0;
+    if (m_lv.empty()) return 0.0;
+    const SweDomain& T = m_lv[0]->dom;
     const double la0 = latDeg * kSweD2R, lo0 = lonDeg * kSweD2R, la1 = m_dom.latC * kSweD2R, lo1 = m_dom.lonC * kSweD2R;
     const double p0[3] = {std::cos(la0) * std::cos(lo0), std::sin(la0), std::cos(la0) * std::sin(lo0)};
     const double p1[3] = {std::cos(la1) * std::cos(lo1), std::sin(la1), std::cos(la1) * std::sin(lo1)};
@@ -1723,14 +2185,14 @@ double SweSolver::TailRayArrivalS(double latDeg, double lonDeg, double h0, doubl
     const double g = double(m_cb.gravity);
     double tSum = 0.0;
     for (int k = 0; k < n; ++k) {
-        const double f = (k + 0.5) / n;   // the slerp along the arc
+        const double f = (k + 0.5) / n;
         const double a = std::sin((1.0 - f) * ang) / std::sin(ang), b = std::sin(f * ang) / std::sin(ang);
         const double q[3] = {a * p0[0] + b * p1[0], a * p0[1] + b * p1[1], a * p0[2] + b * p1[2]};
         const double la = std::asin(q[1]) / kSweD2R, lo = std::atan2(q[2], q[0]) / kSweD2R;
         double tx = 0.0, ty = 0.0;
         double h = h0;
-        if (m_domT.CellOf(la, lo, tx, ty) && tx >= 0.0 && ty >= 0.0 && tx < double(m_domT.nx) && ty < double(m_domT.ny)) {
-            const float e = m_domT.elev[size_t(ty) * m_domT.nx + size_t(tx)];
+        if (T.CellOf(la, lo, tx, ty) && tx >= 0.0 && ty >= 0.0 && tx < double(T.nx) && ty < double(T.ny)) {
+            const float e = T.elev[size_t(ty) * T.nx + size_t(tx)];
             if (e > -9000.0f) h = (std::max)(-double(e), 5.0);
         }
         shallowest = (std::min)(shallowest, h);
@@ -1739,27 +2201,27 @@ double SweSolver::TailRayArrivalS(double latDeg, double lonDeg, double h0, doubl
     return tSum;
 }
 
-// STAGE 2b: THE FASTEST ARRIVAL -- the least time from the impact's cell to the anchor's over the tail's sea cells at
-// the long wave's speed sqrt(g h) (Dijkstra, 8-connected, each step's length the chart's true metric, its speed the
-// two cells' mean): Fermat's path, which a front takes round a shoal where the straight ray crosses it. The gate's
-// reference. 0 where the impact or the anchor is no sea cell of the tail.
+// STAGE 2b: THE FASTEST ARRIVAL -- the least time from the impact's cell to the anchor's over the tail's sea cells
+// at the long wave's speed sqrt(g h) (Dijkstra, 8-connected, each step's length the chart's true metric, its speed
+// the two cells' mean): Fermat's path. The gate's reference. 0 where the impact or the anchor is no sea cell.
 double SweSolver::TailFastestArrivalS(double latDeg, double lonDeg) const {
-    if (!m_tail) return 0.0;
-    const uint32_t n = m_domT.nx;
+    if (m_lv.empty()) return 0.0;
+    const SweDomain& T = m_lv[0]->dom;
+    const uint32_t n = T.nx;
     double tx = 0.0, ty = 0.0, ax = 0.0, ay = 0.0;
-    if (!m_domT.CellOf(latDeg, lonDeg, tx, ty) || !m_domT.CellOf(m_dom.latC, m_dom.lonC, ax, ay)) return 0.0;
+    if (!T.CellOf(latDeg, lonDeg, tx, ty) || !T.CellOf(m_dom.latC, m_dom.lonC, ax, ay)) return 0.0;
     if (tx < 0.0 || ty < 0.0 || tx >= n || ty >= n || ax < 0.0 || ay < 0.0 || ax >= n || ay >= n) return 0.0;
     const uint32_t start = uint32_t(ty) * n + uint32_t(tx), goal = uint32_t(ay) * n + uint32_t(ax);
-    const double g = double(m_cb.gravity), R = m_domT.R, ds0 = m_domT.dx / R, dt0 = m_domT.dy / R;
+    const double g = double(m_cb.gravity), R = T.R, ds0 = T.dx / R, dt0 = T.dy / R;
     const auto speed = [&](uint32_t i) {
-        const float e = m_domT.elev[i];
+        const float e = T.elev[i];
         return (e > -9000.0f && e < 0.0f) ? std::sqrt(g * (std::max)(-double(e), 5.0)) : 0.0;
     };
-    const auto metric = [&](uint32_t i, double& mx, double& my) {   // the cell's true size, east and north
+    const auto metric = [&](uint32_t i, double& mx, double& my) {
         const double s = (double(i % n) + 0.5 - 0.5 * n) * ds0, t = (0.5 * n - double(i / n) - 0.5) * dt0;
         const double q = 1.0 + s * s + t * t;
-        mx = m_domT.dx * std::sqrt(1.0 + t * t) / q;
-        my = m_domT.dy * std::sqrt(1.0 + s * s) / q;
+        mx = T.dx * std::sqrt(1.0 + t * t) / q;
+        my = T.dy * std::sqrt(1.0 + s * s) / q;
     };
     if (speed(start) <= 0.0 || speed(goal) <= 0.0) return 0.0;
     std::vector<float> best(size_t(n) * n, 3.0e38f);
@@ -1797,284 +2259,6 @@ double SweSolver::TailFastestArrivalS(double latDeg, double lonDeg) const {
     return 0.0;
 }
 
-// STAGE 2b: THE TAIL'S LATTICE -- the window's chart coarsened by 2^rank about the same anchor, cells a side, the
-// window whole in its central cells (its corner on the tail's lattice by construction: the tail's corner is the
-// window's less (cells / 2 - window cells / 2^rank / 2) tail cells); its CPU bed the stack at the tail's grain;
-// every tile the sea reaches from its edge at mean sea mapped once, for the run; its step from its deepest water
-// and its far corners' metric.
-void SweSolver::InitTail(Gpu& gpu, const SweConfig& cfg) {
-    const uint32_t rank = cfg.tailRank, per = 1u << rank, nT = cfg.tailCells;
-    const uint32_t winT = (std::max)(m_cb.nx, m_dom.nx) / per;   // the window in tail cells (the lattice is nx x nx)
-    if (winT == 0 || nT < 2 * winT + 2) {
-        Log("[swe] stage 2b: no tail -- %u cells of 2^%u of the window's cannot hold the window (%u tail cells across)", nT, rank, winT);
-        return;
-    }
-    m_tailShift = rank;
-    m_tailCorner = nT / 2 - winT / 2;
-    m_domT = m_dom;
-    m_domT.nx = m_domT.ny = nT;
-    m_domT.dx = m_dom.dx * double(per);
-    m_domT.dy = m_dom.dy * double(per);
-    for (int i = 0; i < 3; ++i) {   // the planes of the tail's cells (SweDomain::Place's form)
-        m_domT.U[i] = m_domT.R / m_domT.dx * m_domT.E[i] + 0.5 * double(nT) * m_domT.A[i];
-        m_domT.V[i] = 0.5 * double(nT) * m_domT.A[i] - m_domT.R / m_domT.dy * m_domT.N[i];
-    }
-    {   // its lat/lon bounds, for the bed's want: the corners and the sides' middles of the gnomonic box
-        double la0 = 90.0, la1 = -90.0, lo0 = 180.0, lo1 = -180.0;
-        const double pts[8][2] = {{0, 0}, {double(nT), 0}, {0, double(nT)}, {double(nT), double(nT)}, {0.5 * nT, 0}, {0.5 * nT, double(nT)}, {0, 0.5 * nT}, {double(nT), 0.5 * nT}};
-        for (const auto& q : pts) {
-            double la = 0.0, lo = 0.0;
-            m_domT.LatLonOf(q[0], q[1], la, lo);
-            la0 = (std::min)(la0, la); la1 = (std::max)(la1, la);
-            lo0 = (std::min)(lo0, lo); lo1 = (std::max)(lo1, lo);
-        }
-        m_domT.lat0 = la0; m_domT.lat1 = la1; m_domT.lon0 = lo0; m_domT.lon1 = lo1;
-    }
-    {
-        const auto t0 = std::chrono::steady_clock::now();
-        m_domT.FillBed(cfg.bedAt);
-        Log("[swe] stage 2b: the tail's CPU bed, %u cells of %.0f x %.0f m (at the anchor) from the height stack in %.1f s; the lattice %.2f..%.2f N x %.2f..%.2f E",
-            nT * nT, m_domT.dx, m_domT.dy, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
-            m_domT.lat0, m_domT.lat1, m_domT.lon0, m_domT.lon1);
-    }
-    m_domT.faces.clear();
-    // the cube's mip the tail's cells read: the finest whose texel is no finer than the cell (the face's mip 0 texel
-    // is the cube's edge over 16384; the want lands it, the kernel reads what is resident)
-    {
-        const double texel0 = 0.5 * 3.141592653589793 * m_domT.R / 16384.0;
-        m_tailBedMip = uint32_t((std::max)(std::floor(std::log2((std::min)(m_domT.dx, m_domT.dy) / texel0)), 0.0));
-    }
-    // THE SEA THE TAIL HOLDS: the flood from its edge at mean sea (every edge cell with a bed: the one edge law),
-    // 4-connected; the tiles any of its cells fall in are the tail's residency, for the run.
-    std::vector<uint8_t> sea(size_t(nT) * nT, 0);
-    {
-        std::vector<uint32_t> q;
-        const auto push = [&](uint32_t i) {
-            if (!sea[i] && m_domT.elev[i] > -9000.0f && m_domT.elev[i] < 0.0f) { sea[i] = 1; q.push_back(i); }
-        };
-        for (uint32_t a = 0; a < nT; ++a) {
-            push(a); push((nT - 1) * nT + a); push(a * nT); push(a * nT + nT - 1);
-        }
-        for (size_t k = 0; k < q.size(); ++k) {
-            const uint32_t i = q[k], c = i % nT, r = i / nT;
-            if (c > 0) push(i - 1);
-            if (c + 1 < nT) push(i + 1);
-            if (r > 0) push(i - nT);
-            if (r + 1 < nT) push(i + nT);
-        }
-    }
-    m_hT.Init(gpu, nT, nT, DXGI_FORMAT_R32_FLOAT, L"swe.tail.h (the ocean's columns over mean sea)", 64, 1);
-    m_bedT.Init(gpu, nT, nT, DXGI_FORMAT_R32_FLOAT, L"swe.tail.bed", 64, 1);
-    m_soilT.Init(gpu, nT, nT, DXGI_FORMAT_R32_FLOAT, L"swe.tail.soil (unused: no soil at sea)", 64, 1);
-    m_etaT.Init(gpu, nT, nT, DXGI_FORMAT_R32_FLOAT, L"swe.tail.eta (unpublished)", 64, 1);
-    m_fluxT.Init(gpu, nT, nT, DXGI_FORMAT_R32G32_FLOAT, L"swe.tail.flux", 64, 1);
-    m_velAT.Init(gpu, nT, nT, DXGI_FORMAT_R32G32_FLOAT, L"swe.tail.vel (one turn)", 64, 1);
-    m_velBT.Init(gpu, nT, nT, DXGI_FORMAT_R32G32_FLOAT, L"swe.tail.vel (the other)", 64, 1);
-    m_limT.Init(gpu, nT, nT, DXGI_FORMAT_R32_FLOAT, L"swe.tail.lim", 64, 1);
-    m_listT.clear();
-    m_fluxListT.clear();
-    uint32_t seaCells = 0;
-    for (uint32_t i = 0; i < nT * nT; ++i) seaCells += sea[i];
-    {
-        const uint32_t tw = m_hT.TileW(), th = m_hT.TileH();
-        m_liveT.assign(size_t(m_hT.TilesX()) * m_hT.TilesY(), 0u);
-        for (uint32_t ty = 0; ty < m_hT.TilesY(); ++ty) {
-            for (uint32_t tx = 0; tx < m_hT.TilesX(); ++tx) {
-                bool any = false;
-                for (uint32_t y = ty * th; y < (std::min)((ty + 1) * th, nT) && !any; ++y) {
-                    for (uint32_t x = tx * tw; x < (std::min)((tx + 1) * tw, nT); ++x) {
-                        if (sea[size_t(y) * nT + x]) { any = true; break; }
-                    }
-                }
-                if (!any) continue;
-                m_listT.push_back(ty * m_hT.TilesX() + tx);
-                m_liveT[size_t(ty) * m_hT.TilesX() + tx] = 1u;
-                for (TileAtlas2D* b : {&m_hT, &m_bedT, &m_soilT, &m_etaT, &m_limT}) b->RequestMap(tx, ty);
-            }
-        }
-        // the 8-byte banks tile 128 x 64: every tile under a resident 4-byte tile
-        for (uint32_t ty = 0; ty < m_fluxT.TilesY(); ++ty) {
-            for (uint32_t tx = 0; tx < m_fluxT.TilesX(); ++tx) {
-                const uint32_t hx = (tx * m_fluxT.TileW()) / tw, hy = (ty * m_fluxT.TileH()) / th;
-                if (!m_liveT[size_t(hy) * m_hT.TilesX() + hx]) continue;
-                m_fluxListT.push_back(ty * m_fluxT.TilesX() + tx);
-                for (TileAtlas2D* b : {&m_fluxT, &m_velAT, &m_velBT}) b->RequestMap(tx, ty);
-            }
-        }
-        for (TileAtlas2D* b : {&m_hT, &m_bedT, &m_soilT, &m_etaT, &m_limT, &m_fluxT, &m_velAT, &m_velBT}) b->CommitMappings(gpu, nullptr);
-    }
-    // the step: the CFL at the deepest water, over the smallest true cell (the far corners' metric)
-    {
-        float deepest = 0.0f;
-        for (const float e : m_domT.elev) if (e > -9000.0f) deepest = (std::min)(deepest, e);
-        const double sC = 0.5 * double(nT) * m_domT.dx / m_domT.R, tC = 0.5 * double(nT) * m_domT.dy / m_domT.R;
-        const double q = 1.0 + sC * sC + tC * tC;
-        const double metric = (std::min)(std::sqrt(1.0 + tC * tC), std::sqrt(1.0 + sC * sC)) / q;
-        // the wave's speed over the deepest water, and as much again for the water's own speed where a cavity's lip
-        // falls (a 10 km stone's lip stands 4 km over 4 km of water: sqrt(2 g D) of fall)
-        m_dtT = static_cast<float>(0.45 * (std::min)(m_domT.dx, m_domT.dy) * metric / (2.0 * std::sqrt(PlanetGWave() * (std::max)(-double(deepest) + 10.0, 50.0))));
-        Log("[swe] stage 2b: THE TAIL -- %u x %u cells of 2^%u of the window's (%.1f x %.1f km at the anchor, %.0f x %.0f km across on the plane, "
-            "the far corners' cells %.2f of their size on the sphere), the window in its cells %u..%u; the sea from its edge reaches %u cells "
-            "(%.0f%%) in %zu tiles; the deepest water %.0f m; its step %.2f s; its bed the cube's mip %u",
-            nT, nT, rank, m_domT.dx / 1000.0, m_domT.dy / 1000.0, nT * m_domT.dx / 1000.0, nT * m_domT.dy / 1000.0, metric,
-            m_tailCorner, m_tailCorner + winT, seaCells, 100.0 * seaCells / double(nT) / double(nT), m_listT.size(), -deepest, m_dtT, m_tailBedMip);
-    }
-    m_tail = true;
-    m_tailFresh = true;
-}
-
-// STAGE 2b: the tail's constants -- the window's with its own lattice, chart, step and clock; no river, no sea's
-// push, no soil; its tide plane mean sea (0 m); nothing above it; no tail under it.
-void SweSolver::TailCb() {
-    m_cbT = m_cb;
-    m_cbT.nx = m_cbT.ny = m_domT.nx;
-    m_cbT.etaTilesX = m_hT.TilesX();
-    m_cbT.fluxTilesX = m_fluxT.TilesX();
-    m_cbT.listCount = static_cast<uint32_t>(m_listT.size());
-    m_cbT.dx = static_cast<float>(m_domT.dx);
-    m_cbT.dy = static_cast<float>(m_domT.dy);
-    m_cbT.dt = m_dtT;
-    m_cbT.tideNavd = 0.0f;
-    m_cbT.faceCount = 0.0f;
-    m_cbT.soil[3] = 0.0f;
-    m_cbT.sea[3] = 0.0f;
-    m_cbT.oceanU = 0.0f;
-    m_cbT.mip = 0.0f;
-    m_cbT.mips = 1.0f;
-    m_cbT.etaTilesXUp = 0.0f;
-    const double ds = m_domT.dx / m_domT.R, dt = m_domT.dy / m_domT.R;
-    m_cbT.cellX[0] = static_cast<float>((0.5 - 0.5 * double(m_domT.nx)) * ds);
-    m_cbT.cellX[1] = static_cast<float>(ds);
-    m_cbT.cellX[2] = static_cast<float>((0.5 * double(m_domT.ny) - 0.5) * dt);
-    m_cbT.cellX[3] = static_cast<float>(-dt);
-    m_cbT.east[3] = static_cast<float>((std::min)(m_domT.dx, m_domT.dy));   // the cell's grain: the bed's level
-    m_cbT.tail[0] = -1.0f;
-    m_cbT.impactB[0] = m_imposeTailN;   // the event's cavity inside the tail, else nothing to impose here
-}
-
-// STAGE 2b: the tail's own exterior, four samples a side of its far edge: the departure from mean sea the
-// impacts' law says there (events outside the tail), else nought. Its transport is nought: no prism at MSL.
-void SweSolver::TailBoundary() {
-    for (float& v : m_cbT.oceanEta) v = 0.0f;
-    if (!m_tailLevelAt) return;
-    const double nx = double(m_cbT.nx), ny = double(m_cbT.ny);
-    for (int s = 0; s < 4; ++s) {
-        const double len = s < 2 ? nx : ny;
-        for (int k = 0; k < 4; ++k) {
-            const double a = len * k / 3.0;
-            const double tx = s == 2 ? 0.5 : s == 3 ? nx - 0.5 : a;
-            const double ty = s == 0 ? 0.5 : s == 1 ? ny - 0.5 : a;
-            double la = 0.0, lo = 0.0;
-            m_domT.LatLonOf(tx, ty, la, lo);
-            const double v = m_tailLevelAt(la, lo, m_simTimeT);
-            m_cbT.oceanEta[4 * s + k] = static_cast<float>(std::isfinite(v) ? v : 0.0);
-        }
-    }
-}
-
-// STAGE 2b: THE TAIL'S BATCH -- its first instant (clear, bed, rest at mean sea), an impact due, then its steps up
-// to the batch's end, each: the twin's fold into its cells under the window, the faces, the share, the columns.
-TailGpu SweSolver::TailGpuDesc(float exag) const {
-    TailGpu g;
-    if (!m_tail) return g;
-    g.hSrv = m_hT.Srv();
-    g.bedSrv = m_bedT.Srv();
-    g.cells = m_domT.nx;
-    for (int i = 0; i < 3; ++i) {
-        g.up[i] = static_cast<float>(m_domT.A[i]);
-        g.east[i] = static_cast<float>(m_domT.E[i]);
-        g.north[i] = static_cast<float>(m_domT.N[i]);
-    }
-    g.R = static_cast<float>(m_domT.R);
-    g.ds = static_cast<float>(m_domT.dx / m_domT.R);
-    g.dt = static_cast<float>(m_domT.dy / m_domT.R);
-    g.exag = exag;
-    return g;
-}
-
-void SweSolver::TailTo(hal::CommandContext& cmd, D3D12_RESOURCE_STATES to) {
-    if (!m_tail || m_tailState == to) return;
-    cmd.Barrier(m_hT.Res(), m_tailState, to);
-    cmd.Barrier(m_bedT.Res(), m_tailState, to);
-    m_tailState = to;
-}
-
-void SweSolver::RecordTail(hal::CommandContext& cmd, Gpu& gpu, double batchEnd, bool reset) {
-    PixScope scope(cmd.Native(), "swe.tail (the ocean's departure over mean sea, on its own clock)");
-    TailTo(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    TailCb();
-    if (m_tailFresh) m_simTimeT = m_simTime;
-    TailBoundary();
-    m_hlTVa = gpu.PushConstants(m_listT.data(), m_listT.size() * 4);
-    m_flTVa = gpu.PushConstants(m_fluxListT.data(), m_fluxListT.size() * 4);
-    const UINT hn = static_cast<UINT>(m_listT.size()), fn = static_cast<UINT>(m_fluxListT.size());
-    cmd.ComputeConstants(0, m_cbT);
-    cmd.ComputeSrvAt(3, m_liveTVa);
-    cmd.ComputeSrvAt(5, m_liveTVa);   // nothing above the tail (gMips = 1): unread
-    cmd.ComputeTable(2, (m_velNewT ? m_tableBT : m_tableT).Base());
-    if (m_tailFresh) {
-        cmd.ComputeSrvAt(1, m_hlTVa);
-        cmd.Pipeline(m_clearTileK.Get());
-        cmd.Dispatch(m_hT.TileW() / 16, m_hT.TileH() / 16, hn);
-        cmd.ComputeSrvAt(1, m_flTVa);
-        cmd.Pipeline(m_clearFlux.Get());
-        cmd.Dispatch(m_fluxT.TileW() / 16, m_fluxT.TileH() / 16, fn);
-        cmd.UavBarriers({m_hT.Res(), m_soilT.Res(), m_etaT.Res(), m_fluxT.Res(), m_velAT.Res(), m_velBT.Res(), m_limT.Res()});
-        cmd.ComputeSrvAt(1, m_hlTVa);
-        cmd.Pipeline(m_bedFillK.Get());
-        cmd.Dispatch(m_hT.TileW() / 16, m_hT.TileH() / 16, hn);
-        cmd.UavBarrier(m_bedT.Res());
-    }
-    if (m_tailFresh || reset) {
-        cmd.ComputeSrvAt(1, m_hlTVa);
-        cmd.Pipeline(m_resetK.Get());
-        cmd.Dispatch(m_hT.TileW() / 16, m_hT.TileH() / 16, hn);
-        cmd.ComputeSrvAt(1, m_flTVa);
-        cmd.Pipeline(m_clearFlux.Get());
-        cmd.Dispatch(m_fluxT.TileW() / 16, m_fluxT.TileH() / 16, fn);
-        cmd.UavBarriers({m_hT.Res(), m_soilT.Res(), m_fluxT.Res(), m_velAT.Res(), m_velBT.Res(), m_limT.Res()});
-        if (reset) m_simTimeT = m_simTime;
-    }
-    m_tailFresh = false;
-    RecordImpose(cmd, m_hlTVa, hn, m_velNewT ? m_tableBT : m_tableT);   // stage 3: the event on the tail too
-    int steps = 0;
-    // THE FOLD INTO THE TAIL IS OFF (2026-10-27): the twin's departure from the window's tide plane carries the
-    // estuary's own lag against the plane (+-0.2 m through a tide), which folded into a 5 km ocean cell radiated
-    // back to the window's edge as a sea-level change before any event. The tail's gauge is mean sea's and the
-    // window's the tide's; the fold's subtraction is the atlas's plane, not the estuary's level. One-way at the
-    // tail: the window's water does not return to the ocean (its feedback on a 5 km cell is nil). Kept, off.
-    constexpr bool kTailFold = false;
-    while (m_simTimeT + double(m_dtT) <= batchEnd + 1.0e-6 && steps < 64) {
-        if (kTailFold) {
-            CoarseCb(1, 1);
-            cmd.ComputeConstants(0, m_cb1);
-            cmd.ComputeSrvAt(3, gpu.PushConstants(m_live1.data(), m_live1.size() * 4));
-            cmd.ComputeTable(2, m_tableFoldT[m_velNew1][m_velNewT].Base());
-            cmd.Pipeline(m_foldTailK.Get());
-            const uint32_t winT = m_cbT.nx > 0 ? (std::max)(m_cb.nx >> m_tailShift, 1u) : 1u;
-            cmd.Dispatch(winT * winT, 1, 1);
-            cmd.UavBarriers({m_hT.Res(), m_velAT.Res(), m_velBT.Res()});
-            cmd.ComputeConstants(0, m_cbT);
-            cmd.ComputeSrvAt(3, m_liveTVa);
-        }
-        cmd.ComputeTable(2, (m_velNewT ? m_tableBT : m_tableT).Base());
-        cmd.ComputeSrvAt(1, m_flTVa);
-        cmd.Pipeline(m_fluxK.Get());
-        cmd.Dispatch(m_fluxT.TileW() / 16, m_fluxT.TileH() / 16, fn);
-        cmd.UavBarriers({m_fluxT.Res(), m_velAT.Res(), m_velBT.Res()});
-        m_velNewT ^= 1;
-        cmd.ComputeSrvAt(1, m_hlTVa);
-        cmd.Pipeline(m_limitK.Get());
-        cmd.Dispatch(m_hT.TileW() / 16, m_hT.TileH() / 16, hn);
-        cmd.UavBarrier(m_limT.Res());
-        cmd.Pipeline(m_heightK.Get());
-        cmd.Dispatch(m_hT.TileW() / 16, m_hT.TileH() / 16, hn);
-        cmd.UavBarrier(m_hT.Res());
-        m_simTimeT += double(m_dtT);
-        ++steps;
-    }
-}
-
 void SweSolver::RecordImpose(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS listVa, UINT count, const hal::Table& table) {
     if (m_imposeEvent < 0 || count == 0) return;
     PixScope scope(cmd.Native(), "swe.impose (an impact's state onto the columns)");
@@ -2092,8 +2276,8 @@ void SweSolver::RecordImpose(hal::CommandContext& cmd, D3D12_GPU_VIRTUAL_ADDRESS
 // water there, unbounded) beside the solver's at the anchor and the two sea points.
 void SweSolver::ProbeCoarse(Gpu& gpu) {
     if (!m_probeOn || !m_coarse || !m_ready || m_coarseFresh) return;   // the twin has stepped
-    const bool live = m_impacts && m_imposedAt > -1.0e17 && m_simTime - m_imposedAt < (m_tail ? 8.0 * 3600.0 : 3600.0);
-    if (m_simTime - m_probeAt < (live ? (m_tail ? 60.0 : 0.0) : 30.0)) return;
+    const bool live = m_impacts && m_imposedAt > -1.0e17 && m_simTime - m_imposedAt < (!m_lv.empty() ? 8.0 * 3600.0 : 3600.0);
+    if (m_simTime - m_probeAt < (live ? (!m_lv.empty() ? 60.0 : 0.0) : 30.0)) return;
     m_probeAt = m_simTime;
     // the points: the anchor, then a line out to sea (inside the fine set, then the twin's own) and one up the
     // river (the twin's own at a 1.5 km reach) -- where a disturbance stands first says where it is from
@@ -2140,26 +2324,46 @@ void SweSolver::ProbeCoarse(Gpu& gpu) {
             line += buf;
         }
     }
-    if (m_tail && live) {   // stage 2b: what the tail carries at the anchor's cell and at the window's east edge
-        Plane hT, bT;
-        const auto readTail = [&](TileAtlas2D& bank, Plane& out) {
+    if (!m_lv.empty() && live) {   // stage 2b/2c: what the tail carries at the anchor's cell and east of the window, the law beside it; each patch at its centre
+        const auto readLevel = [&](TileAtlas2D& bank, D3D12_RESOURCE_STATES state, Plane& out) {
             GpuTexture wrap;
             wrap.res = bank.Res();
             wrap.format = DXGI_FORMAT_R32_FLOAT;
             wrap.width = bank.TilesX() * bank.TileW();
             wrap.height = bank.TilesY() * bank.TileH();
-            wrap.state = m_tailState;   // the readers' state after a batch, the kernels' within one
+            wrap.state = state;   // the readers' state after a batch, the kernels' within one
             out.raw = gpu.ReadbackTexture(wrap, &out.pitch, 0);
         };
-        readTail(m_hT, hT);
-        readTail(m_bedT, bT);
-        const uint32_t cx = m_tailCorner + ((m_cb.nx / 2u) >> m_tailShift), cy = m_tailCorner + ((m_cb.ny / 2u) >> m_tailShift);
-        const uint32_t ex = m_tailCorner + (m_cb.nx >> m_tailShift);   // the first tail cell past the window's east edge
-        float h0 = 0.0f, b0 = 0.0f, h1 = 0.0f, b1 = 0.0f;
-        if (at(hT, cx, cy, h0) && at(bT, cx, cy, b0) && at(hT, ex, cy, h1) && at(bT, ex, cy, b1)) {
-            snprintf(buf, sizeof buf, "  tail: at the anchor %+.3f (bed %.0f), east of the window %+.3f (bed %.0f)",
-                     b0 < 0.0f ? h0 + b0 : 0.0f, b0, b1 < 0.0f ? h1 + b1 : 0.0f, b1);
-            line += buf;
+        {
+            Level& T = *m_lv[0];
+            Plane hT, bT;
+            readLevel(T.h, T.state, hT);
+            readLevel(T.bed, T.state, bT);
+            double cxd = 0.0, cyd = 0.0, exd = 0.0, eyd = 0.0;
+            T.dom.CellOf(m_dom.latC, m_dom.lonC, cxd, cyd);
+            const uint32_t cx = uint32_t(std::clamp(cxd, 0.0, double(T.nx) - 1.0)), cy = uint32_t(std::clamp(cyd, 0.0, double(T.ny) - 1.0));
+            const uint32_t ex = uint32_t(std::clamp(double((int64_t(m_dom.nx) - T.c0x) >> T.rank), 0.0, double(T.nx) - 1.0));   // the first tail cell past the window's east edge
+            float h0 = 0.0f, b0 = 0.0f, h1 = 0.0f, b1 = 0.0f;
+            if (at(hT, cx, cy, h0) && at(bT, cx, cy, b0) && at(hT, ex, cy, h1) && at(bT, ex, cy, b1)) {
+                T.dom.LatLonOf(ex + 0.5, cy + 0.5, exd, eyd);
+                const double law = (b1 < 0.0f) ? m_impacts->EtaAt(exd, eyd, m_simTime, -double(b1), false) : 0.0;
+                snprintf(buf, sizeof buf, "  tail: at the anchor %+.3f (bed %.0f), east of the window %+.3f (bed %.0f; the law there %+.3f)",
+                         b0 < 0.0f ? h0 + b0 : 0.0f, b0, b1 < 0.0f ? h1 + b1 : 0.0f, b1, law);
+                line += buf;
+            }
+        }
+        for (auto& Lp : m_lv) {
+            Level& L = *Lp;
+            if (!L.patch || L.fresh) continue;
+            Plane hP, bP;
+            readLevel(L.h, L.state, hP);
+            readLevel(L.bed, L.state, bP);
+            const uint32_t cx = L.nx / 2u, cy = L.ny / 2u;
+            float hh = 0.0f, bb = 0.0f;
+            if (at(hP, cx, cy, hh) && at(bP, cx, cy, bb)) {
+                snprintf(buf, sizeof buf, "  %s at its centre %+.1f (bed %.0f)", L.name.c_str(), bb < 0.0f ? hh + bb : 0.0f, bb);
+                line += buf;
+            }
         }
     }
     Log("[swe] the probe t=%.0f (%u fine tiles, the tide plane %+.3f):%s", m_simTime, m_h.ResidentCount(), m_cb.tideNavd, line.c_str());
@@ -2335,13 +2539,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     OceanBoundary(tideNavd, tideRate);   // C1: the open sea's Level and its transport
     SeaBoundary();                       // C4: the sea there, whose waves push
     BeginImpose(gpu, reset);             // stage 3: an impact due this batch, its state onto the columns below
-    // stage 2b: the tail under the fine lattice (the shift from fine cells to tail cells is the rank)
-    m_cb.tail[0] = m_tail ? float(m_tailShift) : -1.0f;
-    m_cb.tail[1] = m_cb.tail[2] = float(m_tailCorner);
-    m_cb.tail[3] = m_tail ? float(m_cbT.nx) : 0.0f;
-    m_cb.tail2[0] = m_tail ? float(m_cbT.ny) : 0.0f;
-    m_cb.tail2[1] = m_tail ? float(m_hT.TilesX()) : 0.0f;
-    m_cb.tail2[2] = m_cb.tail2[3] = 0.0f;
+    ParentFields(m_cb, m_winParent, 0u, 0, 0);   // stage 2b/2c: the window's parent level under the fine lattice
 
     // STAGE 1c: this dispatch's mip, the chain's mips and the mip above's stride (Swe.hlsl UpLiveAt); the live
     // words of the mip above on root SRV 4, the chains' table on root param 4 (rebound a step: the parities)
@@ -2355,9 +2553,10 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     const D3D12_GPU_VIRTUAL_ADDRESS liveVa = gpu.PushConstants(m_live.data(), m_live.size() * 4);
     cmd.ComputeSrvAt(3, liveVa);
     cmd.ComputeSrvAt(5, gpu.PushConstants(m_live1.empty() ? m_live.data() : m_live1.data(), (m_live1.empty() ? m_live.size() : m_live1.size()) * 4));
-    m_liveTVa = gpu.PushConstants(m_liveT.empty() ? m_live.data() : m_liveT.data(), (m_liveT.empty() ? m_live.size() : m_liveT.size()) * 4);
-    cmd.ComputeSrvAt(7, m_liveTVa);   // stage 2b: the tail's live words
-    cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][m_velNewT].Base());
+    const D3D12_GPU_VIRTUAL_ADDRESS winParentLiveVa = gpu.PushConstants(m_winParent >= 0 ? m_lv[size_t(m_winParent)]->live.data() : m_live.data(),
+                                                                       (m_winParent >= 0 ? m_lv[size_t(m_winParent)]->live.size() : m_live.size()) * 4);
+    cmd.ComputeSrvAt(7, winParentLiveVa);   // stage 2b/2c: the window's parent level's live words (the ghost)
+    cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][WinParentParity()].Base());
     const auto& hl = m_testH.empty() ? m_h.Atlas().ResidentList() : m_testH;
     const auto& fl = m_testF.empty() ? m_flux.ResidentList() : m_testF;
     const D3D12_GPU_VIRTUAL_ADDRESS hlVa = gpu.PushConstants(hl.data(), hl.size() * 4);
@@ -2391,15 +2590,16 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     cmd.UavBarrier(m_bed.Res());
     if (reset) RecordReset(cmd, hlVa, static_cast<UINT>(hl.size()), flVa, static_cast<UINT>(fl.size()));
     RecordImpose(cmd, hlVa, static_cast<UINT>(hl.size()), m_velNew ? m_tableB : m_table);   // stage 3: the fine set
-    // STAGE 2b: THE TAIL AHEAD OF THE BATCH -- its steps up to the batch's end on its own clock (the twin's fold into
-    // it before each), so the window's edge reads the departure the tail has carried to it; then the fine's bindings
-    if (m_tail) {
-        RecordTail(cmd, gpu, m_simTime + double(n) * double(m_dt), reset);
+    // STAGE 2b/2c: THE LEVELS AHEAD OF THE BATCH, coarsest first -- each its steps up to the batch's end on its own
+    // clock, its edge reading the departure its parent has carried to it; then the fine's bindings
+    if (!m_lv.empty()) {
+        for (auto& L : m_lv) RecordLevel(cmd, gpu, *L, m_simTime + double(n) * double(m_dt), reset);
         cmd.ComputeConstants(0, m_cb);
         cmd.ComputeTable(2, m_table.Base());
         cmd.ComputeSrvAt(3, liveVa);
         cmd.ComputeSrvAt(5, gpu.PushConstants(m_live1.empty() ? m_live.data() : m_live1.data(), (m_live1.empty() ? m_live.size() : m_live1.size()) * 4));
-        cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][m_velNewT].Base());
+        cmd.ComputeSrvAt(7, winParentLiveVa);
+        cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][WinParentParity()].Base());
     }
     // C4: THE SEA IN THE COLUMNS, a few sweeps a batch (an even number: the solve reads the bank they end on).
     if (m_cb.sea[3] > 0.0f) {
@@ -2430,7 +2630,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     for (; i < fineTo; ++i) {
         // The substeps take turns: read the newest velocities (u7), write the other bank (u10).
         cmd.ComputeTable(2, (m_velNew ? m_tableB : m_table).Base());
-        cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][m_velNewT].Base());   // stage 1c: the chains at this parity
+        cmd.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][WinParentParity()].Base());   // stage 1c: the chains at this parity
         cmd.ComputeSrvAt(1, flVa);
         cmd.Pipeline(m_fluxK.Get());
         cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
@@ -2497,8 +2697,8 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     uvTo(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    // stage 2b: the tail's h and bed likewise, for the far field's readers (TailRead.hlsli)
-    TailTo(cmd, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    // stage 2b/2c: every level's h and bed likewise, for the far field's readers (TailRead.hlsli)
+    for (auto& L : m_lv) LevelTo(cmd, *L, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     char s[96];
     snprintf(s, sizeof(s), "swe %ut %.0f/%.0fMB %dss", ResidentTiles(), ResidentBytes() / 1048576.0,
@@ -2585,9 +2785,9 @@ bool SweSolver::TraceFace(Gpu& gpu, std::vector<FaceRow>& rows) {
         up.ComputeSrvAt(1, gpu.PushConstants(fl.data(), fl.size() * 4));
         up.ComputeTable(2, m_faceTable.Base());
         up.ComputeSrvAt(3, gpu.PushConstants(m_live.data(), m_live.size() * 4));
-        up.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][m_velNewT].Base());   // stage 1c
+        up.ComputeTable(4, m_tableChain[m_velNew][m_velNew1][WinParentParity()].Base());   // stage 1c
         up.ComputeSrvAt(5, gpu.PushConstants(m_live1.empty() ? m_live.data() : m_live1.data(), (m_live1.empty() ? m_live.size() : m_live1.size()) * 4));
-        up.ComputeSrvAt(7, gpu.PushConstants(m_liveT.empty() ? m_live.data() : m_liveT.data(), (m_liveT.empty() ? m_live.size() : m_liveT.size()) * 4));   // stage 2b
+        up.ComputeSrvAt(7, gpu.PushConstants(m_winParent >= 0 ? m_lv[size_t(m_winParent)]->live.data() : m_live.data(), (m_winParent >= 0 ? m_lv[size_t(m_winParent)]->live.size() : m_live.size()) * 4));   // stage 2b
         up.Pipeline(m_faceK.Get());
         up.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
         gpu.EndUpload();

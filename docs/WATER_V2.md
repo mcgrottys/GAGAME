@@ -1797,10 +1797,47 @@ it from there; a shore eye sees the window's own water, the solver's. Stated: th
 is the next reader to turn; the far field's readers take the tail with no residency of their own (the tail's
 tiles are the run's).
 
-*Stated, not built:* the levels between the twin and the tail (a telescope of mips, so a 1 km stone's 19 km
-cavity, three tail cells, is resolved where it falls); the hull's reader of the far field; the tail's residency
-is the run's (static, the sea from its edge); one tail, no second window; the metric's shear; the fold into the
-tail, kept off.
+**Stage 2c, built (2026-10-27, Mark: "the telescope"): the levels.** The tail is now the coarsest of a LIST of
+levels (`SweSolver::Level`, `m_lv`, coarsest first), each a rectangle of the one anchor chart at its own cell size
+(2^rank window cells) with its corner on its parent's lattice so its cells nest exactly, stepped by the same
+kernels on its own banks, lists and clock, coarsest first each batch (`RecordLevel`). A level's edge is the
+sea's exterior at its PARENT's departure and velocity in the ghost cell beyond the side (the kernel's `gTail`
+is now "the parent's fields", `ParentFields`); the top's edge reads the impacts' law. A level of mean sea's
+gauge folds its wet cells' mean into its parent before each parent step (`CsSweFoldTail`, the same kernel; the
+window's twin, of the tide's gauge, still does not). THE ANCHOR LEVELS telescope from the tail to the window:
+`water.swe.telescopeLevels` of `telescopeCells`, `telescopeStep` ranks apart under the tail's (3 of 512, 2
+apart: ranks 7, 5, 3 -- 1.3 x 1.8 km, 320 x 440 m and 80 x 110 m cells, 900, 225 and 56 km across), the window's
+edge reading the finest that holds it with a ghost beyond (level 2^3). AN EVENT whose cavity is unresolved
+where it falls -- its lip over fewer than eight cells of the finest level holding it -- gets a PATCH of its own
+the batch it is imposed (`AddLevel` at run time: the stack's bed at its grain, its banks, its tables with the
+page views kept from `SetBed`): 512 cells at the rank its lip wants (R_D over eight window cells, a power of
+two), about its cavity, nested in and folding into the finest level that holds it. The chart's inverse carries
+a rectangle's offset (`SweDomain::ox, oy`) so every level's `CellOf` and `LatLonOf` stand. The readers take the
+finest level holding the point (`TailRead.hlsli` over `gLvlA[8]`/`gLvlU[8]`, coarsest first in the cbuffers, the
+search finest first); the manager wants each level's bed at the cube's mip its cells read (`LevelBoxes`).
+
+*The gate* (out/review/stage2/merrimack10; `scenes/demos/impact_telescope.json`, out/review/stage3/impact_telescope1):
+the Merrimack with four levels standing is BYTE-IDENTICAL to the run with the tail alone (the window's edge reads
+level 2^3's ghost, at rest as the tail was). The 1 km stone (1950 DA's class) at 35 N 42 W: its lip, 12.9 km,
+stood over 2.5 cells of the tail, so the event got `patch 2^7 (event 0)`, 512 cells of 1.3 x 1.8 km (660 x 900
+km, all sea, 16 tiles), parent the tail; its cavity (18.2 km across, 4000 m deep, 1777 terms) imposed there at
+T = 1 s -- the probe's cell 8 km off the centre read +2218 m, the lip, then -2 m a minute later, and the centre
+sloshed +-3 m for hours. Then the honest result: THE TRAIN DOES NOT SURVIVE THE CROSSING. At the window's east
+cell the tail's departure rose to 0.09 m (0.13 m at the anchor's cell) from 5.4 h, where the one-depth law says
++-20 m (Green's law unbounded to 68 m: +-9 m deep) and Ward & Asphaug 3 to 9 m deep; the window answered
++-0.5 m at the bar. The 10 km stone's 50 to 200 km waves crossed the tail at two thirds of the law's amplitude;
+this stone's 13 to 50 km waves are three to ten of the tail's 5 km cells, and the first-order upwind flux's
+diffusion over 460 cells of travel takes them (a 13 km wave to a few percent, a 30 km one to half, by the
+scheme's own diffusion u dx / 2 over the crossing's 3.5 h) -- and the law's dispersive train, which shallow
+water does not make, spreads what remains. So the telescope resolves the cavity WHERE IT FALLS and not ALONG
+THE WAY: the patch is a level about the impact, not a level that follows the front at the mip its wavelength
+needs (14.2's words), which is what this stone's train would need -- or a tail less diffusive than first
+order, or a finer tail (2.5 km at 4096 cells: 16 M cells). Stated, not built, and the next piece.
+
+*Stated, not built:* the level that follows a train's front (the telescope along the way); a second-order
+flux (the first-order upwind's diffusion is the tail's limit); the hull's reader of the far field; the levels'
+residency is the run's (static, the sea from each edge); the metric's shear; the twin's fold into its parent,
+kept off (the gauge); a patch is never released.
 
 ## Sources
 

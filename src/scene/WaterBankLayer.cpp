@@ -1240,21 +1240,26 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.impU[0] = m_imp.slot;
     cb.impU[1] = m_imp.events;
     cb.impU[2] = cb.impU[3] = 0u;
-    // STAGE 2b (SetTail): the tail's chart and textures to the far field's readers
+    // STAGE 2b/2c (SetTail): the levels' chart and textures to the far field's readers
     for (int i = 0; i < 3; ++i) {
-        cb.tailA[i] = m_tail.up[i];
-        cb.tailE[i] = m_tail.east[i];
-        cb.tailN[i] = m_tail.north[i];
+        cb.lvlChart[i] = m_tail.up[i];
+        cb.lvlE[i] = m_tail.east[i];
+        cb.lvlN[i] = m_tail.north[i];
     }
-    cb.tailA[3] = m_tail.R;
-    cb.tailE[3] = m_tail.ds;
-    cb.tailN[3] = m_tail.dt;
-    cb.tailU[0] = m_tail.hSrv;
-    cb.tailU[1] = m_tail.bedSrv;
-    cb.tailU[2] = m_tail.cells;
-    cb.tailU[3] = 0u;
-    cb.tailB[0] = m_tail.exag;
-    cb.tailB[1] = cb.tailB[2] = cb.tailB[3] = 0.0f;
+    cb.lvlChart[3] = m_tail.R;
+    cb.lvlE[3] = float(m_tail.count);
+    cb.lvlN[3] = m_tail.exag;
+    for (uint32_t k = 0; k < LevelsGpu::kMax; ++k) {
+        const LevelsGpu::Level& L = m_tail.level[k];
+        cb.lvlA[k][0] = L.s0;
+        cb.lvlA[k][1] = L.t0;
+        cb.lvlA[k][2] = L.ds;
+        cb.lvlA[k][3] = L.dt;
+        cb.lvlU[k][0] = k < m_tail.count ? L.hSrv : 0xFFFFFFFFu;
+        cb.lvlU[k][1] = k < m_tail.count ? L.bedSrv : 0xFFFFFFFFu;
+        cb.lvlU[k][2] = L.nx;
+        cb.lvlU[k][3] = L.ny;
+    }
     static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");
     memcpy(cb.hwU, &m_hw, sizeof(m_hw));   // PHASE B2: hwU..hwS, KernelRows' packing
     memcpy(cb.svU, m_sv, sizeof(m_sv));   // svU..svO, SweDomain::KernelRows' packing

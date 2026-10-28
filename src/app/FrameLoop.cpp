@@ -4398,7 +4398,7 @@ bool FrameLoop::Frame() {
             if (m_A.waterBankEye) m_A.waterBankEye->SetImpact(m_impactGpu);
             // STAGE 2b (2026-10-27): the tail to the same readers -- the far field they draw is the tail's where it
             // stands, the law's beyond it; the drawn departure takes the first event's exaggeration, as the law does
-            m_tailGpu = m_A.swe.HasTail() ? m_A.swe.TailGpuDesc(m_impacts->Any() ? float(m_impacts->Events().front().props.exag) : 1.0f) : TailGpu{};
+            m_tailGpu = m_A.swe.HasTail() ? m_A.swe.LevelsGpuDesc(m_impacts->Any() ? float(m_impacts->Events().front().props.exag) : 1.0f) : LevelsGpu{};
             if (waterBank) waterBank->SetTail(m_tailGpu);
             if (waterBankB) waterBankB->SetTail(m_tailGpu);
             if (m_A.waterBankEye) m_A.waterBankEye->SetTail(m_tailGpu);

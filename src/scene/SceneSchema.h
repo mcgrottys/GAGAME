@@ -219,6 +219,12 @@ struct SweProps {
     // window whole in its central cells); 0 = no tail.
     uint32_t tailCells = 2048;
     uint32_t tailRank = 9;
+    // STAGE 2c: THE TELESCOPE -- the anchor levels between the tail and the window: this many, telescopeCells a
+    // side, their ranks telescopeStep apart below the tail's (3 of 512 cells, 2 apart: ranks 7, 5, 3 -- 1.76 km,
+    // 440 m, 110 m cells, 900, 225 and 56 km across).
+    uint32_t telescopeLevels = 3;
+    uint32_t telescopeCells = 512;
+    uint32_t telescopeStep = 2;
 };
 struct BankProps {
     bool flatBed = false;

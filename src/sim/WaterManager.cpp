@@ -41,14 +41,7 @@ void WaterManager::AddExternalWindow(const char* name, SweSolver* solver,
         w.box[1] = d.lon0;
         w.box[2] = d.lat1;
         w.box[3] = d.lon1;
-        if (solver->HasTail()) {   // stage 2b: the tail's bed is wanted with the window's
-            const SweDomain& t = solver->TailDomain();
-            w.tailBox[0] = t.lat0;
-            w.tailBox[1] = t.lon0;
-            w.tailBox[2] = t.lat1;
-            w.tailBox[3] = t.lon1;
-            w.tailMip = solver->TailBedMip();
-        }
+        w.levels = solver->LevelBoxes();   // stage 2b/2c: the levels' beds are wanted with the window's
     }
     w.oceanAt = std::move(oceanAt);
     w.active = solver && solver->Ready();
@@ -188,12 +181,13 @@ int WaterManager::WantDomain(ResidencyManager& res, int sampler, int hgtTenant, 
     }
     // STAGE 2b: ...and the cube under the tail at the tail's own mip (its cells' grain): the tail's kernel reads the
     // cube where the window holds nothing, which is everywhere but the window.
-    if (w.tailBox[2] > w.tailBox[0]) {
+    for (const SweSolver::LevelBox& lb : w.levels) {
+        if (!(lb.box[2] > lb.box[0])) continue;
         float ct[6][4];
-        const uint32_t ft = SurfaceFrame::CubeRectsLL(w.tailBox[0], w.tailBox[1], w.tailBox[2], w.tailBox[3], ct);
+        const uint32_t ft = SurfaceFrame::CubeRectsLL(lb.box[0], lb.box[1], lb.box[2], lb.box[3], ct);
         for (uint32_t f = 0; f < 6u; ++f) {
             if (!((ft >> f) & 1u)) continue;
-            res.Want(sampler, hgtTenant, f, w.tailMip, ct[f][0], ct[f][1], ct[f][2], ct[f][3]);
+            res.Want(sampler, hgtTenant, f, lb.mip, ct[f][0], ct[f][1], ct[f][2], ct[f][3]);
         }
     }
     return n;
